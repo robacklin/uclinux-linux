@@ -1,23 +1,22 @@
-/* $Id: w6692.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: w6692.c,v 1.18.2.4 2004/02/11 13:21:34 keil Exp $
  *
  * Winbond W6692 specific routines
  *
  * Author       Petr Novak
  * Copyright    by Petr Novak        <petr.novak@i.cz>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
-#define __NO_VERSION__
 #include "hisax.h"
 #include "w6692.h"
 #include "isdnl1.h"
 #include <linux/interrupt.h>
 #include <linux/pci.h>
+#include <linux/slab.h>
 
 /* table entry in the PCI devices list */
 typedef struct {
@@ -40,13 +39,11 @@ static const PCI_ENTRY id_list[] =
 #define W6692_DYNALINK 1
 #define W6692_USR      2
 
-extern const char *CardType[];
-
-const char *w6692_revision = "$Revision: 1.1.4.1 $";
+static const char *w6692_revision = "$Revision: 1.18.2.4 $";
 
 #define DBUSY_TIMER_VALUE 80
 
-static char *W6692Ver[] __initdata =
+static char *W6692Ver[] =
 {"W6692 V00", "W6692 V01", "W6692 V10",
  "W6692 V11"};
 
@@ -72,43 +69,43 @@ static void
 W6692_new_ph(struct IsdnCardState *cs)
 {
 	switch (cs->dc.w6692.ph_state) {
-		case (W_L1CMD_RST):
-			ph_command(cs, W_L1CMD_DRC);
-			l1_msg(cs, HW_RESET | INDICATION, NULL);
-			/* fallthru */
-		case (W_L1IND_CD):
-			l1_msg(cs, HW_DEACTIVATE | CONFIRM, NULL);
-			break;
-		case (W_L1IND_DRD):
-			l1_msg(cs, HW_DEACTIVATE | INDICATION, NULL);
-			break;
-		case (W_L1IND_CE):
-			l1_msg(cs, HW_POWERUP | CONFIRM, NULL);
-			break;
-		case (W_L1IND_LD):
-			l1_msg(cs, HW_RSYNC | INDICATION, NULL);
-			break;
-		case (W_L1IND_ARD):
-			l1_msg(cs, HW_INFO2 | INDICATION, NULL);
-			break;
-		case (W_L1IND_AI8):
-			l1_msg(cs, HW_INFO4_P8 | INDICATION, NULL);
-			break;
-		case (W_L1IND_AI10):
-			l1_msg(cs, HW_INFO4_P10 | INDICATION, NULL);
-			break;
-		default:
-			break;
+	case (W_L1CMD_RST):
+		ph_command(cs, W_L1CMD_DRC);
+		l1_msg(cs, HW_RESET | INDICATION, NULL);
+		/* fallthru */
+	case (W_L1IND_CD):
+		l1_msg(cs, HW_DEACTIVATE | CONFIRM, NULL);
+		break;
+	case (W_L1IND_DRD):
+		l1_msg(cs, HW_DEACTIVATE | INDICATION, NULL);
+		break;
+	case (W_L1IND_CE):
+		l1_msg(cs, HW_POWERUP | CONFIRM, NULL);
+		break;
+	case (W_L1IND_LD):
+		l1_msg(cs, HW_RSYNC | INDICATION, NULL);
+		break;
+	case (W_L1IND_ARD):
+		l1_msg(cs, HW_INFO2 | INDICATION, NULL);
+		break;
+	case (W_L1IND_AI8):
+		l1_msg(cs, HW_INFO4_P8 | INDICATION, NULL);
+		break;
+	case (W_L1IND_AI10):
+		l1_msg(cs, HW_INFO4_P10 | INDICATION, NULL);
+		break;
+	default:
+		break;
 	}
 }
 
 static void
-W6692_bh(struct IsdnCardState *cs)
+W6692_bh(struct work_struct *work)
 {
+	struct IsdnCardState *cs =
+		container_of(work, struct IsdnCardState, tqueue);
 	struct PStack *stptr;
 
-	if (!cs)
-		return;
 	if (test_and_clear_bit(D_CLEARBUSY, &cs->event)) {
 		if (cs->debug)
 			debugl1(cs, "D-Channel Busy cleared");
@@ -125,34 +122,17 @@ W6692_bh(struct IsdnCardState *cs)
 	if (test_and_clear_bit(D_XMTBUFREADY, &cs->event))
 		DChannel_proc_xmt(cs);
 /*
-   if (test_and_clear_bit(D_RX_MON1, &cs->event))
-   arcofi_fsm(cs, ARCOFI_RX_END, NULL);
-   if (test_and_clear_bit(D_TX_MON1, &cs->event))
-   arcofi_fsm(cs, ARCOFI_TX_END, NULL);
- */
-}
-
-void
-W6692_sched_event(struct IsdnCardState *cs, int event)
-{
-	test_and_set_bit(event, &cs->event);
-	queue_task(&cs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
-}
-
-static void
-W6692B_sched_event(struct BCState *bcs, int event)
-{
-	bcs->event |= 1 << event;
-	queue_task(&bcs->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+  if (test_and_clear_bit(D_RX_MON1, &cs->event))
+  arcofi_fsm(cs, ARCOFI_RX_END, NULL);
+  if (test_and_clear_bit(D_TX_MON1, &cs->event))
+  arcofi_fsm(cs, ARCOFI_TX_END, NULL);
+*/
 }
 
 static void
 W6692_empty_fifo(struct IsdnCardState *cs, int count)
 {
 	u_char *ptr;
-	long flags;
 
 	if ((cs->debug & L1_DEB_ISAC) && !(cs->debug & L1_DEB_ISAC_FIFO))
 		debugl1(cs, "W6692_empty_fifo");
@@ -167,11 +147,8 @@ W6692_empty_fifo(struct IsdnCardState *cs, int count)
 	}
 	ptr = cs->rcvbuf + cs->rcvidx;
 	cs->rcvidx += count;
-	save_flags(flags);
-	cli();
 	cs->readW6692fifo(cs, ptr, count);
 	cs->writeW6692(cs, W_D_CMDR, W_D_CMDR_RACK);
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_ISAC_FIFO) {
 		char *t = cs->dlog;
 
@@ -186,7 +163,6 @@ W6692_fill_fifo(struct IsdnCardState *cs)
 {
 	int count, more;
 	u_char *ptr;
-	long flags;
 
 	if ((cs->debug & L1_DEB_ISAC) && !(cs->debug & L1_DEB_ISAC_FIFO))
 		debugl1(cs, "W6692_fill_fifo");
@@ -203,14 +179,11 @@ W6692_fill_fifo(struct IsdnCardState *cs)
 		more = !0;
 		count = W_D_FIFO_THRESH;
 	}
-	save_flags(flags);
-	cli();
 	ptr = cs->tx_skb->data;
 	skb_pull(cs->tx_skb, count);
 	cs->tx_cnt += count;
 	cs->writeW6692fifo(cs, ptr, count);
 	cs->writeW6692(cs, W_D_CMDR, more ? W_D_CMDR_XMS : (W_D_CMDR_XMS | W_D_CMDR_XME));
-	restore_flags(flags);
 	if (test_and_set_bit(FLG_DBUSY_TIMER, &cs->HW_Flags)) {
 		debugl1(cs, "W6692_fill_fifo dbusytimer running");
 		del_timer(&cs->dbusytimer);
@@ -232,7 +205,6 @@ W6692B_empty_fifo(struct BCState *bcs, int count)
 {
 	u_char *ptr;
 	struct IsdnCardState *cs = bcs->cs;
-	long flags;
 
 	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
 		debugl1(cs, "W6692B_empty_fifo");
@@ -246,11 +218,8 @@ W6692B_empty_fifo(struct BCState *bcs, int count)
 	}
 	ptr = bcs->hw.w6692.rcvbuf + bcs->hw.w6692.rcvidx;
 	bcs->hw.w6692.rcvidx += count;
-	save_flags(flags);
-	cli();
 	READW6692BFIFO(cs, bcs->channel, ptr, count);
 	cs->BC_Write_Reg(cs, bcs->channel, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RACT);
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
@@ -267,11 +236,6 @@ W6692B_fill_fifo(struct BCState *bcs)
 	struct IsdnCardState *cs = bcs->cs;
 	int more, count;
 	u_char *ptr;
-	long flags;
-
-
-	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
-		debugl1(cs, "W6692B_fill_fifo");
 
 	if (!bcs->tx_skb)
 		return;
@@ -280,20 +244,20 @@ W6692B_fill_fifo(struct BCState *bcs)
 
 	more = (bcs->mode == L1_MODE_TRANS) ? 1 : 0;
 	if (bcs->tx_skb->len > W_B_FIFO_THRESH) {
-		more = !0;
+		more = 1;
 		count = W_B_FIFO_THRESH;
 	} else
 		count = bcs->tx_skb->len;
 
-	save_flags(flags);
-	cli();
+	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
+		debugl1(cs, "W6692B_fill_fifo%s%d", (more ? " " : " last "), count);
+
 	ptr = bcs->tx_skb->data;
 	skb_pull(bcs->tx_skb, count);
 	bcs->tx_cnt -= count;
 	bcs->hw.w6692.count += count;
 	WRITEW6692BFIFO(cs, bcs->channel, ptr, count);
 	cs->BC_Write_Reg(cs, bcs->channel, W_B_CMDR, W_B_CMDR_RACT | W_B_CMDR_XMS | (more ? 0 : W_B_CMDR_XME));
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
@@ -313,7 +277,7 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 	struct sk_buff *skb;
 	int count;
 
-	bcs = (cs->bcs->channel == bchan) ? cs->bcs : (cs->bcs+1);
+	bcs = (cs->bcs->channel == bchan) ? cs->bcs : (cs->bcs + 1);
 	val = cs->BC_Read_Reg(cs, bchan, W_B_EXIR);
 	debugl1(cs, "W6692B chan %d B_EXIR 0x%02X", bchan, val);
 
@@ -323,7 +287,9 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 	}
 	if (val & W_B_EXI_RME) {	/* RME */
 		r = cs->BC_Read_Reg(cs, bchan, W_B_STAR);
-		if (r & (W_B_STAR_RDOV | W_B_STAR_CRCE | W_B_STAR_RMB | W_B_STAR_XDOW)) {
+		if (r & (W_B_STAR_RDOV | W_B_STAR_CRCE | W_B_STAR_RMB)) {
+			if (cs->debug & L1_DEB_WARN)
+				debugl1(cs, "W6692 B STAR %x", r);
 			if ((r & W_B_STAR_RDOV) && bcs->mode)
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, "W6692 B RDOV mode=%d",
@@ -349,10 +315,18 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 			}
 		}
 		bcs->hw.w6692.rcvidx = 0;
-		W6692B_sched_event(bcs, B_RCVBUFREADY);
+		schedule_event(bcs, B_RCVBUFREADY);
 	}
 	if (val & W_B_EXI_RMR) {	/* RMR */
 		W6692B_empty_fifo(bcs, W_B_FIFO_THRESH);
+		r = cs->BC_Read_Reg(cs, bchan, W_B_STAR);
+		if (r & W_B_STAR_RDOV) {
+			if (cs->debug & L1_DEB_WARN)
+				debugl1(cs, "W6692 B RDOV(RMR) mode=%d", bcs->mode);
+			cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_RACK | W_B_CMDR_RRST | W_B_CMDR_RACT);
+			if (bcs->mode != L1_MODE_TRANS)
+				bcs->hw.w6692.rcvidx = 0;
+		}
 		if (bcs->mode == L1_MODE_TRANS) {
 			/* receive audio data */
 			if (!(skb = dev_alloc_skb(W_B_FIFO_THRESH)))
@@ -362,18 +336,52 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 				skb_queue_tail(&bcs->rqueue, skb);
 			}
 			bcs->hw.w6692.rcvidx = 0;
-			W6692B_sched_event(bcs, B_RCVBUFREADY);
+			schedule_event(bcs, B_RCVBUFREADY);
 		}
 	}
+	if (val & W_B_EXI_XDUN) {	/* XDUN */
+		cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_XRST | W_B_CMDR_RACT);
+		if (cs->debug & L1_DEB_WARN)
+			debugl1(cs, "W6692 B EXIR %x Lost TX", val);
+		if (bcs->mode == 1)
+			W6692B_fill_fifo(bcs);
+		else {
+			/* Here we lost an TX interrupt, so
+			 * restart transmitting the whole frame.
+			 */
+			if (bcs->tx_skb) {
+				skb_push(bcs->tx_skb, bcs->hw.w6692.count);
+				bcs->tx_cnt += bcs->hw.w6692.count;
+				bcs->hw.w6692.count = 0;
+			}
+		}
+		return;
+	}
 	if (val & W_B_EXI_XFR) {	/* XFR */
+		r = cs->BC_Read_Reg(cs, bchan, W_B_STAR);
+		if (r & W_B_STAR_XDOW) {
+			if (cs->debug & L1_DEB_WARN)
+				debugl1(cs, "W6692 B STAR %x XDOW", r);
+			cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_XRST | W_B_CMDR_RACT);
+			if (bcs->tx_skb && (bcs->mode != 1)) {
+				skb_push(bcs->tx_skb, bcs->hw.w6692.count);
+				bcs->tx_cnt += bcs->hw.w6692.count;
+				bcs->hw.w6692.count = 0;
+			}
+		}
 		if (bcs->tx_skb) {
 			if (bcs->tx_skb->len) {
 				W6692B_fill_fifo(bcs);
 				return;
 			} else {
-				if (bcs->st->lli.l1writewakeup &&
-				 (PACKET_NOACK != bcs->tx_skb->pkt_type))
-					bcs->st->lli.l1writewakeup(bcs->st, bcs->hw.w6692.count);
+				if (test_bit(FLG_LLI_L1WAKEUP, &bcs->st->lli.flag) &&
+				    (PACKET_NOACK != bcs->tx_skb->pkt_type)) {
+					u_long flags;
+					spin_lock_irqsave(&bcs->aclock, flags);
+					bcs->ackcnt += bcs->hw.w6692.count;
+					spin_unlock_irqrestore(&bcs->aclock, flags);
+					schedule_event(bcs, B_ACKPENDING);
+				}
 				dev_kfree_skb_irq(bcs->tx_skb);
 				bcs->hw.w6692.count = 0;
 				bcs->tx_skb = NULL;
@@ -385,45 +393,28 @@ W6692B_interrupt(struct IsdnCardState *cs, u_char bchan)
 			W6692B_fill_fifo(bcs);
 		} else {
 			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
-			W6692B_sched_event(bcs, B_XMTBUFREADY);
-		}
-	}
-	if (val & W_B_EXI_XDUN) {	/* XDUN */
-		if (bcs->mode == 1)
-			W6692B_fill_fifo(bcs);
-		else {
-			/* Here we lost an TX interrupt, so
-			   * restart transmitting the whole frame.
-			 */
-			if (bcs->tx_skb) {
-				skb_push(bcs->tx_skb, bcs->hw.w6692.count);
-				bcs->tx_cnt += bcs->hw.w6692.count;
-				bcs->hw.w6692.count = 0;
-			}
-			cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_XRST | W_B_CMDR_RACT);
-			if (cs->debug & L1_DEB_WARN)
-				debugl1(cs, "W6692 B EXIR %x Lost TX", val);
+			schedule_event(bcs, B_XMTBUFREADY);
 		}
 	}
 }
 
-static void
-W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+W6692_interrupt(int intno, void *dev_id)
 {
-	struct IsdnCardState *cs = dev_id;
-	u_char val, exval, v1;
-	struct sk_buff *skb;
-	unsigned int count;
-	long flags;
-	int icnt = 5;
+	struct IsdnCardState	*cs = dev_id;
+	u_char			val, exval, v1;
+	struct sk_buff		*skb;
+	u_int			count;
+	u_long			flags;
+	int			icnt = 5;
 
-	if (!cs) {
-		printk(KERN_WARNING "W6692: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	val = cs->readW6692(cs, W_ISTA);
-
-      StartW6692:
+	if (!val) {
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_NONE;
+	}
+StartW6692:
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "W6692 ISTA %x", val);
 
@@ -445,8 +436,6 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			if (count == 0)
 				count = W_D_FIFO_THRESH;
 			W6692_empty_fifo(cs, count);
-			save_flags(flags);
-			cli();
 			if ((count = cs->rcvidx) > 0) {
 				cs->rcvidx = 0;
 				if (!(skb = alloc_skb(count, GFP_ATOMIC)))
@@ -456,10 +445,9 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 					skb_queue_tail(&cs->rq, skb);
 				}
 			}
-			restore_flags(flags);
 		}
 		cs->rcvidx = 0;
-		W6692_sched_event(cs, D_RCVBUFREADY);
+		schedule_event(cs, D_RCVBUFREADY);
 	}
 	if (val & W_INT_D_RMR) {	/* RMR */
 		W6692_empty_fifo(cs, W_D_FIFO_THRESH);
@@ -468,7 +456,7 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 		if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 			del_timer(&cs->dbusytimer);
 		if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-			W6692_sched_event(cs, D_CLEARBUSY);
+			schedule_event(cs, D_CLEARBUSY);
 		if (cs->tx_skb) {
 			if (cs->tx_skb->len) {
 				W6692_fill_fifo(cs);
@@ -483,9 +471,9 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			cs->tx_cnt = 0;
 			W6692_fill_fifo(cs);
 		} else
-			W6692_sched_event(cs, D_XMTBUFREADY);
+			schedule_event(cs, D_XMTBUFREADY);
 	}
-      afterXFR:
+afterXFR:
 	if (val & (W_INT_XINT0 | W_INT_XINT1)) {	/* XINT0/1 - never */
 		if (cs->debug & L1_DEB_ISAC)
 			debugl1(cs, "W6692 spurious XINT!");
@@ -500,7 +488,7 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
 				del_timer(&cs->dbusytimer);
 			if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-				W6692_sched_event(cs, D_CLEARBUSY);
+				schedule_event(cs, D_CLEARBUSY);
 			if (cs->tx_skb) {	/* Restart frame */
 				skb_push(cs->tx_skb, cs->tx_cnt);
 				cs->tx_cnt = 0;
@@ -532,7 +520,7 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 				cs->dc.w6692.ph_state = v1 & W_CIR_COD_MASK;
 				if (cs->debug & L1_DEB_ISAC)
 					debugl1(cs, "ph_state_change %x", cs->dc.w6692.ph_state);
-				W6692_sched_event(cs, D_L1STATECHANGE);
+				schedule_event(cs, D_L1STATECHANGE);
 			}
 			if (v1 & W_CIR_SCC) {
 				v1 = cs->readW6692(cs, W_SQR);
@@ -563,6 +551,8 @@ W6692_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 		printk(KERN_WARNING "W6692 IRQ LOOP\n");
 		cs->writeW6692(cs, W_IMASK, 0xff);
 	}
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 static void
@@ -570,99 +560,112 @@ W6692_l1hw(struct PStack *st, int pr, void *arg)
 {
 	struct IsdnCardState *cs = (struct IsdnCardState *) st->l1.hardware;
 	struct sk_buff *skb = arg;
+	u_long flags;
 	int val;
 
 	switch (pr) {
-		case (PH_DATA | REQUEST):
-			if (cs->debug & DEB_DLOG_HEX)
-				LogFrame(cs, skb->data, skb->len);
-			if (cs->debug & DEB_DLOG_VERBOSE)
-				dlogframe(cs, skb, 0);
-			if (cs->tx_skb) {
-				skb_queue_tail(&cs->sq, skb);
+	case (PH_DATA | REQUEST):
+		if (cs->debug & DEB_DLOG_HEX)
+			LogFrame(cs, skb->data, skb->len);
+		if (cs->debug & DEB_DLOG_VERBOSE)
+			dlogframe(cs, skb, 0);
+		spin_lock_irqsave(&cs->lock, flags);
+		if (cs->tx_skb) {
+			skb_queue_tail(&cs->sq, skb);
 #ifdef L2FRAME_DEBUG		/* psa */
-				if (cs->debug & L1_DEB_LAPD)
-					Logl2Frame(cs, skb, "PH_DATA Queued", 0);
+			if (cs->debug & L1_DEB_LAPD)
+				Logl2Frame(cs, skb, "PH_DATA Queued", 0);
 #endif
-			} else {
-				cs->tx_skb = skb;
-				cs->tx_cnt = 0;
-#ifdef L2FRAME_DEBUG		/* psa */
-				if (cs->debug & L1_DEB_LAPD)
-					Logl2Frame(cs, skb, "PH_DATA", 0);
-#endif
-				W6692_fill_fifo(cs);
-			}
-			break;
-		case (PH_PULL | INDICATION):
-			if (cs->tx_skb) {
-				if (cs->debug & L1_DEB_WARN)
-					debugl1(cs, " l2l1 tx_skb exist this shouldn't happen");
-				skb_queue_tail(&cs->sq, skb);
-				break;
-			}
-			if (cs->debug & DEB_DLOG_HEX)
-				LogFrame(cs, skb->data, skb->len);
-			if (cs->debug & DEB_DLOG_VERBOSE)
-				dlogframe(cs, skb, 0);
+		} else {
 			cs->tx_skb = skb;
 			cs->tx_cnt = 0;
 #ifdef L2FRAME_DEBUG		/* psa */
 			if (cs->debug & L1_DEB_LAPD)
-				Logl2Frame(cs, skb, "PH_DATA_PULLED", 0);
+				Logl2Frame(cs, skb, "PH_DATA", 0);
 #endif
 			W6692_fill_fifo(cs);
-			break;
-		case (PH_PULL | REQUEST):
-#ifdef L2FRAME_DEBUG		/* psa */
-			if (cs->debug & L1_DEB_LAPD)
-				debugl1(cs, "-> PH_REQUEST_PULL");
-#endif
-			if (!cs->tx_skb) {
-				test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
-				st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
-			} else
-				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
-			break;
-		case (HW_RESET | REQUEST):
-			if ((cs->dc.w6692.ph_state == W_L1IND_DRD))
-				ph_command(cs, W_L1CMD_ECK);
-			else {
-				ph_command(cs, W_L1CMD_RST);
-				cs->dc.w6692.ph_state = W_L1CMD_RST;
-				W6692_new_ph(cs);
-			}
-			break;
-		case (HW_ENABLE | REQUEST):
-			ph_command(cs, W_L1CMD_ECK);
-			break;
-		case (HW_INFO3 | REQUEST):
-			ph_command(cs, W_L1CMD_AR8);
-			break;
-		case (HW_TESTLOOP | REQUEST):
-			val = 0;
-			if (1 & (long) arg)
-				val |= 0x0c;
-			if (2 & (long) arg)
-				val |= 0x3;
-			/* !!! not implemented yet */
-			break;
-		case (HW_DEACTIVATE | RESPONSE):
-			skb_queue_purge(&cs->rq);
-			skb_queue_purge(&cs->sq);
-			if (cs->tx_skb) {
-				dev_kfree_skb_any(cs->tx_skb);
-				cs->tx_skb = NULL;
-			}
-			if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
-				del_timer(&cs->dbusytimer);
-			if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
-				W6692_sched_event(cs, D_CLEARBUSY);
-			break;
-		default:
+		}
+		spin_unlock_irqrestore(&cs->lock, flags);
+		break;
+	case (PH_PULL | INDICATION):
+		spin_lock_irqsave(&cs->lock, flags);
+		if (cs->tx_skb) {
 			if (cs->debug & L1_DEB_WARN)
-				debugl1(cs, "W6692_l1hw unknown %04x", pr);
+				debugl1(cs, " l2l1 tx_skb exist this shouldn't happen");
+			skb_queue_tail(&cs->sq, skb);
+			spin_unlock_irqrestore(&cs->lock, flags);
 			break;
+		}
+		if (cs->debug & DEB_DLOG_HEX)
+			LogFrame(cs, skb->data, skb->len);
+		if (cs->debug & DEB_DLOG_VERBOSE)
+			dlogframe(cs, skb, 0);
+		cs->tx_skb = skb;
+		cs->tx_cnt = 0;
+#ifdef L2FRAME_DEBUG		/* psa */
+		if (cs->debug & L1_DEB_LAPD)
+			Logl2Frame(cs, skb, "PH_DATA_PULLED", 0);
+#endif
+		W6692_fill_fifo(cs);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		break;
+	case (PH_PULL | REQUEST):
+#ifdef L2FRAME_DEBUG		/* psa */
+		if (cs->debug & L1_DEB_LAPD)
+			debugl1(cs, "-> PH_REQUEST_PULL");
+#endif
+		if (!cs->tx_skb) {
+			test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
+			st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
+		} else
+			test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
+		break;
+	case (HW_RESET | REQUEST):
+		spin_lock_irqsave(&cs->lock, flags);
+		if ((cs->dc.w6692.ph_state == W_L1IND_DRD)) {
+			ph_command(cs, W_L1CMD_ECK);
+			spin_unlock_irqrestore(&cs->lock, flags);
+		} else {
+			ph_command(cs, W_L1CMD_RST);
+			cs->dc.w6692.ph_state = W_L1CMD_RST;
+			spin_unlock_irqrestore(&cs->lock, flags);
+			W6692_new_ph(cs);
+		}
+		break;
+	case (HW_ENABLE | REQUEST):
+		spin_lock_irqsave(&cs->lock, flags);
+		ph_command(cs, W_L1CMD_ECK);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		break;
+	case (HW_INFO3 | REQUEST):
+		spin_lock_irqsave(&cs->lock, flags);
+		ph_command(cs, W_L1CMD_AR8);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		break;
+	case (HW_TESTLOOP | REQUEST):
+		val = 0;
+		if (1 & (long) arg)
+			val |= 0x0c;
+		if (2 & (long) arg)
+			val |= 0x3;
+		/* !!! not implemented yet */
+		break;
+	case (HW_DEACTIVATE | RESPONSE):
+		skb_queue_purge(&cs->rq);
+		skb_queue_purge(&cs->sq);
+		if (cs->tx_skb) {
+			dev_kfree_skb_any(cs->tx_skb);
+			cs->tx_skb = NULL;
+		}
+		if (test_and_clear_bit(FLG_DBUSY_TIMER, &cs->HW_Flags))
+			del_timer(&cs->dbusytimer);
+		if (test_and_clear_bit(FLG_L1_DBUSY, &cs->HW_Flags))
+			schedule_event(cs, D_CLEARBUSY);
+		break;
+	default:
+		if (cs->debug & L1_DEB_WARN)
+			debugl1(cs, "W6692_l1hw unknown %04x", pr);
+		break;
 	}
 }
 
@@ -682,7 +685,9 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 {
 	struct PStack *stptr;
 	int rbch, star;
+	u_long flags;
 
+	spin_lock_irqsave(&cs->lock, flags);
 	if (test_bit(FLG_DBUSY_TIMER, &cs->HW_Flags)) {
 		rbch = cs->readW6692(cs, W_D_RBCH);
 		star = cs->readW6692(cs, W_D_STAR);
@@ -708,9 +713,12 @@ dbusy_timer_handler(struct IsdnCardState *cs)
 				debugl1(cs, "D-Channel Busy no skb");
 			}
 			cs->writeW6692(cs, W_D_CMDR, W_D_CMDR_XRST);	/* Transmitter reset */
-			cs->irq_func(cs->irq, cs, NULL);
+			spin_unlock_irqrestore(&cs->lock, flags);
+			cs->irq_func(cs->irq, cs);
+			return;
 		}
 	}
+	spin_unlock_irqrestore(&cs->lock, flags);
 }
 
 static void
@@ -726,17 +734,17 @@ W6692Bmode(struct BCState *bcs, int mode, int bchan)
 	bcs->hw.w6692.bchan = bchan;
 
 	switch (mode) {
-		case (L1_MODE_NULL):
-			cs->BC_Write_Reg(cs, bchan, W_B_MODE, 0);
-			break;
-		case (L1_MODE_TRANS):
-			cs->BC_Write_Reg(cs, bchan, W_B_MODE, W_B_MODE_MMS);
-			break;
-		case (L1_MODE_HDLC):
-			cs->BC_Write_Reg(cs, bchan, W_B_MODE, W_B_MODE_ITF);
-			cs->BC_Write_Reg(cs, bchan, W_B_ADM1, 0xff);
-			cs->BC_Write_Reg(cs, bchan, W_B_ADM2, 0xff);
-			break;
+	case (L1_MODE_NULL):
+		cs->BC_Write_Reg(cs, bchan, W_B_MODE, 0);
+		break;
+	case (L1_MODE_TRANS):
+		cs->BC_Write_Reg(cs, bchan, W_B_MODE, W_B_MODE_MMS);
+		break;
+	case (L1_MODE_HDLC):
+		cs->BC_Write_Reg(cs, bchan, W_B_MODE, W_B_MODE_ITF);
+		cs->BC_Write_Reg(cs, bchan, W_B_ADM1, 0xff);
+		cs->BC_Write_Reg(cs, bchan, W_B_ADM2, 0xff);
+		break;
 	}
 	if (mode)
 		cs->BC_Write_Reg(cs, bchan, W_B_CMDR, W_B_CMDR_RRST |
@@ -748,54 +756,59 @@ static void
 W6692_l2l1(struct PStack *st, int pr, void *arg)
 {
 	struct sk_buff *skb = arg;
-	long flags;
+	struct BCState *bcs = st->l1.bcs;
+	u_long flags;
 
 	switch (pr) {
-		case (PH_DATA | REQUEST):
-			save_flags(flags);
-			cli();
-			if (st->l1.bcs->tx_skb) {
-				skb_queue_tail(&st->l1.bcs->squeue, skb);
-				restore_flags(flags);
-			} else {
-				st->l1.bcs->tx_skb = skb;
-				test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-				st->l1.bcs->hw.w6692.count = 0;
-				restore_flags(flags);
-				st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-			}
+	case (PH_DATA | REQUEST):
+		spin_lock_irqsave(&bcs->cs->lock, flags);
+		if (bcs->tx_skb) {
+			skb_queue_tail(&bcs->squeue, skb);
+		} else {
+			bcs->tx_skb = skb;
+			test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+			bcs->hw.w6692.count = 0;
+			bcs->cs->BC_Send_Data(bcs);
+		}
+		spin_unlock_irqrestore(&bcs->cs->lock, flags);
+		break;
+	case (PH_PULL | INDICATION):
+		if (bcs->tx_skb) {
+			printk(KERN_WARNING "W6692_l2l1: this shouldn't happen\n");
 			break;
-		case (PH_PULL | INDICATION):
-			if (st->l1.bcs->tx_skb) {
-				printk(KERN_WARNING "W6692_l2l1: this shouldn't happen\n");
-				break;
-			}
-			test_and_set_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			st->l1.bcs->tx_skb = skb;
-			st->l1.bcs->hw.w6692.count = 0;
-			st->l1.bcs->cs->BC_Send_Data(st->l1.bcs);
-			break;
-		case (PH_PULL | REQUEST):
-			if (!st->l1.bcs->tx_skb) {
-				test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
-				st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
-			} else
-				test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
-			break;
-		case (PH_ACTIVATE | REQUEST):
-			test_and_set_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			W6692Bmode(st->l1.bcs, st->l1.mode, st->l1.bc);
-			l1_msg_b(st, pr, arg);
-			break;
-		case (PH_DEACTIVATE | REQUEST):
-			l1_msg_b(st, pr, arg);
-			break;
-		case (PH_DEACTIVATE | CONFIRM):
-			test_and_clear_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-			test_and_clear_bit(BC_FLG_BUSY, &st->l1.bcs->Flag);
-			W6692Bmode(st->l1.bcs, 0, st->l1.bc);
-			st->l1.l1l2(st, PH_DEACTIVATE | CONFIRM, NULL);
-			break;
+		}
+		spin_lock_irqsave(&bcs->cs->lock, flags);
+		test_and_set_bit(BC_FLG_BUSY, &bcs->Flag);
+		bcs->tx_skb = skb;
+		bcs->hw.w6692.count = 0;
+		bcs->cs->BC_Send_Data(bcs);
+		spin_unlock_irqrestore(&bcs->cs->lock, flags);
+		break;
+	case (PH_PULL | REQUEST):
+		if (!bcs->tx_skb) {
+			test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
+			st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
+		} else
+			test_and_set_bit(FLG_L1_PULL_REQ, &st->l1.Flags);
+		break;
+	case (PH_ACTIVATE | REQUEST):
+		spin_lock_irqsave(&bcs->cs->lock, flags);
+		test_and_set_bit(BC_FLG_ACTIV, &bcs->Flag);
+		W6692Bmode(bcs, st->l1.mode, st->l1.bc);
+		spin_unlock_irqrestore(&bcs->cs->lock, flags);
+		l1_msg_b(st, pr, arg);
+		break;
+	case (PH_DEACTIVATE | REQUEST):
+		l1_msg_b(st, pr, arg);
+		break;
+	case (PH_DEACTIVATE | CONFIRM):
+		spin_lock_irqsave(&bcs->cs->lock, flags);
+		test_and_clear_bit(BC_FLG_ACTIV, &bcs->Flag);
+		test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
+		W6692Bmode(bcs, 0, st->l1.bc);
+		spin_unlock_irqrestore(&bcs->cs->lock, flags);
+		st->l1.l1l2(st, PH_DEACTIVATE | CONFIRM, NULL);
+		break;
 	}
 }
 
@@ -804,14 +817,10 @@ close_w6692state(struct BCState *bcs)
 {
 	W6692Bmode(bcs, 0, bcs->channel);
 	if (test_and_clear_bit(BC_FLG_INIT, &bcs->Flag)) {
-		if (bcs->hw.w6692.rcvbuf) {
-			kfree(bcs->hw.w6692.rcvbuf);
-			bcs->hw.w6692.rcvbuf = NULL;
-		}
-		if (bcs->blog) {
-			kfree(bcs->blog);
-			bcs->blog = NULL;
-		}
+		kfree(bcs->hw.w6692.rcvbuf);
+		bcs->hw.w6692.rcvbuf = NULL;
+		kfree(bcs->blog);
+		bcs->blog = NULL;
 		skb_queue_purge(&bcs->rqueue);
 		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
@@ -865,12 +874,12 @@ setstack_w6692(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-void resetW6692(struct IsdnCardState *cs)
+static void resetW6692(struct IsdnCardState *cs)
 {
 	cs->writeW6692(cs, W_D_CTL, W_D_CTL_SRST);
-	schedule_timeout((10*HZ)/1000);
+	mdelay(10);
 	cs->writeW6692(cs, W_D_CTL, 0x00);
-	schedule_timeout((10*HZ)/1000);
+	mdelay(10);
 	cs->writeW6692(cs, W_IMASK, 0xff);
 	cs->writeW6692(cs, W_D_SAM, 0xff);
 	cs->writeW6692(cs, W_D_TAM, 0xff);
@@ -887,10 +896,9 @@ void resetW6692(struct IsdnCardState *cs)
 	}
 }
 
-void __init initW6692(struct IsdnCardState *cs, int part)
+static void initW6692(struct IsdnCardState *cs, int part)
 {
 	if (part & 1) {
-		cs->tqueue.routine = (void *) (void *) W6692_bh;
 		cs->setstack_d = setstack_W6692;
 		cs->DC_Close = DC_Close_W6692;
 		cs->dbusytimer.function = (void *) dbusy_timer_handler;
@@ -935,13 +943,13 @@ WriteW6692(struct IsdnCardState *cs, u_char offset, u_char value)
 }
 
 static void
-ReadISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+ReadISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	insb(cs->hw.w6692.iobase + W_D_RFIFO, data, size);
 }
 
 static void
-WriteISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+WriteISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	outsb(cs->hw.w6692.iobase + W_D_XFIFO, data, size);
 }
@@ -962,30 +970,30 @@ static int
 w6692_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
 	switch (mt) {
-		case CARD_RESET:
-			resetW6692(cs);
-			return (0);
-		case CARD_RELEASE:
-			cs->writeW6692(cs, W_IMASK, 0xff);
-			release_region(cs->hw.w6692.iobase, 256);
-			if (cs->subtyp == W6692_USR) {
-				cs->writeW6692(cs, W_XDATA, 0x04);
-			}
-			return (0);
-		case CARD_INIT:
-			initW6692(cs, 3);
-			return (0);
-		case CARD_TEST:
-			return (0);
+	case CARD_RESET:
+		resetW6692(cs);
+		return (0);
+	case CARD_RELEASE:
+		cs->writeW6692(cs, W_IMASK, 0xff);
+		release_region(cs->hw.w6692.iobase, 256);
+		if (cs->subtyp == W6692_USR) {
+			cs->writeW6692(cs, W_XDATA, 0x04);
+		}
+		return (0);
+	case CARD_INIT:
+		initW6692(cs, 3);
+		return (0);
+	case CARD_TEST:
+		return (0);
 	}
 	return (0);
 }
 
-static int id_idx ;
+static int id_idx;
 
-static struct pci_dev *dev_w6692 __initdata = NULL;
+static struct pci_dev *dev_w6692 __devinitdata = NULL;
 
-int __init 
+int __devinit
 setup_w6692(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
@@ -994,22 +1002,15 @@ setup_w6692(struct IsdnCard *card)
 	u_char pci_irq = 0;
 	u_int pci_ioaddr = 0;
 
-#ifdef __BIG_ENDIAN
-#error "not running on big endian machines now"
-#endif
 	strcpy(tmp, w6692_revision);
 	printk(KERN_INFO "HiSax: W6692 driver Rev. %s\n", HiSax_getrev(tmp));
 	if (cs->typ != ISDN_CTYPE_W6692)
 		return (0);
-#if CONFIG_PCI
-	if (!pci_present()) {
-		printk(KERN_ERR "W6692: no PCI bus present\n");
-		return (0);
-	}
+
 	while (id_list[id_idx].vendor_id) {
-		dev_w6692 = pci_find_device(id_list[id_idx].vendor_id,
-					    id_list[id_idx].device_id,
-					    dev_w6692);
+		dev_w6692 = hisax_find_pci_device(id_list[id_idx].vendor_id,
+						  id_list[id_idx].device_id,
+						  dev_w6692);
 		if (dev_w6692) {
 			if (pci_enable_device(dev_w6692))
 				continue;
@@ -1049,28 +1050,21 @@ setup_w6692(struct IsdnCard *card)
 	printk(KERN_INFO "Found: %s %s, I/O base: 0x%x, irq: %d\n",
 	       id_list[cs->subtyp].vendor_name, id_list[cs->subtyp].card_name,
 	       pci_ioaddr, pci_irq);
-	if (check_region((cs->hw.w6692.iobase), 256)) {
+	if (!request_region(cs->hw.w6692.iobase, 256, id_list[cs->subtyp].card_name)) {
 		printk(KERN_WARNING
 		       "HiSax: %s I/O ports %x-%x already in use\n",
 		       id_list[cs->subtyp].card_name,
 		       cs->hw.w6692.iobase,
 		       cs->hw.w6692.iobase + 255);
 		return (0);
-	} else {
-		request_region(cs->hw.w6692.iobase, 256,
-			       id_list[cs->subtyp].card_name);
 	}
-#else
-	printk(KERN_WARNING "HiSax: W6692 and NO_PCI_BIOS\n");
-	printk(KERN_WARNING "HiSax: W6692 unable to config\n");
-	return (0);
-#endif				/* CONFIG_PCI */
 
 	printk(KERN_INFO
 	       "HiSax: %s config irq:%d I/O:%x\n",
 	       id_list[cs->subtyp].card_name, cs->irq,
 	       cs->hw.w6692.iobase);
 
+	INIT_WORK(&cs->tqueue, W6692_bh);
 	cs->readW6692 = &ReadW6692;
 	cs->writeW6692 = &WriteW6692;
 	cs->readisacfifo = &ReadISACfifo;
@@ -1080,7 +1074,7 @@ setup_w6692(struct IsdnCard *card)
 	cs->BC_Send_Data = &W6692B_fill_fifo;
 	cs->cardmsg = &w6692_card_msg;
 	cs->irq_func = &W6692_interrupt;
-	cs->irq_flags |= SA_SHIRQ;
+	cs->irq_flags |= IRQF_SHARED;
 	W6692Version(cs, "W6692:");
 	printk(KERN_INFO "W6692 ISTA=0x%X\n", ReadW6692(cs, W_ISTA));
 	printk(KERN_INFO "W6692 IMASK=0x%X\n", ReadW6692(cs, W_IMASK));

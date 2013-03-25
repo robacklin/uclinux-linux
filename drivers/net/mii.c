@@ -33,15 +33,38 @@
 #include <linux/ethtool.h>
 #include <linux/mii.h>
 
+static u32 mii_get_an(struct mii_if_info *mii, u16 addr)
+{
+	int advert;
+
+	advert = mii->mdio_read(mii->dev, mii->phy_id, addr);
+
+	return mii_lpa_to_ethtool_lpa_t(advert);
+}
+
+/**
+ * mii_ethtool_gset - get settings that are specified in @ecmd
+ * @mii: MII interface
+ * @ecmd: requested ethtool_cmd
+ *
+ * The @ecmd parameter is expected to have been cleared before calling
+ * mii_ethtool_gset().
+ *
+ * Returns 0 for success, negative on error.
+ */
 int mii_ethtool_gset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 {
 	struct net_device *dev = mii->dev;
-	u32 advert, bmcr, lpa, nego;
+	u16 bmcr, bmsr, ctrl1000 = 0, stat1000 = 0;
+	u32 nego;
 
 	ecmd->supported =
 	    (SUPPORTED_10baseT_Half | SUPPORTED_10baseT_Full |
 	     SUPPORTED_100baseT_Half | SUPPORTED_100baseT_Full |
 	     SUPPORTED_Autoneg | SUPPORTED_TP | SUPPORTED_MII);
+	if (mii->supports_gmii)
+		ecmd->supported |= SUPPORTED_1000baseT_Half |
+			SUPPORTED_1000baseT_Full;
 
 	/* only supports twisted-pair */
 	ecmd->port = PORT_MII;
@@ -51,53 +74,81 @@ int mii_ethtool_gset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 
 	/* this isn't fully supported at higher layers */
 	ecmd->phy_address = mii->phy_id;
+	ecmd->mdio_support = ETH_MDIO_SUPPORTS_C22;
 
 	ecmd->advertising = ADVERTISED_TP | ADVERTISED_MII;
-	advert = mii->mdio_read(dev, mii->phy_id, MII_ADVERTISE);
-	if (advert & ADVERTISE_10HALF)
-		ecmd->advertising |= ADVERTISED_10baseT_Half;
-	if (advert & ADVERTISE_10FULL)
-		ecmd->advertising |= ADVERTISED_10baseT_Full;
-	if (advert & ADVERTISE_100HALF)
-		ecmd->advertising |= ADVERTISED_100baseT_Half;
-	if (advert & ADVERTISE_100FULL)
-		ecmd->advertising |= ADVERTISED_100baseT_Full;
 
 	bmcr = mii->mdio_read(dev, mii->phy_id, MII_BMCR);
-	lpa = mii->mdio_read(dev, mii->phy_id, MII_LPA);
+	bmsr = mii->mdio_read(dev, mii->phy_id, MII_BMSR);
+	if (mii->supports_gmii) {
+ 		ctrl1000 = mii->mdio_read(dev, mii->phy_id, MII_CTRL1000);
+		stat1000 = mii->mdio_read(dev, mii->phy_id, MII_STAT1000);
+	}
 	if (bmcr & BMCR_ANENABLE) {
 		ecmd->advertising |= ADVERTISED_Autoneg;
 		ecmd->autoneg = AUTONEG_ENABLE;
-		
-		nego = mii_nway_result(advert & lpa);
-		if (nego == LPA_100FULL || nego == LPA_100HALF)
-			ecmd->speed = SPEED_100;
-		else
-			ecmd->speed = SPEED_10;
-		if (nego == LPA_100FULL || nego == LPA_10FULL) {
-			ecmd->duplex = DUPLEX_FULL;
-			mii->full_duplex = 1;
+
+		ecmd->advertising |= mii_get_an(mii, MII_ADVERTISE);
+		if (mii->supports_gmii)
+			ecmd->advertising |=
+					mii_ctrl1000_to_ethtool_adv_t(ctrl1000);
+
+		if (bmsr & BMSR_ANEGCOMPLETE) {
+			ecmd->lp_advertising = mii_get_an(mii, MII_LPA);
+			ecmd->lp_advertising |=
+					mii_stat1000_to_ethtool_lpa_t(stat1000);
 		} else {
-			ecmd->duplex = DUPLEX_HALF;
-			mii->full_duplex = 0;
+			ecmd->lp_advertising = 0;
+		}
+
+		nego = ecmd->advertising & ecmd->lp_advertising;
+
+		if (nego & (ADVERTISED_1000baseT_Full |
+			    ADVERTISED_1000baseT_Half)) {
+			ethtool_cmd_speed_set(ecmd, SPEED_1000);
+			ecmd->duplex = !!(nego & ADVERTISED_1000baseT_Full);
+		} else if (nego & (ADVERTISED_100baseT_Full |
+				   ADVERTISED_100baseT_Half)) {
+			ethtool_cmd_speed_set(ecmd, SPEED_100);
+			ecmd->duplex = !!(nego & ADVERTISED_100baseT_Full);
+		} else {
+			ethtool_cmd_speed_set(ecmd, SPEED_10);
+			ecmd->duplex = !!(nego & ADVERTISED_10baseT_Full);
 		}
 	} else {
 		ecmd->autoneg = AUTONEG_DISABLE;
 
-		ecmd->speed = (bmcr & BMCR_SPEED100) ? SPEED_100 : SPEED_10;
+		ethtool_cmd_speed_set(ecmd,
+				      ((bmcr & BMCR_SPEED1000 &&
+					(bmcr & BMCR_SPEED100) == 0) ?
+				       SPEED_1000 :
+				       ((bmcr & BMCR_SPEED100) ?
+					SPEED_100 : SPEED_10)));
 		ecmd->duplex = (bmcr & BMCR_FULLDPLX) ? DUPLEX_FULL : DUPLEX_HALF;
 	}
+
+	mii->full_duplex = ecmd->duplex;
 
 	/* ignore maxtxpkt, maxrxpkt for now */
 
 	return 0;
 }
 
+/**
+ * mii_ethtool_sset - set settings that are specified in @ecmd
+ * @mii: MII interface
+ * @ecmd: requested ethtool_cmd
+ *
+ * Returns 0 for success, negative on error.
+ */
 int mii_ethtool_sset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 {
 	struct net_device *dev = mii->dev;
+	u32 speed = ethtool_cmd_speed(ecmd);
 
-	if (ecmd->speed != SPEED_10 && ecmd->speed != SPEED_100)
+	if (speed != SPEED_10 &&
+	    speed != SPEED_100 &&
+	    speed != SPEED_1000)
 		return -EINVAL;
 	if (ecmd->duplex != DUPLEX_HALF && ecmd->duplex != DUPLEX_FULL)
 		return -EINVAL;
@@ -109,34 +160,42 @@ int mii_ethtool_sset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 		return -EINVAL;
 	if (ecmd->autoneg != AUTONEG_DISABLE && ecmd->autoneg != AUTONEG_ENABLE)
 		return -EINVAL;
-				  
+	if ((speed == SPEED_1000) && (!mii->supports_gmii))
+		return -EINVAL;
+
 	/* ignore supported, maxtxpkt, maxrxpkt */
-	
+
 	if (ecmd->autoneg == AUTONEG_ENABLE) {
 		u32 bmcr, advert, tmp;
+		u32 advert2 = 0, tmp2 = 0;
 
 		if ((ecmd->advertising & (ADVERTISED_10baseT_Half |
 					  ADVERTISED_10baseT_Full |
 					  ADVERTISED_100baseT_Half |
-					  ADVERTISED_100baseT_Full)) == 0)
+					  ADVERTISED_100baseT_Full |
+					  ADVERTISED_1000baseT_Half |
+					  ADVERTISED_1000baseT_Full)) == 0)
 			return -EINVAL;
 
 		/* advertise only what has been requested */
 		advert = mii->mdio_read(dev, mii->phy_id, MII_ADVERTISE);
 		tmp = advert & ~(ADVERTISE_ALL | ADVERTISE_100BASE4);
-		if (ecmd->advertising & ADVERTISED_10baseT_Half)
-			tmp |= ADVERTISE_10HALF;
-		if (ecmd->advertising & ADVERTISED_10baseT_Full)
-			tmp |= ADVERTISE_10FULL;
-		if (ecmd->advertising & ADVERTISED_100baseT_Half)
-			tmp |= ADVERTISE_100HALF;
-		if (ecmd->advertising & ADVERTISED_100baseT_Full)
-			tmp |= ADVERTISE_100FULL;
+		if (mii->supports_gmii) {
+			advert2 = mii->mdio_read(dev, mii->phy_id, MII_CTRL1000);
+			tmp2 = advert2 & ~(ADVERTISE_1000HALF | ADVERTISE_1000FULL);
+		}
+		tmp |= ethtool_adv_to_mii_adv_t(ecmd->advertising);
+
+		if (mii->supports_gmii)
+			tmp2 |=
+			      ethtool_adv_to_mii_ctrl1000_t(ecmd->advertising);
 		if (advert != tmp) {
 			mii->mdio_write(dev, mii->phy_id, MII_ADVERTISE, tmp);
 			mii->advertising = tmp;
 		}
-		
+		if ((mii->supports_gmii) && (advert2 != tmp2))
+			mii->mdio_write(dev, mii->phy_id, MII_CTRL1000, tmp2);
+
 		/* turn on autonegotiation, and force a renegotiate */
 		bmcr = mii->mdio_read(dev, mii->phy_id, MII_BMCR);
 		bmcr |= (BMCR_ANENABLE | BMCR_ANRESTART);
@@ -148,8 +207,11 @@ int mii_ethtool_sset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 
 		/* turn off auto negotiation, set speed and duplexity */
 		bmcr = mii->mdio_read(dev, mii->phy_id, MII_BMCR);
-		tmp = bmcr & ~(BMCR_ANENABLE | BMCR_SPEED100 | BMCR_FULLDPLX);
-		if (ecmd->speed == SPEED_100)
+		tmp = bmcr & ~(BMCR_ANENABLE | BMCR_SPEED100 |
+			       BMCR_SPEED1000 | BMCR_FULLDPLX);
+		if (speed == SPEED_1000)
+			tmp |= BMCR_SPEED1000;
+		else if (speed == SPEED_100)
 			tmp |= BMCR_SPEED100;
 		if (ecmd->duplex == DUPLEX_FULL) {
 			tmp |= BMCR_FULLDPLX;
@@ -164,6 +226,30 @@ int mii_ethtool_sset(struct mii_if_info *mii, struct ethtool_cmd *ecmd)
 	return 0;
 }
 
+/**
+ * mii_check_gmii_support - check if the MII supports Gb interfaces
+ * @mii: the MII interface
+ */
+int mii_check_gmii_support(struct mii_if_info *mii)
+{
+	int reg;
+
+	reg = mii->mdio_read(mii->dev, mii->phy_id, MII_BMSR);
+	if (reg & BMSR_ESTATEN) {
+		reg = mii->mdio_read(mii->dev, mii->phy_id, MII_ESTATUS);
+		if (reg & (ESTATUS_1000_TFULL | ESTATUS_1000_THALF))
+			return 1;
+	}
+
+	return 0;
+}
+
+/**
+ * mii_link_ok - is link status up/ok
+ * @mii: the MII interface
+ *
+ * Returns 1 if the MII reports link status up/ok, 0 otherwise.
+ */
 int mii_link_ok (struct mii_if_info *mii)
 {
 	/* first, a dummy read, needed to latch some MII phys */
@@ -173,6 +259,12 @@ int mii_link_ok (struct mii_if_info *mii)
 	return 0;
 }
 
+/**
+ * mii_nway_restart - restart NWay (autonegotiation) for this interface
+ * @mii: the MII interface
+ *
+ * Returns 0 on success, negative on error.
+ */
 int mii_nway_restart (struct mii_if_info *mii)
 {
 	int bmcr;
@@ -190,6 +282,14 @@ int mii_nway_restart (struct mii_if_info *mii)
 	return r;
 }
 
+/**
+ * mii_check_link - check MII link status
+ * @mii: MII interface
+ *
+ * If the link status changed (previous != current), call
+ * netif_carrier_on() if current link status is Up or call
+ * netif_carrier_off() if current link status is Down.
+ */
 void mii_check_link (struct mii_if_info *mii)
 {
 	int cur_link = mii_link_ok(mii);
@@ -201,12 +301,22 @@ void mii_check_link (struct mii_if_info *mii)
 		netif_carrier_off(mii->dev);
 }
 
+/**
+ * mii_check_media - check the MII interface for a duplex change
+ * @mii: the MII interface
+ * @ok_to_print: OK to print link up/down messages
+ * @init_media: OK to save duplex mode in @mii
+ *
+ * Returns 1 if the duplex mode changed, 0 if not.
+ * If the media type is forced, always returns 0.
+ */
 unsigned int mii_check_media (struct mii_if_info *mii,
 			      unsigned int ok_to_print,
 			      unsigned int init_media)
 {
 	unsigned int old_carrier, new_carrier;
 	int advertise, lpa, media, duplex;
+	int lpa2 = 0;
 
 	/* if forced media, go no further */
 	if (mii->force_media)
@@ -226,7 +336,7 @@ unsigned int mii_check_media (struct mii_if_info *mii,
 	if (!new_carrier) {
 		netif_carrier_off(mii->dev);
 		if (ok_to_print)
-			printk(KERN_INFO "%s: link down\n", mii->dev->name);
+			netdev_info(mii->dev, "link down\n");
 		return 0; /* duplex did not change */
 	}
 
@@ -243,18 +353,22 @@ unsigned int mii_check_media (struct mii_if_info *mii,
 		mii->advertising = advertise;
 	}
 	lpa = mii->mdio_read(mii->dev, mii->phy_id, MII_LPA);
+	if (mii->supports_gmii)
+		lpa2 = mii->mdio_read(mii->dev, mii->phy_id, MII_STAT1000);
 
 	/* figure out media and duplex from advertise and LPA values */
 	media = mii_nway_result(lpa & advertise);
 	duplex = (media & ADVERTISE_FULL) ? 1 : 0;
+	if (lpa2 & LPA_1000FULL)
+		duplex = 1;
 
 	if (ok_to_print)
-		printk(KERN_INFO "%s: link up, %sMbps, %s-duplex, lpa 0x%04X\n",
-		       mii->dev->name,
-		       media & (ADVERTISE_100FULL | ADVERTISE_100HALF) ?
-		       		"100" : "10",
-		       duplex ? "full" : "half",
-		       lpa);
+		netdev_info(mii->dev, "link up, %uMbps, %s-duplex, lpa 0x%04X\n",
+			    lpa2 & (LPA_1000FULL | LPA_1000HALF) ? 1000 :
+			    media & (ADVERTISE_100FULL | ADVERTISE_100HALF) ?
+			    100 : 10,
+			    duplex ? "full" : "half",
+			    lpa);
 
 	if ((init_media) || (mii->full_duplex != duplex)) {
 		mii->full_duplex = duplex;
@@ -264,6 +378,16 @@ unsigned int mii_check_media (struct mii_if_info *mii,
 	return 0; /* duplex did not change */
 }
 
+/**
+ * generic_mii_ioctl - main MII ioctl interface
+ * @mii_if: the MII interface
+ * @mii_data: MII ioctl data structure
+ * @cmd: MII ioctl command
+ * @duplex_chg_out: pointer to @duplex_changed status if there was no
+ *	ioctl error
+ *
+ * Returns 0 on success, negative on error.
+ */
 int generic_mii_ioctl(struct mii_if_info *mii_if,
 		      struct mii_ioctl_data *mii_data, int cmd,
 		      unsigned int *duplex_chg_out)
@@ -278,24 +402,18 @@ int generic_mii_ioctl(struct mii_if_info *mii_if,
 	mii_data->reg_num &= mii_if->reg_num_mask;
 
 	switch(cmd) {
-	case SIOCDEVPRIVATE:	/* binary compat, remove in 2.5 */
 	case SIOCGMIIPHY:
 		mii_data->phy_id = mii_if->phy_id;
 		/* fall through */
 
-	case SIOCDEVPRIVATE + 1:/* binary compat, remove in 2.5 */
 	case SIOCGMIIREG:
 		mii_data->val_out =
 			mii_if->mdio_read(mii_if->dev, mii_data->phy_id,
 					  mii_data->reg_num);
 		break;
 
-	case SIOCDEVPRIVATE + 2:/* binary compat, remove in 2.5 */
 	case SIOCSMIIREG: {
 		u16 val = mii_data->val_in;
-
-		if (!capable(CAP_NET_ADMIN))
-			return -EPERM;
 
 		if (mii_data->phy_id == mii_if->phy_id) {
 			switch(mii_data->reg_num) {
@@ -349,5 +467,6 @@ EXPORT_SYMBOL(mii_ethtool_gset);
 EXPORT_SYMBOL(mii_ethtool_sset);
 EXPORT_SYMBOL(mii_check_link);
 EXPORT_SYMBOL(mii_check_media);
+EXPORT_SYMBOL(mii_check_gmii_support);
 EXPORT_SYMBOL(generic_mii_ioctl);
 

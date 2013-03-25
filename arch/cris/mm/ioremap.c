@@ -10,87 +10,9 @@
  */
 
 #include <linux/vmalloc.h>
-#include <asm/io.h>
+#include <linux/io.h>
 #include <asm/pgalloc.h>
-
-extern inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-
-	address &= ~PMD_MASK;
-	end = address + size;
-	if (end > PMD_SIZE)
-		end = PMD_SIZE;
-	if (address >= end)
-		BUG();
-	do {
-		if (!pte_none(*pte)) {
-			printk("remap_area_pte: page already exists\n");
-			BUG();
-		}
-		set_pte(pte, mk_pte_phys(phys_addr, __pgprot(_PAGE_PRESENT | __READABLE | 
-							     __WRITEABLE | _PAGE_GLOBAL |
-							     _PAGE_KERNEL | flags)));
-		address += PAGE_SIZE;
-		phys_addr += PAGE_SIZE;
-		pte++;
-	} while (address && (address < end));
-}
-
-static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
-	unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-
-	address &= ~PGDIR_MASK;
-	end = address + size;
-	if (end > PGDIR_SIZE)
-		end = PGDIR_SIZE;
-	phys_addr -= address;
-	if (address >= end)
-		BUG();
-	do {
-		pte_t * pte = pte_alloc(&init_mm, pmd, address);
-		if (!pte)
-			return -ENOMEM;
-		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address && (address < end));
-	return 0;
-}
-
-static int remap_area_pages(unsigned long address, unsigned long phys_addr,
-				 unsigned long size, unsigned long flags)
-{
-	int error;
-	pgd_t * dir;
-	unsigned long end = address + size;
-
-	phys_addr -= address;
-	dir = pgd_offset(&init_mm, address);
-	flush_cache_all();
-	if (address >= end)
-		BUG();
-	spin_lock(&init_mm.page_table_lock);
-	do {
-		pmd_t *pmd;
-		pmd = pmd_alloc(&init_mm, dir, address);
-		error = -ENOMEM;
-		if (!pmd)
-			break;
-		if (remap_area_pmd(pmd, address, end - address,
-				   phys_addr + address, flags))
-			break;
-		error = 0;
-		address = (address + PGDIR_SIZE) & PGDIR_MASK;
-		dir++;
-	} while (address && (address < end));
-	spin_unlock(&init_mm.page_table_lock);
-	flush_tlb_all();
-	return error;
-}
+#include <arch/memmap.h>
 
 /*
  * Generic mapping function (not visible outside):
@@ -105,9 +27,9 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr,
  * have to convert them into an offset in a page-aligned mapping, but the
  * caller shouldn't need to know that small detail.
  */
-void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+void __iomem * __ioremap_prot(unsigned long phys_addr, unsigned long size, pgprot_t prot)
 {
-	void * addr;
+	void __iomem * addr;
 	struct vm_struct * area;
 	unsigned long offset, last_addr;
 
@@ -115,31 +37,6 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	last_addr = phys_addr + size - 1;
 	if (!size || last_addr < phys_addr)
 		return NULL;
-
-#if 0
-	/* TODO: Here we can put checks for driver-writer abuse...  */
-
-	/*
-	 * Don't remap the low PCI/ISA area, it's always mapped..
-	 */
-	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
-		return phys_to_virt(phys_addr);
-
-	/*
-	 * Don't allow anybody to remap normal RAM that we're using..
-	 */
-	if (phys_addr < virt_to_phys(high_memory)) {
-		char *t_addr, *t_end;
-		struct page *page;
-
-		t_addr = __va(phys_addr);
-		t_end = t_addr + (size - 1);
-	   
-		for(page = virt_to_page(t_addr); page <= virt_to_page(t_end); page++)
-			if(!PageReserved(page))
-				return NULL;
-	}
-#endif
 
 	/*
 	 * Mappings have to be page-aligned
@@ -154,15 +51,37 @@ void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flag
 	area = get_vm_area(size, VM_IOREMAP);
 	if (!area)
 		return NULL;
-	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
-		vfree(addr);
+	addr = (void __iomem *)area->addr;
+	if (ioremap_page_range((unsigned long)addr, (unsigned long)addr + size,
+			       phys_addr, prot)) {
+		vfree((void __force *)addr);
 		return NULL;
 	}
-	return (void *) (offset + (char *)addr);
+	return (void __iomem *) (offset + (char __iomem *)addr);
 }
 
-void iounmap(void *addr)
+void __iomem * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+{
+	return __ioremap_prot(phys_addr, size,
+		              __pgprot(_PAGE_PRESENT | __READABLE |
+				       __WRITEABLE | _PAGE_GLOBAL |
+				       _PAGE_KERNEL | flags));
+}
+
+/**
+ * ioremap_nocache     -   map bus memory into CPU space
+ * @offset:    bus address of the memory
+ * @size:      size of the resource to map
+ *
+ * Must be freed with iounmap.
+ */
+
+void __iomem *ioremap_nocache (unsigned long phys_addr, unsigned long size)
+{
+        return __ioremap(phys_addr | MEM_NON_CACHEABLE, size, 0);
+}
+
+void iounmap(volatile void __iomem *addr)
 {
 	if (addr > high_memory)
 		return vfree((void *) (PAGE_MASK & (unsigned long) addr));

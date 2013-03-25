@@ -41,7 +41,7 @@
 //	into one 8 byte word. In this case we have only one entry in the pipeline.
 //
 //	We use a (LOAD_LATENCY+2)-stage pipeline in the loop to account for
-//	possible load latency and also to accomodate for head and tail.
+//	possible load latency and also to accommodate for head and tail.
 //
 //	The end of the function deals with folding the checksum from 64bits
 //	down to 16bits taking care of the carry.
@@ -137,7 +137,7 @@ GLOBAL_ENTRY(do_csum)
 	mov saved_pr=pr		// preserve predicates (rotation)
 (p6)	br.ret.spnt.many rp	// return if zero or negative length
 
-	mov hmask=-1		// intialize head mask
+	mov hmask=-1		// initialize head mask
 	tbit.nz p15,p0=buf,0	// is buf an odd address?
 	and first1=-8,buf	// 8-byte align down address of first1 element
 
@@ -201,7 +201,7 @@ GLOBAL_ENTRY(do_csum)
 	;;
 (p6)	adds result1[0]=1,result1[0]
 (p9)	br.cond.sptk .do_csum_exit	// if (count == 1) exit
-	// Fall through to caluculate the checksum, feeding result1[0] as
+	// Fall through to calculate the checksum, feeding result1[0] as
 	// the initial value in result1[0].
 	//
 	// Calculate the checksum loading two 8-byte words per loop.

@@ -4,7 +4,7 @@
  * Atari time and real time clock stuff
  *
  * Assembled of parts of former atari/config.c 97-12-18 by Roman Hodek
- *  
+ *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
@@ -15,36 +15,43 @@
 #include <linux/interrupt.h>
 #include <linux/init.h>
 #include <linux/rtc.h>
+#include <linux/bcd.h>
+#include <linux/delay.h>
+#include <linux/export.h>
 
 #include <asm/atariints.h>
 
+DEFINE_SPINLOCK(rtc_lock);
+EXPORT_SYMBOL_GPL(rtc_lock);
+
 void __init
-atari_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
+atari_sched_init(irq_handler_t timer_routine)
 {
     /* set Timer C data Register */
-    mfp.tim_dt_c = INT_TICKS;
+    st_mfp.tim_dt_c = INT_TICKS;
     /* start timer C, div = 1:100 */
-    mfp.tim_ct_cd = (mfp.tim_ct_cd & 15) | 0x60; 
+    st_mfp.tim_ct_cd = (st_mfp.tim_ct_cd & 15) | 0x60;
     /* install interrupt service routine for MFP Timer C */
-    request_irq(IRQ_MFP_TIMC, timer_routine, IRQ_TYPE_SLOW,
-                "timer", timer_routine);
+    if (request_irq(IRQ_MFP_TIMC, timer_routine, IRQ_TYPE_SLOW,
+		    "timer", timer_routine))
+	pr_err("Couldn't register timer interrupt\n");
 }
 
 /* ++andreas: gettimeoffset fixed to check for pending interrupt */
 
 #define TICK_SIZE 10000
-  
+
 /* This is always executed with interrupts disabled.  */
 unsigned long atari_gettimeoffset (void)
 {
   unsigned long ticks, offset = 0;
 
   /* read MFP timer C current value */
-  ticks = mfp.tim_dt_c;
+  ticks = st_mfp.tim_dt_c;
   /* The probability of underflow is less than 2% */
   if (ticks > INT_TICKS - INT_TICKS / 50)
     /* Check for pending timer interrupt */
-    if (mfp.int_pn_b & (1 << 5))
+    if (st_mfp.int_pn_b & (1 << 5))
       offset = TICK_SIZE;
 
   ticks = INT_TICKS - ticks;
@@ -58,9 +65,9 @@ static void mste_read(struct MSTE_RTC *val)
 {
 #define COPY(v) val->v=(mste_rtc.v & 0xf)
 	do {
-		COPY(sec_ones) ; COPY(sec_tens) ; COPY(min_ones) ; 
-		COPY(min_tens) ; COPY(hr_ones) ; COPY(hr_tens) ; 
-		COPY(weekday) ; COPY(day_ones) ; COPY(day_tens) ; 
+		COPY(sec_ones) ; COPY(sec_tens) ; COPY(min_ones) ;
+		COPY(min_tens) ; COPY(hr_ones) ; COPY(hr_tens) ;
+		COPY(weekday) ; COPY(day_ones) ; COPY(day_tens) ;
 		COPY(mon_ones) ; COPY(mon_tens) ; COPY(year_ones) ;
 		COPY(year_tens) ;
 	/* prevent from reading the clock while it changed */
@@ -72,9 +79,9 @@ static void mste_write(struct MSTE_RTC *val)
 {
 #define COPY(v) mste_rtc.v=val->v
 	do {
-		COPY(sec_ones) ; COPY(sec_tens) ; COPY(min_ones) ; 
-		COPY(min_tens) ; COPY(hr_ones) ; COPY(hr_tens) ; 
-		COPY(weekday) ; COPY(day_ones) ; COPY(day_tens) ; 
+		COPY(sec_ones) ; COPY(sec_tens) ; COPY(min_ones) ;
+		COPY(min_tens) ; COPY(hr_ones) ; COPY(hr_tens) ;
+		COPY(weekday) ; COPY(day_ones) ; COPY(day_tens) ;
 		COPY(mon_ones) ; COPY(mon_tens) ; COPY(year_ones) ;
 		COPY(year_tens) ;
 	/* prevent from writing the clock while it changed */
@@ -96,73 +103,6 @@ static void mste_write(struct MSTE_RTC *val)
 	} while(0)
 
 
-void atari_mste_gettod (int *yearp, int *monp, int *dayp,
-			int *hourp, int *minp, int *secp)
-{
-    int hr24=0, hour;
-    struct MSTE_RTC val;
-
-    mste_rtc.mode=(mste_rtc.mode | 1);
-    hr24=mste_rtc.mon_tens & 1;
-    mste_rtc.mode=(mste_rtc.mode & ~1);
-
-    mste_read(&val);
-    *secp = val.sec_ones + val.sec_tens * 10;
-    *minp = val.min_ones + val.min_tens * 10;
-    hour = val.hr_ones + val.hr_tens * 10;
-    if (!hr24) {
-        if (hour == 12 || hour == 12 + 20)
-	    hour -= 12;
-	if (hour >= 20)
-	    hour += 12 - 20;
-    }
-    *hourp = hour;
-    *dayp = val.day_ones + val.day_tens * 10;
-    *monp = val.mon_ones + val.mon_tens * 10;
-    *yearp = val.year_ones + val.year_tens * 10 + 80;	
-}
-
-  
-void atari_tt_gettod (int *yearp, int *monp, int *dayp,
-		      int *hourp, int *minp, int *secp)
-{
-    unsigned char	ctrl;
-    int hour, pm;
-
-    while (!(RTC_READ(RTC_FREQ_SELECT) & RTC_UIP)) ;
-    while (RTC_READ(RTC_FREQ_SELECT) & RTC_UIP) ;
-
-    *secp  = RTC_READ(RTC_SECONDS);
-    *minp  = RTC_READ(RTC_MINUTES);
-    hour = RTC_READ(RTC_HOURS);
-    *dayp  = RTC_READ(RTC_DAY_OF_MONTH);
-    *monp  = RTC_READ(RTC_MONTH);
-    *yearp = RTC_READ(RTC_YEAR);
-    pm = hour & 0x80;
-    hour &= ~0x80;
-
-    ctrl = RTC_READ(RTC_CONTROL); 
-
-    if (!(ctrl & RTC_DM_BINARY)) {
-        BCD_TO_BIN(*secp);
-        BCD_TO_BIN(*minp);
-        BCD_TO_BIN(hour);
-        BCD_TO_BIN(*dayp);
-        BCD_TO_BIN(*monp);
-        BCD_TO_BIN(*yearp);
-    }
-    if (!(ctrl & RTC_24H)) {
-	if (!pm && hour == 12)
-	    hour = 0;
-	else if (pm && hour != 12)
-            hour += 12;
-    }
-    *hourp = hour;
-
-    /* Adjust values (let the setup valid) */
-    *yearp += atari_rtc_year_offset;
-}
-
 #define HWCLK_POLL_INTERVAL	5
 
 int atari_mste_hwclk( int op, struct rtc_time *t )
@@ -170,14 +110,14 @@ int atari_mste_hwclk( int op, struct rtc_time *t )
     int hour, year;
     int hr24=0;
     struct MSTE_RTC val;
-    
+
     mste_rtc.mode=(mste_rtc.mode | 1);
     hr24=mste_rtc.mon_tens & 1;
     mste_rtc.mode=(mste_rtc.mode & ~1);
 
     if (op) {
         /* write: prepare values */
-        
+
         val.sec_ones = t->tm_sec % 10;
         val.sec_tens = t->tm_sec / 10;
         val.min_ones = t->tm_min % 10;
@@ -226,8 +166,8 @@ int atari_mste_hwclk( int op, struct rtc_time *t )
 
 int atari_tt_hwclk( int op, struct rtc_time *t )
 {
-    int sec=0, min=0, hour=0, day=0, mon=0, year=0, wday=0; 
-    unsigned long 	flags;
+    int sec=0, min=0, hour=0, day=0, mon=0, year=0, wday=0;
+    unsigned long	flags;
     unsigned char	ctrl;
     int pm = 0;
 
@@ -236,7 +176,7 @@ int atari_tt_hwclk( int op, struct rtc_time *t )
 
     if (op) {
         /* write: prepare values */
-        
+
         sec  = t->tm_sec;
         min  = t->tm_min;
         hour = t->tm_hour;
@@ -244,7 +184,7 @@ int atari_tt_hwclk( int op, struct rtc_time *t )
         mon  = t->tm_mon + 1;
         year = t->tm_year - atari_rtc_year_offset;
         wday = t->tm_wday + (t->tm_wday >= 0);
-        
+
         if (!(ctrl & RTC_24H)) {
 	    if (hour > 11) {
 		pm = 0x80;
@@ -254,18 +194,19 @@ int atari_tt_hwclk( int op, struct rtc_time *t )
 	    else if (hour == 0)
 		hour = 12;
         }
-        
+
         if (!(ctrl & RTC_DM_BINARY)) {
-            BIN_TO_BCD(sec);
-            BIN_TO_BCD(min);
-            BIN_TO_BCD(hour);
-            BIN_TO_BCD(day);
-            BIN_TO_BCD(mon);
-            BIN_TO_BCD(year);
-            if (wday >= 0) BIN_TO_BCD(wday);
+	    sec = bin2bcd(sec);
+	    min = bin2bcd(min);
+	    hour = bin2bcd(hour);
+	    day = bin2bcd(day);
+	    mon = bin2bcd(mon);
+	    year = bin2bcd(year);
+	    if (wday >= 0)
+		wday = bin2bcd(wday);
         }
     }
-    
+
     /* Reading/writing the clock registers is a bit critical due to
      * the regular update cycle of the RTC. While an update is in
      * progress, registers 0..9 shouldn't be touched.
@@ -279,12 +220,13 @@ int atari_tt_hwclk( int op, struct rtc_time *t )
      */
 
     while( RTC_READ(RTC_FREQ_SELECT) & RTC_UIP ) {
-        current->state = TASK_INTERRUPTIBLE;
-        schedule_timeout(HWCLK_POLL_INTERVAL);
+	if (in_atomic() || irqs_disabled())
+	    mdelay(1);
+	else
+	    schedule_timeout_interruptible(HWCLK_POLL_INTERVAL);
     }
 
-    save_flags(flags);
-    cli();
+    local_irq_save(flags);
     RTC_WRITE( RTC_CONTROL, ctrl | RTC_SET );
     if (!op) {
         sec  = RTC_READ( RTC_SECONDS );
@@ -305,24 +247,24 @@ int atari_tt_hwclk( int op, struct rtc_time *t )
         if (wday >= 0) RTC_WRITE( RTC_DAY_OF_WEEK, wday );
     }
     RTC_WRITE( RTC_CONTROL, ctrl & ~RTC_SET );
-    restore_flags(flags);
+    local_irq_restore(flags);
 
     if (!op) {
         /* read: adjust values */
-        
+
         if (hour & 0x80) {
 	    hour &= ~0x80;
 	    pm = 1;
 	}
 
 	if (!(ctrl & RTC_DM_BINARY)) {
-            BCD_TO_BIN(sec);
-            BCD_TO_BIN(min);
-            BCD_TO_BIN(hour);
-            BCD_TO_BIN(day);
-            BCD_TO_BIN(mon);
-            BCD_TO_BIN(year);
-            BCD_TO_BIN(wday);
+	    sec = bcd2bin(sec);
+	    min = bcd2bin(min);
+	    hour = bcd2bin(hour);
+	    day = bcd2bin(day);
+	    mon = bcd2bin(mon);
+	    year = bcd2bin(year);
+	    wday = bcd2bin(wday);
         }
 
         if (!(ctrl & RTC_24H)) {
@@ -351,7 +293,7 @@ int atari_mste_set_clock_mmss (unsigned long nowtime)
     struct MSTE_RTC val;
     unsigned char rtc_minutes;
 
-    mste_read(&val);  
+    mste_read(&val);
     rtc_minutes= val.min_ones + val.min_tens * 10;
     if ((rtc_minutes < real_minutes
          ? real_minutes - rtc_minutes
@@ -382,7 +324,7 @@ int atari_tt_set_clock_mmss (unsigned long nowtime)
 
     rtc_minutes = RTC_READ (RTC_MINUTES);
     if (!(save_control & RTC_DM_BINARY))
-        BCD_TO_BIN (rtc_minutes);
+	rtc_minutes = bcd2bin(rtc_minutes);
 
     /* Since we're only adjusting minutes and seconds, don't interfere
        with hour overflow.  This avoids messing with unknown time zones
@@ -393,8 +335,8 @@ int atari_tt_set_clock_mmss (unsigned long nowtime)
         {
             if (!(save_control & RTC_DM_BINARY))
                 {
-                    BIN_TO_BCD (real_seconds);
-                    BIN_TO_BCD (real_minutes);
+		    real_seconds = bin2bcd(real_seconds);
+		    real_minutes = bin2bcd(real_minutes);
                 }
             RTC_WRITE (RTC_SECONDS, real_seconds);
             RTC_WRITE (RTC_MINUTES, real_minutes);

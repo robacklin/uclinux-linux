@@ -1,4 +1,4 @@
-/* 
+/*
  * Cryptographic API
  *
  * ARC4 Cipher Algorithm
@@ -24,33 +24,33 @@ struct arc4_ctx {
 	u8 x, y;
 };
 
-static int arc4_set_key(void *ctx_arg, const u8 *in_key, unsigned int key_len, u32 *flags)
+static int arc4_set_key(struct crypto_tfm *tfm, const u8 *in_key,
+			unsigned int key_len)
 {
-	struct arc4_ctx *ctx = ctx_arg;
+	struct arc4_ctx *ctx = crypto_tfm_ctx(tfm);
 	int i, j = 0, k = 0;
 
 	ctx->x = 1;
 	ctx->y = 0;
 
-	for(i = 0; i < 256; i++)
+	for (i = 0; i < 256; i++)
 		ctx->S[i] = i;
 
-	for(i = 0; i < 256; i++)
-	{
+	for (i = 0; i < 256; i++) {
 		u8 a = ctx->S[i];
 		j = (j + in_key[k] + a) & 0xff;
 		ctx->S[i] = ctx->S[j];
 		ctx->S[j] = a;
-		if(++k >= key_len)
+		if (++k >= key_len)
 			k = 0;
 	}
 
 	return 0;
 }
 
-static void arc4_crypt(void *ctx_arg, u8 *out, const u8 *in)
+static void arc4_crypt(struct crypto_tfm *tfm, u8 *out, const u8 *in)
 {
-	struct arc4_ctx *ctx = ctx_arg;
+	struct arc4_ctx *ctx = crypto_tfm_ctx(tfm);
 
 	u8 *const S = ctx->S;
 	u8 x = ctx->x;
@@ -79,9 +79,9 @@ static struct crypto_alg arc4_alg = {
 	.cra_u			=	{ .cipher = {
 	.cia_min_keysize	=	ARC4_MIN_KEY_SIZE,
 	.cia_max_keysize	=	ARC4_MAX_KEY_SIZE,
-	.cia_setkey	   	= 	arc4_set_key,
-	.cia_encrypt	 	=	arc4_crypt,
-	.cia_decrypt	  	=	arc4_crypt } }
+	.cia_setkey		=	arc4_set_key,
+	.cia_encrypt		=	arc4_crypt,
+	.cia_decrypt		=	arc4_crypt } }
 };
 
 static int __init arc4_init(void)

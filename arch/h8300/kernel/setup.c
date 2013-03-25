@@ -3,24 +3,24 @@
  *
  *  Copyleft  ()) 2000       James D. Schettine {james@telos-systems.com}
  *  Copyright (C) 1999,2000  Greg Ungerer (gerg@snapgear.com)
- *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uClinux.org>
+ *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@lineo.ca>
  *  Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
  *  Copyright (C) 1995       Hamish Macdonald
  *  Copyright (C) 2000       Lineo Inc. (www.lineo.com) 
  *  Copyright (C) 2001 	     Lineo, Inc. <www.lineo.com>
  *
- *  H8/300H porting Yoshinori Sato <ysato@users.sourceforge.jp>
+ *  H8/300 porting Yoshinori Sato <ysato@users.sourceforge.jp>
  */
 
 /*
  * This file handles the architecture-dependent parts of system setup
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
+#include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/fb.h>
 #include <linux/console.h>
@@ -30,59 +30,44 @@
 #include <linux/major.h>
 #include <linux/bootmem.h>
 #include <linux/seq_file.h>
+#include <linux/init.h>
 
 #include <asm/setup.h>
 #include <asm/irq.h>
-
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
 #include <asm/pgtable.h>
-#endif
 
-#if defined(CONFIG_CPU_H8300H)
+#if defined(__H8300H__)
 #define CPU "H8/300H"
 #include <asm/regs306x.h>
 #endif
-#if defined(CONFIG_CPU_H8S)
+
+#if defined(__H8300S__)
 #define CPU "H8S"
 #include <asm/regs267x.h>
 #endif
 
-#define STUBSIZE 0xc000;
+#define STUBSIZE 0xc000
 
 unsigned long rom_length;
 unsigned long memory_start;
 unsigned long memory_end;
 
-struct task_struct *_current_task;
+char __initdata command_line[COMMAND_LINE_SIZE];
 
-char command_line[512];
-char saved_command_line[512];
-
-extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end, _erom;
+extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end;
 extern int _ramstart, _ramend;
 extern char _target_name[];
-extern int h8300_gpio_init(void);
+extern void h8300_gpio_init(void);
 
-#if defined(CONFIG_BLK_DEV_INITRD)
-extern unsigned long initrd_start,initrd_end;
-#endif
-
-#if defined(CONFIG_GDB_EXEC) && defined(CONFIG_GDB_MAGICPRINT)
+#if (defined(CONFIG_H8300H_SIM) || defined(CONFIG_H8S_SIM)) \
+    && defined(CONFIG_GDB_MAGICPRINT)
 /* printk with gdb service */
-static void gdb_console_output(struct console *c, char *msg, unsigned len)
+static void gdb_console_output(struct console *c, const char *msg, unsigned len)
 {
 	for (; len > 0; len--) {
 		asm("mov.w %0,r2\n\t"
                     "jsr @0xc4"::"r"(*msg++):"er2");
 	}
-}
-
-static kdev_t gdb_console_device(struct console *c)
-{
-    	/* TODO: this is totally bogus */
-	/* return MKDEV(SCI_MAJOR, SCI_MINOR_START + c->index); */
-	return 0;
 }
 
 /*
@@ -96,52 +81,42 @@ static int __init gdb_console_setup(struct console *co, char *options)
 	return 0;
 }
 
-static struct console gdb_console = {
-	name:		"gdb",
-	write:		gdb_console_output,
-	device:		gdb_console_device,
-	setup:		gdb_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+static const struct console gdb_console = {
+	.name		= "gdb_con",
+	.write		= gdb_console_output,
+	.device		= NULL,
+	.setup		= gdb_console_setup,
+	.flags		= CON_PRINTBUFFER,
+	.index		= -1,
 };
 #endif
 
 void __init setup_arch(char **cmdline_p)
 {
 	int bootmap_size;
-	unsigned int blkdev_length = 0;
 
 	memory_start = (unsigned long) &_ramstart;
-#if defined(CONFIG_ROMKERNEL)
-	rom_length = (unsigned long) &_erom;
-#endif
 
-#if defined(CONFIG_BLK_DEV_BLKMEM)
 	/* allow for ROMFS on the end of the kernel */
 	if (memcmp((void *)memory_start, "-rom1fs-", 8) == 0) {
-		blkdev_length = be32_to_cpu(((unsigned long *) (memory_start))[2]);
 #if defined(CONFIG_BLK_DEV_INITRD)
-		initrd_end = memory_start += blkdev_length
+		initrd_start = memory_start;
+		initrd_end = memory_start += be32_to_cpu(((unsigned long *) (memory_start))[2]);
 #else
-		memory_start += blkdev_length;
+		memory_start += be32_to_cpu(((unsigned long *) memory_start)[2]);
 #endif
 	}
-#endif
-
 	memory_start = PAGE_ALIGN(memory_start);
+#if !defined(CONFIG_BLKDEV_RESERVE)
 	memory_end = (unsigned long) &_ramend; /* by now the stack is part of the init task */
 #if defined(CONFIG_GDB_DEBUG)
 	memory_end -= STUBSIZE;
 #endif
-#if defined(CONFIG_BLKDEV_RESERVE)
-	/* get BLKDEV length */
-	blkdev_length = be32_to_cpu(((unsigned long *) (CONFIG_BLKDEV_RESERVE_ADDRESS))[2]);
-	/* BLKDEV before userarea */
-	if (memory_start < CONFIG_BLKDEV_RESERVE_ADDRESS + blkdev_length)
-		memory_start = CONFIG_BLKDEV_RESERVE_ADDRESS + blkdev_length;
-	/* BLKDEV after userarea */
-	if (memory_end > CONFIG_BLKDEV_RESERVE_ADDRESS)
-		memory_end = CONFIG_BLKDEV_RESERVE_ADDRESS;
+#else
+	if ((memory_end < CONFIG_BLKDEV_RESERVE_ADDRESS) && 
+	    (memory_end > CONFIG_BLKDEV_RESERVE_ADDRESS))
+	    /* overlap userarea */
+	    memory_end = CONFIG_BLKDEV_RESERVE_ADDRESS; 
 #endif
 
 	init_mm.start_code = (unsigned long) &_stext;
@@ -149,31 +124,25 @@ void __init setup_arch(char **cmdline_p)
 	init_mm.end_data = (unsigned long) &_edata;
 	init_mm.brk = (unsigned long) 0; 
 
-#if defined(CONFIG_GDB_EXEC) && defined(CONFIG_GDB_MAGICPRINT)
-	register_console(&gdb_console);
+#if (defined(CONFIG_H8300H_SIM) || defined(CONFIG_H8S_SIM)) && defined(CONFIG_GDB_MAGICPRINT)
+	register_console((struct console *)&gdb_console);
 #endif
 
-	printk("\r\nuClinux " CPU "\n");
-	printk("Target Hardware: %s\n", _target_name);
-	printk("H8/300 series support by Yoshinori Sato <ysato@users.sourceforge.jp>\n");
-
-	printk("Flat model support (C) 1998,1999 Kenneth Albanowski, D. Jeff Dionne\n");
-
+	printk(KERN_INFO "\r\n\nuClinux " CPU "\n");
+	printk(KERN_INFO "Target Hardware: %s\n",_target_name);
+	printk(KERN_INFO "Flat model support (C) 1998,1999 Kenneth Albanowski, D. Jeff Dionne\n");
+	printk(KERN_INFO "H8/300 series support by Yoshinori Sato <ysato@users.sourceforge.jp>\n");
 
 #ifdef DEBUG
-	printk("KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x "
+	printk(KERN_DEBUG "KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x "
 		"BSS=0x%06x-0x%06x\n", (int) &_stext, (int) &_etext,
 		(int) &_sdata, (int) &_edata,
 		(int) &_sbss, (int) &_ebss);
-	printk("KERNEL -> ROMFS=0x%06x-0x%06x MEM=0x%06x-0x%06x "
+	printk(KERN_DEBUG "KERNEL -> ROMFS=0x%06x-0x%06x MEM=0x%06x-0x%06x "
 		"STACK=0x%06x-0x%06x\n",
 	       (int) &_ebss, (int) memory_start,
 		(int) memory_start, (int) memory_end,
 		(int) memory_end, (int) &_ramend);
-#endif
-
-#ifdef CONFIG_BLK_DEV_BLKMEM
-	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
 #endif
 
 #ifdef CONFIG_DEFAULT_CMDLINE
@@ -183,12 +152,12 @@ void __init setup_arch(char **cmdline_p)
 #endif
 	/* Keep a copy of command line */
 	*cmdline_p = &command_line[0];
-	memcpy(saved_command_line, command_line, sizeof(saved_command_line));
-	saved_command_line[sizeof(saved_command_line)-1] = 0;
+	memcpy(boot_command_line, command_line, COMMAND_LINE_SIZE);
+	boot_command_line[COMMAND_LINE_SIZE-1] = 0;
 
 #ifdef DEBUG
 	if (strlen(*cmdline_p)) 
-		printk("Command line: '%s'\n", *cmdline_p);
+		printk(KERN_DEBUG "Command line: '%s'\n", *cmdline_p);
 #endif
 
 	/*
@@ -205,17 +174,24 @@ void __init setup_arch(char **cmdline_p)
 	 * the bootmem bitmap so we then reserve it after freeing it :-)
 	 */
 	free_bootmem(memory_start, memory_end - memory_start);
-	reserve_bootmem(memory_start, bootmap_size);
+	reserve_bootmem(memory_start, bootmap_size, BOOTMEM_DEFAULT);
 	/*
 	 * get kmalloc into gear
 	 */
 	paging_init();
-	/*
- 	 * initalize gpio management
-	 */
 	h8300_gpio_init();
+#if defined(CONFIG_H8300_AKI3068NET) && defined(CONFIG_IDE)
+	{
+#define AREABIT(addr) (1 << (((addr) >> 21) & 7))
+		/* setup BSC */
+		volatile unsigned char *abwcr = (volatile unsigned char *)ABWCR;
+		volatile unsigned char *cscr = (volatile unsigned char *)CSCR;
+		*abwcr &= ~(AREABIT(CONFIG_H8300_IDE_BASE) | AREABIT(CONFIG_H8300_IDE_ALT));
+		*cscr  |= (AREABIT(CONFIG_H8300_IDE_BASE) | AREABIT(CONFIG_H8300_IDE_ALT)) | 0x0f;
+	}
+#endif
 #ifdef DEBUG
-	printk("Done setup_arch\n");
+	printk(KERN_DEBUG "Done setup_arch\n");
 #endif
 }
 
@@ -232,7 +208,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
     cpu = CPU;
     mode = *(volatile unsigned char *)MDCR & 0x07;
 
-    clockfreq = CONFIG_CLK_FREQ;
+    clockfreq = CONFIG_CPU_CLOCK;
 
     seq_printf(m,  "CPU:\t\t%s (mode:%d)\n"
 		   "Clock:\t\t%lu.%1luMHz\n"
@@ -261,9 +237,9 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
+const struct seq_operations cpuinfo_op = {
+	.start	= c_start,
+	.next	= c_next,
+	.stop	= c_stop,
+	.show	= show_cpuinfo,
 };

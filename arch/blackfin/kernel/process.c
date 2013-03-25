@@ -1,234 +1,202 @@
 /*
- *  linux/arch/frionommu/kernel/process.c
+ * Blackfin architecture-dependent process handling
  *
- *  Copyright (C) 1995  Hamish Macdonald
+ * Copyright 2004-2009 Analog Devices Inc.
  *
- *
- *  uClinux changes Copyright (C) 2000, Lineo, davidm@lineo.com
+ * Licensed under the GPL-2 or later
  */
 
-/*
- * This file handles the architecture-dependent parts of process handling..
- */
-
-/*   Changes made for FRIO by Akbar Hussain Lineo Inc., July 2001  */
-
-#include <linux/config.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
+#include <linux/module.h>
 #include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/reboot.h>
+#include <linux/uaccess.h>
+#include <linux/slab.h>
+#include <linux/sched.h>
+#include <linux/tick.h>
+#include <linux/fs.h>
+#include <linux/err.h>
 
-#include <asm/uaccess.h>
-#include <asm/system.h>
-#include <asm/traps.h>
-#include <asm/machdep.h>
-#include <asm/setup.h>
-#include <asm/pgtable.h>
-#include <asm/segment.h>
-
-/*
- * Initial task structure. Make this a per-architecture thing,
- * because different architectures tend to have different
- * alignment requirements and potentially different initial
- * setup.
- */
-
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-struct mm_struct init_mm = INIT_MM(init_mm);
-
-union task_union init_task_union
-__attribute__((section(".data.init_task"), aligned(KTHREAD_SIZE)))
-	= { task: INIT_TASK(init_task_union.task) };
+#include <asm/blackfin.h>
+#include <asm/fixed_code.h>
+#include <asm/mem_map.h>
+#include <asm/irq.h>
 
 asmlinkage void ret_from_fork(void);
 
+/* Points to the SDRAM backup memory for the stack that is currently in
+ * L1 scratchpad memory.
+ */
+void *current_l1_stack_save;
+
+/* The number of tasks currently using a L1 stack area.  The SRAM is
+ * allocated/deallocated whenever this changes from/to zero.
+ */
+int nr_l1stack_tasks;
+
+/* Start and length of the area in L1 scratchpad memory which we've allocated
+ * for process stacks.
+ */
+void *l1_stack_base;
+unsigned long l1_stack_len;
 
 /*
- * The idle loop on FRIO 
+ * Powermanagement idle function, if any..
+ */
+void (*pm_idle)(void) = NULL;
+EXPORT_SYMBOL(pm_idle);
+
+void (*pm_power_off)(void) = NULL;
+EXPORT_SYMBOL(pm_power_off);
+
+/*
+ * The idle loop on BFIN
+ */
+#ifdef CONFIG_IDLE_L1
+static void default_idle(void)__attribute__((l1_text));
+void cpu_idle(void)__attribute__((l1_text));
+#endif
+
+/*
+ * This is our default idle handler.  We need to disable
+ * interrupts here to ensure we don't miss a wakeup call.
  */
 static void default_idle(void)
 {
-	while(1) {
-		if (!current->need_resched)
-			__asm__("idle;\n\t" : : : "cc"); 
-	/* for FRIO idle_req bit of SEQSTAT is set, and also idle is supervisor
-	 * mode insn, need "SSYNC" ???  Tony */
+#ifdef CONFIG_IPIPE
+	ipipe_suspend_domain();
+#endif
+	hard_local_irq_disable();
+	if (!need_resched())
+		idle_with_irq_disabled();
 
-		schedule();
-	}
+	hard_local_irq_enable();
 }
 
-void (*frio_idle)(void) = default_idle;
-
 /*
- * The idle thread. There's no useful work to be
- * done, so just try to conserve power and have a
- * low exit latency (ie sit in a loop waiting for
- * somebody to say that they'd like to reschedule)
+ * The idle thread.  We try to conserve power, while trying to keep
+ * overall latency low.  The architecture specific idle is passed
+ * a value to indicate the level of "idleness" of the system.
  */
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	init_idle(); /* In sched.c (Generic) */
-	current->nice = 20;
-	current->counter = -100;
-	frio_idle();
-}
+	while (1) {
+		void (*idle)(void) = pm_idle;
 
-void machine_restart(char * __unused)
-{
-	if (mach_reset)
-		mach_reset();  
-/*  Frio 1st system event is for machine setup, see setup.c */
-	for (;;);
-}
-
-void machine_halt(void)
-{
-	if (mach_halt)
-		mach_halt(); /* NULL see setup.c, ? have hardware support */
-	for (;;);
-}
-
-void machine_power_off(void)
-{
-	if (mach_power_off)
-		mach_power_off(); /* NULL see setup.c */
-	for (;;);
-}
-
-void show_regs(struct pt_regs * regs)
-{
-	printk("\n");
-	printk("PC: %08lu  Status: %04lu  SysStatus: %04lu  RETS: %08lu\n",
-	       regs->pc, regs->astat, regs->seqstat, regs->rets);
-	printk("A0.x: %08lx  A0.w: %08lx  A1.x: %08lx  A1.w: %08lx\n",
-	       regs->a0x, regs->a0w, regs->a1x, regs->a1w);
-	printk("P0: %08lx  P1: %08lx  P2: %08lx  P3: %08lx\n",
-	       regs->p0, regs->p1, regs->p2, regs->p3);
-	printk("P4: %08lx  P5: %08lx\n",
-	       regs->p4, regs->p5);
-	printk("R0: %08lx  R1: %08lx  R2: %08lx  R3: %08lx\n",
-	       regs->r0, regs->r1, regs->r2, regs->r3);
-	printk("R4: %08lx  R5: %08lx  R6: %08lx  R7: %08lx\n",
-	       regs->r4, regs->r5, regs->r6, regs->r7);
-
-	/* PS_S should be 0x0c00, to expect the 0b00 value in SEQSTAT's bit 11:10 */
-	if (!(regs->seqstat & PS_S))
-		printk("USP: %08lx\n", rdusp());
+#ifdef CONFIG_HOTPLUG_CPU
+		if (cpu_is_offline(smp_processor_id()))
+			cpu_die();
+#endif
+		if (!idle)
+			idle = default_idle;
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
+		while (!need_resched())
+			idle();
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
+		schedule_preempt_disabled();
+	}
 }
 
 /*
- * Create a kernel thread
+ * This gets run with P1 containing the
+ * function to call, and R1 containing
+ * the "args".  Note P0 is clobbered on the way here.
  */
-int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+void kernel_thread_helper(void);
+__asm__(".section .text\n"
+	".align 4\n"
+	"_kernel_thread_helper:\n\t"
+	"\tsp += -12;\n\t"
+	"\tr0 = r1;\n\t" "\tcall (p1);\n\t" "\tcall _do_exit;\n" ".previous");
+
+/*
+ * Create a kernel thread.
+ */
+pid_t kernel_thread(int (*fn) (void *), void *arg, unsigned long flags)
 {
-	long retval;
-	long clone_arg = flags | CLONE_VM;
-	unsigned long t_hold_sp;
+	struct pt_regs regs;
 
-	__asm__ __volatile__ (
-			"r1 = sp; \n\t"		/* movel	%%sp, %%d2\n\t"*/
-			"r0 = %6; \n\t"		/* movel	%5, %%d1\n\t" */
-			"r5 = %2; \n\t"		/* movel	%1, %%d0\n\t" */
-			"excpt 0; \n\t"		/* trap		#0\n\t" */
-			"%1 = sp; \n\t"		/* cmpl		%%sp, %%d2\n\t" */
-			"cc = %1 == r1; \n\t"
-			"if cc jump 1f; \n\t"		/* jeq		1f\n\t" */
-			"r0 = %4; \n\t"		/* movel	%3, %%sp@-\n\t"*/
-			"call (%5); \n\t"	/* jsr		%4@\n\t" */
-			"r5 = %3; \n\t"		/* movel	%2, %%d0\n\t" */
-			"excpt 0; \n"		/* trap		#0\n" */
-			"1:"
-		: "=d" (retval), "=d" (t_hold_sp)
-		: "i" (__NR_clone),
-		  "i" (__NR_exit),
-		  "a" (arg),
-		  "a" (fn),
-		  "a" (clone_arg)
-		: "CC", "R0", "R1", "R2", "R5");
+	memset(&regs, 0, sizeof(regs));
 
-	return retval;
+	regs.r1 = (unsigned long)arg;
+	regs.p1 = (unsigned long)fn;
+	regs.pc = (unsigned long)kernel_thread_helper;
+	regs.orig_p0 = -1;
+	/* Set bit 2 to tell ret_from_fork we should be returning to kernel
+	   mode.  */
+	regs.ipend = 0x8002;
+	__asm__ __volatile__("%0 = syscfg;":"=da"(regs.syscfg):);
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0, &regs, 0, NULL,
+		       NULL);
 }
+EXPORT_SYMBOL(kernel_thread);
+
+/*
+ * Do necessary setup to start up a newly executed thread.
+ *
+ * pass the data segment into user programs if it exists,
+ * it can't hurt anything as far as I can tell
+ */
+void start_thread(struct pt_regs *regs, unsigned long new_ip, unsigned long new_sp)
+{
+	regs->pc = new_ip;
+	if (current->mm)
+		regs->p5 = current->mm->start_data;
+#ifndef CONFIG_SMP
+	task_thread_info(current)->l1_task_info.stack_start =
+		(void *)current->mm->context.stack_start;
+	task_thread_info(current)->l1_task_info.lowest_sp = (void *)new_sp;
+	memcpy(L1_SCRATCH_TASK_INFO, &task_thread_info(current)->l1_task_info,
+	       sizeof(*L1_SCRATCH_TASK_INFO));
+#endif
+	wrusp(new_sp);
+}
+EXPORT_SYMBOL_GPL(start_thread);
 
 void flush_thread(void)
 {
 }
 
-/*
- * "frio_fork()".. By the time we get here, the
- * non-volatile registers have also been saved on the
- * stack. We do some ugly pointer stuff here.. (see
- * also copy_thread)
- */
-
-asmlinkage int frio_fork(struct pt_regs *regs)  
-/* Need to change the name in /platform/.../entry.S */
+asmlinkage int bfin_vfork(struct pt_regs *regs)
 {
-#ifdef NO_MM
-	/* fork almost works,  enough to trick you into looking elsewhere :-( */
-	return(-EINVAL);
-#else
-	return do_fork(SIGCHLD, rdusp(), regs, 0);
-#endif
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0, NULL,
+		       NULL);
 }
 
-asmlinkage int frio_vfork(struct pt_regs *regs)   
-/* Need to change the name in /platform/.../entry.S */
-{
-	unsigned long newsp;
-
-	newsp = regs->r1;
-	if (!newsp)
-	   newsp = rdusp();
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0);
-}
-
-asmlinkage int frio_clone(struct pt_regs *regs) 
-/* Need to change the name in /platform/.../entry.S */
+asmlinkage int bfin_clone(struct pt_regs *regs)
 {
 	unsigned long clone_flags;
 	unsigned long newsp;
+
+#ifdef __ARCH_SYNC_CORE_DCACHE
+	if (current->rt.nr_cpus_allowed == num_possible_cpus())
+		set_cpus_allowed_ptr(current, cpumask_of(smp_processor_id()));
+#endif
 
 	/* syscall2 puts clone_flags in r0 and usp in r1 */
 	clone_flags = regs->r0;
 	newsp = regs->r1;
 	if (!newsp)
-	   newsp = rdusp();
-	return do_fork(clone_flags, newsp, regs, 0);
+		newsp = rdusp();
+	else
+		newsp -= 12;
+	return do_fork(clone_flags, newsp, regs, 0, NULL, NULL);
 }
 
-int copy_thread(int nr, unsigned long clone_flags,
-		unsigned long usp, unsigned long topstk,
-		struct task_struct * p, struct pt_regs * regs)
+int
+copy_thread(unsigned long clone_flags,
+	    unsigned long usp, unsigned long topstk,
+	    struct task_struct *p, struct pt_regs *regs)
 {
-	struct pt_regs * childregs;
-	unsigned long stack_offset;
+	struct pt_regs *childregs;
 
-	stack_offset = KTHREAD_SIZE - sizeof(struct pt_regs);
-	childregs = (struct pt_regs *) ((unsigned long) p + stack_offset);
-
+	childregs = (struct pt_regs *) (task_stack_page(p) + THREAD_SIZE) - 1;
 	*childregs = *regs;
 	childregs->r0 = 0;
 
 	p->thread.usp = usp;
-
-	/* eeks we should be this from copy_thread and not try to construct
-	 * ourselves. We'll get in trouble if we get a sys_clone from user
-	 * space - amit */
-
 	p->thread.ksp = (unsigned long)childregs;
 	p->thread.pc = (unsigned long)ret_from_fork;
 
@@ -236,76 +204,24 @@ int copy_thread(int nr, unsigned long clone_flags,
 }
 
 /*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-
-/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk +
-					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-
-	if (dump->start_stack < TASK_SIZE)
-		dump->u_ssize = ((unsigned long) (TASK_SIZE - dump->start_stack)) >> PAGE_SHIFT;
-
-	dump->u_ar0 = (struct user_regs_struct *)((int)&dump->regs - (int)dump);
-	dump->regs.r0 = regs->r0;
-	dump->regs.r1 = regs->r1;
-	dump->regs.r2 = regs->r2;
-	dump->regs.r3 = regs->r3;
-	dump->regs.r4 = regs->r4;
-	dump->regs.r5 = regs->r5;
-	dump->regs.r6 = regs->r6;
-	dump->regs.r7 = regs->r7;
-	dump->regs.p0 = regs->p0;
-	dump->regs.p1 = regs->p1;
-	dump->regs.p2 = regs->p2;
-	dump->regs.p3 = regs->p3;
-	dump->regs.p4 = regs->p4;
-	dump->regs.p5 = regs->p5;
-	dump->regs.orig_r0 = regs->orig_r0;
-	dump->regs.a0w = regs->a0w;
-	dump->regs.a1w = regs->a1w;
-	dump->regs.a0x = regs->a0x;
-	dump->regs.a1x = regs->a1x;
-	dump->regs.rets = regs->rets;
-	dump->regs.astat = regs->astat;
-	dump->regs.pc = regs->pc;
-}
-
-/*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(struct pt_regs regs)
+asmlinkage int sys_execve(const char __user *name,
+			  const char __user *const __user *argv,
+			  const char __user *const __user *envp)
 {
 	int error;
-	char * filename;
+	char *filename;
+	struct pt_regs *regs = (struct pt_regs *)((&name) + 6);
 
-	lock_kernel();
-	filename = getname((char *)regs.r0);
+	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
-		goto out;
-	error = do_execve(filename, (char **)regs.r1, (char **)regs.r2, &regs);
+		return error;
+	error = do_execve(filename, argv, envp, regs);
 	putname(filename);
-out:
-	unlock_kernel();
 	return error;
 }
-
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -318,14 +234,280 @@ unsigned long get_wchan(struct task_struct *p)
 	stack_page = (unsigned long)p;
 	fp = p->thread.usp;
 	do {
-		if (fp < stack_page+sizeof(struct task_struct) ||
-		    fp >= 8184+stack_page)
+		if (fp < stack_page + sizeof(struct thread_info) ||
+		    fp >= 8184 + stack_page)
 			return 0;
 		pc = ((unsigned long *)fp)[1];
-		/* FIXME: This depends on the order of these functions. */
-		if (pc < first_sched || pc >= last_sched)
+		if (!in_sched_functions(pc))
 			return pc;
-		fp = *(unsigned long *) fp;
-	} while (count++ < 16);
+		fp = *(unsigned long *)fp;
+	}
+	while (count++ < 16);
 	return 0;
 }
+
+void finish_atomic_sections (struct pt_regs *regs)
+{
+	int __user *up0 = (int __user *)regs->p0;
+
+	switch (regs->pc) {
+	default:
+		/* not in middle of an atomic step, so resume like normal */
+		return;
+
+	case ATOMIC_XCHG32 + 2:
+		put_user(regs->r1, up0);
+		break;
+
+	case ATOMIC_CAS32 + 2:
+	case ATOMIC_CAS32 + 4:
+		if (regs->r0 == regs->r1)
+	case ATOMIC_CAS32 + 6:
+			put_user(regs->r2, up0);
+		break;
+
+	case ATOMIC_ADD32 + 2:
+		regs->r0 = regs->r1 + regs->r0;
+		/* fall through */
+	case ATOMIC_ADD32 + 4:
+		put_user(regs->r0, up0);
+		break;
+
+	case ATOMIC_SUB32 + 2:
+		regs->r0 = regs->r1 - regs->r0;
+		/* fall through */
+	case ATOMIC_SUB32 + 4:
+		put_user(regs->r0, up0);
+		break;
+
+	case ATOMIC_IOR32 + 2:
+		regs->r0 = regs->r1 | regs->r0;
+		/* fall through */
+	case ATOMIC_IOR32 + 4:
+		put_user(regs->r0, up0);
+		break;
+
+	case ATOMIC_AND32 + 2:
+		regs->r0 = regs->r1 & regs->r0;
+		/* fall through */
+	case ATOMIC_AND32 + 4:
+		put_user(regs->r0, up0);
+		break;
+
+	case ATOMIC_XOR32 + 2:
+		regs->r0 = regs->r1 ^ regs->r0;
+		/* fall through */
+	case ATOMIC_XOR32 + 4:
+		put_user(regs->r0, up0);
+		break;
+	}
+
+	/*
+	 * We've finished the atomic section, and the only thing left for
+	 * userspace is to do a RTS, so we might as well handle that too
+	 * since we need to update the PC anyways.
+	 */
+	regs->pc = regs->rets;
+}
+
+static inline
+int in_mem(unsigned long addr, unsigned long size,
+           unsigned long start, unsigned long end)
+{
+	return addr >= start && addr + size <= end;
+}
+static inline
+int in_mem_const_off(unsigned long addr, unsigned long size, unsigned long off,
+                     unsigned long const_addr, unsigned long const_size)
+{
+	return const_size &&
+	       in_mem(addr, size, const_addr + off, const_addr + const_size);
+}
+static inline
+int in_mem_const(unsigned long addr, unsigned long size,
+                 unsigned long const_addr, unsigned long const_size)
+{
+	return in_mem_const_off(addr, size, 0, const_addr, const_size);
+}
+#define ASYNC_ENABLED(bnum, bctlnum) \
+({ \
+	(bfin_read_EBIU_AMGCTL() & 0xe) < ((bnum + 1) << 1) ? 0 : \
+	bfin_read_EBIU_AMBCTL##bctlnum() & B##bnum##RDYEN ? 0 : \
+	1; \
+})
+/*
+ * We can't read EBIU banks that aren't enabled or we end up hanging
+ * on the access to the async space.  Make sure we validate accesses
+ * that cross async banks too.
+ *	0 - found, but unusable
+ *	1 - found & usable
+ *	2 - not found
+ */
+static
+int in_async(unsigned long addr, unsigned long size)
+{
+	if (addr >= ASYNC_BANK0_BASE && addr < ASYNC_BANK0_BASE + ASYNC_BANK0_SIZE) {
+		if (!ASYNC_ENABLED(0, 0))
+			return 0;
+		if (addr + size <= ASYNC_BANK0_BASE + ASYNC_BANK0_SIZE)
+			return 1;
+		size -= ASYNC_BANK0_BASE + ASYNC_BANK0_SIZE - addr;
+		addr = ASYNC_BANK0_BASE + ASYNC_BANK0_SIZE;
+	}
+	if (addr >= ASYNC_BANK1_BASE && addr < ASYNC_BANK1_BASE + ASYNC_BANK1_SIZE) {
+		if (!ASYNC_ENABLED(1, 0))
+			return 0;
+		if (addr + size <= ASYNC_BANK1_BASE + ASYNC_BANK1_SIZE)
+			return 1;
+		size -= ASYNC_BANK1_BASE + ASYNC_BANK1_SIZE - addr;
+		addr = ASYNC_BANK1_BASE + ASYNC_BANK1_SIZE;
+	}
+	if (addr >= ASYNC_BANK2_BASE && addr < ASYNC_BANK2_BASE + ASYNC_BANK2_SIZE) {
+		if (!ASYNC_ENABLED(2, 1))
+			return 0;
+		if (addr + size <= ASYNC_BANK2_BASE + ASYNC_BANK2_SIZE)
+			return 1;
+		size -= ASYNC_BANK2_BASE + ASYNC_BANK2_SIZE - addr;
+		addr = ASYNC_BANK2_BASE + ASYNC_BANK2_SIZE;
+	}
+	if (addr >= ASYNC_BANK3_BASE && addr < ASYNC_BANK3_BASE + ASYNC_BANK3_SIZE) {
+		if (ASYNC_ENABLED(3, 1))
+			return 0;
+		if (addr + size <= ASYNC_BANK3_BASE + ASYNC_BANK3_SIZE)
+			return 1;
+		return 0;
+	}
+
+	/* not within async bounds */
+	return 2;
+}
+
+int bfin_mem_access_type(unsigned long addr, unsigned long size)
+{
+	int cpu = raw_smp_processor_id();
+
+	/* Check that things do not wrap around */
+	if (addr > ULONG_MAX - size)
+		return -EFAULT;
+
+	if (in_mem(addr, size, FIXED_CODE_START, physical_mem_end))
+		return BFIN_MEM_ACCESS_CORE;
+
+	if (in_mem_const(addr, size, L1_CODE_START, L1_CODE_LENGTH))
+		return cpu == 0 ? BFIN_MEM_ACCESS_ITEST : BFIN_MEM_ACCESS_IDMA;
+	if (in_mem_const(addr, size, L1_SCRATCH_START, L1_SCRATCH_LENGTH))
+		return cpu == 0 ? BFIN_MEM_ACCESS_CORE_ONLY : -EFAULT;
+	if (in_mem_const(addr, size, L1_DATA_A_START, L1_DATA_A_LENGTH))
+		return cpu == 0 ? BFIN_MEM_ACCESS_CORE : BFIN_MEM_ACCESS_IDMA;
+	if (in_mem_const(addr, size, L1_DATA_B_START, L1_DATA_B_LENGTH))
+		return cpu == 0 ? BFIN_MEM_ACCESS_CORE : BFIN_MEM_ACCESS_IDMA;
+#ifdef COREB_L1_CODE_START
+	if (in_mem_const(addr, size, COREB_L1_CODE_START, COREB_L1_CODE_LENGTH))
+		return cpu == 1 ? BFIN_MEM_ACCESS_ITEST : BFIN_MEM_ACCESS_IDMA;
+	if (in_mem_const(addr, size, COREB_L1_SCRATCH_START, L1_SCRATCH_LENGTH))
+		return cpu == 1 ? BFIN_MEM_ACCESS_CORE_ONLY : -EFAULT;
+	if (in_mem_const(addr, size, COREB_L1_DATA_A_START, COREB_L1_DATA_A_LENGTH))
+		return cpu == 1 ? BFIN_MEM_ACCESS_CORE : BFIN_MEM_ACCESS_IDMA;
+	if (in_mem_const(addr, size, COREB_L1_DATA_B_START, COREB_L1_DATA_B_LENGTH))
+		return cpu == 1 ? BFIN_MEM_ACCESS_CORE : BFIN_MEM_ACCESS_IDMA;
+#endif
+	if (in_mem_const(addr, size, L2_START, L2_LENGTH))
+		return BFIN_MEM_ACCESS_CORE;
+
+	if (addr >= SYSMMR_BASE)
+		return BFIN_MEM_ACCESS_CORE_ONLY;
+
+	switch (in_async(addr, size)) {
+	case 0: return -EFAULT;
+	case 1: return BFIN_MEM_ACCESS_CORE;
+	case 2: /* fall through */;
+	}
+
+	if (in_mem_const(addr, size, BOOT_ROM_START, BOOT_ROM_LENGTH))
+		return BFIN_MEM_ACCESS_CORE;
+	if (in_mem_const(addr, size, L1_ROM_START, L1_ROM_LENGTH))
+		return BFIN_MEM_ACCESS_DMA;
+
+	return -EFAULT;
+}
+
+#if defined(CONFIG_ACCESS_CHECK)
+#ifdef CONFIG_ACCESS_OK_L1
+__attribute__((l1_text))
+#endif
+/* Return 1 if access to memory range is OK, 0 otherwise */
+int _access_ok(unsigned long addr, unsigned long size)
+{
+	int aret;
+
+	if (size == 0)
+		return 1;
+	/* Check that things do not wrap around */
+	if (addr > ULONG_MAX - size)
+		return 0;
+	if (segment_eq(get_fs(), KERNEL_DS))
+		return 1;
+#ifdef CONFIG_MTD_UCLINUX
+	if (1)
+#else
+	if (0)
+#endif
+	{
+		if (in_mem(addr, size, memory_start, memory_end))
+			return 1;
+		if (in_mem(addr, size, memory_mtd_end, physical_mem_end))
+			return 1;
+# ifndef CONFIG_ROMFS_ON_MTD
+		if (0)
+# endif
+			/* For XIP, allow user space to use pointers within the ROMFS.  */
+			if (in_mem(addr, size, memory_mtd_start, memory_mtd_end))
+				return 1;
+	} else {
+		if (in_mem(addr, size, memory_start, physical_mem_end))
+			return 1;
+	}
+
+	if (in_mem(addr, size, (unsigned long)__init_begin, (unsigned long)__init_end))
+		return 1;
+
+	if (in_mem_const(addr, size, L1_CODE_START, L1_CODE_LENGTH))
+		return 1;
+	if (in_mem_const_off(addr, size, _etext_l1 - _stext_l1, L1_CODE_START, L1_CODE_LENGTH))
+		return 1;
+	if (in_mem_const_off(addr, size, _ebss_l1 - _sdata_l1, L1_DATA_A_START, L1_DATA_A_LENGTH))
+		return 1;
+	if (in_mem_const_off(addr, size, _ebss_b_l1 - _sdata_b_l1, L1_DATA_B_START, L1_DATA_B_LENGTH))
+		return 1;
+#ifdef COREB_L1_CODE_START
+	if (in_mem_const(addr, size, COREB_L1_CODE_START, COREB_L1_CODE_LENGTH))
+		return 1;
+	if (in_mem_const(addr, size, COREB_L1_SCRATCH_START, L1_SCRATCH_LENGTH))
+		return 1;
+	if (in_mem_const(addr, size, COREB_L1_DATA_A_START, COREB_L1_DATA_A_LENGTH))
+		return 1;
+	if (in_mem_const(addr, size, COREB_L1_DATA_B_START, COREB_L1_DATA_B_LENGTH))
+		return 1;
+#endif
+
+#ifndef CONFIG_EXCEPTION_L1_SCRATCH
+	if (in_mem_const(addr, size, (unsigned long)l1_stack_base, l1_stack_len))
+		return 1;
+#endif
+
+	aret = in_async(addr, size);
+	if (aret < 2)
+		return aret;
+
+	if (in_mem_const_off(addr, size, _ebss_l2 - _stext_l2, L2_START, L2_LENGTH))
+		return 1;
+
+	if (in_mem_const(addr, size, BOOT_ROM_START, BOOT_ROM_LENGTH))
+		return 1;
+	if (in_mem_const(addr, size, L1_ROM_START, L1_ROM_LENGTH))
+		return 1;
+
+	return 0;
+}
+EXPORT_SYMBOL(_access_ok);
+#endif /* CONFIG_ACCESS_CHECK */

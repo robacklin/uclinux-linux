@@ -16,7 +16,7 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  *    If you want to make changes, improve or add functionality to this
  *    driver, you'll probably need the Compaq Array Controller Interface
@@ -27,7 +27,6 @@
 
 #ifdef __KERNEL__
 #include <linux/blkdev.h>
-#include <linux/locks.h>
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/timer.h>
@@ -39,7 +38,6 @@
 #define IO_ERROR	1
 #define NWD		16
 #define NWD_SHIFT	4
-#define IDA_MAX_PART	16
 
 #define IDA_TIMER	(5*HZ)
 #define IDA_TIMEOUT	(10*HZ)
@@ -83,21 +81,19 @@ struct ctlr_info {
 	__u32	mp_failed_drv_map;
 
 	char	firm_rev[4];
-	struct pci_dev *pdev;
 	int	ctlr_sig;
 
 	int	log_drives;
-	int	highest_lun;
 	int	phys_drives;
 
 	struct pci_dev *pci_dev;    /* NULL if EISA */
 	__u32	board_id;
 	char	*product_name;	
 
-	void *vaddr;
+	void __iomem *vaddr;
 	unsigned long paddr;
 	unsigned long io_mem_addr;
-	unsigned long io_mem_length;	
+	unsigned long io_mem_length;
 	int	intr;
 	int	usage_count;
 	drv_info_t	drv[NWD];
@@ -109,7 +105,9 @@ struct ctlr_info {
 	cmdlist_t *cmpQ;
 	cmdlist_t *cmd_pool;
 	dma_addr_t cmd_pool_dhandle;
-	__u32	*cmd_pool_bits;
+	unsigned long *cmd_pool_bits;
+	struct request_queue *queue;
+	spinlock_t lock;
 
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
@@ -119,14 +117,10 @@ struct ctlr_info {
 	unsigned int nr_frees;
 	struct timer_list timer;
 	unsigned int misc_tflags;
-	// Disk structures we need to pass back
-	struct gendisk gendisk;
-	// Index by Minor Numbers
-	struct hd_struct	hd[256];
-	int			sizes[256];
-	int			blocksizes[256];
-	int			hardsizes[256];
 };
+
+#define IDA_LOCK(i)	(&hba[i]->lock)
+
 #endif
 
 #endif /* CPQARRAY_H */

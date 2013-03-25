@@ -4,47 +4,42 @@
 # 12 June 2000, Christoph Hellwig <hch@infradead.org>
 # Rewritten to use lists instead of if-statements.
 # 
-# Note : at this point, these files are compiled on all systems.
-# In the future, some of these should be built conditionally.
-#
-
-O_TARGET := block.o
-
-export-objs	:= ll_rw_blk.o blkpg.o loop.o DAC960.o genhd.o acsi.o
-
-obj-y	:= ll_rw_blk.o blkpg.o genhd.o elevator.o
 
 obj-$(CONFIG_MAC_FLOPPY)	+= swim3.o
+obj-$(CONFIG_BLK_DEV_SWIM)	+= swim_mod.o
 obj-$(CONFIG_BLK_DEV_FD)	+= floppy.o
 obj-$(CONFIG_AMIGA_FLOPPY)	+= amiflop.o
+obj-$(CONFIG_PS3_DISK)		+= ps3disk.o
+obj-$(CONFIG_PS3_VRAM)		+= ps3vram.o
 obj-$(CONFIG_ATARI_FLOPPY)	+= ataflop.o
-obj-$(CONFIG_BLK_DEV_SWIM_IOP)	+= swim_iop.o
-obj-$(CONFIG_ATARI_ACSI)	+= acsi.o
-obj-$(CONFIG_ATARI_SLM)		+= acsi_slm.o
 obj-$(CONFIG_AMIGA_Z2RAM)	+= z2ram.o
-obj-$(CONFIG_BLK_DEV_BLKMEM)+= blkmem.o
-obj-$(CONFIG_BLK_DEV_RAM)	+= rd.o
+obj-$(CONFIG_BLK_DEV_RAM)	+= brd.o
 obj-$(CONFIG_BLK_DEV_LOOP)	+= loop.o
-obj-$(CONFIG_BLK_DEV_PS2)	+= ps2esdi.o
 obj-$(CONFIG_BLK_DEV_XD)	+= xd.o
 obj-$(CONFIG_BLK_CPQ_DA)	+= cpqarray.o
 obj-$(CONFIG_BLK_CPQ_CISS_DA)  += cciss.o
 obj-$(CONFIG_BLK_DEV_DAC960)	+= DAC960.o
+obj-$(CONFIG_XILINX_SYSACE)	+= xsysace.o
+obj-$(CONFIG_CDROM_PKTCDVD)	+= pktcdvd.o
+obj-$(CONFIG_MG_DISK)		+= mg_disk.o
+obj-$(CONFIG_SUNVDC)		+= sunvdc.o
+obj-$(CONFIG_BLK_DEV_NVME)	+= nvme.o
+obj-$(CONFIG_BLK_DEV_OSD)	+= osdblk.o
+
 obj-$(CONFIG_BLK_DEV_UMEM)	+= umem.o
 obj-$(CONFIG_BLK_DEV_NBD)	+= nbd.o
-obj-$(CONFIG_BLK_DEV_MMC)	+= mmc_COBRA52xx.o
+obj-$(CONFIG_BLK_DEV_CRYPTOLOOP) += cryptoloop.o
+obj-$(CONFIG_VIRTIO_BLK)	+= virtio_blk.o
+
+obj-$(CONFIG_VIODASD)		+= viodasd.o
 obj-$(CONFIG_BLK_DEV_SX8)	+= sx8.o
+obj-$(CONFIG_BLK_DEV_UB)	+= ub.o
+obj-$(CONFIG_BLK_DEV_HD)	+= hd.o
 
-subdir-$(CONFIG_PARIDE) += paride
+obj-$(CONFIG_XEN_BLKDEV_FRONTEND)	+= xen-blkfront.o
+obj-$(CONFIG_XEN_BLKDEV_BACKEND)	+= xen-blkback/
+obj-$(CONFIG_BLK_DEV_DRBD)     += drbd/
+obj-$(CONFIG_BLK_DEV_RBD)     += rbd.o
+obj-$(CONFIG_BLK_DEV_PCIESSD_MTIP32XX)	+= mtip32xx/
 
-mod-subdirs			+= xilinx_sysace
-subdir-$(CONFIG_XILINX_SYSACE)	+= xilinx_sysace
-obj-$(CONFIG_XILINX_SYSACE)	+= xilinx_sysace/xilinx_sysace.o
-
-ifeq ($(CONFIG_ARCH_ACORN),y)
-mod-subdirs	+= ../acorn/block
-subdir-y	+= ../acorn/block
-obj-y		+= ../acorn/block/acorn-block.o
-endif
-
-include $(TOPDIR)/Rules.make
+swim_mod-y	:= swim.o swim_asm.o

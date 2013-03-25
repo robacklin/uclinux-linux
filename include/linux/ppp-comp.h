@@ -1,46 +1,16 @@
 /*
  * ppp-comp.h - Definitions for doing PPP packet compression.
  *
- * Copyright (c) 1994 The Australian National University.
- * All rights reserved.
+ * Copyright 1994-1998 Paul Mackerras.
  *
- * Permission to use, copy, modify, and distribute this software and its
- * documentation is hereby granted, provided that the above copyright
- * notice appears in all copies.  This software is provided without any
- * warranty, express or implied. The Australian National University
- * makes no representations about the suitability of this software for
- * any purpose.
- *
- * IN NO EVENT SHALL THE AUSTRALIAN NATIONAL UNIVERSITY BE LIABLE TO ANY
- * PARTY FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
- * ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN IF
- * THE AUSTRALIAN NATIONAL UNIVERSITY HAVE BEEN ADVISED OF THE POSSIBILITY
- * OF SUCH DAMAGE.
- *
- * THE AUSTRALIAN NATIONAL UNIVERSITY SPECIFICALLY DISCLAIMS ANY WARRANTIES,
- * INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
- * AND FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
- * ON AN "AS IS" BASIS, AND THE AUSTRALIAN NATIONAL UNIVERSITY HAS NO
- * OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
- * OR MODIFICATIONS.
- *
- * $Id: ppp-comp.h,v 1.8 1999/07/23 06:53:40 paulus Exp $
+ *  This program is free software; you can redistribute it and/or
+ *  modify it under the terms of the GNU General Public License
+ *  version 2 as published by the Free Software Foundation.
  */
-
-/*
- *  ==FILEVERSION 990623==
- *
- *  NOTE TO MAINTAINERS:
- *     If you modify this file at all, please set the above date.
- *     ppp-comp.h is shipped with a PPP distribution as well as with the kernel;
- *     if everyone increases the FILEVERSION number above, then scripts
- *     can do the right thing when deciding whether to install a new ppp-comp.h
- *     file.  Don't change the format of that line otherwise, so the
- *     installation script can recognize it.
- */
-
 #ifndef _NET_PPP_COMP_H
 #define _NET_PPP_COMP_H
+
+struct module;
 
 /*
  * The following symbols control whether we include code for
@@ -106,6 +76,11 @@ struct compressor {
 
 	/* Return decompression statistics */
 	void	(*decomp_stat) (void *state, struct compstat *stats);
+
+	/* Used in locking compressor modules */
+	struct module *owner;
+	/* Extra skb space needed by the compressor algorithm */
+	unsigned int comp_extra;
 };
 
 /*
@@ -120,7 +95,6 @@ struct compressor {
  * Don't you just lurve software patents.
  */
 
-#define DECOMP_OK		0	/* no error occured */
 #define DECOMP_ERROR		-1	/* error detected before decomp. */
 #define DECOMP_FATALERROR	-2	/* error detected after decomp. */
 
@@ -139,7 +113,7 @@ struct compressor {
  * Max # bytes for a CCP option
  */
 
-#define CCP_MAX_OPTION_LENGTH	64
+#define CCP_MAX_OPTION_LENGTH	32
 
 /*
  * Parts of a CCP packet.
@@ -178,28 +152,27 @@ struct compressor {
 #define CI_DEFLATE_DRAFT	24	/* value used in original draft RFC */
 #define CILEN_DEFLATE		4	/* length of its config option */
 
-#define DEFLATE_MIN_SIZE	8
+#define DEFLATE_MIN_SIZE	9
 #define DEFLATE_MAX_SIZE	15
 #define DEFLATE_METHOD_VAL	8
-#define DEFLATE_SIZE(x)		(((x) >> 4) + DEFLATE_MIN_SIZE)
+#define DEFLATE_SIZE(x)		(((x) >> 4) + 8)
 #define DEFLATE_METHOD(x)	((x) & 0x0F)
-#define DEFLATE_MAKE_OPT(w)	((((w) - DEFLATE_MIN_SIZE) << 4) \
-				 + DEFLATE_METHOD_VAL)
+#define DEFLATE_MAKE_OPT(w)	((((w) - 8) << 4) + DEFLATE_METHOD_VAL)
 #define DEFLATE_CHK_SEQUENCE	0
-
-/*
- * Definitions for MPPE.
- */
-
-#define CI_MPPE			18	/* config. option for MPPE */
-#define CILEN_MPPE		6	/* length of config. option */
 
 /*
  * Definitions for Stac LZS.
  */
 
-#define CI_LZS			17	/* config option for Stac LZS */
-#define CILEN_LZS		5	/* length of config option */
+#define CI_LZS          17  /* config option for Stac LZS */
+#define CILEN_LZS       5   /* length of config option */
+
+/*
+ * Definitions for MPPE.
+ */
+
+#define CI_MPPE                18      /* config option for MPPE */
+#define CILEN_MPPE              6      /* length of config option */
 
 /*
  * Definitions for other, as yet unsupported, compression methods.

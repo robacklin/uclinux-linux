@@ -17,11 +17,11 @@
 #include <linux/spinlock.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/slab.h>
 
 #endif				/* __KERNEL__ */
 
 #include "befs.h"
-#include "endian.h"
 
 #define ERRBUFSIZE 1024
 
@@ -29,30 +29,37 @@ void
 befs_error(const struct super_block *sb, const char *fmt, ...)
 {
 	va_list args;
-	char err_buf[ERRBUFSIZE];
+	char *err_buf = kmalloc(ERRBUFSIZE, GFP_KERNEL);
+	if (err_buf == NULL) {
+		printk(KERN_ERR "could not allocate %d bytes\n", ERRBUFSIZE);
+		return;
+	}
 
 	va_start(args, fmt);
 	vsnprintf(err_buf, ERRBUFSIZE, fmt, args);
 	va_end(args);
 
-	printk(KERN_ERR "BeFS(%s): %s\n", bdevname(sb->s_dev), err_buf);
-
-	befs_debug(sb, err_buf);
+	printk(KERN_ERR "BeFS(%s): %s\n", sb->s_id, err_buf);
+	kfree(err_buf);
 }
 
 void
 befs_warning(const struct super_block *sb, const char *fmt, ...)
 {
 	va_list args;
-	char err_buf[ERRBUFSIZE];
+	char *err_buf = kmalloc(ERRBUFSIZE, GFP_KERNEL);
+	if (err_buf == NULL) {
+		printk(KERN_ERR "could not allocate %d bytes\n", ERRBUFSIZE);
+		return;
+	}
 
 	va_start(args, fmt);
 	vsnprintf(err_buf, ERRBUFSIZE, fmt, args);
 	va_end(args);
 
-	printk(KERN_WARNING "BeFS(%s): %s\n", bdevname(sb->s_dev), err_buf);
+	printk(KERN_WARNING "BeFS(%s): %s\n", sb->s_id, err_buf);
 
-	befs_debug(sb, err_buf);
+	kfree(err_buf);
 }
 
 void
@@ -61,16 +68,25 @@ befs_debug(const struct super_block *sb, const char *fmt, ...)
 #ifdef CONFIG_BEFS_DEBUG
 
 	va_list args;
-	char err_buf[ERRBUFSIZE];
+	char *err_buf = NULL;
 
 	if (BEFS_SB(sb)->mount_opts.debug) {
+		err_buf = kmalloc(ERRBUFSIZE, GFP_KERNEL);
+		if (err_buf == NULL) {
+			printk(KERN_ERR "could not allocate %d bytes\n",
+				ERRBUFSIZE);
+			return;
+		}
+
 		va_start(args, fmt);
 		vsnprintf(err_buf, ERRBUFSIZE, fmt, args);
 		va_end(args);
 
-		printk(KERN_DEBUG "BeFS(%s): %s\n",
-		       bdevname(sb->s_dev), err_buf);
+		printk(KERN_DEBUG "BeFS(%s): %s\n", sb->s_id, err_buf);
+
+		kfree(err_buf);
 	}
+
 #endif				//CONFIG_BEFS_DEBUG
 }
 
@@ -81,7 +97,7 @@ befs_dump_inode(const struct super_block *sb, befs_inode * inode)
 
 	befs_block_run tmp_run;
 
-	befs_debug(sb, "befs_inode infomation");
+	befs_debug(sb, "befs_inode information");
 
 	befs_debug(sb, "  magic1 %08x", fs32_to_cpu(sb, inode->magic1));
 
@@ -109,7 +125,7 @@ befs_dump_inode(const struct super_block *sb, befs_inode * inode)
 	befs_debug(sb, "  type %08x", fs32_to_cpu(sb, inode->type));
 	befs_debug(sb, "  inode_size %u", fs32_to_cpu(sb, inode->inode_size));
 
-	if (S_ISLNK(inode->mode)) {
+	if (S_ISLNK(fs32_to_cpu(sb, inode->mode))) {
 		befs_debug(sb, "  Symbolic link [%s]", inode->data.symlink);
 	} else {
 		int i;
@@ -206,26 +222,29 @@ befs_dump_super_block(const struct super_block *sb, befs_super_block * sup)
 #endif				//CONFIG_BEFS_DEBUG
 }
 
+#if 0
+/* unused */
 void
 befs_dump_small_data(const struct super_block *sb, befs_small_data * sd)
 {
 }
 
+/* unused */
 void
-befs_dump_run(const struct super_block *sb, befs_block_run run)
+befs_dump_run(const struct super_block *sb, befs_disk_block_run run)
 {
 #ifdef CONFIG_BEFS_DEBUG
 
-	run = fsrun_to_cpu(sb, run);
+	befs_block_run n = fsrun_to_cpu(sb, run);
 
-	befs_debug(sb, "[%u, %hu, %hu]",
-		   run.allocation_group, run.start, run.len);
+	befs_debug(sb, "[%u, %hu, %hu]", n.allocation_group, n.start, n.len);
 
 #endif				//CONFIG_BEFS_DEBUG
 }
+#endif  /*  0  */
 
 void
-befs_dump_index_entry(const struct super_block *sb, befs_btree_super * super)
+befs_dump_index_entry(const struct super_block *sb, befs_disk_btree_super * super)
 {
 #ifdef CONFIG_BEFS_DEBUG
 

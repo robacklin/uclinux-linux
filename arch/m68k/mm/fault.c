@@ -9,15 +9,14 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/setup.h>
 #include <asm/traps.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
 
 extern void die_if_kernel(char *, struct pt_regs *, long);
-extern const int frame_extra_sizes[]; /* in m68k/kernel/signal.c */
 
 int send_fault_sig(struct pt_regs *regs)
 {
@@ -34,21 +33,8 @@ int send_fault_sig(struct pt_regs *regs)
 		force_sig_info(siginfo.si_signo,
 			       &siginfo, current);
 	} else {
-		unsigned long fixup;
-
-		/* Are we prepared to handle this kernel fault? */
-		if ((fixup = search_exception_table(regs->pc))) {
-			struct pt_regs *tregs;
-			/* Create a new four word stack frame, discarding the old
-			   one.  */
-			regs->stkadj = frame_extra_sizes[regs->format];
-			tregs =	(struct pt_regs *)((ulong)regs + regs->stkadj);
-			tregs->vector = regs->vector;
-			tregs->format = 0;
-			tregs->pc = fixup;
-			tregs->sr = regs->sr;
+		if (handle_kernel_fault(regs))
 			return -1;
-		}
 
 		//if (siginfo.si_signo == SIGBUS)
 		//	force_sig_info(siginfo.si_signo,
@@ -98,7 +84,7 @@ int do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -143,7 +129,7 @@ good_area:
 		case 1:		/* read, present */
 			goto acc_err;
 		case 0:		/* read, not present */
-			if (!(vma->vm_flags & (VM_READ | VM_EXEC)))
+			if (!(vma->vm_flags & (VM_READ | VM_EXEC | VM_WRITE)))
 				goto acc_err;
 	}
 
@@ -153,23 +139,21 @@ good_area:
 	 * the fault.
 	 */
 
- survive:
-	fault = handle_mm_fault(mm, vma, address, write);
+	fault = handle_mm_fault(mm, vma, address, write ? FAULT_FLAG_WRITE : 0);
 #ifdef DEBUG
- 	printk("handle_mm_fault returns %d\n",fault);
+	printk("handle_mm_fault returns %d\n",fault);
 #endif
-	switch (fault) {
-	case 1:
-		current->min_flt++;
-		break;
-	case 2:
-		current->maj_flt++;
-		break;
-	case 0:
-		goto bus_err;
-	default:
-		goto out_of_memory;
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto bus_err;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 
 	up_read(&mm->mmap_sem);
 	return 0;
@@ -179,15 +163,11 @@ good_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
-	if (current->pid == 1) {
-		yield();
-		goto survive;
-	}
-
 	up_read(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(regs))
-		do_exit(SIGKILL);
+	if (!user_mode(regs))
+		goto no_context;
+	pagefault_out_of_memory();
+	return 0;
 
 no_context:
 	current->thread.signo = SIGBUS;

@@ -1,12 +1,7 @@
 /*
  * uncompress.c
  *
- * Copyright (C) 1999 Linus Torvalds
- * Copyright (C) 2000-2002 Transmeta Corporation
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License (Version 2) as
- * published by the Free Software Foundation.
+ * (C) Copyright 1999 Linus Torvalds
  *
  * cramfs interfaces to the uncompression library. There's really just
  * three entrypoints:
@@ -24,6 +19,7 @@
 #include <linux/errno.h>
 #include <linux/vmalloc.h>
 #include <linux/zlib.h>
+#include <linux/cramfs_fs.h>
 
 static z_stream stream;
 static int initialized;
@@ -54,7 +50,7 @@ int cramfs_uncompress_block(void *dst, int dstlen, void *src, int srclen)
 err:
 	printk("Error %d while decompressing!\n", err);
 	printk("%p(%d)->%p(%d)\n", src, srclen, dst, dstlen);
-	return -1;
+	return -EIO;
 }
 
 int cramfs_uncompress_init(void)
@@ -72,11 +68,10 @@ int cramfs_uncompress_init(void)
 	return 0;
 }
 
-int cramfs_uncompress_exit(void)
+void cramfs_uncompress_exit(void)
 {
 	if (!--initialized) {
 		zlib_inflateEnd(&stream);
 		vfree(stream.workspace);
 	}
-	return 0;
 }

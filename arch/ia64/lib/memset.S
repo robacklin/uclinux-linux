@@ -57,10 +57,10 @@ GLOBAL_ENTRY(memset)
 { .mmi
 	.prologue
 	alloc	tmp = ar.pfs, 3, 0, 0, 0
-	.body
 	lfetch.nt1 [dest]			//
 	.save   ar.lc, save_lc
 	mov.i	save_lc = ar.lc
+	.body
 } { .mmi
 	mov	ret0 = dest			// return value
 	cmp.ne	p_nz, p_zr = value, r0		// use stf.spill if value is zero
@@ -125,7 +125,7 @@ GLOBAL_ENTRY(memset)
 (p_zr)	br.cond.dptk.many .l1b			// Jump to use stf.spill
 ;; }
 
-//	.align 32 // -------------------------- //  L1A: store ahead into cache lines; fill later
+	TEXT_ALIGN(32) // --------------------- //  L1A: store ahead into cache lines; fill later
 { .mmi
 	and	tmp = -(LINE_SIZE), cnt		// compute end of range
 	mov	ptr9 = ptr1			// used for prefetching
@@ -194,7 +194,7 @@ GLOBAL_ENTRY(memset)
 	br.cond.dpnt.many  .move_bytes_from_alignment	// Branch no. 3
 ;; }
 
-//	.align 32
+	TEXT_ALIGN(32)
 .l1b:	// ------------------------------------ //  L1B: store ahead into cache lines; fill later
 { .mmi
 	and	tmp = -(LINE_SIZE), cnt		// compute end of range
@@ -261,7 +261,7 @@ GLOBAL_ENTRY(memset)
 	and	cnt = 0x1f, cnt			// compute the remaining cnt
 	mov.i   ar.lc = loopcnt
 ;; }
-//	.align 32
+	TEXT_ALIGN(32)
 .l2:	// ------------------------------------ //  L2A:  store 32B in 2 cycles
 { .mmb
 	stf8	[ptr1] = fvalue, 8

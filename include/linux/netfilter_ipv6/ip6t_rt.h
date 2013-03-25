@@ -1,19 +1,19 @@
 #ifndef _IP6T_RT_H
 #define _IP6T_RT_H
 
+#include <linux/types.h>
 /*#include <linux/in6.h>*/
 
 #define IP6T_RT_HOPS 16
 
-struct ip6t_rt
-{
-	u_int32_t rt_type;			/* Routing Type */
-	u_int32_t segsleft[2];			/* Segments Left */
-	u_int32_t hdrlen;			/* Header Length */
-	u_int8_t  flags;			/*  */
-	u_int8_t  invflags;			/* Inverse flags */
+struct ip6t_rt {
+	__u32 rt_type;			/* Routing Type */
+	__u32 segsleft[2];			/* Segments Left */
+	__u32 hdrlen;			/* Header Length */
+	__u8  flags;			/*  */
+	__u8  invflags;			/* Inverse flags */
 	struct in6_addr addrs[IP6T_RT_HOPS];	/* Hops */
-	u_int8_t addrnr;			/* Nr of Addresses */
+	__u8 addrnr;			/* Nr of Addresses */
 };
 
 #define IP6T_RT_TYP 		0x01
@@ -29,14 +29,5 @@ struct ip6t_rt
 #define IP6T_RT_INV_SGS		0x02	/* Invert the sense of Segments. */
 #define IP6T_RT_INV_LEN		0x04	/* Invert the sense of length. */
 #define IP6T_RT_INV_MASK	0x07	/* All possible flags. */
-
-#define MASK_HOPOPTS    128
-#define MASK_DSTOPTS    64
-#define MASK_ROUTING    32
-#define MASK_FRAGMENT   16
-#define MASK_AH         8
-#define MASK_ESP        4
-#define MASK_NONE       2
-#define MASK_PROTO      1
 
 #endif /*_IP6T_RT_H*/

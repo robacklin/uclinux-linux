@@ -2,7 +2,12 @@
 #define _LINUX_SHM_H_
 
 #include <linux/ipc.h>
+#include <linux/errno.h>
+#ifdef __KERNEL__
 #include <asm/page.h>
+#else
+#include <unistd.h>
+#endif
 
 /*
  * SHMMAX, SHMMNI and SHMALL are upper limits are defaults which can
@@ -12,10 +17,16 @@
 #define SHMMAX 0x2000000		 /* max shared seg size (bytes) */
 #define SHMMIN 1			 /* min shared seg size (bytes) */
 #define SHMMNI 4096			 /* max num of segs system wide */
+#ifdef __KERNEL__
 #define SHMALL (SHMMAX/PAGE_SIZE*(SHMMNI/16)) /* max shm system wide (pages) */
+#else
+#define SHMALL (SHMMAX/getpagesize()*(SHMMNI/16))
+#endif
 #define SHMSEG SHMMNI			 /* max shared segs per process */
 
+#ifdef __KERNEL__
 #include <asm/shmparam.h>
+#endif
 
 /* Obsolete, used only for backwards compatibility and libc5 compiles */
 struct shmid_ds {
@@ -43,6 +54,7 @@ struct shmid_ds {
 #define	SHM_RDONLY	010000	/* read-only access */
 #define	SHM_RND		020000	/* round attach address to SHMLBA boundary */
 #define	SHM_REMAP	040000	/* take-over region on attach */
+#define	SHM_EXEC	0100000	/* execution access */
 
 /* super user shmctl commands */
 #define SHM_LOCK 	11
@@ -71,16 +83,47 @@ struct shm_info {
 };
 
 #ifdef __KERNEL__
+struct shmid_kernel /* private to the kernel */
+{	
+	struct kern_ipc_perm	shm_perm;
+	struct file *		shm_file;
+	unsigned long		shm_nattch;
+	unsigned long		shm_segsz;
+	time_t			shm_atim;
+	time_t			shm_dtim;
+	time_t			shm_ctim;
+	pid_t			shm_cprid;
+	pid_t			shm_lprid;
+	struct user_struct	*mlock_user;
+
+	/* The task created the shm object.  NULL if the task is dead. */
+	struct task_struct	*shm_creator;
+};
 
 /* shm_mode upper byte flags */
 #define	SHM_DEST	01000	/* segment will be destroyed on last detach */
 #define SHM_LOCKED      02000   /* segment will not be swapped */
+#define SHM_HUGETLB     04000   /* segment will use huge TLB pages */
+#define SHM_NORESERVE   010000  /* don't check for reservations */
 
-asmlinkage long sys_shmget (key_t key, size_t size, int flag);
-asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, unsigned long *addr);
-asmlinkage long sys_shmdt (char *shmaddr);
-asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf);
-extern void shm_unuse(swp_entry_t entry, struct page *page);
+#ifdef CONFIG_SYSVIPC
+long do_shmat(int shmid, char __user *shmaddr, int shmflg, unsigned long *addr);
+extern int is_file_shm_hugepages(struct file *file);
+extern void exit_shm(struct task_struct *task);
+#else
+static inline long do_shmat(int shmid, char __user *shmaddr,
+				int shmflg, unsigned long *addr)
+{
+	return -ENOSYS;
+}
+static inline int is_file_shm_hugepages(struct file *file)
+{
+	return 0;
+}
+static inline void exit_shm(struct task_struct *task)
+{
+}
+#endif
 
 #endif /* __KERNEL__ */
 

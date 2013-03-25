@@ -1,11 +1,12 @@
 /*
  * Routines common to all CFI-type probes.
- * (C) 2001, 2001 Red Hat, Inc.
+ * (C) 2001-2003 Red Hat, Inc.
  * GPL'd
- * $Id: gen_probe.c,v 1.9 2002/09/05 05:15:32 acurtis Exp $
  */
 
 #include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/module.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/cfi.h>
@@ -24,7 +25,7 @@ struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 
 	/* First probe the map to see if we have CFI stuff there. */
 	cfi = genprobe_ident_chips(map, cp);
-	
+
 	if (!cfi)
 		return NULL;
 
@@ -34,12 +35,19 @@ struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 	mtd = check_cmd_set(map, 1); /* First the primary cmdset */
 	if (!mtd)
 		mtd = check_cmd_set(map, 0); /* Then the secondary */
-	
-	if (mtd)
+
+	if (mtd) {
+		if (mtd->size > map->size) {
+			printk(KERN_WARNING "Reducing visibility of %ldKiB chip to %ldKiB\n",
+			       (unsigned long)mtd->size >> 10,
+			       (unsigned long)map->size >> 10);
+			mtd->size = map->size;
+		}
 		return mtd;
+	}
 
 	printk(KERN_WARNING"gen_probe: No supported Vendor Command Set found\n");
-	
+
 	kfree(cfi->cfiq);
 	kfree(cfi);
 	map->fldrv_priv = NULL;
@@ -48,24 +56,24 @@ struct mtd_info *mtd_do_chip_probe(struct map_info *map, struct chip_probe *cp)
 EXPORT_SYMBOL(mtd_do_chip_probe);
 
 
-struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chip_probe *cp)
+static struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chip_probe *cp)
 {
-	unsigned long base=0;
 	struct cfi_private cfi;
 	struct cfi_private *retcfi;
-	struct flchip chip[MAX_CFI_CHIPS];
-	int i;
+	unsigned long *chip_map;
+	int i, j, mapsize;
+	int max_chips;
 
 	memset(&cfi, 0, sizeof(cfi));
 
-	/* Call the probetype-specific code with all permutations of 
+	/* Call the probetype-specific code with all permutations of
 	   interleave and device type, etc. */
 	if (!genprobe_new_chip(map, cp, &cfi)) {
 		/* The probe didn't like it */
-		printk(KERN_WARNING "%s: Found no %s device at location zero\n",
-		       cp->name, map->name);
+		pr_debug("%s: Found no %s device at location zero\n",
+			 cp->name, map->name);
 		return NULL;
-	}		
+	}
 
 #if 0 /* Let the CFI probe routine do this sanity check. The Intel and AMD
 	 probe routines won't ever return a broken CFI structure anyway,
@@ -77,49 +85,54 @@ struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chip_probe
 		return NULL;
 	}
 #endif
-	chip[0].start = 0;
-	chip[0].state = FL_READY;
 	cfi.chipshift = cfi.cfiq->DevSize;
 
-	switch(cfi.interleave) {
-#ifdef CFIDEV_INTERLEAVE_1
-	case 1:
-		break;
-#endif
-#ifdef CFIDEV_INTERLEAVE_2
-	case 2:
+	if (cfi_interleave_is_1(&cfi)) {
+		;
+	} else if (cfi_interleave_is_2(&cfi)) {
 		cfi.chipshift++;
-		break;
-#endif
-#ifdef CFIDEV_INTERLEAVE_4
-	case 4:
-		cfi.chipshift+=2;
-		break;
-#endif
-	default:
+	} else if (cfi_interleave_is_4((&cfi))) {
+		cfi.chipshift += 2;
+	} else if (cfi_interleave_is_8(&cfi)) {
+		cfi.chipshift += 3;
+	} else {
 		BUG();
 	}
-		
+
 	cfi.numchips = 1;
+
+	/*
+	 * Allocate memory for bitmap of valid chips.
+	 * Align bitmap storage size to full byte.
+	 */
+	max_chips = map->size >> cfi.chipshift;
+	if (!max_chips) {
+		printk(KERN_WARNING "NOR chip too large to fit in mapping. Attempting to cope...\n");
+		max_chips = 1;
+	}
+
+	mapsize = sizeof(long) * DIV_ROUND_UP(max_chips, BITS_PER_LONG);
+	chip_map = kzalloc(mapsize, GFP_KERNEL);
+	if (!chip_map) {
+		printk(KERN_WARNING "%s: kmalloc failed for CFI chip map\n", map->name);
+		kfree(cfi.cfiq);
+		return NULL;
+	}
+
+	set_bit(0, chip_map); /* Mark first chip valid */
 
 	/*
 	 * Now probe for other chips, checking sensibly for aliases while
 	 * we're at it. The new_chip probe above should have let the first
 	 * chip in read mode.
-	 *
-	 * NOTE: Here, we're checking if there is room for another chip
-	 *       the same size within the mapping. Therefore, 
-	 *       base + chipsize <= map->size is the correct thing to do, 
-	 *       because, base + chipsize would be the  _first_ byte of the
-	 *       next chip, not the one we're currently pondering.
 	 */
 
-	for (base = (1<<cfi.chipshift); base + (1<<cfi.chipshift) <= map->size;
-	     base += (1<<cfi.chipshift))
-		cp->probe_chip(map, base, &chip[0], &cfi);
+	for (i = 1; i < max_chips; i++) {
+		cp->probe_chip(map, i << cfi.chipshift, chip_map, &cfi);
+	}
 
 	/*
-	 * Now allocate the space for the structures we need to return to 
+	 * Now allocate the space for the structures we need to return to
 	 * our caller, and copy the appropriate data into them.
 	 */
 
@@ -128,154 +141,56 @@ struct cfi_private *genprobe_ident_chips(struct map_info *map, struct chip_probe
 	if (!retcfi) {
 		printk(KERN_WARNING "%s: kmalloc failed for CFI private structure\n", map->name);
 		kfree(cfi.cfiq);
+		kfree(chip_map);
 		return NULL;
 	}
 
 	memcpy(retcfi, &cfi, sizeof(cfi));
-	memcpy(&retcfi->chips[0], chip, sizeof(struct flchip) * cfi.numchips);
+	memset(&retcfi->chips[0], 0, sizeof(struct flchip) * cfi.numchips);
 
-	/* Fix up the stuff that breaks when you move it */
-	for (i=0; i< retcfi->numchips; i++) {
-		init_waitqueue_head(&retcfi->chips[i].wq);
-		spin_lock_init(&retcfi->chips[i]._spinlock);
-		retcfi->chips[i].mutex = &retcfi->chips[i]._spinlock;
+	for (i = 0, j = 0; (j < cfi.numchips) && (i < max_chips); i++) {
+		if(test_bit(i, chip_map)) {
+			struct flchip *pchip = &retcfi->chips[j++];
+
+			pchip->start = (i << cfi.chipshift);
+			pchip->state = FL_READY;
+			init_waitqueue_head(&pchip->wq);
+			mutex_init(&pchip->mutex);
+		}
 	}
 
+	kfree(chip_map);
 	return retcfi;
 }
 
-	
+
 static int genprobe_new_chip(struct map_info *map, struct chip_probe *cp,
 			     struct cfi_private *cfi)
 {
-	switch (map->buswidth) {
-#ifdef CFIDEV_BUSWIDTH_1		
-	case CFIDEV_BUSWIDTH_1:
-		cfi->interleave = CFIDEV_INTERLEAVE_1;
+	int min_chips = (map_bankwidth(map)/4?:1); /* At most 4-bytes wide. */
+	int max_chips = map_bankwidth(map); /* And minimum 1 */
+	int nr_chips, type;
 
-		cfi->device_type = CFI_DEVICETYPE_X8;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
+	for (nr_chips = max_chips; nr_chips >= min_chips; nr_chips >>= 1) {
 
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-		break;			
-#endif /* CFIDEV_BUSWITDH_1 */
+		if (!cfi_interleave_supported(nr_chips))
+		    continue;
 
-#ifdef CFIDEV_BUSWIDTH_2		
-	case CFIDEV_BUSWIDTH_2:
-#ifdef CFIDEV_INTERLEAVE_1
-		cfi->interleave = CFIDEV_INTERLEAVE_1;
+		cfi->interleave = nr_chips;
 
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-			
-		cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_1 */
-#ifdef CFIDEV_INTERLEAVE_2
-		cfi->interleave = CFIDEV_INTERLEAVE_2;
+		/* Minimum device size. Don't look for one 8-bit device
+		   in a 16-bit bus, etc. */
+		type = map_bankwidth(map) / nr_chips;
 
-		cfi->device_type = CFI_DEVICETYPE_X8;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
+		for (; type <= CFI_DEVICETYPE_X32; type<<=1) {
+			cfi->device_type = type;
 
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_2 */
-		break;			
-#endif /* CFIDEV_BUSWIDTH_2 */
-
-#ifdef CFIDEV_BUSWIDTH_4
-	case CFIDEV_BUSWIDTH_4:
-#if defined(CFIDEV_INTERLEAVE_1) && defined(SOMEONE_ACTUALLY_MAKES_THESE)
-                cfi->interleave = CFIDEV_INTERLEAVE_1;
-
-                cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_1 */
-#ifdef CFIDEV_INTERLEAVE_2
-		cfi->interleave = CFIDEV_INTERLEAVE_2;
-
-#ifdef SOMEONE_ACTUALLY_MAKES_THESE
-		cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-
-		cfi->device_type = CFI_DEVICETYPE_X8;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_2 */
-#ifdef CFIDEV_INTERLEAVE_4
-		cfi->interleave = CFIDEV_INTERLEAVE_4;
-
-#ifdef SOMEONE_ACTUALLY_MAKES_THESE
-		cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-
-		cfi->device_type = CFI_DEVICETYPE_X8;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_4 */
-		break;
-#endif /* CFIDEV_BUSWIDTH_4 */
-
-#ifdef CFIDEV_BUSWIDTH_8
-	case CFIDEV_BUSWIDTH_8:
-#if defined(CFIDEV_INTERLEAVE_2) && defined(SOMEONE_ACTUALLY_MAKES_THESE)
-                cfi->interleave = CFIDEV_INTERLEAVE_2;
-
-                cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_2 */
-#ifdef CFIDEV_INTERLEAVE_4
-		cfi->interleave = CFIDEV_INTERLEAVE_4;
-
-#ifdef SOMEONE_ACTUALLY_MAKES_THESE
-		cfi->device_type = CFI_DEVICETYPE_X32;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_4 */
-#ifdef CFIDEV_INTERLEAVE_8
-		cfi->interleave = CFIDEV_INTERLEAVE_8;
-
-		cfi->device_type = CFI_DEVICETYPE_X16;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-
-		cfi->device_type = CFI_DEVICETYPE_X8;
-		if (cp->probe_chip(map, 0, NULL, cfi))
-			return 1;
-#endif /* CFIDEV_INTERLEAVE_8 */
-		break;
-#endif /* CFIDEV_BUSWIDTH_8 */
-
-	default:
-		printk(KERN_WARNING "genprobe_new_chip called with unsupported buswidth %d\n", map->buswidth);
-		return 0;
+			if (cp->probe_chip(map, 0, NULL, cfi))
+				return 1;
+		}
 	}
 	return 0;
 }
-
 
 typedef struct mtd_info *cfi_cmdset_fn_t(struct map_info *, int);
 
@@ -283,30 +198,33 @@ extern cfi_cmdset_fn_t cfi_cmdset_0001;
 extern cfi_cmdset_fn_t cfi_cmdset_0002;
 extern cfi_cmdset_fn_t cfi_cmdset_0020;
 
-static inline struct mtd_info *cfi_cmdset_unknown(struct map_info *map, 
+static inline struct mtd_info *cfi_cmdset_unknown(struct map_info *map,
 						  int primary)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
 	__u16 type = primary?cfi->cfiq->P_ID:cfi->cfiq->A_ID;
-#if defined(CONFIG_MODULES) && defined(HAVE_INTER_MODULE)
-	char probename[32];
+#ifdef CONFIG_MODULES
+	char probename[16+sizeof(MODULE_SYMBOL_PREFIX)];
 	cfi_cmdset_fn_t *probe_function;
 
-	sprintf(probename, "cfi_cmdset_%4.4X", type);
-		
-	probe_function = inter_module_get_request(probename, probename);
+	sprintf(probename, MODULE_SYMBOL_PREFIX "cfi_cmdset_%4.4X", type);
+
+	probe_function = __symbol_get(probename);
+	if (!probe_function) {
+		request_module(probename + sizeof(MODULE_SYMBOL_PREFIX) - 1);
+		probe_function = __symbol_get(probename);
+	}
 
 	if (probe_function) {
 		struct mtd_info *mtd;
 
 		mtd = (*probe_function)(map, primary);
 		/* If it was happy, it'll have increased its own use count */
-		inter_module_put(probename);
+		symbol_put_addr(probe_function);
 		return mtd;
 	}
 #endif
-	printk(KERN_NOTICE "Support for command set %04X not present\n",
-	       type);
+	printk(KERN_NOTICE "Support for command set %04X not present\n", type);
 
 	return NULL;
 }
@@ -315,33 +233,32 @@ static struct mtd_info *check_cmd_set(struct map_info *map, int primary)
 {
 	struct cfi_private *cfi = map->fldrv_priv;
 	__u16 type = primary?cfi->cfiq->P_ID:cfi->cfiq->A_ID;
-	
+
 	if (type == P_ID_NONE || type == P_ID_RESERVED)
 		return NULL;
 
 	switch(type){
-		/* Urgh. Ifdefs. The version with weak symbols was
-		 * _much_ nicer. Shame it didn't seem to work on
-		 * anything but x86, really.
-		 * But we can't rely in inter_module_get() because
-		 * that'd mean we depend on link order.
-		 */
+		/* We need these for the !CONFIG_MODULES case,
+		   because symbol_get() doesn't work there */
 #ifdef CONFIG_MTD_CFI_INTELEXT
-	case 0x0001:
-	case 0x0003:
+	case P_ID_INTEL_EXT:
+	case P_ID_INTEL_STD:
+	case P_ID_INTEL_PERFORMANCE:
 		return cfi_cmdset_0001(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_AMDSTD
-	case 0x0002:
+	case P_ID_AMD_STD:
+	case P_ID_SST_OLD:
+	case P_ID_WINBOND:
 		return cfi_cmdset_0002(map, primary);
 #endif
 #ifdef CONFIG_MTD_CFI_STAA
-        case 0x0020:
+        case P_ID_ST_ADV:
 		return cfi_cmdset_0020(map, primary);
 #endif
+	default:
+		return cfi_cmdset_unknown(map, primary);
 	}
-
-	return cfi_cmdset_unknown(map, primary);
 }
 
 MODULE_LICENSE("GPL");

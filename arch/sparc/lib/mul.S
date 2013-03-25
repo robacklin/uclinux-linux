@@ -1,4 +1,4 @@
-/* $Id: mul.S,v 1.4 1996/09/30 02:22:32 davem Exp $
+/*
  * mul.S:       This routine was taken from glibc-1.09 and is covered
  *              by the GNU Library General Public License Version 2.
  */
@@ -16,7 +16,9 @@
  */
 
 	.globl .mul
+	.globl _Mul
 .mul:
+_Mul:	/* needed for export */
 	mov	%o0, %y		! multiplier -> Y
 	andncc	%o0, 0xfff, %g0	! test bits 12..31
 	be	Lmul_shortway	! if zero, can do it the short way

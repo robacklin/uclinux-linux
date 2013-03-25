@@ -21,63 +21,35 @@
  *  Modified by Chris Faulhaber <jedgar@fxp.org>
  *        Added module command-line options
  *        19-Jul-99
- *  Modified by Adam Fritzler <mid@auk.cx>
+ *  Modified by Adam Fritzler
  *        Added proper detection of the AHA-1640 (MCA version of AHA-1540)
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
-#include <linux/pci.h>
 #include <linux/isapnp.h>
-#include <asm/dma.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <linux/mca.h>
+#include <linux/mca-legacy.h>
+#include <linux/slab.h>
+
+#include <asm/dma.h>
+#include <asm/io.h>
 
 #include "scsi.h"
-#include "hosts.h"
-
-
+#include <scsi/scsi_host.h>
 #include "aha1542.h"
 
-#define SCSI_PA(address) virt_to_bus(address)
-
-static void BAD_DMA(void *address, unsigned int length)
-{
-	printk(KERN_CRIT "buf vaddress %p paddress 0x%lx length %d\n",
-	       address,
-	       SCSI_PA(address),
-	       length);
-	panic("Buffer at physical address > 16Mb used for aha1542");
-}
-
-static void BAD_SG_DMA(Scsi_Cmnd * SCpnt,
-		       struct scatterlist *sgpnt,
-		       int nseg,
-		       int badseg)
-{
-	printk(KERN_CRIT "sgpnt[%d:%d] addr %p/0x%lx length %d\n",
-	       badseg, nseg,
-	       sgpnt[badseg].address,
-	       SCSI_PA(sgpnt[badseg].address),
-	       sgpnt[badseg].length);
-
-	/*
-	 * Not safe to continue.
-	 */
-	panic("Buffer at physical address > 16Mb used for aha1542");
-}
+#define SCSI_BUF_PA(address)	isa_virt_to_bus(address)
+#define SCSI_SG_PA(sgent)	(isa_page_to_bus(sg_page((sgent))) + (sgent)->offset)
 
 #include<linux/stat.h>
 
@@ -129,10 +101,10 @@ static int setup_dmaspeed[MAXBOARDS] __initdata = { -1, -1, -1, -1 };
  */
 
 #if defined(MODULE)
-int isapnp = 0;
-int aha1542[] = {0x330, 11, 4, -1};
-MODULE_PARM(aha1542, "1-4i");
-MODULE_PARM(isapnp, "i");
+static bool isapnp = 0;
+static int aha1542[] = {0x330, 11, 4, -1};
+module_param_array(aha1542, int, NULL, 0);
+module_param(isapnp, bool, 0);
 
 static struct isapnp_device_id id_table[] __initdata = {
 	{
@@ -165,8 +137,7 @@ struct aha1542_hostdata {
 
 #define HOSTDATA(host) ((struct aha1542_hostdata *) &host->hostdata)
 
-static struct Scsi_Host *aha_host[7];	/* One for each IRQ level (9-15) */
-
+static DEFINE_SPINLOCK(aha1542_lock);
 
 
 
@@ -174,8 +145,7 @@ static struct Scsi_Host *aha_host[7];	/* One for each IRQ level (9-15) */
 
 static void setup_mailboxes(int base_io, struct Scsi_Host *shpnt);
 static int aha1542_restart(struct Scsi_Host *shost);
-static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs);
-static void do_aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs);
+static void aha1542_intr_handle(struct Scsi_Host *shost);
 
 #define aha1542_intr_reset(base)  outb(IRST, CONTROL(base))
 
@@ -217,31 +187,34 @@ static void aha1542_stat(void)
 static int aha1542_out(unsigned int base, unchar * cmdp, int len)
 {
 	unsigned long flags = 0;
+	int got_lock;
 
-	save_flags(flags);
 	if (len == 1) {
+		got_lock = 0;
 		while (1 == 1) {
 			WAIT(STATUS(base), CDF, 0, CDF);
-			cli();
+			spin_lock_irqsave(&aha1542_lock, flags);
 			if (inb(STATUS(base)) & CDF) {
-				restore_flags(flags);
+				spin_unlock_irqrestore(&aha1542_lock, flags);
 				continue;
 			}
 			outb(*cmdp, DATA(base));
-			restore_flags(flags);
+			spin_unlock_irqrestore(&aha1542_lock, flags);
 			return 0;
 		}
 	} else {
-		cli();
+		spin_lock_irqsave(&aha1542_lock, flags);
+		got_lock = 1;
 		while (len--) {
 			WAIT(STATUS(base), CDF, 0, CDF);
 			outb(*cmdp++, DATA(base));
 		}
-		restore_flags(flags);
+		spin_unlock_irqrestore(&aha1542_lock, flags);
 	}
 	return 0;
 fail:
-	restore_flags(flags);
+	if (got_lock)
+		spin_unlock_irqrestore(&aha1542_lock, flags);
 	printk(KERN_ERR "aha1542_out failed(%d): ", len + 1);
 	aha1542_stat();
 	return 1;
@@ -254,16 +227,15 @@ static int __init aha1542_in(unsigned int base, unchar * cmdp, int len)
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&aha1542_lock, flags);
 	while (len--) {
 		WAIT(STATUS(base), DF, DF, 0);
 		*cmdp++ = inb(DATA(base));
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 	return 0;
 fail:
-	restore_flags(flags);
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 	printk(KERN_ERR "aha1542_in failed(%d): ", len + 1);
 	aha1542_stat();
 	return 1;
@@ -276,16 +248,15 @@ static int __init aha1542_in1(unsigned int base, unchar * cmdp, int len)
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&aha1542_lock, flags);
 	while (len--) {
 		WAITd(STATUS(base), DF, DF, 0, 100);
 		*cmdp++ = inb(DATA(base));
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 	return 0;
 fail:
-	restore_flags(flags);
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 	return 1;
 }
 
@@ -414,32 +385,29 @@ fail:
 }
 
 /* A quick wrapper for do_aha1542_intr_handle to grab the spin lock */
-static void do_aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t do_aha1542_intr_handle(int dummy, void *dev_id)
 {
 	unsigned long flags;
+	struct Scsi_Host *shost = dev_id;
 
-	spin_lock_irqsave(&io_request_lock, flags);
-	aha1542_intr_handle(irq, dev_id, regs);
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_lock_irqsave(shost->host_lock, flags);
+	aha1542_intr_handle(shost);
+	spin_unlock_irqrestore(shost->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
 /* A "high" level interrupt handler */
-static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
+static void aha1542_intr_handle(struct Scsi_Host *shost)
 {
 	void (*my_done) (Scsi_Cmnd *) = NULL;
 	int errstatus, mbi, mbo, mbistatus;
 	int number_serviced;
 	unsigned long flags;
-	struct Scsi_Host *shost;
 	Scsi_Cmnd *SCtmp;
 	int flag;
 	int needs_restart;
 	struct mailbox *mb;
 	struct ccb *ccb;
-
-	shost = aha_host[irq - 9];
-	if (!shost)
-		panic("Splunge!");
 
 	mb = HOSTDATA(shost)->mb;
 	ccb = HOSTDATA(shost)->ccb;
@@ -483,8 +451,7 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 		}
 		aha1542_intr_reset(shost->io_port);
 
-		save_flags(flags);
-		cli();
+		spin_lock_irqsave(&aha1542_lock, flags);
 		mbi = HOSTDATA(shost)->aha1542_last_mbi_used + 1;
 		if (mbi >= 2 * AHA1542_MAILBOXES)
 			mbi = AHA1542_MAILBOXES;
@@ -498,7 +465,7 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 		} while (mbi != HOSTDATA(shost)->aha1542_last_mbi_used);
 
 		if (mb[mbi].status == 0) {
-			restore_flags(flags);
+			spin_unlock_irqrestore(&aha1542_lock, flags);
 			/* Hmm, no mail.  Must have read it the last time around */
 			if (!number_serviced && !needs_restart)
 				printk(KERN_WARNING "aha1542.c: interrupt received, but no mail.\n");
@@ -509,11 +476,11 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 			return;
 		};
 
-		mbo = (scsi2int(mb[mbi].ccbptr) - (SCSI_PA(&ccb[0]))) / sizeof(struct ccb);
+		mbo = (scsi2int(mb[mbi].ccbptr) - (SCSI_BUF_PA(&ccb[0]))) / sizeof(struct ccb);
 		mbistatus = mb[mbi].status;
 		mb[mbi].status = 0;
 		HOSTDATA(shost)->aha1542_last_mbi_used = mbi;
-		restore_flags(flags);
+		spin_unlock_irqrestore(&aha1542_lock, flags);
 
 #ifdef DEBUG
 		{
@@ -539,16 +506,14 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 			return;
 		}
 		my_done = SCtmp->scsi_done;
-		if (SCtmp->host_scribble) {
-			scsi_free(SCtmp->host_scribble, 512);
-			SCtmp->host_scribble = 0;
-		}
+		kfree(SCtmp->host_scribble);
+		SCtmp->host_scribble = NULL;
 		/* Fetch the sense data, and tuck it away, in the required slot.  The
 		   Adaptec automatically fetches it, and there is no guarantee that
 		   we will still have it in the cdb when we come back */
 		if (ccb[mbo].tarstat == 2)
 			memcpy(SCtmp->sense_buffer, &ccb[mbo].cdb[ccb[mbo].cdblen],
-			       sizeof(SCtmp->sense_buffer));
+			       SCSI_SENSE_BUFFERSIZE);
 
 
 		/* is there mail :-) */
@@ -592,24 +557,23 @@ static void aha1542_intr_handle(int irq, void *dev_id, struct pt_regs *regs)
 	};
 }
 
-static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
+static int aha1542_queuecommand_lck(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 {
 	unchar ahacmd = CMD_START_SCSI;
 	unchar direction;
 	unchar *cmd = (unchar *) SCpnt->cmnd;
-	unchar target = SCpnt->target;
-	unchar lun = SCpnt->lun;
+	unchar target = SCpnt->device->id;
+	unchar lun = SCpnt->device->lun;
 	unsigned long flags;
-	void *buff = SCpnt->request_buffer;
-	int bufflen = SCpnt->request_bufflen;
+	int bufflen = scsi_bufflen(SCpnt);
 	int mbo;
 	struct mailbox *mb;
 	struct ccb *ccb;
 
 	DEB(int i);
 
-	mb = HOSTDATA(SCpnt->host)->mb;
-	ccb = HOSTDATA(SCpnt->host)->ccb;
+	mb = HOSTDATA(SCpnt->device->host)->mb;
+	ccb = HOSTDATA(SCpnt->device->host)->ccb;
 
 	DEB(if (target > 1) {
 	    SCpnt->result = DID_TIME_OUT << 16;
@@ -622,7 +586,7 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 #if 0
 		/* scsi_request_sense() provides a buffer of size 256,
 		   so there is no reason to expect equality */
-		if (bufflen != sizeof(SCpnt->sense_buffer))
+		if (bufflen != SCSI_SENSE_BUFFERSIZE)
 			printk(KERN_CRIT "aha1542: Wrong buffer length supplied "
 			       "for request sense (%d)\n", bufflen);
 #endif
@@ -652,34 +616,33 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	/* Use the outgoing mailboxes in a round-robin fashion, because this
 	   is how the host adapter will scan for them */
 
-	save_flags(flags);
-	cli();
-	mbo = HOSTDATA(SCpnt->host)->aha1542_last_mbo_used + 1;
+	spin_lock_irqsave(&aha1542_lock, flags);
+	mbo = HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used + 1;
 	if (mbo >= AHA1542_MAILBOXES)
 		mbo = 0;
 
 	do {
-		if (mb[mbo].status == 0 && HOSTDATA(SCpnt->host)->SCint[mbo] == NULL)
+		if (mb[mbo].status == 0 && HOSTDATA(SCpnt->device->host)->SCint[mbo] == NULL)
 			break;
 		mbo++;
 		if (mbo >= AHA1542_MAILBOXES)
 			mbo = 0;
-	} while (mbo != HOSTDATA(SCpnt->host)->aha1542_last_mbo_used);
+	} while (mbo != HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used);
 
-	if (mb[mbo].status || HOSTDATA(SCpnt->host)->SCint[mbo])
+	if (mb[mbo].status || HOSTDATA(SCpnt->device->host)->SCint[mbo])
 		panic("Unable to find empty mailbox for aha1542.\n");
 
-	HOSTDATA(SCpnt->host)->SCint[mbo] = SCpnt;	/* This will effectively prevent someone else from
+	HOSTDATA(SCpnt->device->host)->SCint[mbo] = SCpnt;	/* This will effectively prevent someone else from
 							   screwing with this cdb. */
 
-	HOSTDATA(SCpnt->host)->aha1542_last_mbo_used = mbo;
-	restore_flags(flags);
+	HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used = mbo;
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "Sending command (%d %x)...", mbo, done);
 #endif
 
-	any2scsi(mb[mbo].ccbptr, SCSI_PA(&ccb[mbo]));	/* This gets trashed for some reason */
+	any2scsi(mb[mbo].ccbptr, SCSI_BUF_PA(&ccb[mbo]));	/* This gets trashed for some reason */
 
 	memset(&ccb[mbo], 0, sizeof(struct ccb));
 
@@ -693,41 +656,28 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 
 	memcpy(ccb[mbo].cdb, cmd, ccb[mbo].cdblen);
 
-	if (SCpnt->use_sg) {
-		struct scatterlist *sgpnt;
+	if (bufflen) {
+		struct scatterlist *sg;
 		struct chain *cptr;
 #ifdef DEBUG
 		unsigned char *ptr;
 #endif
-		int i;
+		int i, sg_count = scsi_sg_count(SCpnt);
 		ccb[mbo].op = 2;	/* SCSI Initiator Command  w/scatter-gather */
-		SCpnt->host_scribble = (unsigned char *) scsi_malloc(512);
-		sgpnt = (struct scatterlist *) SCpnt->request_buffer;
+		SCpnt->host_scribble = kmalloc(sizeof(*cptr)*sg_count,
+		                                         GFP_KERNEL | GFP_DMA);
 		cptr = (struct chain *) SCpnt->host_scribble;
-		if (cptr == NULL)
-			panic("aha1542.c: unable to allocate DMA memory\n");
-		for (i = 0; i < SCpnt->use_sg; i++) {
-			if (sgpnt[i].length == 0 || SCpnt->use_sg > 16 ||
-			    (((int) sgpnt[i].address) & 1) || (sgpnt[i].length & 1)) {
-				unsigned char *ptr;
-				printk(KERN_CRIT "Bad segment list supplied to aha1542.c (%d, %d)\n", SCpnt->use_sg, i);
-				for (i = 0; i < SCpnt->use_sg; i++) {
-					printk(KERN_CRIT "%d: %p %d\n", i, sgpnt[i].address,
-					       sgpnt[i].length);
-				};
-				printk(KERN_CRIT "cptr %x: ", (unsigned int) cptr);
-				ptr = (unsigned char *) &cptr[i];
-				for (i = 0; i < 18; i++)
-					printk("%02x ", ptr[i]);
-				panic("Foooooooood fight!");
-			};
-			any2scsi(cptr[i].dataptr, SCSI_PA(sgpnt[i].address));
-			if (SCSI_PA(sgpnt[i].address + sgpnt[i].length - 1) > ISA_DMA_THRESHOLD)
-				BAD_SG_DMA(SCpnt, sgpnt, SCpnt->use_sg, i);
-			any2scsi(cptr[i].datalen, sgpnt[i].length);
+		if (cptr == NULL) {
+			/* free the claimed mailbox slot */
+			HOSTDATA(SCpnt->device->host)->SCint[mbo] = NULL;
+			return SCSI_MLQUEUE_HOST_BUSY;
+		}
+		scsi_for_each_sg(SCpnt, sg, sg_count, i) {
+			any2scsi(cptr[i].dataptr, SCSI_SG_PA(sg));
+			any2scsi(cptr[i].datalen, sg->length);
 		};
-		any2scsi(ccb[mbo].datalen, SCpnt->use_sg * sizeof(struct chain));
-		any2scsi(ccb[mbo].dataptr, SCSI_PA(cptr));
+		any2scsi(ccb[mbo].datalen, sg_count * sizeof(struct chain));
+		any2scsi(ccb[mbo].dataptr, SCSI_BUF_PA(cptr));
 #ifdef DEBUG
 		printk("cptr %x: ", cptr);
 		ptr = (unsigned char *) cptr;
@@ -737,10 +687,8 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	} else {
 		ccb[mbo].op = 0;	/* SCSI Initiator Command */
 		SCpnt->host_scribble = NULL;
-		any2scsi(ccb[mbo].datalen, bufflen);
-		if (buff && SCSI_PA(buff + bufflen - 1) > ISA_DMA_THRESHOLD)
-			BAD_DMA(buff, bufflen);
-		any2scsi(ccb[mbo].dataptr, SCSI_PA(buff));
+		any2scsi(ccb[mbo].datalen, 0);
+		any2scsi(ccb[mbo].dataptr, 0);
 	};
 	ccb[mbo].idlun = (target & 7) << 5 | direction | (lun & 7);	/*SCSI Target Id */
 	ccb[mbo].rsalen = 16;
@@ -761,7 +709,7 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 		    aha1542_stat());
 		SCpnt->scsi_done = done;
 		mb[mbo].status = 1;
-		aha1542_out(SCpnt->host->io_port, &ahacmd, 1);	/* start scsi command */
+		aha1542_out(SCpnt->device->host->io_port, &ahacmd, 1);	/* start scsi command */
 		DEB(aha1542_stat());
 	} else
 		printk("aha1542_queuecommand: done can't be NULL\n");
@@ -769,22 +717,7 @@ static int aha1542_queuecommand(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	return 0;
 }
 
-static void internal_done(Scsi_Cmnd * SCpnt)
-{
-	SCpnt->SCp.Status++;
-}
-
-static int aha1542_command(Scsi_Cmnd * SCpnt)
-{
-	DEB(printk("aha1542_command: ..calling aha1542_queuecommand\n"));
-
-	aha1542_queuecommand(SCpnt, internal_done);
-
-	SCpnt->SCp.Status = 0;
-	while (!SCpnt->SCp.Status)
-		barrier();
-	return SCpnt->result;
-}
+static DEF_SCSI_QCMD(aha1542_queuecommand)
 
 /* Initialize mailboxes */
 static void setup_mailboxes(int bse, struct Scsi_Host *shpnt)
@@ -800,10 +733,10 @@ static void setup_mailboxes(int bse, struct Scsi_Host *shpnt)
 
 	for (i = 0; i < AHA1542_MAILBOXES; i++) {
 		mb[i].status = mb[AHA1542_MAILBOXES + i].status = 0;
-		any2scsi(mb[i].ccbptr, SCSI_PA(&ccb[i]));
+		any2scsi(mb[i].ccbptr, SCSI_BUF_PA(&ccb[i]));
 	};
 	aha1542_intr_reset(bse);	/* reset interrupts, so they don't block */
-	any2scsi((cmd + 2), SCSI_PA(mb));
+	any2scsi((cmd + 2), SCSI_BUF_PA(mb));
 	aha1542_out(bse, cmd, 5);
 	WAIT(INTRFLAGS(bse), INTRMASK, HACC, 0);
 	while (0) {
@@ -957,10 +890,10 @@ fail:
 }
 
 #ifndef MODULE
-static int setup_idx = 0;
 static char *setup_str[MAXBOARDS] __initdata;
+static int setup_idx = 0;
 
-void __init aha1542_setup(char *str, int *ints)
+static void __init aha1542_setup(char *str, int *ints)
 {
 	const char *ahausage = "aha1542: usage: aha1542=<PORTBASE>[,<BUSON>,<BUSOFF>[,<DMASPEED>]]\n";
 	int setup_portbase;
@@ -1018,11 +951,11 @@ void __init aha1542_setup(char *str, int *ints)
 
 static int __init do_setup(char *str)
 {
-	int ints[4];
+	int ints[5];
 
 	int count=setup_idx;
 
-	get_options(str, sizeof(ints)/sizeof(int), ints);
+	get_options(str, ARRAY_SIZE(ints), ints);
 	aha1542_setup(str,ints);
 
 	return count<setup_idx;
@@ -1032,7 +965,7 @@ __setup("aha1542=",do_setup);
 #endif
 
 /* return non-zero on detection */
-static int __init aha1542_detect(Scsi_Host_Template * tpnt)
+static int __init aha1542_detect(struct scsi_host_template * tpnt)
 {
 	unsigned char dma_chan;
 	unsigned char irq_level;
@@ -1078,13 +1011,12 @@ static int __init aha1542_detect(Scsi_Host_Template * tpnt)
 	/*
 	 *	Find MicroChannel cards (AHA1640)
 	 */
-#ifdef CONFIG_MCA
+#ifdef CONFIG_MCA_LEGACY
 	if(MCA_bus) {
 		int slot = 0;
 		int pos = 0;
 
-		for (indx = 0; (slot !=  MCA_NOTFOUND) && 
-			     (indx < sizeof(bases)/sizeof(bases[0])); indx++) {
+		for (indx = 0; (slot != MCA_NOTFOUND) && (indx < ARRAY_SIZE(bases)); indx++) {
 
 			if (bases[indx])
 				continue;
@@ -1094,10 +1026,9 @@ static int __init aha1542_detect(Scsi_Host_Template * tpnt)
 			if (slot == MCA_NOTFOUND)
 				break;
 
-			
 			/* Found one */
 			pos = mca_read_stored_pos(slot, 3);
-			
+
 			/* Decode address */
 			if (pos & 0x80) {
 				if (pos & 0x02) {
@@ -1129,68 +1060,64 @@ static int __init aha1542_detect(Scsi_Host_Template * tpnt)
 			mca_set_adapter_name(slot, "Adapter AHA-1640");
 			mca_set_adapter_procfn(slot, NULL, NULL);
 			mca_mark_as_used(slot);
-			
+
 			/* Go on */
 			slot++;
 		}
-		
+
 	}
 #endif
 
 	/*
 	 *	Hunt for ISA Plug'n'Pray Adaptecs (AHA1535)
 	 */
-	 
+
 	if(isapnp)
 	{
-		struct pci_dev *pdev = NULL;
-		for(indx = 0; indx <sizeof(bases)/sizeof(bases[0]);indx++)
-		{
+		struct pnp_dev *pdev = NULL;
+		for(indx = 0; indx < ARRAY_SIZE(bases); indx++) {
 			if(bases[indx])
 				continue;
-			pdev = isapnp_find_dev(NULL, ISAPNP_VENDOR('A', 'D', 'P'), 
+			pdev = pnp_find_dev(NULL, ISAPNP_VENDOR('A', 'D', 'P'), 
 				ISAPNP_FUNCTION(0x1542), pdev);
 			if(pdev==NULL)
 				break;
 			/*
 			 *	Activate the PnP card
 			 */
-			 
-			if(pdev->prepare(pdev)<0)
-				continue;
-				
-			if(!(pdev->resource[0].flags&IORESOURCE_IO))
-				continue;
-				
-			pdev->resource[0].flags|=IORESOURCE_AUTO;
 
-			if(pdev->activate(pdev)<0)
+			if(pnp_device_attach(pdev)<0)
 				continue;
-				
-			bases[indx] = pdev->resource[0].start;
-			
+
+			if(pnp_activate_dev(pdev)<0) {
+				pnp_device_detach(pdev);
+				continue;
+			}
+
+			if(!pnp_port_valid(pdev, 0)) {
+				pnp_device_detach(pdev);
+				continue;
+			}
+
+			bases[indx] = pnp_port_start(pdev, 0);
+
 			/* The card can be queried for its DMA, we have 
 			   the DMA set up that is enough */
-			   
+
 			printk(KERN_INFO "ISAPnP found an AHA1535 at I/O 0x%03X\n", bases[indx]);
 		}
 	}
-	for (indx = 0; indx < sizeof(bases) / sizeof(bases[0]); indx++)
-		if (bases[indx] != 0 && !check_region(bases[indx], 4)) {
+	for (indx = 0; indx < ARRAY_SIZE(bases); indx++)
+		if (bases[indx] != 0 && request_region(bases[indx], 4, "aha1542")) {
 			shpnt = scsi_register(tpnt,
 					sizeof(struct aha1542_hostdata));
 
-			if(shpnt==NULL)
+			if(shpnt==NULL) {
+				release_region(bases[indx], 4);
 				continue;
-			/* For now we do this - until kmalloc is more intelligent
-			   we are resigned to stupid hacks like this */
-			if (SCSI_PA(shpnt) >= ISA_DMA_THRESHOLD) {
-				printk(KERN_ERR "Invalid address for shpnt with 1542.\n");
-				goto unregister;
 			}
 			if (!aha1542_test_port(bases[indx], shpnt))
 				goto unregister;
-
 
 			base_io = bases[indx];
 
@@ -1239,18 +1166,18 @@ fail:
 			DEB(aha1542_stat());
 
 			DEB(printk("aha1542_detect: enable interrupt channel %d\n", irq_level));
-			save_flags(flags);
-			cli();
-			if (request_irq(irq_level, do_aha1542_intr_handle, 0, "aha1542", NULL)) {
+			spin_lock_irqsave(&aha1542_lock, flags);
+			if (request_irq(irq_level, do_aha1542_intr_handle, 0,
+					"aha1542", shpnt)) {
 				printk(KERN_ERR "Unable to allocate IRQ for adaptec controller.\n");
-				restore_flags(flags);
+				spin_unlock_irqrestore(&aha1542_lock, flags);
 				goto unregister;
 			}
 			if (dma_chan != 0xFF) {
 				if (request_dma(dma_chan, "aha1542")) {
 					printk(KERN_ERR "Unable to allocate DMA channel for Adaptec.\n");
-					free_irq(irq_level, NULL);
-					restore_flags(flags);
+					free_irq(irq_level, shpnt);
+					spin_unlock_irqrestore(&aha1542_lock, flags);
 					goto unregister;
 				}
 				if (dma_chan == 0 || dma_chan >= 5) {
@@ -1258,7 +1185,7 @@ fail:
 					enable_dma(dma_chan);
 				}
 			}
-			aha_host[irq_level - 9] = shpnt;
+
 			shpnt->this_id = scsi_id;
 			shpnt->unique_id = base_io;
 			shpnt->io_port = base_io;
@@ -1271,7 +1198,7 @@ fail:
 			HOSTDATA(shpnt)->aha1542_last_mbi_used = (2 * AHA1542_MAILBOXES - 1);
 			HOSTDATA(shpnt)->aha1542_last_mbo_used = (AHA1542_MAILBOXES - 1);
 			memset(HOSTDATA(shpnt)->SCint, 0, sizeof(HOSTDATA(shpnt)->SCint));
-			restore_flags(flags);
+			spin_unlock_irqrestore(&aha1542_lock, flags);
 #if 0
 			DEB(printk(" *** READ CAPACITY ***\n"));
 
@@ -1305,16 +1232,28 @@ fail:
 				aha1542_command(0, cmd, buffer, 512);
 			}
 #endif
-			request_region(bases[indx], 4, "aha1542");	/* Register the IO ports that we use */
 			count++;
 			continue;
 unregister:
+			release_region(bases[indx], 4);
 			scsi_unregister(shpnt);
 			continue;
 
 		};
 
 	return count;
+}
+
+static int aha1542_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, shost);
+	if (shost->dma_channel != 0xff)
+		free_dma(shost->dma_channel);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
 }
 
 static int aha1542_restart(struct Scsi_Host *shost)
@@ -1342,20 +1281,6 @@ static int aha1542_restart(struct Scsi_Host *shost)
 	return 0;
 }
 
-static int aha1542_abort(Scsi_Cmnd * SCpnt)
-{
-
-	/*
-	 * The abort command does not leave the device in a clean state where
-	 *  it is available to be used again.  Until this gets worked out, we
-	 * will leave it commented out.  
-	 */
-
-	printk(KERN_ERR "aha1542.c: Unable to abort command for target %d\n",
-	       SCpnt->target);
-	return FAILED;
-}
-
 /*
  * This is a device reset.  This is handled by sending a special command
  * to the device.
@@ -1364,40 +1289,39 @@ static int aha1542_dev_reset(Scsi_Cmnd * SCpnt)
 {
 	unsigned long flags;
 	struct mailbox *mb;
-	unchar target = SCpnt->target;
-	unchar lun = SCpnt->lun;
+	unchar target = SCpnt->device->id;
+	unchar lun = SCpnt->device->lun;
 	int mbo;
 	struct ccb *ccb;
 	unchar ahacmd = CMD_START_SCSI;
 
-	ccb = HOSTDATA(SCpnt->host)->ccb;
-	mb = HOSTDATA(SCpnt->host)->mb;
+	ccb = HOSTDATA(SCpnt->device->host)->ccb;
+	mb = HOSTDATA(SCpnt->device->host)->mb;
 
-	save_flags(flags);
-	cli();
-	mbo = HOSTDATA(SCpnt->host)->aha1542_last_mbo_used + 1;
+	spin_lock_irqsave(&aha1542_lock, flags);
+	mbo = HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used + 1;
 	if (mbo >= AHA1542_MAILBOXES)
 		mbo = 0;
 
 	do {
-		if (mb[mbo].status == 0 && HOSTDATA(SCpnt->host)->SCint[mbo] == NULL)
+		if (mb[mbo].status == 0 && HOSTDATA(SCpnt->device->host)->SCint[mbo] == NULL)
 			break;
 		mbo++;
 		if (mbo >= AHA1542_MAILBOXES)
 			mbo = 0;
-	} while (mbo != HOSTDATA(SCpnt->host)->aha1542_last_mbo_used);
+	} while (mbo != HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used);
 
-	if (mb[mbo].status || HOSTDATA(SCpnt->host)->SCint[mbo])
+	if (mb[mbo].status || HOSTDATA(SCpnt->device->host)->SCint[mbo])
 		panic("Unable to find empty mailbox for aha1542.\n");
 
-	HOSTDATA(SCpnt->host)->SCint[mbo] = SCpnt;	/* This will effectively
+	HOSTDATA(SCpnt->device->host)->SCint[mbo] = SCpnt;	/* This will effectively
 							   prevent someone else from
 							   screwing with this cdb. */
 
-	HOSTDATA(SCpnt->host)->aha1542_last_mbo_used = mbo;
-	restore_flags(flags);
+	HOSTDATA(SCpnt->device->host)->aha1542_last_mbo_used = mbo;
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 
-	any2scsi(mb[mbo].ccbptr, SCSI_PA(&ccb[mbo]));	/* This gets trashed for some reason */
+	any2scsi(mb[mbo].ccbptr, SCSI_BUF_PA(&ccb[mbo]));	/* This gets trashed for some reason */
 
 	memset(&ccb[mbo], 0, sizeof(struct ccb));
 
@@ -1412,9 +1336,10 @@ static int aha1542_dev_reset(Scsi_Cmnd * SCpnt)
 	 * Now tell the 1542 to flush all pending commands for this 
 	 * target 
 	 */
-	aha1542_out(SCpnt->host->io_port, &ahacmd, 1);
+	aha1542_out(SCpnt->device->host->io_port, &ahacmd, 1);
 
-	printk(KERN_WARNING "aha1542.c: Trying device reset for target %d\n", SCpnt->target);
+	scmd_printk(KERN_WARNING, SCpnt,
+		"Trying device reset for target\n");
 
 	return SUCCESS;
 
@@ -1440,10 +1365,8 @@ static int aha1542_dev_reset(Scsi_Cmnd * SCpnt)
 		    HOSTDATA(SCpnt->host)->SCint[i]->target == SCpnt->target) {
 			Scsi_Cmnd *SCtmp;
 			SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
-			if (SCtmp->host_scribble) {
-				scsi_free(SCtmp->host_scribble, 512);
-				SCtmp->host_scribble = NULL;
-			}
+			kfree(SCtmp->host_scribble);
+			SCtmp->host_scribble = NULL;
 			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
 			HOSTDATA(SCpnt->host)->mb[i].status = 0;
 		}
@@ -1464,7 +1387,7 @@ static int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 	 * we do this?  Try this first, and we can add that later
 	 * if it turns out to be useful.
 	 */
-	outb(SCRST, CONTROL(SCpnt->host->io_port));
+	outb(SCRST, CONTROL(SCpnt->device->host->io_port));
 
 	/*
 	 * Wait for the thing to settle down a bit.  Unfortunately
@@ -1473,11 +1396,11 @@ static int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 	 * check for timeout, and if we are doing something like this
 	 * we are pretty desperate anyways.
 	 */
-	spin_unlock_irq(&io_request_lock);
-	scsi_sleep(4 * HZ);
-	spin_lock_irq(&io_request_lock);
+	ssleep(4);
 
-	WAIT(STATUS(SCpnt->host->io_port),
+	spin_lock_irq(SCpnt->device->host->host_lock);
+
+	WAIT(STATUS(SCpnt->device->host->io_port),
 	     STATMASK, INIT | IDLE, STST | DIAGF | INVDCMD | DF | CDF);
 
 	/*
@@ -1486,12 +1409,12 @@ static int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 	 * out.  We do not try and restart any commands or anything - 
 	 * the strategy handler takes care of that crap.
 	 */
-	printk(KERN_WARNING "Sent BUS RESET to scsi host %d\n", SCpnt->host->host_no);
+	printk(KERN_WARNING "Sent BUS RESET to scsi host %d\n", SCpnt->device->host->host_no);
 
 	for (i = 0; i < AHA1542_MAILBOXES; i++) {
-		if (HOSTDATA(SCpnt->host)->SCint[i] != NULL) {
+		if (HOSTDATA(SCpnt->device->host)->SCint[i] != NULL) {
 			Scsi_Cmnd *SCtmp;
-			SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
+			SCtmp = HOSTDATA(SCpnt->device->host)->SCint[i];
 
 
 			if (SCtmp->device->soft_reset) {
@@ -1503,18 +1426,18 @@ static int aha1542_bus_reset(Scsi_Cmnd * SCpnt)
 				 */
 				continue;
 			}
-			if (SCtmp->host_scribble) {
-				scsi_free(SCtmp->host_scribble, 512);
-				SCtmp->host_scribble = NULL;
-			}
-			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
-			HOSTDATA(SCpnt->host)->mb[i].status = 0;
+			kfree(SCtmp->host_scribble);
+			SCtmp->host_scribble = NULL;
+			HOSTDATA(SCpnt->device->host)->SCint[i] = NULL;
+			HOSTDATA(SCpnt->device->host)->mb[i].status = 0;
 		}
 	}
 
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return SUCCESS;
 
 fail:
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return FAILED;
 }
 
@@ -1528,7 +1451,7 @@ static int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 	 * we do this?  Try this first, and we can add that later
 	 * if it turns out to be useful.
 	 */
-	outb(HRST | SCRST, CONTROL(SCpnt->host->io_port));
+	outb(HRST | SCRST, CONTROL(SCpnt->device->host->io_port));
 
 	/*
 	 * Wait for the thing to settle down a bit.  Unfortunately
@@ -1537,18 +1460,17 @@ static int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 	 * check for timeout, and if we are doing something like this
 	 * we are pretty desperate anyways.
 	 */
-	spin_unlock_irq(&io_request_lock);
-	scsi_sleep(4 * HZ);
-	spin_lock_irq(&io_request_lock);
+	ssleep(4);
+	spin_lock_irq(SCpnt->device->host->host_lock);
 
-	WAIT(STATUS(SCpnt->host->io_port),
+	WAIT(STATUS(SCpnt->device->host->io_port),
 	     STATMASK, INIT | IDLE, STST | DIAGF | INVDCMD | DF | CDF);
 
 	/*
 	 * We need to do this too before the 1542 can interact with
 	 * us again.
 	 */
-	setup_mailboxes(SCpnt->host->io_port, SCpnt->host);
+	setup_mailboxes(SCpnt->device->host->io_port, SCpnt->device->host);
 
 	/*
 	 * Now try to pick up the pieces.  For all pending commands,
@@ -1556,12 +1478,12 @@ static int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 	 * out.  We do not try and restart any commands or anything - 
 	 * the strategy handler takes care of that crap.
 	 */
-	printk(KERN_WARNING "Sent BUS RESET to scsi host %d\n", SCpnt->host->host_no);
+	printk(KERN_WARNING "Sent BUS RESET to scsi host %d\n", SCpnt->device->host->host_no);
 
 	for (i = 0; i < AHA1542_MAILBOXES; i++) {
-		if (HOSTDATA(SCpnt->host)->SCint[i] != NULL) {
+		if (HOSTDATA(SCpnt->device->host)->SCint[i] != NULL) {
 			Scsi_Cmnd *SCtmp;
-			SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
+			SCtmp = HOSTDATA(SCpnt->device->host)->SCint[i];
 
 			if (SCtmp->device->soft_reset) {
 				/*
@@ -1572,21 +1494,22 @@ static int aha1542_host_reset(Scsi_Cmnd * SCpnt)
 				 */
 				continue;
 			}
-			if (SCtmp->host_scribble) {
-				scsi_free(SCtmp->host_scribble, 512);
-				SCtmp->host_scribble = NULL;
-			}
-			HOSTDATA(SCpnt->host)->SCint[i] = NULL;
-			HOSTDATA(SCpnt->host)->mb[i].status = 0;
+			kfree(SCtmp->host_scribble);
+			SCtmp->host_scribble = NULL;
+			HOSTDATA(SCpnt->device->host)->SCint[i] = NULL;
+			HOSTDATA(SCpnt->device->host)->mb[i].status = 0;
 		}
 	}
 
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return SUCCESS;
 
 fail:
+	spin_unlock_irq(SCpnt->device->host->host_lock);
 	return FAILED;
 }
 
+#if 0
 /*
  * These are the old error handling routines.  They are only temporarily
  * here while we play with the new error handling code.
@@ -1603,8 +1526,7 @@ static int aha1542_old_abort(Scsi_Cmnd * SCpnt)
 	       inb(STATUS(SCpnt->host->io_port)),
 	       inb(INTRFLAGS(SCpnt->host->io_port)));
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&aha1542_lock, flags);
 	mb = HOSTDATA(SCpnt->host)->mb;
 	mbi = HOSTDATA(SCpnt->host)->aha1542_last_mbi_used + 1;
 	if (mbi >= 2 * AHA1542_MAILBOXES)
@@ -1617,12 +1539,12 @@ static int aha1542_old_abort(Scsi_Cmnd * SCpnt)
 		if (mbi >= 2 * AHA1542_MAILBOXES)
 			mbi = AHA1542_MAILBOXES;
 	} while (mbi != HOSTDATA(SCpnt->host)->aha1542_last_mbi_used);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&aha1542_lock, flags);
 
 	if (mb[mbi].status) {
 		printk(KERN_ERR "Lost interrupt discovered on irq %d - attempting to recover\n",
 		       SCpnt->host->irq);
-		aha1542_intr_handle(SCpnt->host->irq, NULL);
+		aha1542_intr_handle(SCpnt->host, NULL);
 		return 0;
 	}
 	/* OK, no lost interrupt.  Try looking to see how many pending commands
@@ -1632,28 +1554,34 @@ static int aha1542_old_abort(Scsi_Cmnd * SCpnt)
 		if (HOSTDATA(SCpnt->host)->SCint[i]) {
 			if (HOSTDATA(SCpnt->host)->SCint[i] == SCpnt) {
 				printk(KERN_ERR "Timed out command pending for %s\n",
-				       kdevname(SCpnt->request.rq_dev));
+				       SCpnt->request->rq_disk ?
+				       SCpnt->request->rq_disk->disk_name : "?"
+				       );
 				if (HOSTDATA(SCpnt->host)->mb[i].status) {
 					printk(KERN_ERR "OGMB still full - restarting\n");
 					aha1542_out(SCpnt->host->io_port, &ahacmd, 1);
 				};
 			} else
 				printk(KERN_ERR "Other pending command %s\n",
-				       kdevname(SCpnt->request.rq_dev));
+				       SCpnt->request->rq_disk ?
+				       SCpnt->request->rq_disk->disk_name : "?"
+				       );
 		}
 #endif
 
 	DEB(printk("aha1542_abort\n"));
 #if 0
-	save_flags(flags);
-	cli();
-	for (mbo = 0; mbo < AHA1542_MAILBOXES; mbo++)
+	spin_lock_irqsave(&aha1542_lock, flags);
+	for (mbo = 0; mbo < AHA1542_MAILBOXES; mbo++) {
 		if (SCpnt == HOSTDATA(SCpnt->host)->SCint[mbo]) {
 			mb[mbo].status = 2;	/* Abort command */
 			aha1542_out(SCpnt->host->io_port, &ahacmd, 1);	/* start scsi command */
-			restore_flags(flags);
+			spin_unlock_irqrestore(&aha1542_lock, flags);
 			break;
-		};
+		}
+	}
+	if (AHA1542_MAILBOXES == mbo)
+		spin_unlock_irqrestore(&aha1542_lock, flags);
 #endif
 	return SCSI_ABORT_SNOOZE;
 }
@@ -1710,10 +1638,8 @@ static int aha1542_old_reset(Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 				Scsi_Cmnd *SCtmp;
 				SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
 				SCtmp->result = DID_RESET << 16;
-				if (SCtmp->host_scribble) {
-					scsi_free(SCtmp->host_scribble, 512);
-					SCtmp->host_scribble = NULL;
-				}
+				kfree(SCtmp->host_scribble);
+				SCtmp->host_scribble = NULL;
 				printk(KERN_WARNING "Sending DID_RESET for target %d\n", SCpnt->target);
 				SCtmp->scsi_done(SCpnt);
 
@@ -1756,10 +1682,8 @@ fail:
 						Scsi_Cmnd *SCtmp;
 						SCtmp = HOSTDATA(SCpnt->host)->SCint[i];
 						SCtmp->result = DID_RESET << 16;
-						if (SCtmp->host_scribble) {
-							scsi_free(SCtmp->host_scribble, 512);
-							SCtmp->host_scribble = NULL;
-						}
+						kfree(SCtmp->host_scribble);
+						SCtmp->host_scribble = NULL;
 						printk(KERN_WARNING "Sending DID_RESET for target %d\n", SCpnt->target);
 						SCtmp->scsi_done(SCpnt);
 
@@ -1774,15 +1698,15 @@ fail:
 	   to request sense information in order to decide what to do next. */
 	return SCSI_RESET_PUNT;
 }
+#endif    /* end of big comment block around old_abort + old_reset */
 
-#include "sd.h"
-
-static int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int *ip)
+static int aha1542_biosparam(struct scsi_device *sdev,
+		struct block_device *bdev, sector_t capacity, int *ip)
 {
 	int translation_algorithm;
-	int size = disk->capacity;
+	int size = capacity;
 
-	translation_algorithm = HOSTDATA(disk->device->host)->bios_translation;
+	translation_algorithm = HOSTDATA(sdev->host)->bios_translation;
 
 	if ((size >> 11) > 1024 && translation_algorithm == BIOS_TRANSLATION_25563) {
 		/* Please verify that this is the same as what DOS returns */
@@ -1800,7 +1724,21 @@ static int aha1542_biosparam(Scsi_Disk * disk, kdev_t dev, int *ip)
 MODULE_LICENSE("GPL");
 
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = AHA1542;
-
+static struct scsi_host_template driver_template = {
+	.proc_name		= "aha1542",
+	.name			= "Adaptec 1542",
+	.detect			= aha1542_detect,
+	.release		= aha1542_release,
+	.queuecommand		= aha1542_queuecommand,
+	.eh_device_reset_handler= aha1542_dev_reset,
+	.eh_bus_reset_handler	= aha1542_bus_reset,
+	.eh_host_reset_handler	= aha1542_host_reset,
+	.bios_param		= aha1542_biosparam,
+	.can_queue		= AHA1542_MAILBOXES, 
+	.this_id		= 7,
+	.sg_tablesize		= AHA1542_SCATTER,
+	.cmd_per_lun		= AHA1542_CMDLUN,
+	.unchecked_isa_dma	= 1, 
+	.use_clustering		= ENABLE_CLUSTERING,
+};
 #include "scsi_module.c"

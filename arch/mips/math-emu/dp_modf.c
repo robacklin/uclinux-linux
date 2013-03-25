@@ -3,8 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -29,7 +28,7 @@
 
 /* modf function is always exact for a finite number
 */
-ieee754dp ieee754dp_modf(ieee754dp x, ieee754dp * ip)
+ieee754dp ieee754dp_modf(ieee754dp x, ieee754dp *ip)
 {
 	COMPXDP;
 

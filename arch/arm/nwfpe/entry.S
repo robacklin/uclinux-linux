@@ -20,9 +20,13 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
+#include <asm/opcodes.h>
+
 /* This is the kernel's entry point into the floating point emulator.
 It is called from the kernel with code similar to this:
 
+	sub	r4, r5, #4
+	ldrt	r0, [r4]			@ r0  = instruction
 	adrsvc	al, r9, ret_from_exception	@ r9  = normal FP return
 	adrsvc	al, lr, fpundefinstr		@ lr  = undefined instr return
 
@@ -51,7 +55,7 @@ want it.
 This routine does three things:
 
 1) The kernel has created a struct pt_regs on the stack and saved the
-user registers into it.  See inclue/asm-arm/proc/ptrace.h for details.
+user registers into it.  See /usr/include/asm/proc/ptrace.h for details.
 
 2) It calls EmulateAll to emulate a floating point instruction.
 EmulateAll returns 1 if the emulation was successful, or 0 if not.
@@ -68,24 +72,30 @@ floating point instructions.  GCC attempts to group floating point
 instructions to allow the emulator to spread the cost of the trap over
 several floating point instructions.  */
 
+#include <asm/asm-offsets.h>
+
 	.globl	nwfpe_enter
 nwfpe_enter:
 	mov	r4, lr			@ save the failure-return addresses
-	ldr	ip, [r10, #112]		@ get init_flag
 	mov	sl, sp			@ we access the registers via 'sl'
 
-	ldr	r5, [sp, #60]		@ get contents of PC;
-	cmp	ip, #0
-	bleq	nwfpe_init_fpa
-	sub	r8, r5, #4
-.Lx1:	ldrt	r0, [r8]		@ get actual instruction into r0
+	ldr	r5, [sp, #S_PC]		@ get contents of PC;
+	mov	r6, r0			@ save the opcode
 emulate:
+	ldr	r1, [sp, #S_PSR]	@ fetch the PSR
+	bl	arm_check_condition	@ check the condition
+	cmp	r0, #ARM_OPCODE_CONDTEST_PASS	@ condition passed?
+
+	@ if condition code failed to match, next insn
+	bne	next			@ get the next instruction;
+
+	mov	r0, r6			@ prepare for EmulateAll()
 	bl	EmulateAll		@ emulate the instruction
 	cmp	r0, #0			@ was emulation successful
 	moveq	pc, r4			@ no, return failure
 
 next:
-.Lx2:	ldrt	r6, [r5], #4		@ get the next instruction and
+.Lx1:	ldrt	r6, [r5], #4		@ get the next instruction and
 					@ increment PC
 
 	and	r2, r6, #0x0F000000	@ test for FP insns
@@ -94,30 +104,21 @@ next:
 	teqne	r2, #0x0E000000
 	movne	pc, r9			@ return ok if not a fp insn
 
-	str	r5, [sp, #60]		@ update PC copy in regs
+	str	r5, [sp, #S_PC]		@ update PC copy in regs
 
 	mov	r0, r6			@ save a copy
-	ldr	r1, [sp, #64]		@ fetch the condition codes
-	bl	checkCondition		@ check the condition
-	cmp	r0, #0			@ r0 = 0 ==> condition failed
-
-	@ if condition code failed to match, next insn
-	beq	next			@ get the next instruction;
-
-	mov	r0, r6			@ prepare for EmulateAll()
-	b	emulate			@ if r0 != 0, goto EmulateAll
+	b	emulate			@ check condition and emulate
 
 	@ We need to be prepared for the instructions at .Lx1 and .Lx2 
 	@ to fault.  Emit the appropriate exception gunk to fix things up.
 	@ ??? For some reason, faults can happen at .Lx2 even with a
 	@ plain LDR instruction.  Weird, but it seems harmless.
-	.section .fixup,"ax"
+	.pushsection .fixup,"ax"
 	.align	2
 .Lfix:	mov	pc, r9			@ let the user eat segfaults
-	.previous
+	.popsection
 
-	.section __ex_table,"a"
+	.pushsection __ex_table,"a"
 	.align	3
 	.long	.Lx1, .Lfix
-	.long	.Lx2, .Lfix
-	.previous
+	.popsection

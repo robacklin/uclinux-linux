@@ -1,12 +1,15 @@
 /*
  * uCbootmap.c:
  *
- * Retrieve Arcturus Networks uCbootstrap flash device data
- * to create mtd devices
+ * Retrieve Arcturus Networks uCbootloader Flash device data
+ * to create MTD devices
  *
- * (c) 2004 Michael Leslie [mleslie arcturusnetworks com]
+ * Copyright (c) 2004-2007 Arcturus Networks Inc.
+ *               by Michael Leslie, David Wu, et al <www.ArcturusNetworks.com>
  * Based on solutionengine.c by jsiegel
- *
+ * 
+ * Change log:
+ *   - modified for 2.6 kernel (David Wu)
  */
 
 #include <linux/module.h>
@@ -16,7 +19,6 @@
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
-#include <linux/config.h>
 
 #include <asm/uCbootstrap.h>
 
@@ -24,88 +26,18 @@ static int errno;
 extern char *getbenv(char *varname);
 static _bsc1 (int, setpmask, int, mask);
 
-/* pmask values: */
-#define FEF_BOOT_READ   0x0002	/* Read permission for bootloader */
-#define FEF_BOOT_WRITE  0x0004	/* Write permission for bootloader */
-#define FEF_SUPER_READ  0x0020	/* Read permission for supervisor */
-#define FEF_SUPER_WRITE 0x0040	/* Write permission for supervisor */
-#define FEF_USER_READ   0x0200	/* Read permission for user */
-#define FEF_USER_WRITE  0x0400	/* Write permission for user */
-
-
 #define MAX_FLASH_DEVICES 2 /* for uCbootstrap platforms to date */
-
-
 extern int parse_ucbootstrap_partitions(struct mtd_info *master,
-										struct map_info *map,
-										struct mtd_partition **pparts);
+                                        struct map_info *map,
+                                        struct mtd_partition **pparts);
 
 static struct mtd_info *flash_mtd[MAX_FLASH_DEVICES];
 static struct mtd_partition *parsed_parts;
 
-
-
-/****************************************************************************/
-
-static __u8 uC_read8(struct map_info *map, unsigned long ofs) {
-	return *(__u8 *)(map->map_priv_1 + ofs); }
-
-static __u16 uC_read16(struct map_info *map, unsigned long ofs) {
-	return *(__u16 *)(map->map_priv_1 + ofs); }
-
-static __u32 uC_read32(struct map_info *map, unsigned long ofs) {
-	return *(__u32 *)(map->map_priv_1 + ofs); }
-
-static void uC_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len) {
-	memcpy(to, (void *)(map->map_priv_1 + from), len); }
-
-static void uC_write8(struct map_info *map, __u8 d, unsigned long adr) {
-	*(__u8 *)(map->map_priv_1 + adr) = d; }
-
-static void uC_write16(struct map_info *map, __u16 d, unsigned long adr) {
-	*(__u16 *)(map->map_priv_1 + adr) = d; }
-
-static void uC_write32(struct map_info *map, __u32 d, unsigned long adr) {
-	*(__u32 *)(map->map_priv_1 + adr) = d; }
-
-static void uC_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len) {
-	memcpy((void *)(map->map_priv_1 + to), from, len); }
-
-/****************************************************************************/
-
-
-
-
-struct map_info uCflash_map[MAX_FLASH_DEVICES] =
-	{
-		{
-			name:       "Flash 0",
-			read8:		uC_read8,
-			read16:		uC_read16,
-			read32:		uC_read32,
-			copy_from:	uC_copy_from,
-			write8:		uC_write8,
-			write16:	uC_write16,
-			write32:	uC_write32,
-			copy_to:	uC_copy_to
-
-		},
-		{
-			name:       "Flash 1",
-			read8:		uC_read8,
-			read16:		uC_read16,
-			read32:		uC_read32,
-			copy_from:	uC_copy_from,
-			write8:		uC_write8,
-			write16:	uC_write16,
-			write32:	uC_write32,
-			copy_to:	uC_copy_to
-		}
-	};
+struct map_info uCflash_map[MAX_FLASH_DEVICES] = { { name:       "Flash 0" }, { name:       "Flash 1" } };
 
 char *env_name[MAX_FLASH_DEVICES] = { "FLASH0", "FLASH1" };
 #define ENVARNAME_LENGTH 32 /* local maximum */
-
 
 static int __init init_uCbootstrap_maps(void)
 {
@@ -115,17 +47,21 @@ static int __init init_uCbootstrap_maps(void)
 	char *val;
 	unsigned int window_size, window_addr, bus_width;
 	int i;
+	int try = 0;
+	int found = 0;
 
-	printk("MTD chip mapping driver for uCbootstrap\n");
+	printk("MTD chip mapping driver for uCbootloader\n");
 
 	/* zero pointers: */
 	for (i=0;i<MAX_FLASH_DEVICES;i++)
 		flash_mtd[i] = 0;
 
-	setpmask(FEF_SUPER_READ); /* set supervisory env var read permission */
-
-	for (i=0;i<MAX_FLASH_DEVICES;i++) {
+retry:
+	for (i=0;i<MAX_FLASH_DEVICES ;i++) {
 		valstr[0] = 0; val = NULL;
+
+		if(try == 0) setpmask(FEF_SUPER_READ); /* set supervisory env var read permission */
+        	/* FIXME: assume all requested variables exist */
 
 		/* retrieve FLASH[]_BASE */
 		sprintf (varname, "%s_BASE", env_name[i]);
@@ -134,7 +70,8 @@ static int __init init_uCbootstrap_maps(void)
 		if (val == NULL) {
 			/* sti(); */
 			continue;
-		}
+		} else found = 1;
+                
 		strncpy (valstr, val, ENVARNAME_LENGTH);
 		/* sti(); */
 		sscanf (valstr, "0x%x", &window_addr);
@@ -156,42 +93,58 @@ static int __init init_uCbootstrap_maps(void)
 		sscanf (valstr, "%d", &bus_width);
 		bus_width /= 8; /* bytes from bits */
 		
-		/* mleslie debug */
-		printk("%s window address = 0x%08x; size = 0x%08x, bus width = %d bytes\n",
-			   env_name[i], window_addr, window_size, bus_width);
-
-		/* First probe at offset 0 */
-		uCflash_map[i].buswidth = bus_width;
-		uCflash_map[i].size     = window_size;
-		uCflash_map[i].map_priv_1 = (unsigned long)ioremap(window_addr, window_size);
-
-		if (!uCflash_map[i].map_priv_1) {
-			printk("Failed to ioremap \n");
-			return -EIO;
-		}
-		
 		/* reset supervisory env var read permission */
-		setpmask(FEF_USER_READ  | FEF_USER_WRITE  |
+		if(try == 0) setpmask(FEF_USER_READ  | FEF_USER_WRITE  |
 				 FEF_BOOT_READ  | FEF_BOOT_WRITE);
 		
-		printk("Probing for flash chip at 0x%08x:\n", window_addr);
+#ifdef CONFIG_MTD_DEBUG	
+		printk("%s: %s window address = 0x%08x; size = 0x%08x, bus width = %d bytes\n",
+			   __FILE__, env_name[i], window_addr, window_size, bus_width);
+#endif
+		/* First probe at offset 0 */
+		uCflash_map[i].phys = window_addr;
+		uCflash_map[i].bankwidth = bus_width;
+		uCflash_map[i].size     = window_size;
+		uCflash_map[i].virt = ioremap(window_addr, window_size);
+		
+		
+		if ( (uCflash_map[i].phys != 0 ) && ( uCflash_map[i].virt == 0 ) ) {
+			printk("%s: Failed to ioremap\n", __FILE__);
+			return -EIO;
+		}
+
+		simple_map_init(&(uCflash_map[i]));
+
+		printk(KERN_DEBUG "%s: Probing for flash chip at 0x%08x:\n", __FILE__, window_addr);
 		flash_mtd[i] = do_map_probe("cfi_probe", &(uCflash_map[i]));
 
+		if(flash_mtd[i]) {
+			flash_mtd[i]->owner = THIS_MODULE;
+
 #ifdef CONFIG_MTD_UCBOOTSTRAP_PARTS
-		n_partitions = parse_ucbootstrap_partitions(flash_mtd[i], &(uCflash_map[i]), &parsed_parts);
-		if (n_partitions > 0)
-			printk(KERN_NOTICE "Found uCbootstrap partition table.\n");
-		else if (n_partitions < 0)
-			printk(KERN_NOTICE "Error looking for uCbootstrap partitions.\n");
+			n_partitions = parse_ucbootstrap_partitions(flash_mtd[i], &(uCflash_map[i]), &parsed_parts);
+			if (n_partitions > 0)
+				printk(KERN_INFO "%s: Found uCbootloader partition table.\n", __FILE__);
+			else if (n_partitions < 0)
+				printk(KERN_ERR "%s: Error looking for uCbootloader partitions.\n", __FILE__);
 
-		if (n_partitions > 0)
-			add_mtd_partitions(flash_mtd[i], parsed_parts, n_partitions);
-		else
+			if (n_partitions > 0)
+				mtd_device_register(flash_mtd[i], parsed_parts, n_partitions);
+			else
 #endif /* CONFIG_MTD_UCBOOTSTRAP_PARTS */
-			add_mtd_device(flash_mtd[i]);
+				add_mtd_device(flash_mtd[i]);
+		} else
+			iounmap(uCflash_map[i].virt);
 	}
-
-	return 0;
+	/* reset supervisory env var read permission */
+	setpmask(FEF_USER_READ  | FEF_USER_WRITE  |
+				 FEF_BOOT_READ  | FEF_BOOT_WRITE);
+	if (!found && !try){
+		try = 1;
+		goto retry;
+	}
+	if(found) return 0;
+	return -1;
 }
 
 static void __exit cleanup_uCbootstrap_maps(void)
@@ -202,7 +155,7 @@ static void __exit cleanup_uCbootstrap_maps(void)
 	if (parsed_parts) {
 		for (i=0;i<MAX_FLASH_DEVICES;i++) {
 			if (flash_mtd[i])
-				del_mtd_partitions(flash_mtd[i]);
+				mtd_device_unregister(flash_mtd[i]);
 			map_destroy(flash_mtd[i]);
 		}
 	} else
@@ -219,13 +172,6 @@ module_init(init_uCbootstrap_maps);
 module_exit(cleanup_uCbootstrap_maps);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Michael Leslie, Arcturus Networks Inc. [mleslie arcturusnetworks com]");
-MODULE_DESCRIPTION("MTD map driver for platforms running Arcturus Networks uCbootstrap");
+MODULE_AUTHOR("Arcturus Networks Inc. <www.ArcturusNetworks.com>");
+MODULE_DESCRIPTION("MTD map driver for platforms running Arcturus Networks uCbootloader");
 
-/*
- * Local variables:
- *  c-indent-level: 4
- *  c-basic-offset: 4
- *  tab-width: 4
- * End:
- */

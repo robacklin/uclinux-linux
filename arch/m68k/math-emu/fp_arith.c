@@ -19,12 +19,13 @@
 
 const struct fp_ext fp_QNaN =
 {
-	0, 0, 0x7fff, { ~0 }
+	.exp = 0x7fff,
+	.mant = { .m64 = ~0 }
 };
 
 const struct fp_ext fp_Inf =
 {
-	0, 0, 0x7fff, { 0 }
+	.exp = 0x7fff,
 };
 
 /* let's start with the easy ones */
@@ -457,7 +458,7 @@ static void fp_roundint(struct fp_ext *dest, int mode)
 		return;
 
 	/* infinities and zeroes */
-	if (IS_INF(dest) || IS_ZERO(dest)) 
+	if (IS_INF(dest) || IS_ZERO(dest))
 		return;
 
 	/* first truncate the lower bits */

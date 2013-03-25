@@ -1,16 +1,12 @@
 #
 # Makefile for the linux ipc.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := ipc.o
+obj-$(CONFIG_SYSVIPC_COMPAT) += compat.o
+obj-$(CONFIG_SYSVIPC) += util.o msgutil.o msg.o sem.o shm.o ipcns_notifier.o syscall.o
+obj-$(CONFIG_SYSVIPC_SYSCTL) += ipc_sysctl.o
+obj_mq-$(CONFIG_COMPAT) += compat_mq.o
+obj-$(CONFIG_POSIX_MQUEUE) += mqueue.o msgutil.o $(obj_mq-y)
+obj-$(CONFIG_IPC_NS) += namespace.o
+obj-$(CONFIG_POSIX_MQUEUE_SYSCTL) += mq_sysctl.o
 
-obj-y   := util.o
-
-obj-$(CONFIG_SYSVIPC) += msg.o sem.o shm.o
-
-include $(TOPDIR)/Rules.make

@@ -11,88 +11,39 @@
  */
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/kernel.h>
 
 #include <asm/irq_cpu.h>
 #include <asm/mipsregs.h>
-#include <asm/system.h>
 
-static int irq_base;
-
-static inline void unmask_rm7k_irq(unsigned int irq)
+static inline void unmask_rm7k_irq(struct irq_data *d)
 {
-	set_c0_intcontrol(0x100 << (irq - irq_base));
+	set_c0_intcontrol(0x100 << (d->irq - RM7K_CPU_IRQ_BASE));
 }
 
-static inline void mask_rm7k_irq(unsigned int irq)
+static inline void mask_rm7k_irq(struct irq_data *d)
 {
-	clear_c0_intcontrol(0x100 << (irq - irq_base));
+	clear_c0_intcontrol(0x100 << (d->irq - RM7K_CPU_IRQ_BASE));
 }
 
-static inline void rm7k_cpu_irq_enable(unsigned int irq)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	unmask_rm7k_irq(irq);
-	local_irq_restore(flags);
-}
-
-static void rm7k_cpu_irq_disable(unsigned int irq)
-{
-	unsigned long flags;
-
-	local_irq_save(flags);
-	mask_rm7k_irq(irq);
-	local_irq_restore(flags);
-}
-
-static unsigned int rm7k_cpu_irq_startup(unsigned int irq)
-{
-	rm7k_cpu_irq_enable(irq);
-
-	return 0;
-}
-
-#define	rm7k_cpu_irq_shutdown	rm7k_cpu_irq_disable
-
-/*
- * While we ack the interrupt interrupts are disabled and thus we don't need
- * to deal with concurrency issues.  Same for rm7k_cpu_irq_end.
- */
-static void rm7k_cpu_irq_ack(unsigned int irq)
-{
-	mask_rm7k_irq(irq);
-}
-
-static void rm7k_cpu_irq_end(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED | IRQ_INPROGRESS)))
-		unmask_rm7k_irq(irq);
-}
-
-static hw_irq_controller rm7k_irq_controller = {
-	"RM7000",
-	rm7k_cpu_irq_startup,
-	rm7k_cpu_irq_shutdown,
-	rm7k_cpu_irq_enable,
-	rm7k_cpu_irq_disable,
-	rm7k_cpu_irq_ack,
-	rm7k_cpu_irq_end,
+static struct irq_chip rm7k_irq_controller = {
+	.name = "RM7000",
+	.irq_ack = mask_rm7k_irq,
+	.irq_mask = mask_rm7k_irq,
+	.irq_mask_ack = mask_rm7k_irq,
+	.irq_unmask = unmask_rm7k_irq,
+	.irq_eoi = unmask_rm7k_irq
 };
 
-void __init rm7k_cpu_irq_init(int base)
+void __init rm7k_cpu_irq_init(void)
 {
+	int base = RM7K_CPU_IRQ_BASE;
 	int i;
 
 	clear_c0_intcontrol(0x00000f00);		/* Mask all */
 
-	for (i = base; i < base + 4; i++) {
-		irq_desc[i].status = IRQ_DISABLED;
-		irq_desc[i].action = NULL;
-		irq_desc[i].depth = 1;
-		irq_desc[i].handler = &rm7k_irq_controller;
-	}
-
-	irq_base = base;
+	for (i = base; i < base + 4; i++)
+		irq_set_chip_and_handler(i, &rm7k_irq_controller,
+					 handle_percpu_irq);
 }

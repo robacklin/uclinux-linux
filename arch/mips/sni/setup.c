@@ -5,130 +5,257 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1996, 1997, 1998, 2000 by Ralf Baechle
+ * Copyright (C) 1996, 97, 98, 2000, 03, 04, 06 Ralf Baechle (ralf@linux-mips.org)
+ * Copyright (C) 2006,2007 Thomas Bogendoerfer (tsbogend@alpha.franken.de)
  */
-#include <asm/ptrace.h>
-#include <linux/config.h>
-#include <linux/hdreg.h>
-#include <linux/ioport.h>
-#include <linux/sched.h>
+#include <linux/eisa.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
-#include <linux/timex.h>
-#include <linux/pci.h>
-#include <linux/mc146818rtc.h>
 #include <linux/console.h>
 #include <linux/fb.h>
-#include <linux/pc_keyb.h>
-#include <linux/ide.h>
+#include <linux/screen_info.h>
 
-#include <asm/bcache.h>
+#ifdef CONFIG_ARC
+#include <asm/fw/arc/types.h>
+#include <asm/sgialib.h>
+#endif
+
+#ifdef CONFIG_SNIPROM
+#include <asm/mipsprom.h>
+#endif
+
 #include <asm/bootinfo.h>
-#include <asm/keyboard.h>
 #include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/processor.h>
 #include <asm/reboot.h>
 #include <asm/sni.h>
-#include <asm/time.h>
-#include <asm/traps.h>
+
+unsigned int sni_brd_type;
+EXPORT_SYMBOL(sni_brd_type);
 
 extern void sni_machine_restart(char *command);
-extern void sni_machine_halt(void);
 extern void sni_machine_power_off(void);
 
-extern struct ide_ops std_ide_ops;
-extern struct rtc_ops std_rtc_ops;
-extern struct kbd_ops std_kbd_ops;
-
-static void __init sni_rm200_pci_time_init(struct irqaction *irq)
+static void __init sni_display_setup(void)
 {
-	/* set the clock to 100 Hz */
-	outb_p(0x34,0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
-	outb_p(LATCH & 0xff , 0x40);	/* LSB */
-	outb(LATCH >> 8 , 0x40);	/* MSB */
-	setup_irq(0, irq);
+#if defined(CONFIG_VT) && defined(CONFIG_VGA_CONSOLE) && defined(CONFIG_ARC)
+	struct screen_info *si = &screen_info;
+	DISPLAY_STATUS *di;
+
+	di = ArcGetDisplayStatus(1);
+
+	if (di) {
+		si->orig_x		= di->CursorXPosition;
+		si->orig_y		= di->CursorYPosition;
+		si->orig_video_cols	= di->CursorMaxXPosition;
+		si->orig_video_lines	= di->CursorMaxYPosition;
+		si->orig_video_isVGA	= VIDEO_TYPE_VGAC;
+		si->orig_video_points	= 16;
+	}
+#endif
 }
 
-
-extern unsigned char sni_map_isa_cache;
-
-/*
- * A bit more gossip about the iron we're running on ...
- */
-static inline void sni_pcimt_detect(void)
+static void __init sni_console_setup(void)
 {
-	char boardtype[80];
-	unsigned char csmsr;
-	char *p = boardtype;
-	unsigned int asic;
+#ifndef CONFIG_ARC
+	char *ctype;
+	char *cdev;
+	char *baud;
+	int port;
+	static char options[8] __initdata;
 
-	csmsr = *(volatile unsigned char *)PCIMT_CSMSR;
-
-	p += sprintf(p, "%s PCI", (csmsr & 0x80) ? "RM200" : "RM300");
-	if ((csmsr & 0x80) == 0)
-		p += sprintf(p, ", board revision %s",
-		             (csmsr & 0x20) ? "D" : "C");
-	asic = csmsr & 0x80;
-	asic = (csmsr & 0x08) ? asic : !asic;
-	p += sprintf(p, ", ASIC PCI Rev %s", asic ? "1.0" : "1.1");
-	printk("%s.\n", boardtype);
+	cdev = prom_getenv("console_dev");
+	if (strncmp(cdev, "tty", 3) == 0) {
+		ctype = prom_getenv("console");
+		switch (*ctype) {
+		default:
+		case 'l':
+			port = 0;
+			baud = prom_getenv("lbaud");
+			break;
+		case 'r':
+			port = 1;
+			baud = prom_getenv("rbaud");
+			break;
+		}
+		if (baud)
+			strcpy(options, baud);
+		if (strncmp(cdev, "tty552", 6) == 0)
+			add_preferred_console("ttyS", port,
+					      baud ? options : NULL);
+		else
+			add_preferred_console("ttySC", port,
+					      baud ? options : NULL);
+	}
+#endif
 }
 
-void __init sni_rm200_pci_setup(void)
+#ifdef DEBUG
+static void __init sni_idprom_dump(void)
 {
-	sni_pcimt_detect();
-	sni_pcimt_sc_init();
+	int	i;
+
+	pr_debug("SNI IDProm dump:\n");
+	for (i = 0; i < 256; i++) {
+		if (i%16 == 0)
+			pr_debug("%04x ", i);
+
+		printk("%02x ", *(unsigned char *) (SNI_IDPROM_BASE + i));
+
+		if (i % 16 == 15)
+			printk("\n");
+	}
+}
+#endif
+
+void __init plat_mem_setup(void)
+{
+	int cputype;
 
 	set_io_port_base(SNI_PORT_BASE);
+//	ioport_resource.end = sni_io_resource.end;
 
 	/*
 	 * Setup (E)ISA I/O memory access stuff
 	 */
-	isa_slot_offset = 0xb0000000;
-	// sni_map_isa_cache = 0;
+#ifdef CONFIG_EISA
 	EISA_bus = 1;
+#endif
 
-	request_region(0x00,0x20,"dma1");
-	request_region(0x40,0x20,"timer");
-	/* XXX FIXME: CONFIG_RTC */
-	request_region(0x70,0x10,"rtc");
-	request_region(0x80,0x10,"dma page reg");
-	request_region(0xc0,0x20,"dma2");
-	board_time_init = sni_rm200_pci_time_init;
+	sni_brd_type = *(unsigned char *)SNI_IDPROM_BRDTYPE;
+	cputype = *(unsigned char *)SNI_IDPROM_CPUTYPE;
+	switch (sni_brd_type) {
+	case SNI_BRD_TOWER_OASIC:
+		switch (cputype) {
+		case SNI_CPU_M8030:
+			system_type = "RM400-330";
+			break;
+		case SNI_CPU_M8031:
+			system_type = "RM400-430";
+			break;
+		case SNI_CPU_M8037:
+			system_type = "RM400-530";
+			break;
+		case SNI_CPU_M8034:
+			system_type = "RM400-730";
+			break;
+		default:
+			system_type = "RM400-xxx";
+			break;
+		}
+		break;
+	case SNI_BRD_MINITOWER:
+		switch (cputype) {
+		case SNI_CPU_M8021:
+		case SNI_CPU_M8043:
+			system_type = "RM400-120";
+			break;
+		case SNI_CPU_M8040:
+			system_type = "RM400-220";
+			break;
+		case SNI_CPU_M8053:
+			system_type = "RM400-225";
+			break;
+		case SNI_CPU_M8050:
+			system_type = "RM400-420";
+			break;
+		default:
+			system_type = "RM400-xxx";
+			break;
+		}
+		break;
+	case SNI_BRD_PCI_TOWER:
+		system_type = "RM400-Cxx";
+		break;
+	case SNI_BRD_RM200:
+		system_type = "RM200-xxx";
+		break;
+	case SNI_BRD_PCI_MTOWER:
+		system_type = "RM300-Cxx";
+		break;
+	case SNI_BRD_PCI_DESKTOP:
+		switch (read_c0_prid() & 0xff00) {
+		case PRID_IMP_R4600:
+		case PRID_IMP_R4700:
+			system_type = "RM200-C20";
+			break;
+		case PRID_IMP_R5000:
+			system_type = "RM200-C40";
+			break;
+		default:
+			system_type = "RM200-Cxx";
+			break;
+		}
+		break;
+	case SNI_BRD_PCI_TOWER_CPLUS:
+		system_type = "RM400-Exx";
+		break;
+	case SNI_BRD_PCI_MTOWER_CPLUS:
+		system_type = "RM300-Exx";
+		break;
+	}
+	pr_debug("Found SNI brdtype %02x name %s\n", sni_brd_type, system_type);
+
+#ifdef DEBUG
+	sni_idprom_dump();
+#endif
+
+	switch (sni_brd_type) {
+	case SNI_BRD_10:
+	case SNI_BRD_10NEW:
+	case SNI_BRD_TOWER_OASIC:
+	case SNI_BRD_MINITOWER:
+	        sni_a20r_init();
+	        break;
+
+	case SNI_BRD_PCI_TOWER:
+	case SNI_BRD_PCI_TOWER_CPLUS:
+	        sni_pcit_init();
+		break;
+
+	case SNI_BRD_RM200:
+	        sni_rm200_init();
+	        break;
+
+	case SNI_BRD_PCI_MTOWER:
+	case SNI_BRD_PCI_DESKTOP:
+	case SNI_BRD_PCI_MTOWER_CPLUS:
+	        sni_pcimt_init();
+	        break;
+	}
 
 	_machine_restart = sni_machine_restart;
-	_machine_halt = sni_machine_halt;
-	_machine_power_off = sni_machine_power_off;
+	pm_power_off = sni_machine_power_off;
 
-	aux_device_present = 0xaa;
+	sni_display_setup();
+	sni_console_setup();
+}
+
+#ifdef CONFIG_PCI
+
+#include <linux/pci.h>
+#include <video/vga.h>
+#include <video/cirrus.h>
+
+static void __devinit quirk_cirrus_ram_size(struct pci_dev *dev)
+{
+	u16 cmd;
 
 	/*
-	 * Some cluefull person has placed the PCI config data directly in
-	 * the I/O port space ...
+	 * firmware doesn't set the ram size correct, so we
+	 * need to do it here, otherwise we get screen corruption
+	 * on older Cirrus chips
 	 */
-	request_region(0xcfc,0x04,"PCI config data");
-
-#ifdef CONFIG_BLK_DEV_IDE
-	ide_ops = &std_ide_ops;
-#endif
-	conswitchp = &vga_con;
-
-	screen_info = (struct screen_info) {
-		0, 0,		/* orig-x, orig-y */
-		0,		/* unused */
-		52,		/* orig_video_page */
-		3,		/* orig_video_mode */
-		80,		/* orig_video_cols */
-		4626, 3, 9,	/* unused, ega_bx, unused */
-		50,		/* orig_video_lines */
-		0x22,		/* orig_video_isVGA */
-		16		/* orig_video_points */
-	};
-
-	rtc_ops = &std_rtc_ops;
-	kbd_ops = &std_kbd_ops;
-#ifdef CONFIG_PSMOUSE
-	aux_device_present = 0xaa;
-#endif
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	if ((cmd & (PCI_COMMAND_IO|PCI_COMMAND_MEMORY))
+	        == (PCI_COMMAND_IO|PCI_COMMAND_MEMORY)) {
+		vga_wseq(NULL, CL_SEQR6, 0x12);	/* unlock all extension registers */
+		vga_wseq(NULL, CL_SEQRF, 0x18);
+	}
 }
+
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CIRRUS, PCI_DEVICE_ID_CIRRUS_5434_8,
+                        quirk_cirrus_ram_size);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CIRRUS, PCI_DEVICE_ID_CIRRUS_5436,
+                        quirk_cirrus_ram_size);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CIRRUS, PCI_DEVICE_ID_CIRRUS_5446,
+                        quirk_cirrus_ram_size);
+#endif

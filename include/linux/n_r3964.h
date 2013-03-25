@@ -4,7 +4,6 @@
  * Copyright by
  * Philips Automation Projects
  * Kassel (Germany)
- * http://www.pap-philips.de
  * -----------------------------------------------------------
  * This software may be used and distributed according to the terms of
  * the GNU General Public License, incorporated herein by reference.
@@ -13,6 +12,16 @@
  * L. Haag
  *
  * $Log: r3964.h,v $
+ * Revision 1.4  2005/12/21 19:54:24  Kurt Huwig <kurt huwig de>
+ * Fixed HZ usage on 2.6 kernels
+ * Removed unnecessary include
+ *
+ * Revision 1.3  2001/03/18 13:02:24  dwmw2
+ * Fix timer usage, use spinlocks properly.
+ *
+ * Revision 1.2  2001/03/18 12:53:15  dwmw2
+ * Merge changes in 2.4.2
+ *
  * Revision 1.1.1.1  1998/10/13 16:43:14  dwmw2
  * This'll screw the version control
  *
@@ -39,9 +48,11 @@
 #define __LINUX_N_R3964_H__
 
 /* line disciplines for r3964 protocol */
-#include <asm/termios.h>
 
 #ifdef __KERNEL__
+
+#include <linux/param.h>
+
 /*
  * Common ascii handshake characters:
  */
@@ -52,14 +63,14 @@
 #define NAK 0x15
 
 /*
- * Timeouts (msecs/10 msecs per timer interrupt):
+ * Timeouts (from milliseconds to jiffies)
  */
 
-#define R3964_TO_QVZ 550/10
-#define R3964_TO_ZVZ 220/10
-#define R3964_TO_NO_BUF 400/10
-#define R3964_NO_TX_ROOM 100/10
-#define R3964_TO_RX_PANIC 4000/10
+#define R3964_TO_QVZ ((550)*HZ/1000)
+#define R3964_TO_ZVZ ((220)*HZ/1000)
+#define R3964_TO_NO_BUF ((400)*HZ/1000)
+#define R3964_NO_TX_ROOM ((100)*HZ/1000)
+#define R3964_TO_RX_PANIC ((4000)*HZ/1000)
 #define R3964_MAX_RETRIES 5
 
 #endif
@@ -103,8 +114,9 @@ enum { R3964_IDLE,
 struct r3964_message;
 
 struct r3964_client_info {
-	pid_t          pid;
-    unsigned int   sig_flags;
+	spinlock_t     lock;
+	struct pid    *pid;
+	unsigned int   sig_flags;
 
 	struct r3964_client_info *next;
 
@@ -158,7 +170,7 @@ struct r3964_block_header
 {
 	unsigned int length;             /* length in chars without header */
 	unsigned char *data;             /* usually data is located 
-                                        immediatly behind this struct */
+                                        immediately behind this struct */
 	unsigned int locks;              /* only used in rx_buffer */
 	  
     struct r3964_block_header *next;
@@ -186,6 +198,7 @@ struct r3964_block_header
 
 
 struct r3964_info {
+	spinlock_t     lock;
 	struct tty_struct *tty;
 	unsigned char priority;
 	unsigned char *rx_buf;            /* ring buffer */
@@ -209,11 +222,8 @@ struct r3964_info {
 	unsigned int state;
 	unsigned int flags;
 
-	int count_down;
-    int nRetry;
-
-    struct tq_struct bh_1;
-    struct tq_struct bh_2;
+	struct timer_list tmr;
+	int nRetry;
 };
 
 #endif	

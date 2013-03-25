@@ -3,25 +3,14 @@
  *
  *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
- *  Platform depend startup for uClinux-2.4.x
+ *  Platform depend startup
  *  Target Archtecture:	generic
  *  Memory Layout     :	ROM
  */
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
-	
-#if !defined(CONFIG_BLKDEV_RESERVE)
-#if defined(CONFIG_GDB_DEBUG)
-#define RAMEND (__ramend - 0xc000)
-#else
-#define RAMEND __ramend
-#endif
-#else
-#define RAMEND CONFIG_BLKDEV_RESERVE_ADDRESS
-#endif
 	
 	.global SYMBOL_NAME(_start)
 	.global SYMBOL_NAME(_command_line)
@@ -34,34 +23,39 @@
 
 	/* CPU Reset entry */
 SYMBOL_NAME_LABEL(_start)
-	mov.l	#RAMEND,sp
+	mov.l	#__ramend,sp
 	ldc	#0x80,ccr
 
 	/* Peripheral Setup */
 	
 	/* .bss clear */
 	mov.l	#__sbss,er5
-	mov.l	er5,er6
-	inc.l	#1,er6
 	mov.l	#__ebss,er4
 	sub.l	er5,er4
-	sub.w	r0,r0
-	mov.b	r0l,@er5
+	shlr	er4
+	shlr	er4
+	sub.l	er0,er0
 1:	
-	eepmov.w
-	dec.w	#1,e4
-	bpl	1b
+	mov.l	er0,@er5
+	adds	#4,er5
+	dec.l	#1,er4
+	bne	1b
 
 	/* copy .data */
-#if !defined(CONFIG_GDB_EXEC)
+#if !defined(CONFIG_H8300H_SIM)
+	/* copy .data */
 	mov.l	#__begin_data,er5
 	mov.l	#__sdata,er6
 	mov.l	#__edata,er4
-	sub.l	er6,er4		
+	sub.l	er6,er4
+	shlr.l	er4
+	shlr.l	er4
 1:	
-	eepmov.w	
-	dec.w	#1,e4
-	bpl	1b	
+	mov.l	@er5+,er0
+	mov.l	er0,@er6
+	adds	#4,er6
+	dec.l	#1,er4
+	bne	1b	
 #endif
 
 	/* copy kernel commandline */
@@ -70,10 +64,9 @@ SYMBOL_NAME_LABEL(_start)
 	mov.w	#512,r4
 	eepmov.w
 
-	/* uClinux kernel start */
+	/* linux kernel start */
 	ldc	#0x90,ccr	/* running kernel */
-	mov.l	#SYMBOL_NAME(init_task_union),sp
-	mov.l	sp,@SYMBOL_NAME(_current_task)
+	mov.l	#SYMBOL_NAME(init_thread_union),sp
 	add.l	#0x2000,sp
 	jsr	@_start_kernel
 _exit:
@@ -111,6 +104,7 @@ gpio_table:
 	;; PBDDR
 	.byte	0x00,0x00
 
+	.section .rodata
 __target_name:	
 	.asciz	"generic"
 	

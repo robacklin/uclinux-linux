@@ -11,128 +11,125 @@
 # for more details.
 #
 # Copyright (C) 1994 by Hamish Macdonald
+# Copyright (C) 2002,2011 Greg Ungerer <gerg@snapgear.com>
 #
 
-# test for cross compiling
-COMPILE_ARCH = $(shell uname -m)
+KBUILD_DEFCONFIG := multi_defconfig
 
-# override top level makefile
-AS += -m68020
-LD += -m m68kelf
-ifneq ($(COMPILE_ARCH),$(ARCH))
-	# prefix for cross-compiling binaries
-	CROSS_COMPILE = m68k-linux-
-endif
-
-ifndef CONFIG_SUN3
-LINKFLAGS = -T $(TOPDIR)/arch/m68k/vmlinux.lds
-else
-LINKFLAGS = -T $(TOPDIR)/arch/m68k/vmlinux-sun3.lds -N
-endif
-
-# without -fno-strength-reduce the 53c7xx.c driver fails ;-(
-CFLAGS += -pipe -fno-strength-reduce -ffixed-a2
-
-# enable processor switch if compiled only for a single cpu
-ifndef CONFIG_M68020
-ifndef CONFIG_M68030
-
-ifndef CONFIG_M68060
-CFLAGS := $(CFLAGS) -m68040
-endif
-
+#
+#	Enable processor type. Ordering of these is important - we want to
+#	use the minimum processor type of the range we support. The logic
+#	for 680x0 will only allow use of the -m68060 or -m68040 if no other
+#	680x0 type is specified - and no option is specified for 68030 or
+#	68020. The other m68k/ColdFire types always specify some type of
+#	compiler cpu type flag.
+#
 ifndef CONFIG_M68040
-CFLAGS := $(CFLAGS) -m68060
+cpuflags-$(CONFIG_M68060)	:= -m68060
+endif
+ifndef CONFIG_M68060
+cpuflags-$(CONFIG_M68040)	:= -m68040
+endif
+cpuflags-$(CONFIG_M68030)	:=
+cpuflags-$(CONFIG_M68020)	:=
+cpuflags-$(CONFIG_M68360)	:= -m68332
+cpuflags-$(CONFIG_M68000)	:= -m68000
+cpuflags-$(CONFIG_M54xx)	:= $(call cc-option,-mcpu=5475,-m5200)
+cpuflags-$(CONFIG_M5407)	:= $(call cc-option,-mcpu=5407,-m5200)
+cpuflags-$(CONFIG_M532x)	:= $(call cc-option,-mcpu=532x,-m5307)
+cpuflags-$(CONFIG_M5307)	:= $(call cc-option,-mcpu=5307,-m5200)
+cpuflags-$(CONFIG_M528x)	:= $(call cc-option,-mcpu=528x,-m5307)
+cpuflags-$(CONFIG_M5275)	:= $(call cc-option,-mcpu=5275,-m5307)
+cpuflags-$(CONFIG_M5272)	:= $(call cc-option,-mcpu=5272,-m5307)
+cpuflags-$(CONFIG_M5271)	:= $(call cc-option,-mcpu=5271,-m5307)
+cpuflags-$(CONFIG_M523x)	:= $(call cc-option,-mcpu=523x,-m5307)
+cpuflags-$(CONFIG_M5249)	:= $(call cc-option,-mcpu=5249,-m5200)
+cpuflags-$(CONFIG_M520x)	:= $(call cc-option,-mcpu=5208,-m5200)
+cpuflags-$(CONFIG_M5206e)	:= $(call cc-option,-mcpu=5206e,-m5200)
+cpuflags-$(CONFIG_M5206)	:= $(call cc-option,-mcpu=5206,-m5200)
+
+KBUILD_AFLAGS += $(cpuflags-y)
+KBUILD_CFLAGS += $(cpuflags-y) -pipe
+ifdef CONFIG_MMU
+# without -fno-strength-reduce the 53c7xx.c driver fails ;-(
+KBUILD_CFLAGS += -fno-strength-reduce -ffixed-a2
+else
+# we can use a m68k-linux-gcc toolchain with these in place
+KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+KBUILD_CFLAGS += -D__uClinux__
+KBUILD_AFLAGS += -D__uClinux__
 endif
 
+LDFLAGS := -m m68kelf
+KBUILD_LDFLAGS_MODULE += -T $(srctree)/arch/m68k/kernel/module.lds
+ifneq ($(SUBARCH),$(ARCH))
+	ifeq ($(CROSS_COMPILE),)
+		CROSS_COMPILE := $(call cc-cross-prefix, \
+			m68k-linux-gnu- m68k-linux- m68k-unknown-linux-gnu-)
+	endif
 endif
+
+ifdef CONFIG_SUN3
+LDFLAGS_vmlinux = -N
 endif
+
+CHECKFLAGS += -D__mc68000__
+
 
 ifdef CONFIG_KGDB
 # If configured for kgdb support, include debugging infos and keep the
 # frame pointer
-CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS)) -g
+KBUILD_CFLAGS := $(subst -fomit-frame-pointer,,$(KBUILD_CFLAGS)) -g
 endif
 
-ifndef CONFIG_SUN3
-HEAD := arch/m68k/kernel/head.o
-else
-HEAD := arch/m68k/kernel/sun3-head.o
-endif 
+#
+# Select the assembler head startup code. Order is important. The default
+# head code is first, processor specific selections can override it after.
+#
+head-y				:= arch/m68k/kernel/head.o
+head-$(CONFIG_SUN3)		:= arch/m68k/kernel/sun3-head.o
+head-$(CONFIG_M68360)		:= arch/m68k/platform/68360/head.o
+head-$(CONFIG_M68000)		:= arch/m68k/platform/68328/head.o
+head-$(CONFIG_COLDFIRE)		:= arch/m68k/platform/coldfire/head.o
 
-SUBDIRS += arch/m68k/kernel arch/m68k/mm arch/m68k/lib
-CORE_FILES := arch/m68k/kernel/kernel.o arch/m68k/mm/mm.o $(CORE_FILES)
-LIBS += arch/m68k/lib/lib.a
+core-y				+= arch/m68k/kernel/	arch/m68k/mm/
+libs-y				+= arch/m68k/lib/
 
-ifdef CONFIG_Q40
-CORE_FILES := $(CORE_FILES) arch/m68k/q40/q40.o
-SUBDIRS := $(SUBDIRS) arch/m68k/q40
-endif
+core-$(CONFIG_Q40)		+= arch/m68k/q40/
+core-$(CONFIG_AMIGA)		+= arch/m68k/amiga/
+core-$(CONFIG_ATARI)		+= arch/m68k/atari/
+core-$(CONFIG_MAC)		+= arch/m68k/mac/
+core-$(CONFIG_HP300)		+= arch/m68k/hp300/
+core-$(CONFIG_APOLLO)		+= arch/m68k/apollo/
+core-$(CONFIG_MVME147)		+= arch/m68k/mvme147/
+core-$(CONFIG_MVME16x)		+= arch/m68k/mvme16x/
+core-$(CONFIG_BVME6000)		+= arch/m68k/bvme6000/
+core-$(CONFIG_SUN3X)		+= arch/m68k/sun3x/	arch/m68k/sun3/
+core-$(CONFIG_SUN3)		+= arch/m68k/sun3/	arch/m68k/sun3/prom/
+core-$(CONFIG_NATFEAT)		+= arch/m68k/emu/
+core-$(CONFIG_M68040)		+= arch/m68k/fpsp040/
+core-$(CONFIG_M68060)		+= arch/m68k/ifpsp060/
+core-$(CONFIG_M68KFPU_EMU)	+= arch/m68k/math-emu/
+core-$(CONFIG_M68360)		+= arch/m68k/platform/68360/
+core-$(CONFIG_M68000)		+= arch/m68k/platform/68328/
+core-$(CONFIG_M68EZ328)		+= arch/m68k/platform/68EZ328/
+core-$(CONFIG_M68VZ328)		+= arch/m68k/platform/68VZ328/
+core-$(CONFIG_COLDFIRE)		+= arch/m68k/platform/coldfire/
+core-$(CONFIG_M5206)		+= arch/m68k/platform/5206/
+core-$(CONFIG_M5206e)		+= arch/m68k/platform/5206/
+core-$(CONFIG_M520x)		+= arch/m68k/platform/520x/
+core-$(CONFIG_M523x)		+= arch/m68k/platform/523x/
+core-$(CONFIG_M5249)		+= arch/m68k/platform/5249/
+core-$(CONFIG_M527x)		+= arch/m68k/platform/527x/
+core-$(CONFIG_M5272)		+= arch/m68k/platform/5272/
+core-$(CONFIG_M528x)		+= arch/m68k/platform/528x/
+core-$(CONFIG_M5307)		+= arch/m68k/platform/5307/
+core-$(CONFIG_M532x)		+= arch/m68k/platform/532x/
+core-$(CONFIG_M5407)		+= arch/m68k/platform/5407/
+core-$(CONFIG_M54xx)		+= arch/m68k/platform/54xx/
 
-ifdef CONFIG_AMIGA
-CORE_FILES := $(CORE_FILES) arch/m68k/amiga/amiga.o
-SUBDIRS := $(SUBDIRS) arch/m68k/amiga
-endif
 
-ifdef CONFIG_ATARI
-CORE_FILES := $(CORE_FILES) arch/m68k/atari/atari.o
-SUBDIRS := $(SUBDIRS) arch/m68k/atari
-endif
-
-ifdef CONFIG_MAC
-CORE_FILES := $(CORE_FILES) arch/m68k/mac/mac.o
-SUBDIRS := $(SUBDIRS) arch/m68k/mac
-endif
-
-ifdef CONFIG_HP300
-CORE_FILES := $(CORE_FILES) arch/m68k/hp300/hp300.o
-SUBDIRS := $(SUBDIRS) arch/m68k/hp300
-endif
-
-ifdef CONFIG_APOLLO
-CORE_FILES := $(CORE_FILES) arch/m68k/apollo/apollo.o
-SUBDIRS := $(SUBDIRS) arch/m68k/apollo
-endif
-
-ifdef CONFIG_MVME147
-CORE_FILES := $(CORE_FILES) arch/m68k/mvme147/mvme147.o
-SUBDIRS := $(SUBDIRS) arch/m68k/mvme147
-endif
-
-ifdef CONFIG_MVME16x
-CORE_FILES := $(CORE_FILES) arch/m68k/mvme16x/mvme16x.o
-SUBDIRS := $(SUBDIRS) arch/m68k/mvme16x
-endif
-
-ifdef CONFIG_BVME6000
-CORE_FILES := $(CORE_FILES) arch/m68k/bvme6000/bvme6000.o
-SUBDIRS := $(SUBDIRS) arch/m68k/bvme6000
-endif
-
-ifdef CONFIG_SUN3X
-CORE_FILES := $(CORE_FILES) arch/m68k/sun3x/sun3x.o arch/m68k/sun3/sun3.o
-SUBDIRS := $(SUBDIRS) arch/m68k/sun3x arch/m68k/sun3
-endif
-
-ifdef CONFIG_SUN3
-CORE_FILES := $(CORE_FILES) arch/m68k/sun3/sun3.o arch/m68k/sun3/prom/promlib.a
-SUBDIRS := $(SUBDIRS) arch/m68k/sun3 arch/m68k/sun3/prom
-endif
-
-ifdef CONFIG_M68040
-CORE_FILES := $(CORE_FILES) arch/m68k/fpsp040/fpsp.o
-SUBDIRS := $(SUBDIRS) arch/m68k/fpsp040
-endif
-
-ifdef CONFIG_M68060
-CORE_FILES := $(CORE_FILES) arch/m68k/ifpsp060/ifpsp.o
-SUBDIRS := $(SUBDIRS) arch/m68k/ifpsp060
-endif
-
-ifdef CONFIG_M68KFPU_EMU
-CORE_FILES := $(CORE_FILES) arch/m68k/math-emu/mathemu.o
-SUBDIRS := $(SUBDIRS) arch/m68k/math-emu
-endif
+all:	zImage
 
 lilo:	vmlinux
 	if [ -f $(INSTALL_PATH)/vmlinux ]; then mv -f $(INSTALL_PATH)/vmlinux $(INSTALL_PATH)/vmlinux.old; fi
@@ -169,8 +166,6 @@ endif
 
 archclean:
 	rm -f vmlinux.gz vmlinux.bz2
-	rm -f arch/m68k/kernel/m68k_defs.h arch/m68k/kernel/m68k_defs.d
 
-archmrproper:
-
-archdep:
+install:
+	sh $(srctree)/arch/m68k/install.sh $(KERNELRELEASE) vmlinux.gz System.map "$(INSTALL_PATH)"

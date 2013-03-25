@@ -1,40 +1,26 @@
 #
-# arch/s390/boot/Makefile
+# Makefile for the linux s390-specific parts of the memory manager.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-OBJCOPY = $(CROSS_COMPILE)objcopy
+COMPILE_VERSION := __linux_compile_version_id__`hostname |  \
+			tr -c '[0-9A-Za-z]' '_'`__`date | \
+			tr -c '[0-9A-Za-z]' '_'`_t
 
-O_TARGET := 
+ccflags-y  := -DCOMPILE_VERSION=$(COMPILE_VERSION) -gstabs -I.
 
-include $(TOPDIR)/Rules.make
+targets := image
+targets += bzImage
+subdir- := compressed
 
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
+$(obj)/image: vmlinux FORCE
+	$(call if_changed,objcopy)
 
-%.lnk: %.o
-	$(LD) -Ttext 0x0 -o $@ $<
+$(obj)/bzImage: $(obj)/compressed/vmlinux FORCE
+	$(call if_changed,objcopy)
 
-%.boot: %.lnk
-	$(OBJCOPY) -O binary $< $@
+$(obj)/compressed/vmlinux: FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
 
-image: $(CONFIGURE) $(TOPDIR)/vmlinux \
-	iplfba.boot ipleckd.boot ipldump.boot
-	$(OBJCOPY) -O binary $(TOPDIR)/vmlinux image
-	$(NM) $(TOPDIR)/vmlinux | grep -v '\(compiled\)\|\( [aUw] \)\|\(\.\)\|\(LASH[RL]DI\)' | sort > $(TOPDIR)/System.map
-
-listing: ../../../vmlinux
-	$(OBJDUMP) --disassemble --disassemble-all --disassemble-zeroes --reloc $(TOPDIR)/vmlinux > listing
-
-dep:
-
-clean:
-	rm -f image listing iplfba.boot ipleckd.boot ipldump.boot
-
-install: $(CONFIGURE) $(BOOTIMAGE)
-	sh -x ./install.sh $(KERNELRELEASE) $(BOOTIMAGE) $(TOPDIR)/System.map $(TOPDIR)/Kerntypes "$(INSTALL_PATH)"
-
+install: $(CONFIGURE) $(obj)/image
+	sh -x  $(srctree)/$(obj)/install.sh $(KERNELRELEASE) $(obj)/image \
+	      System.map "$(INSTALL_PATH)"

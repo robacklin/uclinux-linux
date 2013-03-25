@@ -27,30 +27,26 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_subr.c,v 1.8 2001/12/28 20:50:47 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - shared subroutines.
  */
 #include <linux/fs.h>
+#include <linux/buffer_head.h>
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/pagemap.h>
 
-#include "vxfs_kcompat.h"
 #include "vxfs_extern.h"
 
 
 static int		vxfs_readpage(struct file *, struct page *);
-static int		vxfs_bmap(struct address_space *, long);
+static sector_t		vxfs_bmap(struct address_space *, sector_t);
 
-struct address_space_operations vxfs_aops = {
+const struct address_space_operations vxfs_aops = {
 	.readpage =		vxfs_readpage,
 	.bmap =			vxfs_bmap,
-	.sync_page =		block_sync_page,
 };
 
-__inline__ void
+inline void
 vxfs_put_page(struct page *pp)
 {
 	kunmap(pp);
@@ -73,14 +69,10 @@ vxfs_get_page(struct address_space *mapping, u_long n)
 {
 	struct page *			pp;
 
-	pp = read_cache_page(mapping, n,
-			(filler_t*)mapping->a_ops->readpage, NULL);
+	pp = read_mapping_page(mapping, n, NULL);
 
 	if (!IS_ERR(pp)) {
-		wait_on_page(pp);
 		kmap(pp);
-		if (!Page_Uptodate(pp))
-			goto fail;
 		/** if (!PageChecked(pp)) **/
 			/** vxfs_check_page(pp); **/
 		if (PageError(pp))
@@ -184,8 +176,8 @@ vxfs_readpage(struct file *file, struct page *page)
  * Locking status:
  *   We are under the bkl.
  */
-static int
-vxfs_bmap(struct address_space *mapping, long block)
+static sector_t
+vxfs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping, block, vxfs_getblk);
 }

@@ -1,24 +1,31 @@
+# arch/arm/mach-ks8695/Makefile
 #
-# Makefile for the linux kernel.
+# Makefile for KS8695 architecture support
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
 
-USE_STANDARD_AS_RULE := true
+obj-y				:= cpu.o irq.o time.o devices.o
+obj-m				:=
+obj-n				:=
+obj-				:=
 
-O_TARGET		:= ks8695.o
+# PCI support is optional
+obj-$(CONFIG_PCI)		+= pci.o
 
-# Object file lists.
+# LEDs
+obj-$(CONFIG_LEDS)		+= leds.o
 
-obj-y			:= arch.o irq.o mm.o
-obj-m			:=
-obj-n			:=
-obj-			:=
+obj-$(CONFIG_KS8695_DEBUG_FIQ)	+= fiq.o
 
-export-objs		:= leds.o
-
-obj-$(CONFIG_LEDS)	+= leds.o
-obj-$(CONFIG_PCI)       += ks8695p_pci.o pci.o
-
-include $(TOPDIR)/Rules.make
+# Board-specific support
+obj-$(CONFIG_MACH_KS8695)	+= board-micrel.o
+obj-$(CONFIG_MACH_LITE300)	+= board-sg.o
+obj-$(CONFIG_MACH_SG310)	+= board-sg.o
+obj-$(CONFIG_MACH_PFW)		+= board-sg.o
+obj-$(CONFIG_MACH_SE4200)	+= board-sg.o
+obj-$(CONFIG_MACH_CM4002)	+= board-og.o
+obj-$(CONFIG_MACH_CM4008)	+= board-og.o
+obj-$(CONFIG_MACH_CM41xx)	+= board-og.o
+obj-$(CONFIG_MACH_IM42xx)	+= board-og.o
+obj-$(CONFIG_MACH_IM4004)	+= board-og.o
+obj-$(CONFIG_MACH_DSM320)	+= board-dsm320.o
+obj-$(CONFIG_MACH_ACS5K)	+= board-acs5k.o

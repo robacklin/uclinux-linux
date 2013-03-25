@@ -2,22 +2,16 @@
 # S/390 network devices
 #
 
-O_TARGET := s390-net.o
-
-list-multi := ctc.o
-export-objs := iucv.o fsm.o
-
-ctc-objs := ctcmain.o ctctty.o
-
-obj-$(CONFIG_IUCV) += iucv.o fsm.o
-obj-$(CONFIG_CTC) += ctc.o fsm.o
-obj-$(CONFIG_IUCV) += netiucv.o
-obj-$(CONFIG_C7000) += c7000.o
+ctcm-y += ctcm_main.o ctcm_fsms.o ctcm_mpc.o ctcm_sysfs.o ctcm_dbug.o
+obj-$(CONFIG_CTCM) += ctcm.o fsm.o
+obj-$(CONFIG_NETIUCV) += netiucv.o fsm.o
+obj-$(CONFIG_SMSGIUCV) += smsgiucv.o
+obj-$(CONFIG_SMSGIUCV_EVENT) += smsgiucv_app.o
+obj-$(CONFIG_LCS) += lcs.o
+obj-$(CONFIG_CLAW) += claw.o
+qeth-y += qeth_core_sys.o qeth_core_main.o qeth_core_mpc.o
 obj-$(CONFIG_QETH) += qeth.o
-export-objs += qeth.o
-
-include $(TOPDIR)/Rules.make
-
-ctc.o: $(ctc-objs)
-	$(LD) -r -o $@ $(ctc-objs)
-
+qeth_l2-y += qeth_l2_main.o
+obj-$(CONFIG_QETH_L2) += qeth_l2.o
+qeth_l3-y += qeth_l3_main.o qeth_l3_sys.o
+obj-$(CONFIG_QETH_L3) += qeth_l3.o

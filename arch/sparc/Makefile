@@ -1,68 +1,115 @@
-# $Id: Makefile,v 1.49 2001/07/27 09:42:22 davem Exp $
+#
 # sparc/Makefile
 #
 # Makefile for the architecture dependent flags and dependencies on the
-# Sparc.
+# Sparc and sparc64.
 #
-# Copyright (C) 1994 David S. Miller (davem@caip.rutgers.edu)
+# Copyright (C) 1994,1996,1998 David S. Miller (davem@caip.rutgers.edu)
+# Copyright (C) 1998 Jakub Jelinek (jj@ultra.linux.cz)
+
+# We are not yet configured - so test on arch
+ifeq ($(ARCH),sparc)
+        KBUILD_DEFCONFIG := sparc32_defconfig
+else
+        KBUILD_DEFCONFIG := sparc64_defconfig
+endif
+
+ifeq ($(CONFIG_SPARC32),y)
+#####
+# sparc32
 #
 
-# If the solaris /bin/sh wasn't so broken, I wouldn't need the following
-# line...
-SHELL  =/bin/bash
-
 #
-# Uncomment the first CFLAGS if you are doing kgdb source level
+# Uncomment the first KBUILD_CFLAGS if you are doing kgdb source level
 # debugging of the kernel to get the proper debugging information.
 
-IS_EGCS := $(shell if $(CC) -m32 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo y; else echo n; fi; )
-NEW_GAS := $(shell if $(LD) -V 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
+AS             := $(AS) -32
+LDFLAGS        := -m elf32_sparc
+CHECKFLAGS     += -D__sparc__
+export BITS    := 32
+UTS_MACHINE    := sparc
 
-ifeq ($(NEW_GAS),y)
-AS              := $(AS) -32
-LD              := $(LD) -m elf32_sparc
-endif
+#KBUILD_CFLAGS += -g -pipe -fcall-used-g5 -fcall-used-g7
+KBUILD_CFLAGS += -m32 -pipe -mno-fpu -fcall-used-g5 -fcall-used-g7
+KBUILD_AFLAGS += -m32 -Wa,-Av8
 
-#CFLAGS := $(CFLAGS) -g -pipe -fcall-used-g5 -fcall-used-g7
-ifneq ($(IS_EGCS),y)
-CFLAGS := $(CFLAGS) -pipe -mno-fpu -fcall-used-g5 -fcall-used-g7
+#LDFLAGS_vmlinux = -N -Ttext 0xf0004000
+#  Since 2.5.40, the first stage is left not btfix-ed.
+#  Actual linking is done with "make image".
+LDFLAGS_vmlinux = -r
+
 else
-CFLAGS := $(CFLAGS) -m32 -pipe -mno-fpu -fcall-used-g5 -fcall-used-g7
+#####
+# sparc64
+#
+
+CHECKFLAGS      += -D__sparc__ -D__sparc_v9__ -D__arch64__ -m64
+
+LDFLAGS              := -m elf64_sparc
+export BITS          := 64
+UTS_MACHINE          := sparc64
+
+KBUILD_CFLAGS += -m64 -pipe -mno-fpu -mcpu=ultrasparc -mcmodel=medlow   \
+                 -ffixed-g4 -ffixed-g5 -fcall-used-g7 -Wno-sign-compare \
+                 -Wa,--undeclared-regs
+KBUILD_CFLAGS += $(call cc-option,-mtune=ultrasparc3)
+KBUILD_AFLAGS += -m64 -mcpu=ultrasparc -Wa,--undeclared-regs
+
+ifeq ($(CONFIG_MCOUNT),y)
+  KBUILD_CFLAGS += -pg
 endif
 
-#LINKFLAGS = -N -Ttext 0xf0004000
-LINKFLAGS = -T arch/sparc/vmlinux.lds
+endif
 
-HEAD := arch/sparc/kernel/head.o arch/sparc/kernel/init_task.o
+head-y                 := arch/sparc/kernel/head_$(BITS).o
+head-y                 += arch/sparc/kernel/init_task.o
 
-SUBDIRS += arch/sparc/kernel arch/sparc/lib arch/sparc/prom \
-	arch/sparc/mm arch/sparc/math-emu
+core-y                 += arch/sparc/kernel/
+core-y                 += arch/sparc/mm/ arch/sparc/math-emu/
 
-CORE_FILES := arch/sparc/kernel/kernel.o arch/sparc/mm/mm.o $(CORE_FILES) \
-	arch/sparc/math-emu/math-emu.o
+libs-y                 += arch/sparc/prom/
+libs-y                 += arch/sparc/lib/
 
-LIBS := $(TOPDIR)/lib/lib.a $(LIBS) $(TOPDIR)/arch/sparc/prom/promlib.a \
-	$(TOPDIR)/arch/sparc/lib/lib.a
+drivers-$(CONFIG_OPROFILE)	+= arch/sparc/oprofile/
 
-# This one has to come last
-_dir_arch/sparc/boot : $(patsubst %, _dir_%, $(SUBDIRS))
-SUBDIRS += arch/sparc/boot
-CORE_FILES_NO_BTFIX := $(CORE_FILES)
-CORE_FILES += arch/sparc/boot/btfix.o
+# Export what is needed by arch/sparc/boot/Makefile
+export VMLINUX_INIT VMLINUX_MAIN
+VMLINUX_INIT := $(head-y) $(init-y)
+VMLINUX_MAIN := $(core-y) kernel/ mm/ fs/ ipc/ security/ crypto/ block/
+VMLINUX_MAIN += $(patsubst %/, %/lib.a, $(libs-y)) $(libs-y)
+VMLINUX_MAIN += $(drivers-y) $(net-y)
 
-export	CORE_FILES_NO_BTFIX
+ifdef CONFIG_KALLSYMS
+export kallsyms.o := .tmp_kallsyms2.o
+endif
+
+boot := arch/sparc/boot
+
+# Default target
+all: zImage
+
+image zImage uImage tftpboot.img vmlinux.aout: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
 archclean:
-	rm -f $(TOPDIR)/vmlinux.aout
-	-$(MAKE) -C arch/sparc/boot clean
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-archmrproper:
-	rm -f $(TOPDIR)/include/asm-sparc/asm_offsets.h
+# This is the image used for packaging
+KBUILD_IMAGE := $(boot)/zImage
 
-archdep: check_asm
-
-check_asm: include/linux/version.h
-	$(MAKE) -C arch/sparc/kernel check_asm
-
-tftpboot.img:
-	$(MAKE) -C arch/sparc/boot tftpboot.img
+# Don't use tabs in echo arguments.
+ifeq ($(ARCH),sparc)
+define archhelp
+  echo  '* image        - kernel image ($(boot)/image)'
+  echo  '* zImage       - stripped kernel image ($(boot)/zImage)'
+  echo  '  uImage       - U-Boot SPARC32 Image (only for LEON)'
+  echo  '  tftpboot.img - image prepared for tftp'
+endef
+else
+define archhelp
+  echo  '* vmlinux      - standard sparc64 kernel'
+  echo  '* zImage       - stripped and compressed sparc64 kernel ($(boot)/zImage)'
+  echo  '  vmlinux.aout - a.out kernel for sparc64'
+  echo  '  tftpboot.img - image prepared for tftp'
+endef
+endif

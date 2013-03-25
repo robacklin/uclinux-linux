@@ -18,6 +18,7 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #include <linux/init.h>
+#include <linux/memblock.h>
 #include <linux/types.h>
 #include <linux/string.h>
 
@@ -25,12 +26,18 @@
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
 
-extern void clps711x_init_irq(void);
+#include "common.h"
+
 extern void edb7211_map_io(void);
 
+/* Reserve screen memory region at the start of main system memory. */
+static void __init edb7211_reserve(void)
+{
+	memblock_reserve(PHYS_OFFSET, 0x00020000);
+}
+
 static void __init
-fixup_edb7211(struct machine_desc *desc, struct param_struct *params,
-	      char **cmdline, struct meminfo *mi)
+fixup_edb7211(struct tag *tags, char **cmdline, struct meminfo *mi)
 {
 	/*
 	 * Bank start addresses are not present in the information
@@ -42,18 +49,18 @@ fixup_edb7211(struct machine_desc *desc, struct param_struct *params,
 	 */
 	mi->bank[0].start = 0xc0000000;
 	mi->bank[0].size = 8*1024*1024;
-	mi->bank[0].node = 0;
 	mi->bank[1].start = 0xc1000000;
 	mi->bank[1].size = 8*1024*1024;
-	mi->bank[1].node = 1;
 	mi->nr_banks = 2;
 }
 
 MACHINE_START(EDB7211, "CL-EDB7211 (EP7211 eval board)")
-	MAINTAINER("Jon McClintock")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0020100)	/* 0xc0000000 - 0xc001ffff can be video RAM */
-	FIXUP(fixup_edb7211)
-	MAPIO(edb7211_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Jon McClintock */
+	.atag_offset	= 0x20100,	/* 0xc0000000 - 0xc001ffff can be video RAM */
+	.fixup		= fixup_edb7211,
+	.map_io		= edb7211_map_io,
+	.reserve	= edb7211_reserve,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END

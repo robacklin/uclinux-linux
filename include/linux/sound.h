@@ -1,7 +1,11 @@
+#ifndef _LINUX_SOUND_H
+#define _LINUX_SOUND_H
 
 /*
  * Minor numbers for the sound driver.
  */
+
+#include <linux/fs.h>
 
 #define SND_DEV_CTL		0	/* Control port /dev/mixer */
 #define SND_DEV_SEQ		1	/* Sequencer output /dev/sequencer (FM
@@ -23,18 +27,22 @@
 #define SND_DEV_AMIDI		13	/* Like /dev/midi (obsolete) */
 #define SND_DEV_ADMMIDI		14	/* Like /dev/dmmidi (onsolete) */
 
+#ifdef __KERNEL__
 /*
  *	Sound core interface functions
  */
  
-extern int register_sound_special(struct file_operations *fops, int unit);
-extern int register_sound_mixer(struct file_operations *fops, int dev);
-extern int register_sound_midi(struct file_operations *fops, int dev);
-extern int register_sound_dsp(struct file_operations *fops, int dev);
-extern int register_sound_synth(struct file_operations *fops, int dev);
+struct device;
+extern int register_sound_special(const struct file_operations *fops, int unit);
+extern int register_sound_special_device(const struct file_operations *fops, int unit, struct device *dev);
+extern int register_sound_mixer(const struct file_operations *fops, int dev);
+extern int register_sound_midi(const struct file_operations *fops, int dev);
+extern int register_sound_dsp(const struct file_operations *fops, int dev);
 
 extern void unregister_sound_special(int unit);
 extern void unregister_sound_mixer(int unit);
 extern void unregister_sound_midi(int unit);
 extern void unregister_sound_dsp(int unit);
-extern void unregister_sound_synth(int unit);
+#endif /* __KERNEL__ */
+
+#endif /* _LINUX_SOUND_H */

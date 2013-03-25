@@ -3,8 +3,6 @@
  * Linux driver for Disk-On-Chip Millennium
  * (c) 1999 Machine Vision Holdings, Inc.
  * (c) 1999, 2000 David Woodhouse <dwmw2@infradead.org>
- *
- * $Id: doc2001.c,v 1.38 2002/12/10 15:05:42 gleixner Exp $
  */
 
 #include <linux/kernel.h>
@@ -12,13 +10,11 @@
 #include <asm/errno.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <linux/miscdevice.h>
-#include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/types.h>
+#include <linux/bitops.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/nand.h>
@@ -36,20 +32,16 @@ static int doc_read(struct mtd_info *mtd, loff_t from, size_t len,
 		    size_t *retlen, u_char *buf);
 static int doc_write(struct mtd_info *mtd, loff_t to, size_t len,
 		     size_t *retlen, const u_char *buf);
-static int doc_read_ecc(struct mtd_info *mtd, loff_t from, size_t len,
-			size_t *retlen, u_char *buf, u_char *eccbuf, int oobsel);
-static int doc_write_ecc(struct mtd_info *mtd, loff_t to, size_t len,
-			 size_t *retlen, const u_char *buf, u_char *eccbuf, int oobsel);
-static int doc_read_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
-			size_t *retlen, u_char *buf);
-static int doc_write_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
-			 size_t *retlen, const u_char *buf);
+static int doc_read_oob(struct mtd_info *mtd, loff_t ofs,
+			struct mtd_oob_ops *ops);
+static int doc_write_oob(struct mtd_info *mtd, loff_t ofs,
+			 struct mtd_oob_ops *ops);
 static int doc_erase (struct mtd_info *mtd, struct erase_info *instr);
 
 static struct mtd_info *docmillist = NULL;
 
 /* Perform the required delay cycles by reading from the NOP register */
-static void DoC_Delay(unsigned long docptr, unsigned short cycles)
+static void DoC_Delay(void __iomem * docptr, unsigned short cycles)
 {
 	volatile char dummy;
 	int i;
@@ -59,24 +51,23 @@ static void DoC_Delay(unsigned long docptr, unsigned short cycles)
 }
 
 /* DOC_WaitReady: Wait for RDY line to be asserted by the flash chip */
-static int _DoC_WaitReady(unsigned long docptr)
+static int _DoC_WaitReady(void __iomem * docptr)
 {
 	unsigned short c = 0xffff;
 
-	DEBUG(MTD_DEBUG_LEVEL3,
-	      "_DoC_WaitReady called for out-of-line wait\n");
+	pr_debug("_DoC_WaitReady called for out-of-line wait\n");
 
 	/* Out-of-line routine to wait for chip response */
 	while (!(ReadDOC(docptr, CDSNControl) & CDSN_CTRL_FR_B) && --c)
 		;
 
 	if (c == 0)
-		DEBUG(MTD_DEBUG_LEVEL2, "_DoC_WaitReady timed out.\n");
+		pr_debug("_DoC_WaitReady timed out.\n");
 
 	return (c == 0);
 }
 
-static inline int DoC_WaitReady(unsigned long docptr)
+static inline int DoC_WaitReady(void __iomem * docptr)
 {
 	/* This is inline, to optimise the common case, where it's ready instantly */
 	int ret = 0;
@@ -100,7 +91,7 @@ static inline int DoC_WaitReady(unsigned long docptr)
    with the internal pipeline. Each of 4 delay cycles (read from the NOP register) is
    required after writing to CDSN Control register, see Software Requirement 11.4 item 3. */
 
-static inline void DoC_Command(unsigned long docptr, unsigned char command,
+static void DoC_Command(void __iomem * docptr, unsigned char command,
 			       unsigned char xtraflags)
 {
 	/* Assert the CLE (Command Latch Enable) line to the flash chip */
@@ -120,7 +111,7 @@ static inline void DoC_Command(unsigned long docptr, unsigned char command,
    with the internal pipeline. Each of 4 delay cycles (read from the NOP register) is
    required after writing to CDSN Control register, see Software Requirement 11.4 item 3. */
 
-static inline void DoC_Address(unsigned long docptr, int numbytes, unsigned long ofs,
+static inline void DoC_Address(void __iomem * docptr, int numbytes, unsigned long ofs,
 			       unsigned char xtraflags1, unsigned char xtraflags2)
 {
 	/* Assert the ALE (Address Latch Enable) line to the flash chip */
@@ -158,7 +149,7 @@ static inline void DoC_Address(unsigned long docptr, int numbytes, unsigned long
 }
 
 /* DoC_SelectChip: Select a given flash chip within the current floor */
-static int DoC_SelectChip(unsigned long docptr, int chip)
+static int DoC_SelectChip(void __iomem * docptr, int chip)
 {
 	/* Select the individual flash chip requested */
 	WriteDOC(chip, docptr, CDSNDeviceSelect);
@@ -169,7 +160,7 @@ static int DoC_SelectChip(unsigned long docptr, int chip)
 }
 
 /* DoC_SelectFloor: Select a given floor (bank of flash chips) */
-static int DoC_SelectFloor(unsigned long docptr, int floor)
+static int DoC_SelectFloor(void __iomem * docptr, int floor)
 {
 	/* Select the floor (bank) of chips required */
 	WriteDOC(floor, docptr, FloorSelect);
@@ -193,10 +184,10 @@ static int DoC_IdentChip(struct DiskOnChip *doc, int floor, int chip)
 	DoC_Command(doc->virtadr, NAND_CMD_RESET, CDSN_CTRL_WP);
 	DoC_WaitReady(doc->virtadr);
 
-	/* Read the NAND chip ID: 1. Send ReadID command */ 
+	/* Read the NAND chip ID: 1. Send ReadID command */
 	DoC_Command(doc->virtadr, NAND_CMD_READID, CDSN_CTRL_WP);
 
-	/* Read the NAND chip ID: 2. Send address byte zero */ 
+	/* Read the NAND chip ID: 2. Send address byte zero */
 	DoC_Address(doc->virtadr, 1, 0x00, CDSN_CTRL_WP, 0x00);
 
 	/* Read the manufacturer and device id codes of the flash device through
@@ -220,14 +211,13 @@ static int DoC_IdentChip(struct DiskOnChip *doc, int floor, int chip)
 			for (j = 0; nand_manuf_ids[j].id != 0x0; j++) {
 				if (nand_manuf_ids[j].id == mfr)
 					break;
-			}	
+			}
 			printk(KERN_INFO "Flash chip found: Manufacturer ID: %2.2X, "
 			       "Chip ID: %2.2X (%s:%s)\n",
 			       mfr, id, nand_manuf_ids[j].name, nand_flash_ids[i].name);
 			doc->mfr = mfr;
 			doc->id = id;
-			doc->chipshift = nand_flash_ids[i].chipshift;
-			doc->erasesize = nand_flash_ids[i].erasesize;
+			doc->chipshift = ffs((nand_flash_ids[i].chipsize << 20)) - 1;
 			break;
 		}
 	}
@@ -273,7 +263,7 @@ static void DoC_ScanChips(struct DiskOnChip *this)
 		return;
 	}
 
-	/* Fill out the chip array with {floor, chipno} for each 
+	/* Fill out the chip array with {floor, chipno} for each
 	 * detected chip in the device. */
 	for (floor = 0, ret = 0; floor < MAX_FLOORS_MIL; floor++) {
 		for (chip = 0 ; chip < numchips[floor] ; chip++) {
@@ -307,7 +297,7 @@ static int DoCMil_is_alias(struct DiskOnChip *doc1, struct DiskOnChip *doc2)
 	tmp2 = ReadDOC(doc2->virtadr, AliasResolution);
 	if (tmp1 != tmp2)
 		return 0;
-	
+
 	WriteDOC((tmp1+1) % 0xff, doc1->virtadr, AliasResolution);
 	tmp2 = ReadDOC(doc2->virtadr, AliasResolution);
 	if (tmp2 == (tmp1+1) % 0xff)
@@ -322,34 +312,27 @@ static int DoCMil_is_alias(struct DiskOnChip *doc1, struct DiskOnChip *doc2)
 	return retval;
 }
 
-static const char im_name[] = "DoCMil_init";
-
-/* This routine is made available to other mtd code via
- * inter_module_register.  It must only be accessed through
- * inter_module_get which will bump the use count of this module.  The
- * addresses passed back in mtd are valid as long as the use count of
- * this module is non-zero, i.e. between inter_module_get and
- * inter_module_put.  Keith Owens <kaos@ocs.com.au> 29 Oct 2000.
- */
-static void DoCMil_init(struct mtd_info *mtd)
+/* This routine is found from the docprobe code by symbol_get(),
+ * which will bump the use count of this module. */
+void DoCMil_init(struct mtd_info *mtd)
 {
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
+	struct DiskOnChip *this = mtd->priv;
 	struct DiskOnChip *old = NULL;
 
 	/* We must avoid being called twice for the same device. */
 	if (docmillist)
-		old = (struct DiskOnChip *)docmillist->priv;
+		old = docmillist->priv;
 
 	while (old) {
 		if (DoCMil_is_alias(this, old)) {
 			printk(KERN_NOTICE "Ignoring DiskOnChip Millennium at "
 			       "0x%lX - already configured\n", this->physadr);
-			iounmap((void *)this->virtadr);
+			iounmap(this->virtadr);
 			kfree(mtd);
 			return;
 		}
 		if (old->nextdoc)
-			old = (struct DiskOnChip *)old->nextdoc->priv;
+			old = old->nextdoc->priv;
 		else
 			old = NULL;
 	}
@@ -360,25 +343,18 @@ static void DoCMil_init(struct mtd_info *mtd)
 
 	mtd->type = MTD_NANDFLASH;
 	mtd->flags = MTD_CAP_NANDFLASH;
-	mtd->size = 0;
 
-	mtd->erasesize = 0;
-	mtd->oobblock = 512;
+	/* FIXME: erase size is not always 8KiB */
+	mtd->erasesize = 0x2000;
+	mtd->writebufsize = mtd->writesize = 512;
 	mtd->oobsize = 16;
-	mtd->module = THIS_MODULE;
-	mtd->erase = doc_erase;
-	mtd->point = NULL;
-	mtd->unpoint = NULL;
-	mtd->read = doc_read;
-	mtd->write = doc_write;
-	mtd->read_ecc = doc_read_ecc;
-	mtd->write_ecc = doc_write_ecc;
-	mtd->read_oob = doc_read_oob;
-	mtd->write_oob = doc_write_oob;
-	mtd->sync = NULL;
-
-	this->totlen = 0;
-	this->numchips = 0;
+	mtd->ecc_strength = 2;
+	mtd->owner = THIS_MODULE;
+	mtd->_erase = doc_erase;
+	mtd->_read = doc_read;
+	mtd->_write = doc_write;
+	mtd->_read_oob = doc_read_oob;
+	mtd->_write_oob = doc_write_oob;
 	this->curfloor = -1;
 	this->curchip = -1;
 
@@ -387,40 +363,29 @@ static void DoCMil_init(struct mtd_info *mtd)
 
 	if (!this->totlen) {
 		kfree(mtd);
-		iounmap((void *)this->virtadr);
+		iounmap(this->virtadr);
 	} else {
 		this->nextdoc = docmillist;
 		docmillist = mtd;
 		mtd->size  = this->totlen;
-		mtd->erasesize = this->erasesize;
-		add_mtd_device(mtd);
+		mtd_device_register(mtd, NULL, 0);
 		return;
 	}
 }
+EXPORT_SYMBOL_GPL(DoCMil_init);
 
 static int doc_read (struct mtd_info *mtd, loff_t from, size_t len,
 		     size_t *retlen, u_char *buf)
 {
-	/* Just a special case of doc_read_ecc */
-	return doc_read_ecc(mtd, from, len, retlen, buf, NULL, 0);
-}
-
-static int doc_read_ecc (struct mtd_info *mtd, loff_t from, size_t len,
-			 size_t *retlen, u_char *buf, u_char *eccbuf, int oobsel)
-{
 	int i, ret;
 	volatile char dummy;
-	unsigned char syndrome[6];
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
-	unsigned long docptr = this->virtadr;
+	unsigned char syndrome[6], eccbuf[6];
+	struct DiskOnChip *this = mtd->priv;
+	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[from >> (this->chipshift)];
 
-	/* Don't allow read past end of device */
-	if (from >= this->totlen)
-		return -EINVAL;
-
 	/* Don't allow a single read to cross a 512-byte block boundary */
-	if (from + len > ((from | 0x1ff) + 1)) 
+	if (from + len > ((from | 0x1ff) + 1))
 		len = ((from | 0x1ff) + 1) - from;
 
 	/* Find the chip which is to be used and select it */
@@ -440,15 +405,9 @@ static int doc_read_ecc (struct mtd_info *mtd, loff_t from, size_t len,
 	DoC_Address(docptr, 3, from, CDSN_CTRL_WP, 0x00);
 	DoC_WaitReady(docptr);
 
-	if (eccbuf) {
-		/* init the ECC engine, see Reed-Solomon EDC/ECC 11.1 .*/
-		WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
-		WriteDOC (DOC_ECC_EN, docptr, ECCConf);
-	} else {
-		/* disable the ECC engine */
-		WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
-		WriteDOC (DOC_ECC_DIS, docptr, ECCConf);
-	}
+	/* init the ECC engine, see Reed-Solomon EDC/ECC 11.1 .*/
+	WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
+	WriteDOC (DOC_ECC_EN, docptr, ECCConf);
 
 	/* Read the data via the internal pipeline through CDSN IO register,
 	   see Pipelined Read Operations 11.3 */
@@ -468,58 +427,56 @@ static int doc_read_ecc (struct mtd_info *mtd, loff_t from, size_t len,
 	*retlen = len;
         ret = 0;
 
-	if (eccbuf) {
-		/* Read the ECC data from Spare Data Area,
-		   see Reed-Solomon EDC/ECC 11.1 */
-		dummy = ReadDOC(docptr, ReadPipeInit);
+	/* Read the ECC data from Spare Data Area,
+	   see Reed-Solomon EDC/ECC 11.1 */
+	dummy = ReadDOC(docptr, ReadPipeInit);
 #ifndef USE_MEMCPY
-		for (i = 0; i < 5; i++) {
-			/* N.B. you have to increase the source address in this way or the
-			   ECC logic will not work properly */
-			eccbuf[i] = ReadDOC(docptr, Mil_CDSN_IO + i);
-		}
+	for (i = 0; i < 5; i++) {
+		/* N.B. you have to increase the source address in this way or the
+		   ECC logic will not work properly */
+		eccbuf[i] = ReadDOC(docptr, Mil_CDSN_IO + i);
+	}
 #else
-		memcpy_fromio(eccbuf, docptr + DoC_Mil_CDSN_IO, 5);
+	memcpy_fromio(eccbuf, docptr + DoC_Mil_CDSN_IO, 5);
 #endif
-		eccbuf[5] = ReadDOC(docptr, LastDataRead);
+	eccbuf[5] = ReadDOC(docptr, LastDataRead);
 
-		/* Flush the pipeline */
-		dummy = ReadDOC(docptr, ECCConf);
-		dummy = ReadDOC(docptr, ECCConf);
+	/* Flush the pipeline */
+	dummy = ReadDOC(docptr, ECCConf);
+	dummy = ReadDOC(docptr, ECCConf);
 
-		/* Check the ECC Status */
-		if (ReadDOC(docptr, ECCConf) & 0x80) {
-                        int nb_errors;
-			/* There was an ECC error */
+	/* Check the ECC Status */
+	if (ReadDOC(docptr, ECCConf) & 0x80) {
+		int nb_errors;
+		/* There was an ECC error */
 #ifdef ECC_DEBUG
-			printk("DiskOnChip ECC Error: Read at %lx\n", (long)from);
+		printk("DiskOnChip ECC Error: Read at %lx\n", (long)from);
 #endif
-			/* Read the ECC syndrom through the DiskOnChip ECC logic.
-			   These syndrome will be all ZERO when there is no error */
-			for (i = 0; i < 6; i++) {
-				syndrome[i] = ReadDOC(docptr, ECCSyndrome0 + i);
-			}
-                        nb_errors = doc_decode_ecc(buf, syndrome);
-#ifdef ECC_DEBUG
-			printk("ECC Errors corrected: %x\n", nb_errors);
-#endif
-                        if (nb_errors < 0) {
-				/* We return error, but have actually done the read. Not that
-				   this can be told to user-space, via sys_read(), but at least
-				   MTD-aware stuff can know about it by checking *retlen */
-				ret = -EIO;
-                        }
+		/* Read the ECC syndrome through the DiskOnChip ECC logic.
+		   These syndrome will be all ZERO when there is no error */
+		for (i = 0; i < 6; i++) {
+			syndrome[i] = ReadDOC(docptr, ECCSyndrome0 + i);
 		}
+		nb_errors = doc_decode_ecc(buf, syndrome);
+#ifdef ECC_DEBUG
+		printk("ECC Errors corrected: %x\n", nb_errors);
+#endif
+		if (nb_errors < 0) {
+			/* We return error, but have actually done the read. Not that
+			   this can be told to user-space, via sys_read(), but at least
+			   MTD-aware stuff can know about it by checking *retlen */
+			ret = -EIO;
+		}
+	}
 
 #ifdef PSYCHO_DEBUG
-		printk("ECC DATA at %lx: %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
-		       (long)from, eccbuf[0], eccbuf[1], eccbuf[2], eccbuf[3],
-		       eccbuf[4], eccbuf[5]);
+	printk("ECC DATA at %lx: %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
+	       (long)from, eccbuf[0], eccbuf[1], eccbuf[2], eccbuf[3],
+	       eccbuf[4], eccbuf[5]);
 #endif
 
-		/* disable the ECC engine */
-		WriteDOC(DOC_ECC_DIS, docptr , ECCConf);
-	}
+	/* disable the ECC engine */
+	WriteDOC(DOC_ECC_DIS, docptr , ECCConf);
 
 	return ret;
 }
@@ -527,26 +484,16 @@ static int doc_read_ecc (struct mtd_info *mtd, loff_t from, size_t len,
 static int doc_write (struct mtd_info *mtd, loff_t to, size_t len,
 		      size_t *retlen, const u_char *buf)
 {
-	char eccbuf[6];
-	return doc_write_ecc(mtd, to, len, retlen, buf, eccbuf, 0);
-}
-
-static int doc_write_ecc (struct mtd_info *mtd, loff_t to, size_t len,
-			  size_t *retlen, const u_char *buf, u_char *eccbuf, int oobsel)
-{
 	int i,ret = 0;
+	char eccbuf[6];
 	volatile char dummy;
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
-	unsigned long docptr = this->virtadr;
+	struct DiskOnChip *this = mtd->priv;
+	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[to >> (this->chipshift)];
-
-	/* Don't allow write past end of device */
-	if (to >= this->totlen)
-		return -EINVAL;
 
 #if 0
 	/* Don't allow a single write to cross a 512-byte block boundary */
-	if (to + len > ( (to | 0x1ff) + 1)) 
+	if (to + len > ( (to | 0x1ff) + 1))
 		len = ((to | 0x1ff) + 1) - to;
 #else
 	/* Don't allow writes which aren't exactly one block */
@@ -575,15 +522,9 @@ static int doc_write_ecc (struct mtd_info *mtd, loff_t to, size_t len,
 	DoC_Address(docptr, 3, to, 0x00, 0x00);
 	DoC_WaitReady(docptr);
 
-	if (eccbuf) {
-		/* init the ECC engine, see Reed-Solomon EDC/ECC 11.1 .*/
-		WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
-		WriteDOC (DOC_ECC_EN | DOC_ECC_RW, docptr, ECCConf);
-	} else {
-		/* disable the ECC engine */
-		WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
-		WriteDOC (DOC_ECC_DIS, docptr, ECCConf);
-	}
+	/* init the ECC engine, see Reed-Solomon EDC/ECC 11.1 .*/
+	WriteDOC (DOC_ECC_RESET, docptr, ECCConf);
+	WriteDOC (DOC_ECC_EN | DOC_ECC_RW, docptr, ECCConf);
 
 	/* Write the data via the internal pipeline through CDSN IO register,
 	   see Pipelined Write Operations 11.2 */
@@ -598,46 +539,44 @@ static int doc_write_ecc (struct mtd_info *mtd, loff_t to, size_t len,
 #endif
 	WriteDOC(0x00, docptr, WritePipeTerm);
 
-	if (eccbuf) {
-		/* Write ECC data to flash, the ECC info is generated by the DiskOnChip ECC logic
-		   see Reed-Solomon EDC/ECC 11.1 */
-		WriteDOC(0, docptr, NOP);
-		WriteDOC(0, docptr, NOP);
-		WriteDOC(0, docptr, NOP);
+	/* Write ECC data to flash, the ECC info is generated by the DiskOnChip ECC logic
+	   see Reed-Solomon EDC/ECC 11.1 */
+	WriteDOC(0, docptr, NOP);
+	WriteDOC(0, docptr, NOP);
+	WriteDOC(0, docptr, NOP);
 
-		/* Read the ECC data through the DiskOnChip ECC logic */
-		for (i = 0; i < 6; i++) {
-			eccbuf[i] = ReadDOC(docptr, ECCSyndrome0 + i);
-		}
+	/* Read the ECC data through the DiskOnChip ECC logic */
+	for (i = 0; i < 6; i++) {
+		eccbuf[i] = ReadDOC(docptr, ECCSyndrome0 + i);
+	}
 
-		/* ignore the ECC engine */
-		WriteDOC(DOC_ECC_DIS, docptr , ECCConf);
+	/* ignore the ECC engine */
+	WriteDOC(DOC_ECC_DIS, docptr , ECCConf);
 
 #ifndef USE_MEMCPY
-		/* Write the ECC data to flash */
-		for (i = 0; i < 6; i++) {
-			/* N.B. you have to increase the source address in this way or the
-			   ECC logic will not work properly */
-			WriteDOC(eccbuf[i], docptr, Mil_CDSN_IO + i);
-		}
+	/* Write the ECC data to flash */
+	for (i = 0; i < 6; i++) {
+		/* N.B. you have to increase the source address in this way or the
+		   ECC logic will not work properly */
+		WriteDOC(eccbuf[i], docptr, Mil_CDSN_IO + i);
+	}
 #else
-		memcpy_toio(docptr + DoC_Mil_CDSN_IO, eccbuf, 6);
+	memcpy_toio(docptr + DoC_Mil_CDSN_IO, eccbuf, 6);
 #endif
 
-		/* write the block status BLOCK_USED (0x5555) at the end of ECC data
-		   FIXME: this is only a hack for programming the IPL area for LinuxBIOS
-		   and should be replace with proper codes in user space utilities */ 
-		WriteDOC(0x55, docptr, Mil_CDSN_IO);
-		WriteDOC(0x55, docptr, Mil_CDSN_IO + 1);
+	/* write the block status BLOCK_USED (0x5555) at the end of ECC data
+	   FIXME: this is only a hack for programming the IPL area for LinuxBIOS
+	   and should be replace with proper codes in user space utilities */
+	WriteDOC(0x55, docptr, Mil_CDSN_IO);
+	WriteDOC(0x55, docptr, Mil_CDSN_IO + 1);
 
-		WriteDOC(0x00, docptr, WritePipeTerm);
+	WriteDOC(0x00, docptr, WritePipeTerm);
 
 #ifdef PSYCHO_DEBUG
-		printk("OOB data at %lx is %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
-		       (long) to, eccbuf[0], eccbuf[1], eccbuf[2], eccbuf[3],
-		       eccbuf[4], eccbuf[5]);
+	printk("OOB data at %lx is %2.2X %2.2X %2.2X %2.2X %2.2X %2.2X\n",
+	       (long) to, eccbuf[0], eccbuf[1], eccbuf[2], eccbuf[3],
+	       eccbuf[4], eccbuf[5]);
 #endif
-	}
 
 	/* Commit the Page Program command and wait for ready
 	   see Software Requirement 11.4 item 1.*/
@@ -653,7 +592,6 @@ static int doc_write_ecc (struct mtd_info *mtd, loff_t to, size_t len,
 		printk("Error programming flash\n");
 		/* Error in programming
 		   FIXME: implement Bad Block Replacement (in nftl.c ??) */
-		*retlen = 0;
 		ret = -EIO;
 	}
 	dummy = ReadDOC(docptr, LastDataRead);
@@ -664,16 +602,22 @@ static int doc_write_ecc (struct mtd_info *mtd, loff_t to, size_t len,
 	return ret;
 }
 
-static int doc_read_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
-			size_t *retlen, u_char *buf)
+static int doc_read_oob(struct mtd_info *mtd, loff_t ofs,
+			struct mtd_oob_ops *ops)
 {
 #ifndef USE_MEMCPY
 	int i;
 #endif
 	volatile char dummy;
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
-	unsigned long docptr = this->virtadr;
+	struct DiskOnChip *this = mtd->priv;
+	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[ofs >> this->chipshift];
+	uint8_t *buf = ops->oobbuf;
+	size_t len = ops->len;
+
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
+
+	ofs += ops->ooboffs;
 
 	/* Find the chip which is to be used and select it */
 	if (this->curfloor != mychip->floor) {
@@ -710,22 +654,28 @@ static int doc_read_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
 #endif
 	buf[len - 1] = ReadDOC(docptr, LastDataRead);
 
-	*retlen = len;
+	ops->retlen = len;
 
 	return 0;
 }
 
-static int doc_write_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
-			 size_t *retlen, const u_char *buf)
+static int doc_write_oob(struct mtd_info *mtd, loff_t ofs,
+			 struct mtd_oob_ops *ops)
 {
 #ifndef USE_MEMCPY
 	int i;
 #endif
 	volatile char dummy;
 	int ret = 0;
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
-	unsigned long docptr = this->virtadr;
+	struct DiskOnChip *this = mtd->priv;
+	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[ofs >> this->chipshift];
+	uint8_t *buf = ops->oobbuf;
+	size_t len = ops->len;
+
+	BUG_ON(ops->mode != MTD_OPS_PLACE_OOB);
+
+	ofs += ops->ooboffs;
 
 	/* Find the chip which is to be used and select it */
 	if (this->curfloor != mychip->floor) {
@@ -777,12 +727,12 @@ static int doc_write_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
 	if (ReadDOC(docptr, Mil_CDSN_IO) & 1) {
 		printk("Error programming oob data\n");
 		/* FIXME: implement Bad Block Replacement (in nftl.c ??) */
-		*retlen = 0;
+		ops->retlen = 0;
 		ret = -EIO;
 	}
 	dummy = ReadDOC(docptr, LastDataRead);
 
-	*retlen = len;
+	ops->retlen = len;
 
 	return ret;
 }
@@ -790,13 +740,13 @@ static int doc_write_oob(struct mtd_info *mtd, loff_t ofs, size_t len,
 int doc_erase (struct mtd_info *mtd, struct erase_info *instr)
 {
 	volatile char dummy;
-	struct DiskOnChip *this = (struct DiskOnChip *)mtd->priv;
+	struct DiskOnChip *this = mtd->priv;
 	__u32 ofs = instr->addr;
 	__u32 len = instr->len;
-	unsigned long docptr = this->virtadr;
+	void __iomem *docptr = this->virtadr;
 	struct Nand *mychip = &this->chips[ofs >> this->chipshift];
 
-	if (len != mtd->erasesize) 
+	if (len != mtd->erasesize)
 		printk(KERN_WARNING "Erase not right size (%x != %x)n",
 		       len, mtd->erasesize);
 
@@ -839,8 +789,7 @@ int doc_erase (struct mtd_info *mtd, struct erase_info *instr)
 		instr->state = MTD_ERASE_DONE;
 	dummy = ReadDOC(docptr, LastDataRead);
 
-	if (instr->callback) 
-		instr->callback(instr);
+	mtd_erase_callback(instr);
 
 	return 0;
 }
@@ -851,32 +800,24 @@ int doc_erase (struct mtd_info *mtd, struct erase_info *instr)
  *
  ****************************************************************************/
 
-int __init init_doc2001(void)
-{
-	inter_module_register(im_name, THIS_MODULE, &DoCMil_init);
-	return 0;
-}
-
 static void __exit cleanup_doc2001(void)
 {
 	struct mtd_info *mtd;
 	struct DiskOnChip *this;
 
 	while ((mtd=docmillist)) {
-		this = (struct DiskOnChip *)mtd->priv;
+		this = mtd->priv;
 		docmillist = this->nextdoc;
-			
-		del_mtd_device(mtd);
-			
-		iounmap((void *)this->virtadr);
+
+		mtd_device_unregister(mtd);
+
+		iounmap(this->virtadr);
 		kfree(this->chips);
 		kfree(mtd);
 	}
-	inter_module_unregister(im_name);
 }
 
 module_exit(cleanup_doc2001);
-module_init(init_doc2001);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org> et al.");

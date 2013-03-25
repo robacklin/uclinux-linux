@@ -1,4 +1,4 @@
-/* $Id: isdn.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
+/* $Id: isdn.h,v 1.125.2.3 2004/02/10 01:07:14 keil Exp $
  *
  * Main header for the Linux ISDN subsystem (linklevel).
  *
@@ -16,14 +16,8 @@
 
 #include <linux/ioctl.h>
 
-#ifdef CONFIG_COBALT_MICRO_SERVER
-/* Save memory */
-#define ISDN_MAX_DRIVERS    2
-#define ISDN_MAX_CHANNELS   8
-#else
 #define ISDN_MAX_DRIVERS    32
 #define ISDN_MAX_CHANNELS   64
-#endif
 
 /* New ioctl-codes */
 #define IIOCNETAIF  _IO('I',1)
@@ -74,7 +68,7 @@
 #define ISDN_NET_ENCAP_SYNCPPP    4
 #define ISDN_NET_ENCAP_UIHDLC     5
 #define ISDN_NET_ENCAP_CISCOHDLCK 6 /* With SLARP and keepalive    */
-#define ISDN_NET_ENCAP_X25IFACE   7 /* Documentation/networking/x25-iface.txt*/
+#define ISDN_NET_ENCAP_X25IFACE   7 /* Documentation/networking/x25-iface.txt */
 #define ISDN_NET_ENCAP_MAX_ENCAP  ISDN_NET_ENCAP_X25IFACE
 
 /* Facility which currently uses an ISDN-channel */
@@ -146,11 +140,9 @@ typedef struct {
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -169,6 +161,7 @@ typedef struct {
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/tcp.h>
+#include <linux/mutex.h>
 
 #define ISDN_TTY_MAJOR    43
 #define ISDN_TTYAUX_MAJOR 44
@@ -194,18 +187,13 @@ typedef struct {
 #endif
 
 #include <linux/ppp_defs.h>
-#include <linux/if_ppp.h>
-#include <linux/if_pppvar.h>
+#include <linux/ppp-ioctl.h>
 
 #include <linux/isdn_ppp.h>
 #endif
 
 #ifdef CONFIG_ISDN_X25
 #  include <linux/concap.h>
-#endif
-
-#ifdef CONFIG_DEVFS_FS
-#  include <linux/devfs_fs_kernel.h>
 #endif
 
 #include <linux/isdnif.h>
@@ -293,7 +281,6 @@ typedef struct {
 /* Local interface-data */
 typedef struct isdn_net_local_s {
   ulong                  magic;
-  char                   name[10];     /* Name of device                   */
   struct net_device_stats stats;       /* Ethernet Statistics              */
   int                    isdn_device;  /* Index to isdn-device             */
   int                    isdn_channel; /* Index to isdn-channel            */
@@ -360,13 +347,6 @@ typedef struct isdn_net_local_s {
                                        /* a particular channel (including  */
                                        /* the frame_cnt                    */
 
-  int                    (*org_hhc)(
-				    struct neighbour *neigh,
-				    struct hh_cache *hh);
-                                       /* Ptr to orig. header_cache_update */
-  void                   (*org_hcu)(struct hh_cache *,
-				    struct net_device *,
-                                    unsigned char *);
   int  pppbind;                        /* ippp device for bindings         */
   int					dialtimeout;	/* How long shall we try on dialing? (jiffies) */
   int					dialwait;		/* How long shall we wait after failed attempt? (jiffies) */
@@ -385,7 +365,7 @@ typedef struct isdn_net_local_s {
   char cisco_line_state;		/* state of line according to keepalive packets */
   char cisco_debserint;			/* debugging flag of cisco hdlc with slarp */
   struct timer_list cisco_timer;
-  struct tq_struct tqueue;
+  struct work_struct tqueue;
 } isdn_net_local;
 
 /* the interface itself */
@@ -396,7 +376,7 @@ typedef struct isdn_net_dev_s {
 					  online                           */
   spinlock_t queue_lock;               /* lock to protect queue            */
   void *next;                          /* Pointer to next isdn-interface   */
-  struct net_device dev;               /* interface to upper levels        */
+  struct net_device *dev;              /* interface to upper levels        */
 #ifdef CONFIG_ISDN_PPP
   ippp_bundle * pb;		/* pointer to the common bundle structure
    			         * with the per-bundle data */
@@ -431,17 +411,16 @@ typedef struct isdn_net_dev_s {
 #ifdef CONFIG_ISDN_AUDIO
 /* For using sk_buffs with audio we need some private variables
  * within each sk_buff. For this purpose, we declare a struct here,
- * and put it always at skb->head. A few macros help accessing the
- * variables. Of course, we need to check skb_headroom prior to
- * any access.
+ * and put it always at the private skb->cb data array. A few macros help
+ * accessing the variables.
  */
-typedef struct isdn_audio_skb {
+typedef struct _isdn_audio_data {
   unsigned short dle_count;
   unsigned char  lock;
-} isdn_audio_skb;
+} isdn_audio_data_t;
 
-#define ISDN_AUDIO_SKB_DLECOUNT(skb) (((isdn_audio_skb*)skb->head)->dle_count)
-#define ISDN_AUDIO_SKB_LOCK(skb) (((isdn_audio_skb*)skb->head)->lock)
+#define ISDN_AUDIO_SKB_DLECOUNT(skb)	(((isdn_audio_data_t *)&skb->cb[0])->dle_count)
+#define ISDN_AUDIO_SKB_LOCK(skb)	(((isdn_audio_data_t *)&skb->cb[0])->lock)
 #endif
 
 /* Private data of AT-command-interpreter */
@@ -460,7 +439,7 @@ typedef struct atemu {
 #endif
 	int          mdmcmdl;                    /* Length of Modem-Commandbuffer      */
 	int          pluscount;                  /* Counter for +++ sequence           */
-	int          lastplus;                   /* Timestamp of last +                */
+	u_long       lastplus;                   /* Timestamp of last +                */
 	int	     carrierwait;                /* Seconds of carrier waiting         */
 	char         mdmcmd[255];                /* Modem-Commandbuffer                */
 	unsigned int charge;                     /* Charge units of current connection */
@@ -469,6 +448,7 @@ typedef struct atemu {
 /* Private data (similar to async_struct in <linux/serial.h>) */
 typedef struct modem_info {
   int			magic;
+  struct module		*owner;
   int			flags;		 /* defined in tty.h               */
   int			x_char;		 /* xon/xoff character             */
   int			mcr;		 /* Modem control register         */
@@ -518,24 +498,23 @@ typedef struct modem_info {
 #endif
   struct tty_struct 	*tty;            /* Pointer to corresponding tty   */
   atemu                 emu;             /* AT-emulator data               */
-  struct termios	normal_termios;  /* For saving termios structs     */
-  struct termios	callout_termios;
+  struct ktermios	normal_termios;  /* For saving termios structs     */
+  struct ktermios	callout_termios;
   wait_queue_head_t	open_wait, close_wait;
-  struct semaphore      write_sem;
+  spinlock_t	        readlock;
 } modem_info;
 
 #define ISDN_MODEM_WINSIZE 8
 
 /* Description of one ISDN-tty */
-typedef struct {
-  int                refcount;			   /* Number of opens        */
-  struct tty_driver  tty_modem;			   /* tty-device             */
-  struct tty_driver  cua_modem;			   /* cua-device             */
-  struct tty_struct  *modem_table[ISDN_MAX_CHANNELS]; /* ?? copied from Orig */
-  struct termios     *modem_termios[ISDN_MAX_CHANNELS];
-  struct termios     *modem_termios_locked[ISDN_MAX_CHANNELS];
+typedef struct _isdn_modem {
+  int                refcount;				/* Number of opens        */
+  struct tty_driver  *tty_modem;			/* tty-device             */
+  struct tty_struct  *modem_table[ISDN_MAX_CHANNELS];	/* ?? copied from Orig    */
+  struct ktermios     *modem_termios[ISDN_MAX_CHANNELS];
+  struct ktermios     *modem_termios_locked[ISDN_MAX_CHANNELS];
   modem_info         info[ISDN_MAX_CHANNELS];	   /* Private data           */
-} modem;
+} isdn_modem_t;
 
 /*======================= End of ISDN-tty stuff ============================*/
 
@@ -576,7 +555,7 @@ typedef struct {
 #define DRV_FLAG_LOADED  4
 
 /* Description of hardware-level-driver */
-typedef struct {
+typedef struct _isdn_driver {
 	ulong               online;           /* Channel-Online flags             */
 	ulong               flags;            /* Misc driver Flags                */
 	int                 locks;            /* Number of locks for this driver  */
@@ -595,51 +574,44 @@ typedef struct {
 	wait_queue_head_t  *rcv_waitq;       /* Wait-Queues for B-Channel-Reads  */
 	wait_queue_head_t  *snd_waitq;       /* Wait-Queue for B-Channel-Send's  */
 	char               msn2eaz[10][ISDN_MSNLEN];  /* Mapping-Table MSN->EAZ   */
-} driver;
+} isdn_driver_t;
 
 /* Main driver-data */
 typedef struct isdn_devt {
-	unsigned short    flags;		       /* Bitmapped Flags:           */
-	/*                            */
-	int               drivers;		       /* Current number of drivers  */
-	int               channels;		       /* Current number of channels */
-	int               net_verbose;               /* Verbose-Flag               */
-	int               modempoll;		       /* Flag: tty-read active      */
-	int               tflags;                    /* Timer-Flags:               */
+	struct module     *owner;
+	spinlock_t	  lock;
+	unsigned short    flags;		      /* Bitmapped Flags:           */
+	int               drivers;		      /* Current number of drivers  */
+	int               channels;		      /* Current number of channels */
+	int               net_verbose;                /* Verbose-Flag               */
+	int               modempoll;		      /* Flag: tty-read active      */
+	spinlock_t	  timerlock;
+	int               tflags;                     /* Timer-Flags:               */
 	/*  see ISDN_TIMER_..defines  */
 	int               global_flags;
-	infostruct        *infochain;                /* List of open info-devs.    */
-	wait_queue_head_t info_waitq;               /* Wait-Queue for isdninfo    */
-	struct timer_list timer;		       /* Misc.-function Timer       */
-	int               chanmap[ISDN_MAX_CHANNELS];/* Map minor->device-channel  */
-	int               drvmap[ISDN_MAX_CHANNELS]; /* Map minor->driver-index    */
-	int               usage[ISDN_MAX_CHANNELS];  /* Used by tty/ip/voice       */
+	infostruct        *infochain;                 /* List of open info-devs.    */
+	wait_queue_head_t info_waitq;                 /* Wait-Queue for isdninfo    */
+	struct timer_list timer;		      /* Misc.-function Timer       */
+	int               chanmap[ISDN_MAX_CHANNELS]; /* Map minor->device-channel  */
+	int               drvmap[ISDN_MAX_CHANNELS];  /* Map minor->driver-index    */
+	int               usage[ISDN_MAX_CHANNELS];   /* Used by tty/ip/voice       */
 	char              num[ISDN_MAX_CHANNELS][ISDN_MSNLEN];
 	/* Remote number of active ch.*/
-	int               m_idx[ISDN_MAX_CHANNELS];  /* Index for mdm....          */
-	driver            *drv[ISDN_MAX_DRIVERS];    /* Array of drivers           */
-	isdn_net_dev      *netdev;		       /* Linked list of net-if's    */
+	int               m_idx[ISDN_MAX_CHANNELS];   /* Index for mdm....          */
+	isdn_driver_t     *drv[ISDN_MAX_DRIVERS];     /* Array of drivers           */
+	isdn_net_dev      *netdev;		      /* Linked list of net-if's    */
 	char              drvid[ISDN_MAX_DRIVERS][20];/* Driver-ID                 */
-	struct task_struct *profd;                   /* For iprofd                 */
-	modem             mdm;		       /* tty-driver-data            */
+	struct task_struct *profd;                    /* For iprofd                 */
+	isdn_modem_t      mdm;			      /* tty-driver-data            */
 	isdn_net_dev      *rx_netdev[ISDN_MAX_CHANNELS]; /* rx netdev-pointers     */
 	isdn_net_dev      *st_netdev[ISDN_MAX_CHANNELS]; /* stat netdev-pointers   */
-	ulong             ibytes[ISDN_MAX_CHANNELS]; /* Statistics incoming bytes  */
-	ulong             obytes[ISDN_MAX_CHANNELS]; /* Statistics outgoing bytes  */
-	int               v110emu[ISDN_MAX_CHANNELS];/* V.110 emulator-mode 0=none */
-	atomic_t          v110use[ISDN_MAX_CHANNELS];/* Usage-Semaphore for stream */
-	isdn_v110_stream  *v110[ISDN_MAX_CHANNELS];  /* V.110 private data         */
-	struct semaphore  sem;                       /* serialize list access*/
+	ulong             ibytes[ISDN_MAX_CHANNELS];  /* Statistics incoming bytes  */
+	ulong             obytes[ISDN_MAX_CHANNELS];  /* Statistics outgoing bytes  */
+	int               v110emu[ISDN_MAX_CHANNELS]; /* V.110 emulator-mode 0=none */
+	atomic_t          v110use[ISDN_MAX_CHANNELS]; /* Usage-Semaphore for stream */
+	isdn_v110_stream  *v110[ISDN_MAX_CHANNELS];   /* V.110 private data         */
+	struct mutex      mtx;                        /* serialize list access*/
 	unsigned long     global_features;
-#ifdef CONFIG_DEVFS_FS
-	devfs_handle_t devfs_handle_isdninfo;
-	devfs_handle_t devfs_handle_isdnctrl;
-	devfs_handle_t devfs_handle_isdnX[ISDN_MAX_CHANNELS];
-	devfs_handle_t devfs_handle_isdnctrlX[ISDN_MAX_CHANNELS];
-#ifdef CONFIG_ISDN_PPP
-	devfs_handle_t devfs_handle_ipppX[ISDN_MAX_CHANNELS];
-#endif
-#endif /* CONFIG_DEVFS_FS */
 } isdn_dev;
 
 extern isdn_dev *dev;

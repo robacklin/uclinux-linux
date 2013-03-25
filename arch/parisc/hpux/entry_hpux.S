@@ -1,23 +1,33 @@
-/*
+/*    syscall table for HPUX specific syscalls
  *
- * Linux/PARISC Project (http://www.parisc-linux.org/)
+ *    Linux/PA-RISC Project (http://www.parisc-linux.org/)
+ *    Copyright (C) 1999 Matthew Wilcox <willy at debian . org>
  *
- * modified by Matthew Wilcox <willy@bofh.ai> 1999-07-26
+ *    This program is free software; you can redistribute it and/or modify
+ *    it under the terms of the GNU General Public License as published by
+ *    the Free Software Foundation; either version 2 of the License, or
+ *    (at your option) any later version.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    GNU General Public License for more details.
+ *
+ *    You should have received a copy of the GNU General Public License
+ *    along with this program; if not, write to the Free Software
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
-
+#include <asm/unistd.h>
+#include <asm/assembly.h>
 #include <linux/sys.h>
 #include <linux/linkage.h>
-#include <asm/unistd.h>
 
-	.text
+#define ENTRY_NAME(_name_) ASM_ULONG_INSN _name_
 
-#define ENTRY_NAME(_name_) .word _name_
-
-	.align 4
-	.export hpux_call_table
+	.section .rodata,"a"
 	.import hpux_unimplemented_wrapper
-hpux_call_table:
+ENTRY(hpux_call_table)
 	ENTRY_NAME(sys_ni_syscall)	/* 0 */
 	ENTRY_NAME(sys_exit)
 	ENTRY_NAME(hpux_fork_wrapper)
@@ -215,7 +225,7 @@ hpux_call_table:
 	ENTRY_NAME(hpux_unimplemented_wrapper)
 	ENTRY_NAME(hpux_unimplemented_wrapper)      /* 195 */
 	ENTRY_NAME(hpux_statfs)
-	ENTRY_NAME(hpux_unimplemented_wrapper)
+	ENTRY_NAME(hpux_fstatfs)
 	ENTRY_NAME(hpux_unimplemented_wrapper)
 	ENTRY_NAME(hpux_unimplemented_wrapper)
 	ENTRY_NAME(sys_waitpid)	/* 200 */
@@ -531,5 +541,6 @@ hpux_call_table:
 	ENTRY_NAME(hpux_unimplemented_wrapper)      /* 510 */
 	ENTRY_NAME(hpux_unimplemented_wrapper)
 	ENTRY_NAME(hpux_unimplemented_wrapper)
+END(hpux_call_table)
 .end
 

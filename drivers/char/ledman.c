@@ -11,7 +11,7 @@
  *	SET      - transient LED's that show activity,  cleared at next poll
  *	ON       - always ON
  *	OFF      - always OFF
- *  FLASHING - a blinking LED with the frequency determined by the poll func
+ *	FLASHING - a blinking LED with the frequency determined by the poll func
  *
  *	We have two sets of LED's to support non-standard LED usage without
  *	losing previously/during use set of std values.
@@ -26,7 +26,8 @@
  */
 /****************************************************************************/
 
-#include <linux/config.h>
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/utsname.h>
@@ -36,7 +37,11 @@
 #include <linux/fcntl.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
+#include <linux/fs.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/ledman.h>
+#include <linux/io.h>
 
 #if LINUX_VERSION_CODE < 0x020300
 #include <linux/malloc.h>
@@ -58,10 +63,10 @@
 #endif
 
 #if LINUX_VERSION_CODE < 0x020100
-#define Get_user(a,b)	a = get_user(b)
+#define Get_user(a, b)	a = get_user(b)
 #else
-#include <asm/uaccess.h>
-#define Get_user(a,b)	get_user(a,b)
+#include <linux/uaccess.h>
+#define Get_user(a, b)	get_user(a, b)
 #endif
 
 #if LINUX_VERSION_CODE < 0x020100
@@ -74,25 +79,15 @@ static struct symbol_table ledman_syms = {
 EXPORT_SYMBOL(ledman_cmd);
 #endif
 
-/****************************************************************************/
-
-static void ledman_poll(unsigned long arg);
-static int  ledman_ioctl(struct inode * inode, struct file * file,
-								unsigned int cmd, unsigned long arg);
-#if !defined(CONFIG_SH_KEYWEST) && !defined(CONFIG_SH_BIGSUR)
-static int	ledman_bits(unsigned long cmd, unsigned long bits);
-static void	ledman_tick(void);
+#if LINUX_VERSION_CODE >= 0x02061d
+#include <linux/syscalls.h>
+#define	kill_proc(p, s, v)	send_sig(s, find_task_by_vpid(p), 0)
+#define	IRQT_FALLING		IRQ_TYPE_EDGE_FALLING
 #endif
 
 /****************************************************************************/
 
 static struct timer_list	ledman_timerlist;
-
-/****************************************************************************/
-
-struct file_operations ledman_fops = {
-	ioctl: ledman_ioctl,	/* ledman_ioctl */
-};
 
 /****************************************************************************/
 /*
@@ -121,7 +116,7 @@ typedef unsigned long ledmap_t[LEDMAN_MAX];
  *	A LED mode is a definition of how a set of LED's should behave.
  *
  *	name    - a symbolic name for the LED mode,  used for changing modes
- *	map     - points to a ledmap array,  maps ledman.h defines to real LED bits
+ *	map     - ledmap array,  maps ledman.h defines to real LED bits
  *	def     - default behaviour for the LED bits (ie, on, flashing ...)
  *	bits    - perform command on physical bits,  you may use the default or
  *	          supply your own for more control.
@@ -132,7 +127,7 @@ typedef unsigned long ledmap_t[LEDMAN_MAX];
  */
 
 
-typedef struct {
+struct ledmode {
 	char	name[LEDMAN_MAX_NAME];
 	u_long	*map;
 	u_long	*def;
@@ -140,12 +135,12 @@ typedef struct {
 	void	(*tick)(void);
 	void	(*set)(unsigned long led);
 	int		jiffies;
-} ledmode_t;
+};
 
 /****************************************************************************/
 
-static int current_mode = 0;				/* the default LED mode */
-static int initted = 0;
+static struct ledmode *lmp;	/* current mode */
+static int initted;
 
 /*
  * We have two sets of LED's for transient operations like DHCP and so on
@@ -171,157 +166,14 @@ static pid_t ledman_resetpid = -1;
 #endif
 
 #if defined(CONFIG_X86)
-#if defined(CONFIG_MTD_SNAPGEODE)
+#if defined(CONFIG_MPENTIUMM)
+#define	CONFIG_UTM2000		1
+#elif defined(CONFIG_MTD_SNAPGEODE)
 #define	CONFIG_GEODE		1
 #else
 #define	CONFIG_AMDSC520		1
 #endif
-#if defined(CONFIG_SNAPGEAR)
-static ledmap_t	nettel_old;
-static leddef_t	nettel_def_old;
-#endif
-static ledmap_t	nettel_std;
-static leddef_t	nettel_def;
-static void nettel_set(unsigned long bits);
-static void ledman_initarch(void);
 #endif /* CONFIG_X86 */
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5307)
-#ifdef ENTERASYS
-static ledmap_t enterasys_std;
-static leddef_t enterasys_def;
-#endif
-static ledmap_t	nettel_old;
-static ledmap_t	nettel_new;
-static leddef_t	nettel_def;
-static void nettel_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5272)
-static ledmap_t	nt5272_std;
-static leddef_t	nt5272_def;
-static void nt5272_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_SE1100)
-static ledmap_t	se1100_std;
-static leddef_t	se1100_def;
-static void se1100_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_GILBARCONAP) && defined(CONFIG_M5272)
-static ledmap_t	nap5272_std;
-static leddef_t	nap5272_def;
-static void nap5272_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_AVNET5282)
-static ledmap_t	ads5282_std;
-static leddef_t	ads5282_def;
-static void ads5282_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_SH_SECUREEDGE5410)
-static ledmap_t	se5410_std;
-static leddef_t	se5410_def;
-static void se5410_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5206e)
-static ledmap_t	nt1500_std;
-static leddef_t	nt1500_def;
-static void nt1500_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_eLIA
-static ledmap_t	elia_std;
-static leddef_t	elia_def;
-static void elia_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
-static ledmap_t	keywest_std;
-static leddef_t	keywest_def;
-static void keywest_set(unsigned long bits);
-static void ledman_initkeywest(void);
-static int	keywest_bits(unsigned long cmd, unsigned long bits);
-static void	keywest_tick(void);
-#endif
-
-#if defined(CONFIG_MACH_MONTEJADE) || defined(CONFIG_MACH_SE5100)
-static ledmap_t	montejade_std;
-static leddef_t	montejade_def;
-static void ledman_initarch(void);
-static void montejade_set(unsigned long bits);
-#endif
-
-#if defined(CONFIG_ARCH_SE4000) || defined(CONFIG_MACH_ESS710) || \
-    defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG580) || \
-	defined(CONFIG_MACH_SG565) || defined(CONFIG_MACH_SG720) || \
-    defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SHIVA1100) || \
-    defined(CONFIG_MACH_SG590) || defined(CONFIG_MACH_SG8100)
-static ledmap_t	snapgear425_std;
-static leddef_t	snapgear425_def;
-static void ledman_initarch(void);
-static void snapgear425_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_MACH_IVPN
-static ledmap_t	ivpn_std;
-static leddef_t	ivpn_def;
-static void ledman_initarch(void);
-static void ivpn_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_MACH_LITE300
-static ledmap_t	lite3_std;
-static leddef_t	lite3_def;
-static void ledman_initarch(void);
-static void lite3_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_MACH_SE4200
-static ledmap_t	se4200_std;
-static leddef_t	se4200_def;
-static void ledman_initarch(void);
-static void se4200_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_MACH_CM4008
-static ledmap_t	cm4008_std;
-static leddef_t	cm4008_def;
-static void ledman_initarch(void);
-static void cm4008_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_MACH_CM41xx
-static ledmap_t	cm41xx_std;
-static leddef_t	cm41xx_def;
-static void ledman_initarch(void);
-static void cm41xx_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_ARCH_EP9312
-static ledmap_t	ipd_std;
-static leddef_t	ipd_def;
-static void ledman_initarch(void);
-static void ipd_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_SG310
-static ledmap_t	sg310_std;
-static leddef_t	sg310_def;
-static void ledman_initarch(void);
-static void sg310_set(unsigned long bits);
-#endif
-
-#ifdef CONFIG_BD_TIBURON
-static ledmap_t	tiburon_std;
-static leddef_t	tiburon_def;
-static void ledman_initarch(void);
-static void tiburon_set(unsigned long bits);
-static struct timer_list	release_tiburon_modemreset_timerlist;
-#endif
 
 /****************************************************************************/
 /****************************************************************************/
@@ -330,109 +182,6 @@ static struct timer_list	release_tiburon_modemreset_timerlist;
 #define LT	(((HZ) + 99) / 100)
 
 /****************************************************************************/
-
-ledmode_t led_mode[] = {
-
-#ifdef ENTERASYS /* first in the list is the default */
-	{ "enterasys", enterasys_std, enterasys_def, ledman_bits, ledman_tick, nettel_set, LT },
-#endif
-
-#if defined(CONFIG_X86)
-	{ "std", nettel_std, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
-#if defined(CONFIG_SNAPGEAR)
-	{ "old", nettel_old, nettel_def_old, ledman_bits, ledman_tick, nettel_set, LT },
-#endif
-#endif
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5307)
-	/*
-	 * by default the first entry is used.  You can select the old-style
-	 * LED patterns for acient boards with the command line parameter:
-	 *
-	 *      ledman=old
-	 */
-	{ "new", nettel_new, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
-	{ "old", nettel_old, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
-#endif
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5272)
-	{ "std", nt5272_std, nt5272_def, ledman_bits, ledman_tick, nt5272_set, LT },
-#endif
-
-#if defined(CONFIG_NETtel) && defined(CONFIG_M5206e)
-	{ "std", nt1500_std, nt1500_def, ledman_bits, ledman_tick, nt1500_set, LT },
-#endif
-
-#if defined(CONFIG_SE1100)
-	{ "std", se1100_std, se1100_def, ledman_bits, ledman_tick, se1100_set, LT },
-#endif
-
-#if defined(CONFIG_GILBARCONAP) && defined(CONFIG_M5272)
-	{ "std", nap5272_std, nap5272_def, ledman_bits, ledman_tick, nap5272_set, LT },
-#endif
-
-#if defined(CONFIG_SH_SECUREEDGE5410)
-	{ "std", se5410_std, se5410_def, ledman_bits, ledman_tick, se5410_set, LT },
-#endif
-
-#ifdef CONFIG_eLIA
-	{ "std", elia_std, elia_def, ledman_bits, ledman_tick, elia_set, LT },
-#endif
-
-#if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
-	{ "std",keywest_std,keywest_def,keywest_bits,keywest_tick,keywest_set,HZ/10},
-#endif
-
-#if defined(CONFIG_MACH_MONTEJADE) || defined(CONFIG_MACH_SE5100)
-	{ "std",montejade_std,montejade_def,ledman_bits,ledman_tick,montejade_set,LT},
-#endif
-
-#if defined(CONFIG_ARCH_SE4000) || defined(CONFIG_MACH_ESS710) || \
-	defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG580) || \
-	defined(CONFIG_MACH_SG565) || defined(CONFIG_MACH_SG720) || \
-	defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SHIVA1100) || \
-	defined(CONFIG_MACH_SG590) || defined(CONFIG_MACH_SG8100)
-	{ "std",snapgear425_std,snapgear425_def,ledman_bits,ledman_tick,snapgear425_set,LT},
-#endif
-
-#ifdef CONFIG_MACH_IVPN
-	{ "std",ivpn_std,ivpn_def,ledman_bits,ledman_tick,ivpn_set,LT},
-#endif
-
-#if defined(CONFIG_MACH_LITE300)
-	{ "std",lite3_std,lite3_def,ledman_bits,ledman_tick,lite3_set,LT},
-#endif
-
-#if defined(CONFIG_MACH_SE4200)
-	{ "std",se4200_std,se4200_def,ledman_bits,ledman_tick,se4200_set,LT},
-#endif
-
-#if defined(CONFIG_MACH_CM4008)
-	{ "std",cm4008_std,cm4008_def,ledman_bits,ledman_tick,cm4008_set,LT},
-#endif
-
-#if defined(CONFIG_MACH_CM41xx)
-	{ "std",cm41xx_std,cm41xx_def,ledman_bits,ledman_tick,cm41xx_set,LT},
-#endif
-
-#if defined(CONFIG_SG310)
-	{ "std", sg310_std, sg310_def, ledman_bits, ledman_tick, sg310_set, LT},
-#endif
-
-#if defined(CONFIG_ARCH_EP9312)
-	{ "std", ipd_std, ipd_def, ledman_bits, ledman_tick, ipd_set, LT},
-#endif
-
-#if defined(CONFIG_AVNET5282)
-	{ "std", ads5282_std, ads5282_def, ledman_bits, ledman_tick, ads5282_set, LT },
-#endif
-
-#ifdef CONFIG_BD_TIBURON
-	{ "std", tiburon_std, tiburon_def, ledman_bits, ledman_tick, tiburon_set, LT },
-#endif
-
-	{ "",  NULL, NULL, 0 }
-};
 
 /****************************************************************************/
 /*
@@ -447,55 +196,10 @@ int
 ledman_setup(char *arg)
 {
 	ledman_cmd(LEDMAN_CMD_MODE, (unsigned long) arg);
-	return(0);
-}
-
-/****************************************************************************/
-/****************************************************************************/
-
-INIT_RET_TYPE ledman_init(void)
-{
-	printk(KERN_INFO "ledman: Copyright (C) SnapGear, 2000-2003.\n");
-
-	if (register_chrdev(LEDMAN_MAJOR, "nled",  &ledman_fops) < 0) {
-		printk("%s(%d): ledman_init() can't get Major %d\n",
-				__FILE__, __LINE__, LEDMAN_MAJOR);
-		return(-EBUSY);
-	} 
-
-#if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
-	ledman_initkeywest();
-#endif
-
-#if defined(CONFIG_X86) || defined(CONFIG_ARM)
-	ledman_initarch();
-#endif
-
-/*
- *	set the LEDs up correctly at boot
- */
-	ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_ALL);
-/*
- *	start the timer
- */
-	if (led_mode[current_mode].tick)
-		ledman_timerlist.expires = jiffies + led_mode[current_mode].jiffies;
-	else
-		ledman_timerlist.expires = jiffies + HZ;
-	ledman_timerlist.function = ledman_poll;
-	ledman_timerlist.data = 0;
-	add_timer(&ledman_timerlist);
-
-#if LINUX_VERSION_CODE < 0x020100
-	register_symtab(&ledman_syms);
-#endif
-
-	initted = 1;
 	return 0;
 }
 
-Module_init(ledman_init);
-
+/****************************************************************************/
 /****************************************************************************/
 
 void
@@ -518,9 +222,9 @@ void
 ledman_starttimer(void)
 {
 /*
- *	stop the timer
+ *	start the timer
  */
-	add_timer(&ledman_timerlist);
+	mod_timer(&ledman_timerlist, jiffies + 1);
 
 /*
  *	set the LEDs up correctly at boot
@@ -533,91 +237,44 @@ ledman_starttimer(void)
 static void
 ledman_poll(unsigned long arg)
 {
-	if (led_mode[current_mode].tick) {
-		(*led_mode[current_mode].tick)();
-		ledman_timerlist.expires = jiffies + led_mode[current_mode].jiffies;
+	unsigned long expires;
+	if (lmp->tick) {
+		lmp->tick();
+		expires = jiffies + lmp->jiffies;
 	} else
-		ledman_timerlist.expires = jiffies + HZ;
-	add_timer(&ledman_timerlist);
+		expires = jiffies + HZ;
+	mod_timer(&ledman_timerlist, expires);
 }
 
 /****************************************************************************/
 
-static int
+static long
 ledman_ioctl(
-	struct inode * inode,
-	struct file * file,
+	struct file *file,
 	unsigned int cmd,
 	unsigned long arg)
 {
 	char	mode[LEDMAN_MAX_NAME];
 	int		i;
 
+	/* Strip off the leading ioctl command identifer */
+	cmd &= LEDMAN_IOC_BITMASK;
+
 	if (cmd == LEDMAN_CMD_SIGNAL) {
 		ledman_resetpid = current->pid;
-		return(0);
+		return 0;
 	}
 
 	if (cmd == LEDMAN_CMD_MODE) {
 		for (i = 0; i < sizeof(mode) - 1; i++) {
-			Get_user(mode[i], (char *) (arg + i));
+			Get_user(mode[i], (char __user *) (arg + i));
 			if (!mode[i])
 				break;
 		}
 		mode[i] = '\0';
 		arg = (unsigned long) &mode[0];
 	}
-	return(ledman_cmd(cmd, arg));
-}
-
-/****************************************************************************/
-/*
- *	cmd - from ledman.h
- *	led - led code from ledman.h
- *
- *	check parameters and then call
- */
-
-int
-ledman_cmd(int cmd, unsigned long led)
-{
-	ledmode_t	*lmp;
-	int			i;
-
-	switch (cmd & ~LEDMAN_CMD_ALTBIT) {
-	case LEDMAN_CMD_SET:
-	case LEDMAN_CMD_ON:
-	case LEDMAN_CMD_OFF:
-	case LEDMAN_CMD_FLASH:
-	case LEDMAN_CMD_RESET:
-	case LEDMAN_CMD_ALT_ON:
-	case LEDMAN_CMD_ALT_OFF:
-		break;
-	case LEDMAN_CMD_STARTTIMER:
-		ledman_starttimer();
-		return(0);
-	case LEDMAN_CMD_KILLTIMER:
-		ledman_killtimer();
-		return(0);
-	case LEDMAN_CMD_MODE:
-		for (i = 0; led_mode[i].name[0]; i++)
-			if (strcmp((char *) led, led_mode[i].name) == 0) {
-				current_mode = i;
-				if (initted)
-					ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_ALL);
-				return(0);
-			}
-		return(-EINVAL);
-	default:
-		return(-EINVAL);
-	}
-
-	if (led < 0 || led >= LEDMAN_MAX)
-		return(-EINVAL);
-
-	lmp = &led_mode[current_mode];
-	(*lmp->bits)(cmd, lmp->map[led]);
-	return(0);
+	return ledman_cmd(cmd, arg);
 }
 
 /****************************************************************************/
@@ -626,15 +283,16 @@ ledman_cmd(int cmd, unsigned long led)
  */
 
 void
-ledman_signalreset()
+ledman_signalreset(void)
 {
-	static unsigned long firstjiffies = 0;
+	static unsigned long firstjiffies;
+
 	if (ledman_resetpid == -1)
 		return;
 	if (jiffies > (firstjiffies + (HZ / 4))) {
 		firstjiffies = jiffies;
-		printk("LED: reset switch interrupt! (sending signal to pid=%d)\n",
-					ledman_resetpid);
+		pr_info("reset switch interrupt!"
+		       " (sending signal to pid=%d)\n", ledman_resetpid);
 		kill_proc(ledman_resetpid, SIGUSR2, 1);
 	}
 }
@@ -646,7 +304,6 @@ ledman_signalreset()
 static int
 ledman_bits(unsigned long cmd, unsigned long bits)
 {
-	ledmode_t		*lmp = &led_mode[current_mode];
 	int				 alt, i;
 	unsigned long	 new_alt;
 
@@ -660,13 +317,13 @@ ledman_bits(unsigned long cmd, unsigned long bits)
 		leds_on[alt]    |= bits;
 		leds_off[alt]   &= ~bits;
 		leds_flash[alt] &= ~bits;
-		(*lmp->tick)();
+		lmp->tick();
 		break;
 	case LEDMAN_CMD_OFF:
 		leds_on[alt]    &= ~bits;
 		leds_off[alt]   |= bits;
 		leds_flash[alt] &= ~bits;
-		(*lmp->tick)();
+		lmp->tick();
 		break;
 	case LEDMAN_CMD_FLASH:
 		leds_on[alt]    &= ~bits;
@@ -674,10 +331,10 @@ ledman_bits(unsigned long cmd, unsigned long bits)
 		leds_flash[alt] |= bits;
 		break;
 	case LEDMAN_CMD_RESET:
-		leds_set[alt]   = (leds_set[alt]  &~bits) | (bits&lmp->def[LEDS_SET]);
-		leds_on[alt]    = (leds_on[alt]   &~bits) | (bits&lmp->def[LEDS_ON]);
-		leds_off[alt]   = (leds_off[alt]  &~bits) | (bits&lmp->def[LEDS_OFF]);
-		leds_flash[alt] = (leds_flash[alt]&~bits) | (bits&lmp->def[LEDS_FLASH]);
+		leds_set[alt]   = (leds_set[alt]   & ~bits) | (bits & lmp->def[LEDS_SET]);
+		leds_on[alt]    = (leds_on[alt]    & ~bits) | (bits & lmp->def[LEDS_ON]);
+		leds_off[alt]   = (leds_off[alt]   & ~bits) | (bits & lmp->def[LEDS_OFF]);
+		leds_flash[alt] = (leds_flash[alt] & ~bits) | (bits & lmp->def[LEDS_FLASH]);
 		break;
 	case LEDMAN_CMD_ALT_ON:
 		new_alt = (bits & ~leds_alt);
@@ -685,7 +342,7 @@ ledman_bits(unsigned long cmd, unsigned long bits)
 		/*
 		 * put any newly alt'd bits into a default state
 		 */
-		(*lmp->bits)(LEDMAN_CMD_RESET | LEDMAN_CMD_ALTBIT, new_alt);
+		lmp->bits(LEDMAN_CMD_RESET | LEDMAN_CMD_ALTBIT, new_alt);
 		for (i = 0; i < 32; i++)
 			if (bits & (1 << i))
 				leds_alt_cnt[i]++;
@@ -699,9 +356,9 @@ ledman_bits(unsigned long cmd, unsigned long bits)
 			}
 		break;
 	default:
-		return(-EINVAL);
+		return -EINVAL;
 	}
-	return(0);
+	return 0;
 }
 
 /****************************************************************************/
@@ -709,9 +366,8 @@ ledman_bits(unsigned long cmd, unsigned long bits)
 static void
 ledman_tick(void)
 {
-	ledmode_t	*lmp = &led_mode[current_mode];
-	int			new_value;
-	static int	flash_on = 0;
+	static int flash_on;
+	int new_value;
 /*
  *	work out which LED's should be on
  */
@@ -729,7 +385,7 @@ ledman_tick(void)
 /*
  *	set the HW
  */
- 	(*lmp->set)(new_value);
+	lmp->set(new_value);
 	leds_set[0] = leds_set[1] = 0;
 }
 
@@ -743,7 +399,7 @@ ledman_tick(void)
  *	as per the labels next to them.  The two parallel port LED's steal
  *	some high bits so we can map it more easily onto the HW
  *
- *	LED - D1   D2   D3   D4   D5   D6   D7   D8   D11  D12  
+ *	LED - D1   D2   D3   D4   D5   D6   D7   D8   D11  D12
  *	HEX - 100  200  004  008  010  020  040  080  002  001
  *
  */
@@ -794,7 +450,7 @@ static ledmap_t enterasys_std = {
 	0x000, 0x000, 0x080, 0x000, 0x000, 0x000, 0x000, 0x100, 0x200, 0x000,
 	0x000, 0x000, 0x000, 0x000
 };
-  
+
 static leddef_t enterasys_def = {
 	0x000, 0x200, 0x000, 0x100,
 };
@@ -803,12 +459,12 @@ static leddef_t enterasys_def = {
 static void
 nettel_set(unsigned long bits)
 {
-	unsigned long		flags;
+	unsigned long flags;
 
-	save_flags(flags); cli();
-	* (volatile char *) NETtel_LEDADDR = (~bits & 0xff);
-	mcf_setppleds(0x60, ~(bits >> 3) & 0x60);
-	restore_flags(flags);
+	local_irq_save(flags);
+	*(volatile char *)NETtel_LEDADDR = (~bits & 0xff);
+	mcf_setppdata(0x60, ~(bits >> 3) & 0x60);
+	local_irq_restore(flags);
 }
 
 /****************************************************************************/
@@ -821,7 +477,7 @@ nettel_set(unsigned long bits)
  *	For the SecureEdge Firewall (5272), 5 operational LED's.
  *
  *	LED -   POWER HEARTBEAT TX     RX     VPN
- * 	HEX -    001     002    004    008    010
+ *	HEX -    001     002    004    008    010
  */
 
 #include <asm/coldfire.h>
@@ -854,7 +510,7 @@ static void nt5272_set(unsigned long bits)
  *	For the SecureEdge SE1100 (5272), 3 operational LED's.
  *
  *	LED -   RUNNING INTERNAL1 INTERNAL2
- * 	HEX -     001     200       002
+ *	HEX -     001     200       002
  */
 
 #include <asm/coldfire.h>
@@ -887,7 +543,7 @@ static void se1100_set(unsigned long bits)
  *	For the Gilbarco/NAP (5272), 2 operational LED's.
  *
  *	LED -   RUNNING DIAG
- * 	HEX -     001    002
+ *	HEX -     001    002
  */
 
 #include <asm/coldfire.h>
@@ -974,20 +630,21 @@ static void ads5282_set(unsigned long bits)
 #if defined(CONFIG_SH_SECUREEDGE5410)
 /****************************************************************************/
 
+#include <asm/snapgear.h>
+
 /*
  *	For the SecureEdge5410 7 (or 8 for eth2/DMZ port) operational LED's.
  *
- *	LED -   POWR  HBEAT  LAN1  LAN2 | LAN3 | COM ONLINE  VPN 
+ *	LED -   POWR  HBEAT  LAN1  LAN2 | LAN3 | COM ONLINE  VPN
  *	POS -    D2    D3    D4    D5   |  ??  | D6    D7    D8    DTR
- * 	HEX -    01    02    04    08   |0x2000| 10    20    40    80 
+ *	HEX -    01    02    04    08   |0x2000| 10    20    40    80
  */
 
-#include <asm/io.h>
 #if defined(CONFIG_LEDMAP_TAMS_SOHO)
 /*
- *	LED -   POWR  HBEAT  LAN1  LAN2    COM   ONLINE VPN      
+ *	LED -   POWR  HBEAT  LAN1  LAN2    COM   ONLINE VPN
  *	POS -    D2    D3    D4    D5      ??    D6     D7    DTR
- * 	HEX -    01    02    04    08    0x2000  10     20    80
+ *	HEX -    01    02    04    08    0x2000  10     20    80
  */
 static ledmap_t se5410_std = {
 	0x203f,0x0001,0x0002,0x2000,0x2000,0x2000,0x2000,0x0004,0x0004,0x0008,
@@ -1010,11 +667,11 @@ static leddef_t	se5410_def = {
 
 static void se5410_set(unsigned long bits)
 {
-	int flags;
+	unsigned long flags;
 
-	save_and_cli(flags);
+	local_irq_save(flags);
 	SECUREEDGE_WRITE_IOPORT(~bits, 0x207f);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /****************************************************************************/
@@ -1026,7 +683,7 @@ static void se5410_set(unsigned long bits)
  *	For the WebWhale/NETtel1500,  3 LED's (was 2)
  *
  *	LED - HEARTBEAT  DCD    DATA
- * 	HEX -    001     002    004
+ *	HEX -    001     002    004
  */
 
 #include <asm/coldfire.h>
@@ -1047,7 +704,7 @@ static leddef_t	nt1500_def = {
 static void
 nt1500_set(unsigned long bits)
 {
-	* (volatile char *) NETtel_LEDADDR = (~bits & 0x7);
+	*(volatile char *)NETtel_LEDADDR = (~bits & 0x7);
 }
 
 /****************************************************************************/
@@ -1082,11 +739,11 @@ static leddef_t	elia_def = {
 static void
 elia_set(unsigned long bits)
 {
-	unsigned long		flags;
+	unsigned long flags;
 
-	save_flags(flags); cli();
-	mcf_setppleds(0x3000, ~(bits << 12) & 0x3000);
-	restore_flags(flags);
+	local_irq_save(flags);
+	mcf_setppdata(0x3000, ~(bits << 12) & 0x3000);
+	local_irq_restore(flags);
 }
 
 /****************************************************************************/
@@ -1100,7 +757,6 @@ elia_set(unsigned long bits)
 #include <linux/sched.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
-#include <asm/io.h>
 
 #if defined(CONFIG_CHINOOK)
 /*
@@ -1170,8 +826,8 @@ static leddef_t	nettel_def_old = {
  *	Here it the definition of the LED's on the SiteController circuit board
  *	as per the labels next to them. (D9 and D10 are not software controlled)
  *
- *	LED -  D1   D2   D3   D4   D5   D6   D7   D8 
- *	HEX - 0001 0002 0004 0008 0010 0020 0040 0080 
+ *	LED -  D1   D2   D3   D4   D5   D6   D7   D8
+ *	HEX - 0001 0002 0004 0008 0010 0020 0040 0080
  */
 static ledmap_t	nettel_std = {
 	0x10fd,0x0001,0x1000,0x0004,0x0004,0x0008,0x0008,0x0040,0x0040,0x0080,
@@ -1237,14 +893,15 @@ static void nettel_set(unsigned long bits)
 	outb(~bits, 0x300);
 	*ledman_ledp = (*ledman_ledp & 0x0fffffff) | (~bits & 0xf0000000);
 #else
-	*ledman_ledp = (*ledman_ledp & ~ nettel_std[LEDMAN_ALL])
+	*ledman_ledp = (*ledman_ledp & ~nettel_std[LEDMAN_ALL])
 			| (~bits & nettel_std[LEDMAN_ALL]);
 #endif
 }
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
 static void ledman_initarch(void)
@@ -1268,10 +925,10 @@ static void ledman_initarch(void)
 	ledman_ledp = (volatile unsigned long *) (mmcrp + 0xc30);
 
 	/* Setup extern "factory default" switch on IRQ12 */
-	if (request_irq(12, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ12 for ERASE witch\n");
+	if (request_irq(12, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ12 for ERASE witch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ12\n");
+		pr_info("registered ERASE switch on IRQ12\n");
 }
 
 /****************************************************************************/
@@ -1280,8 +937,6 @@ static void ledman_initarch(void)
 /****************************************************************************/
 #if defined(CONFIG_GEODE)
 /****************************************************************************/
-
-#include <asm/io.h>
 
 /*
  *	Construct a mapping from virtual LED to gpio bit and bank.
@@ -1334,7 +989,7 @@ static ledmap_t	nettel_std = {
 	0x008, 0x040, 0x020, 0x200, 0x200, 0x200, 0x200, 0x30c,
 	0x0f0, 0x000, 0x3fc, 0x004, 0x000, 0x000, 0x004, 0x000,
 	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-   	0x000, 0x000
+	0x000, 0x000
 };
 
 static struct gpiomap iomap[] = {
@@ -1366,7 +1021,7 @@ static ledmap_t	nettel_std = {
 	0x008, 0x040, 0x020, 0x200, 0x200, 0x200, 0x200, 0x30c,
 	0x0f0, 0x000, 0x3fc, 0x004, 0x000, 0x000, 0x004, 0x000,
 	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-   	0x000, 0x000
+	0x000, 0x000
 };
 
 static struct gpiomap iomap[] = {
@@ -1415,7 +1070,7 @@ static void ledman_buttonpoll(unsigned long arg)
 {
 	if (inl(0x6404) & 0x0002) {
 		if (ledman_button == 0) {
-			printk("LEDMAN: reset button pushed!\n");
+			pr_info("reset button pushed!\n");
 			ledman_signalreset();
 		}
 		ledman_button = 1;
@@ -1424,8 +1079,7 @@ static void ledman_buttonpoll(unsigned long arg)
 	}
 
 	/* Re-arm timer interrupt. */
-	ledman_timer.expires = jiffies + HZ/25;
-	add_timer(&ledman_timer);
+	mod_timer(&ledman_timer, jiffies + HZ/25);
 }
 
 static void ledman_initarch(void)
@@ -1433,12 +1087,235 @@ static void ledman_initarch(void)
 	init_timer(&ledman_timer);
 	ledman_timer.function = ledman_buttonpoll;
 	ledman_timer.data = 0;
-	ledman_timer.expires = jiffies + HZ/25;
-	add_timer(&ledman_timer);
+	mod_timer(&ledman_timer, jiffies + HZ/25);
 }
 
 /****************************************************************************/
 #endif /* CONFIG_GEODE */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_UTM2000)
+/****************************************************************************/
+
+#include <linux/pci.h>
+
+/*
+ * Access to the GPIO registers is via the LPC bus PCI device.
+ * Define relevant parts of that device here.
+ */
+#define	LPC_VENDOR_ID	0x8086
+#define	LPC_DEVICE_ID	0x5031
+
+#define	GPIO_BAR_OFFSET	0x48
+
+/*
+ * Offsets of registers into the GPIO register address space.
+ */
+#define	GPIO_USE_SEL1	0x0
+#define	GP_IO_SEL1	0x4
+#define	GP_LVL1		0xc
+#define	GPO_BLINK	0x18
+#define	GPI_INV		0x2c
+#define	GPIO_USE_SEL2	0x30
+#define	GP_IO_SEL2	0x34
+#define	GP_LVL2		0x38
+
+/*
+ *	Here is the definition of the LED's on the SnapGear Tolapai board.
+ */
+#define	LED0		0x00100000
+#define	LED1		0x01000000
+#define	LED2		0x02000000
+#define	LEDMASK		0x03100000
+
+static ledmap_t	nettel_std = {
+	[LEDMAN_ALL]		= LEDMASK,
+	[LEDMAN_HEARTBEAT]	= LED0,
+	[LEDMAN_COM1_RX]	= LED1,
+	[LEDMAN_COM1_TX]	= LED1,
+	[LEDMAN_COM2_RX]	= LED1,
+	[LEDMAN_COM2_TX]	= LED1,
+	[LEDMAN_LAN1_RX]	= LED2,
+	[LEDMAN_LAN1_TX]	= LED2,
+	[LEDMAN_LAN2_RX]	= LED2,
+	[LEDMAN_LAN2_TX]	= LED2,
+	[LEDMAN_LAN3_RX]	= LED2,
+	[LEDMAN_LAN3_TX]	= LED2,
+};
+
+static leddef_t	nettel_def = {
+	[LEDS_FLASH]		= LED0,
+};
+
+static u32 ledman_gpioaddr;
+
+void gpio_enable_bit(int nr, int dir)
+{
+	u32 addr, v;
+
+	addr = ledman_gpioaddr + ((nr < 32) ? GPIO_USE_SEL1 : GPIO_USE_SEL2);
+	v = inl(addr);
+	v |= (0x1 << (nr & 0x1f));
+	outl(v, addr);
+
+	addr = ledman_gpioaddr + ((nr < 32) ? GP_IO_SEL1 : GP_IO_SEL2);
+	v = inl(addr);
+	if (dir)
+		v &= ~(0x1 << (nr & 0x1f));
+	else
+		v |= (0x1 << (nr & 0x1f));
+	outl(v, addr);
+
+	if (nr < 32) {
+		addr = ledman_gpioaddr + GPO_BLINK;
+		v = inl(addr);
+		v &= ~(0x1 << nr);
+		outl(v, addr);
+	}
+}
+EXPORT_SYMBOL(gpio_enable_bit);
+
+void gpio_dump_reg(void)
+{
+	pr_info("%s(%d): [GPIO_USE_SEL1]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GPIO_USE_SEL1));
+	pr_info("%s(%d): [GP_IO_SEL1]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GP_IO_SEL1));
+	pr_info("%s(%d): [GP_LVL1]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GP_LVL1));
+
+	pr_info("%s(%d): [GPIO_USE_SEL2]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GPIO_USE_SEL2));
+	pr_info("%s(%d): [GP_IO_SEL2]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GP_IO_SEL2));
+	pr_info("%s(%d): [GP_LVL2]=0x%08x\n", __FILE__, __LINE__, inl(ledman_gpioaddr + GP_LVL2));
+}
+EXPORT_SYMBOL(gpio_dump_reg);
+
+void gpio_set_bit(int nr)
+{
+	u32 addr, v;
+	addr = ledman_gpioaddr + ((nr < 32) ? GP_LVL1 : GP_LVL2);
+	v = inl(addr);
+	v |= (0x1 << (nr & 0x1f));
+	outl(v, addr);
+}
+EXPORT_SYMBOL(gpio_set_bit);
+
+void gpio_clear_bit(int nr)
+{
+	u32 addr, v;
+	addr = ledman_gpioaddr + ((nr < 32) ? GP_LVL1 : GP_LVL2);
+	v = inl(addr);
+	v &= ~(0x1 << (nr & 0x1f));
+	outl(v, addr);
+}
+EXPORT_SYMBOL(gpio_clear_bit);
+
+static void nettel_set(unsigned long bits)
+{
+	u32 v;
+	v = inl(ledman_gpioaddr + GP_LVL1);
+	v = (v & ~LEDMASK) | (~bits & LEDMASK);
+	outl(v, ledman_gpioaddr + GP_LVL1);
+}
+
+static void ledman_initarch(void)
+{
+	struct pci_dev *dev;
+	u32 v;
+
+	dev = pci_get_device(LPC_VENDOR_ID, LPC_DEVICE_ID, NULL);
+	if (dev == NULL) {
+		pr_err("cannot find GPIO device?\n");
+		return;
+	}
+	pci_read_config_dword(dev, GPIO_BAR_OFFSET, &ledman_gpioaddr);
+	ledman_gpioaddr &= 0xfffffff0;
+	pr_info("GPIO base IO addr=0x%x\n", ledman_gpioaddr);
+
+	/* Set GPIO lines for LEDs to be GPIO lines (not alternate function) */
+	v = inl(ledman_gpioaddr + GPIO_USE_SEL1);
+	v |= LEDMASK;
+	outl(v, ledman_gpioaddr + GPIO_USE_SEL1);
+
+	v = inl(ledman_gpioaddr + GP_IO_SEL1);
+	v &= ~((0x1 << 24) | (0x1 << 25));
+	outl(v, ledman_gpioaddr + GP_IO_SEL1);
+
+	/* Enable the external USB adapter */
+	gpio_enable_bit(18, 1);
+	gpio_set_bit(18);
+
+	nettel_set(0);
+}
+
+/*
+ *	Access to the expansion bus is enabled via PCI device.
+ */
+#define	EXPBUS_VENDOR_ID	0x8086
+#define	EXPBUS_DEVICE_ID	0x503d
+
+#define	EXPBUS_MMR_BAR_OFFSET	0x10
+#define	EXPBUS_MMR_SIZE		(4 * 1024)
+#define	EXPBUS_CS_BAR_OFFSET	0x14
+#define	EXPBUS_CS_SIZE		(16 * 1024 * 1024)
+
+#define	EXP_TIMING_CS0		0x0
+#define	EXP_TIMING_CS1		0x4
+#define	EXP_TIMING_CS2		0x8
+#define	EXP_TIMING_CS3		0xc
+#define	EXP_TIMING_CS4		0x10
+#define	EXP_TIMING_CS5		0x14
+#define	EXP_TIMING_CS6		0x18
+#define	EXP_TIMING_CS7		0x1c
+#define	EXP_CNFG0		0x20
+
+u32 expbus_cs0;
+u32 expbus_cs1;
+u32 expbus_cs2;
+
+EXPORT_SYMBOL(expbus_cs0);
+EXPORT_SYMBOL(expbus_cs1);
+EXPORT_SYMBOL(expbus_cs2);
+
+static int expbus_init(void)
+{
+	volatile void __iomem *expmmrp;
+	struct pci_dev *dev;
+	u32 expmmr;
+
+	dev = pci_get_device(EXPBUS_VENDOR_ID, EXPBUS_DEVICE_ID, NULL);
+	if (dev == NULL) {
+		pr_err("expbus: cannot find EXPBUS device?\n");
+		return 0;
+	}
+	pci_read_config_dword(dev, EXPBUS_MMR_BAR_OFFSET, &expmmr);
+	expmmr &= 0xfffffff0;
+
+	expmmrp = ioremap(expmmr, EXPBUS_MMR_SIZE);
+	if (expmmrp == NULL) {
+		pr_err("expbus: failed to map Expansion Bus MMR region?\n");
+		return 0;
+	}
+	pr_info("expbus: mapped Expansion Bus MMR (0x%x) to 0x%p\n",
+		expmmr, expmmrp);
+
+	pci_read_config_dword(dev, EXPBUS_CS_BAR_OFFSET, &expbus_cs0);
+	expbus_cs0 &= 0xfffffff0;
+	expbus_cs1 = expbus_cs0 + EXPBUS_CS_SIZE;
+	expbus_cs2 = expbus_cs1 + EXPBUS_CS_SIZE;
+
+	/* Map CS0 and CS1 for the lcd panel and buttons */
+	writel(0xbfff0043, expmmrp + EXP_TIMING_CS0);
+	writel(0xbfff0043, expmmrp + EXP_TIMING_CS1);
+
+	/* Map CS2 for the power-reset controller watchdog timer */
+	writel(0xbfff0043, expmmrp + EXP_TIMING_CS2);
+
+	iounmap(expmmrp);
+	return 0;
+}
+
+fs_initcall(expbus_init);
+
+/****************************************************************************/
+#endif /* CONFIG_TOLAPAI */
 /****************************************************************************/
 /****************************************************************************/
 #if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
@@ -1500,7 +1377,7 @@ struct keywest_font_s {
 	{{ 0x02, 0x05, 0x05, 0x1c, 0x1c, 0x1c, 0x1c }}, /* vpn unlocked */
 };
 
-static unsigned int keywest_old_cntx = 0;
+static unsigned int keywest_old_cntx;
 
 /*
  * program up some display bars
@@ -1510,10 +1387,10 @@ static void ledman_initkeywest()
 {
 	int i, j;
 
-	for (i = 0; i < sizeof(keywest_font) / sizeof(struct keywest_font_s); i++) {
-		* (unsigned char *)(LED_ADDR(0x20)) = i;
+	for (i = 0; i < ARRAY_SIZE(keywest_font); i++) {
+		*(unsigned char *)(LED_ADDR(0x20)) = i;
 		for (j = 0; j < 7; j++)
-			* (unsigned char *)(LED_ADDR(0x28+j)) = keywest_font[i].row[j];
+			*(unsigned char *)(LED_ADDR(0x28+j)) = keywest_font[i].row[j];
 	}
 	keywest_old_cntx = kstat.context_swtch;
 }
@@ -1527,14 +1404,13 @@ static void keywest_set(unsigned long bits)
 	int i, alt;
 	for (i = 0; i < KEYWEST_NUM_LEDS; i++) {
 		alt = (leds_alt & (1 << i)) ? 1 : 0;
-		* (unsigned char *)(LED_ADDR(0x38+i)) = keywest_led_values[i][alt].disp;
+		*(unsigned char *)(LED_ADDR(0x38+i)) = keywest_led_values[i][alt].disp;
 	}
 }
 
 static int
 keywest_bits(unsigned long cmd, unsigned long bits)
 {
-	ledmode_t		*lmp = &led_mode[current_mode];
 	int				 alt, i;
 	unsigned long	 new_alt;
 
@@ -1542,7 +1418,7 @@ keywest_bits(unsigned long cmd, unsigned long bits)
 
 	switch (cmd & ~LEDMAN_CMD_ALTBIT) {
 	case LEDMAN_CMD_SET:
-		bits   &= ~(leds_flash[alt]|leds_on[alt]|leds_off[alt]);
+		bits &= ~(leds_flash[alt]|leds_on[alt]|leds_off[alt]);
 		for (i = 0; i < KEYWEST_NUM_LEDS; i++)
 			if (bits & (1 << i))
 				keywest_led_values[i][alt].count++;
@@ -1551,13 +1427,13 @@ keywest_bits(unsigned long cmd, unsigned long bits)
 		leds_on[alt]    |= bits;
 		leds_off[alt]   &= ~bits;
 		leds_flash[alt] &= ~bits;
-		(*lmp->tick)();
+		lmp->tick();
 		break;
 	case LEDMAN_CMD_OFF:
 		leds_on[alt]    &= ~bits;
 		leds_off[alt]   |= bits;
 		leds_flash[alt] &= ~bits;
-		(*lmp->tick)();
+		lmp->tick();
 		break;
 	case LEDMAN_CMD_FLASH:
 		leds_on[alt]    &= ~bits;
@@ -1565,9 +1441,9 @@ keywest_bits(unsigned long cmd, unsigned long bits)
 		leds_flash[alt] |= bits;
 		break;
 	case LEDMAN_CMD_RESET:
-		leds_on[alt]    = (leds_on[alt]   &~bits) | (bits&lmp->def[LEDS_ON]);
-		leds_off[alt]   = (leds_off[alt]  &~bits) | (bits&lmp->def[LEDS_OFF]);
-		leds_flash[alt] = (leds_flash[alt]&~bits) | (bits&lmp->def[LEDS_FLASH]);
+		leds_on[alt]    = (leds_on[alt]    & ~bits) | (bits & lmp->def[LEDS_ON]);
+		leds_off[alt]   = (leds_off[alt]   & ~bits) | (bits & lmp->def[LEDS_OFF]);
+		leds_flash[alt] = (leds_flash[alt] & ~bits) | (bits & lmp->def[LEDS_FLASH]);
 		memset(keywest_led_values, 0, sizeof(keywest_led_values));
 		break;
 	case LEDMAN_CMD_ALT_ON:
@@ -1576,7 +1452,7 @@ keywest_bits(unsigned long cmd, unsigned long bits)
 		/*
 		 * put any newly alt'd bits into a default state
 		 */
-		(*lmp->bits)(LEDMAN_CMD_RESET | LEDMAN_CMD_ALTBIT, new_alt);
+		lmp->bits(LEDMAN_CMD_RESET | LEDMAN_CMD_ALTBIT, new_alt);
 		for (i = 0; i < 32; i++)
 			if (bits & (1 << i))
 				leds_alt_cnt[i]++;
@@ -1590,18 +1466,17 @@ keywest_bits(unsigned long cmd, unsigned long bits)
 			}
 		break;
 	default:
-		return(-EINVAL);
+		return -EINVAL;
 	}
-	return(0);
+	return 0;
 }
 
 static void
 keywest_tick(void)
 {
-	ledmode_t	*lmp = &led_mode[current_mode];
-	int			alt, i;
-	static int	flash_on = 0;
+	static int flash_on;
 	struct keywest_led_value *led_value;
+	int alt, i;
 
 	/*
 	 * we take over the second LED as a context switch indicator
@@ -1635,7 +1510,7 @@ keywest_tick(void)
 
 			if (led_value->count > led_value->max)
 				led_value->max = led_value->count;
-			
+
 			val = (led_value->prev + led_value->count) / 2;
 			led_value->prev = val;
 
@@ -1650,19 +1525,18 @@ keywest_tick(void)
 		}
 	}
 	flash_on++;
- 	(*lmp->set)(0);
+	lmp->set(0);
 }
 
 /****************************************************************************/
 #endif /* CONFIG_SH_KEYWEST */
 /****************************************************************************/
 /****************************************************************************/
-#if defined(CONFIG_MACH_MONTEJADE) || defined(CONFIG_MACH_SE5100)
+#if defined(CONFIG_MACH_MONTEJADE) || defined(CONFIG_MACH_IXDPG425) || \
+	defined(CONFIG_MACH_SE5100)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 
 /*
  *	Here is the definition of the LED's on the Intel/MonteJade platform.
@@ -1673,7 +1547,7 @@ keywest_tick(void)
  */
 static ledmap_t	montejade_std = {
 	0xff, 0x00, 0x04, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x10, 0x20, 0xff, 0x10,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x28, 0x10, 0x20, 0xfc, 0x10,
 	0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00
 };
@@ -1685,9 +1559,8 @@ static leddef_t	montejade_def = {
 
 static volatile unsigned char *ledman_cs2;
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void ledman_interrupt(int irq, void *dev_id)
 {
-	gpio_line_isr_clear(IXP425_GPIO_PIN_9);
 	ledman_signalreset();
 }
 
@@ -1700,70 +1573,63 @@ static struct timer_list montejade_wdt;
 
 static void montejade_wdtpoll(unsigned long arg)
 {
-	*IXP425_GPIO_GPOUTR ^= 0x400;
+	*IXP4XX_GPIO_GPOUTR ^= 0x400;
 
 	/* Re-arm timer interrupt. */
-	montejade_wdt.expires = jiffies + HZ/10;
-	add_timer(&montejade_wdt);
+	mod_timer(&montejade_wdt, jiffies + HZ/10);
 }
 
 static void montejade_wdtinit(void)
 {
 	/* Configure GPIO10 as an output to kick watchdog */
-	gpio_line_config(IXP425_GPIO_PIN_10, IXP425_GPIO_OUT);
+	gpio_line_config(10, IXP4XX_GPIO_OUT);
 
 	/* Setup timer poll, 10 times a second should be good enough */
 	init_timer(&montejade_wdt);
 	montejade_wdt.function = montejade_wdtpoll;
 	montejade_wdt.data = 0;
-	montejade_wdt.expires = jiffies + HZ/10;
-	add_timer(&montejade_wdt);
+	mod_timer(&montejade_wdt, jiffies + HZ/10);
 }
 
 static void ledman_initarch(void)
 {
 	/* Configure CS2 for operation, 8bit and writable will do */
-	*IXP425_EXP_CS2 = 0xbfff0003;
+	*IXP4XX_EXP_CS2 = 0xbfff0003;
 
 	/* Map the LED chip select address space */
-	ledman_cs2 = (volatile unsigned char *) ioremap(IXP425_EXP_BUS_CS2_BASE_PHYS, 512);
+	ledman_cs2 = (volatile unsigned char *) ioremap(SE5100_LEDMAN_BASE_PHYS, 512);
 	*ledman_cs2 = 0xffffffff;
 
 	/* Configure GPIO9 as interrupt input (ERASE switch) */
-	gpio_line_config(IXP425_GPIO_PIN_9, (IXP425_GPIO_IN | IXP425_GPIO_FALLING_EDGE));
-	gpio_line_isr_clear(IXP425_GPIO_PIN_9);
-
-	if (request_irq(26, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ26 for ERASE witch\n");
-	else
-		printk("LED: registered ERASE switch on IRQ26\n");
+	gpio_line_config(9, IXP4XX_GPIO_IN);
+	irq_set_irq_type(26, IRQ_TYPE_EDGE_FALLING);
+	gpio_line_isr_clear(9);
 
 	montejade_wdtinit();
 }
 
 /****************************************************************************/
-#endif /* CONFIG_MACH_MONTEJADE || CONFIG_MACH_SE5100 */
+#endif /* CONFIG_MACH_MONTEJADE || CONFIG_MACH_IXDPG425 || CONFIG_MACH_SE5100 */
 /****************************************************************************/
 /****************************************************************************/
 #if defined(CONFIG_ARCH_SE4000) || defined(CONFIG_MACH_ESS710) || \
-    defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG580) || \
-	defined(CONFIG_MACH_SG565) || defined(CONFIG_MACH_SG720) || \
-    defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SHIVA1100) || \
-    defined(CONFIG_MACH_SG590) || defined(CONFIG_MACH_SG8100)
+	defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG560USB) || \
+	defined(CONFIG_MACH_SG560ADSL) || defined(CONFIG_MACH_SG565) || \
+	defined(CONFIG_MACH_SG580) || defined(CONFIG_MACH_SG590) || \
+	defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SG720) || \
+	defined(CONFIG_MACH_SG8100)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 
 #if defined(CONFIG_MACH_ESS710) || defined(CONFIG_MACH_SG720)
 /*
  *	Here is the definition of the LED's on the SnapGear/ESS710 circuit board
  *	as per the labels next to them.
  *
- *	LED - D1      D3   D4      D5 
- *	HEX - 004     008  010     020 
- *        F/OVER  H/A  ONLINE  H/B
+ *	LED - D1      D3   D4      D5
+ *	HEX - 004     008  010     020
+ *	      F/OVER  H/A  ONLINE  H/B
  */
 static ledmap_t	snapgear425_std = {
 	0x03c, 0x000, 0x020, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
@@ -1808,32 +1674,10 @@ static leddef_t	snapgear425_def = {
 	[LEDS_FLASH] = LED_D1_UPPER,
 };
 
-#elif defined(CONFIG_MACH_SHIVA1100)
-
-/*
- *	Here is the definition of the LEDs on the Eicon/Shiva1100,
- *	as per the labels next to them.
- *
- *	LED -  D2   D3   D4   D5   D6   D7   D8
- *	HEX - 0004 0008 0010 0020 0040 0080 0400
- */
-static ledmap_t	snapgear425_std = {
-	0x4fc, 0x000, 0x004, 0x040, 0x040, 0x040, 0x040, 0x008, 0x008, 0x010,
-	0x010, 0x000, 0x000, 0x000, 0x000, 0x48c, 0x070, 0x400, 0x4fc, 0x000,
-	0x000, 0x000, 0x080, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x020,
-	0x020, 0x000, 0x000, 0x000
-};
-
-static leddef_t	snapgear425_def = {
-	0x0000, 0x0000, 0x0000, 0x0004,
-};
-
-#define	LEDMASK		0x04fc
-
 #elif defined(CONFIG_MACH_SG565)
 
 /*
- *	Here is the definition of the LEDs on the CyberGuard/SG565,
+ *	Here is the definition of the LEDs on the CyberGuard/SG565
  *	as per the labels next to them.
  *
  *	LED -  D2   D3   D4   D5   D6   D7   D8
@@ -1867,11 +1711,53 @@ static leddef_t	snapgear425_def = {
 
 #define	LEDMASK		0x04fc
 
-#elif defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG580)
+#elif defined(CONFIG_MACH_SG560ADSL)
+
+/*
+ *	Here is the definition of the LEDs on the McAfee/SG560D
+ *	as per the labels next to them.
+ */
+
+#define LED_D2  0x0004
+#define LED_D3  0x0008
+#define LED_D4  0x0010
+#define LED_D5  0x0020
+#define LED_D6  0x0040
+#define LED_D7  0x0080
+#define LED_D8  0x0400
+#define LEDMASK 0x04fc
+
+static ledmap_t	snapgear425_std = {
+	[LEDMAN_ALL] = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_COM1_RX] = LED_D6,
+	[LEDMAN_COM1_TX] = LED_D6,
+	[LEDMAN_LAN1_RX] = LED_D3,
+	[LEDMAN_LAN1_TX] = LED_D3,
+	[LEDMAN_LAN2_RX] = LED_D5,
+	[LEDMAN_LAN2_TX] = LED_D5,
+	[LEDMAN_USB1_RX] = LED_D4,
+	[LEDMAN_USB1_TX] = LED_D4,
+	[LEDMAN_USB2_RX] = LED_D4,
+	[LEDMAN_USB2_TX] = LED_D4,
+	[LEDMAN_NVRAM_1] = LED_D2 | LED_D3 | LED_D7 | LED_D8,
+	[LEDMAN_NVRAM_2] = LED_D4 | LED_D5 | LED_D6,
+	[LEDMAN_VPN] = LED_D8,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+	[LEDMAN_ONLINE] = LED_D7,
+};
+
+static leddef_t	snapgear425_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+
+#elif defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG560USB) || \
+	  defined(CONFIG_MACH_SG580)
 /*
  *	Here is the definition of the LEDs on the CyberGuard/SG560
- *	and CyberGuard/SG580, as per the labels next to them.
+ *	SG560-USB and CyberGuard/SG580, as per the labels next to them.
  */
+
 #define LED_D2  0x0004
 #define LED_D3  0x0008
 #define LED_D4  0x0010
@@ -1998,57 +1884,56 @@ static leddef_t	snapgear425_def = {
 
 #endif
 
-
-#if defined(CONFIG_MACH_SG590) || defined(CONFIG_MACH_SG720)
-#define	ERASEPIN	IXP425_GPIO_PIN_10
-#define	ERASEIRQ	27
+#if defined(CONFIG_MACH_SG720) || defined(CONFIG_MACH_SG590)
+#define	ERASEGPIO	10
+#define ERASEIRQ    IRQ_IXP4XX_GPIO10
 #else
-#define	ERASEPIN	IXP425_GPIO_PIN_9
-#define	ERASEIRQ	26
+#define	ERASEGPIO	9
+#define ERASEIRQ    IRQ_IXP4XX_GPIO9
 #endif
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-	gpio_line_isr_clear(ERASEPIN);
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
 static void snapgear425_set(unsigned long bits)
 {
-	*IXP425_GPIO_GPOUTR = (*IXP425_GPIO_GPOUTR & ~LEDMASK) | (~bits & LEDMASK);
+	*IXP4XX_GPIO_GPOUTR = (*IXP4XX_GPIO_GPOUTR & ~LEDMASK) | (~bits & LEDMASK);
 }
 
 static void ledman_initarch(void)
 {
 	/* Enable LED lines as outputs - do them all in one go */
-	*IXP425_GPIO_GPOER &= ~LEDMASK;
+	*IXP4XX_GPIO_GPOER &= ~LEDMASK;
 
-	/* Configure Erase switch as interrupt input */
-	gpio_line_config(ERASEPIN, (IXP425_GPIO_IN | IXP425_GPIO_FALLING_EDGE));
-	gpio_line_isr_clear(ERASEPIN);
+	/* Configure GPIO9 as interrupt input (ERASE switch) */
+	gpio_line_config(ERASEGPIO, IXP4XX_GPIO_IN);
+	irq_set_irq_type(ERASEIRQ, IRQ_TYPE_EDGE_FALLING);
+	gpio_line_isr_clear(ERASEGPIO);
 
-#if 0
+#if !defined(CONFIG_MACH_SG720) && !defined(CONFIG_MACH_SG590)
 	/* De-assert reset for the hub/switch - just in case... */
-	gpio_line_config(IXP425_GPIO_PIN_13, IXP425_GPIO_OUT);
-	gpio_line_set(IXP425_GPIO_PIN_13, 1);
+	gpio_line_config(13, IXP4XX_GPIO_OUT);
+	gpio_line_set(13, 1);
 #endif
 
-	if (request_irq(ERASEIRQ, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
+	if (request_irq(ERASEIRQ, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
 	else
-		printk("LED: registered ERASE switch on IRQ%d\n", ERASEIRQ);
+		pr_info("registered ERASE switch on IRQ%d\n", ERASEIRQ);
 }
 
 /****************************************************************************/
-#endif /* CONFIG_ARCH_SE4000 || CONFIG_MACH_ESS710 || CONFIG_MACH_SG560 || CONFIG_MACH_SG580 || CONFIG_MACH_SG565 || CONFIG_MACH_SG640 || CONFIG_MACH_SHIVA1100 || CONFIG_MACH_SG590 || CONFIG_MACH_SG8100 */
+#endif /* CONFIG_ARCH_SE4000 || CONFIG_MACH_ESS710 || CONFIG_MACH_SG560 || CONFIG_MACH_SG560USB || CONFIG_MACH_SG560ADSL || CONFIG_MACH_SG565 || CONFIG_MACH_SG580 || CONFIG_MACH_SG640 || CONFIG_MACH_SG720 || CONFIG_MACH_SG590 || CONFIG_MACH_SG8100 */
 /****************************************************************************/
 /****************************************************************************/
 #if defined(CONFIG_MACH_IVPN)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 
 /*
  *	There is 2 LED banks on the iVPN. But really there is 4 LEDs, 2 green
@@ -2086,18 +1971,18 @@ static leddef_t	ivpn_def = {
 };
 
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-	gpio_line_isr_clear(IXP425_GPIO_PIN_9);
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
 static void ivpn_set(unsigned long bits)
 {
+	static unsigned int lancnt;
+	static unsigned int wancnt;
 	unsigned long flags;
 	unsigned int wanbit, val = 0;
-	static unsigned int lancnt = 0;
-	static unsigned int wancnt = 0;
 
 	if (bits & BIT_LANLINK) {
 		if ((bits & BIT_LANACTIVITY) || lancnt) {
@@ -2125,59 +2010,110 @@ static void ivpn_set(unsigned long bits)
 		}
 	}
 
-	save_flags(flags); cli();
-	gpio_line_set(IXP425_GPIO_PIN_2, val & 0x4 ? 0 : 1);
-	gpio_line_set(IXP425_GPIO_PIN_11, val & 0x8 ? 0 : 1);
-	gpio_line_set(IXP425_GPIO_PIN_12, val & 0x1 ? 0 : 1);
-	gpio_line_set(IXP425_GPIO_PIN_13, val & 0x2 ? 0 : 1);
-	restore_flags(flags);
+	local_irq_save(flags);
+	gpio_line_set(2, val & 0x4 ? 0 : 1);
+	gpio_line_set(11, val & 0x8 ? 0 : 1);
+	gpio_line_set(12, val & 0x1 ? 0 : 1);
+	gpio_line_set(13, val & 0x2 ? 0 : 1);
+	local_irq_restore(flags);
 }
 
 static void ledman_initarch(void)
 {
 #if 0
 	/* Enabled second ethernet port */
-	gpio_line_config(IXP425_GPIO_PIN_3, IXP425_GPIO_OUT);
-	gpio_line_set(IXP425_GPIO_PIN_3, 0);
+	gpio_line_config(3, IXP4XX_GPIO_OUT);
+	gpio_line_set(3, 0);
 #endif
 	/* Set up GPIO lines to allow access to LEDs. */
-	gpio_line_set(IXP425_GPIO_PIN_2, 1);
-	gpio_line_set(IXP425_GPIO_PIN_11, 1);
-	gpio_line_set(IXP425_GPIO_PIN_12, 1);
-	gpio_line_set(IXP425_GPIO_PIN_13, 1);
-	gpio_line_config(IXP425_GPIO_PIN_2, IXP425_GPIO_OUT);
-	gpio_line_config(IXP425_GPIO_PIN_11, IXP425_GPIO_OUT);
-	gpio_line_config(IXP425_GPIO_PIN_12, IXP425_GPIO_OUT);
-	gpio_line_config(IXP425_GPIO_PIN_13, IXP425_GPIO_OUT);
+	gpio_line_set(2, 1);
+	gpio_line_set(11, 1);
+	gpio_line_set(12, 1);
+	gpio_line_set(13, 1);
+	gpio_line_config(2, IXP4XX_GPIO_OUT);
+	gpio_line_config(11, IXP4XX_GPIO_OUT);
+	gpio_line_config(12, IXP4XX_GPIO_OUT);
+	gpio_line_config(13, IXP4XX_GPIO_OUT);
 	ivpnss_hwsetup();
 	ivpnss_memmap();
 
 	/* Configure GPIO9 as interrupt input (ERASE switch) */
-	gpio_line_config(IXP425_GPIO_PIN_9, (IXP425_GPIO_IN | IXP425_GPIO_FALLING_EDGE));
-	gpio_line_isr_clear(IXP425_GPIO_PIN_9);
+	gpio_line_config(9, (IXP4XX_GPIO_IN | IXP4XX_GPIO_FALLING_EDGE));
 
-	if (request_irq(26, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ26 for ERASE witch\n");
+	if (request_irq(26, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ26 for ERASE witch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ26\n");
+		pr_info("registered ERASE switch on IRQ26\n");
 }
 
 /****************************************************************************/
 #endif /* CONFIG_MACH_IVPN */
 /****************************************************************************/
 /****************************************************************************/
-#if defined(CONFIG_MACH_LITE300)
+#if defined(CONFIG_MACH_LITE3) || defined(CONFIG_MACH_SG310)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <linux/gpio.h>
+#include <mach/hardware.h>
+#include <mach/regs-gpio.h>
+#include <mach/gpio-ks8695.h>
 
+#ifdef CONFIG_MACH_SG310
 /*
- *	Virtual IO address of GPIO data register.
+ *	LED definitions for the SG310 platform. It has quite a few more LEDs
+ *	than the SG300/LITE3. Setup is supposed to be the same as the SG560.
  */
-#define	KS8695_GPIO_ADDR	(IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA)
+#define LED_D2  0x0002
+#define LED_D3  0x0004
+#define LED_D4  0x0008
+#define LED_D5  0x0010
+#define LED_D6  0x0020
+#define LED_D7  0x0040
+#define LEDMASK 0x007e
 
+static ledmap_t	lite3_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_LAN1_RX]   = LED_D3,
+	[LEDMAN_LAN1_TX]   = LED_D3,
+	[LEDMAN_LAN2_RX]   = LED_D4,
+	[LEDMAN_LAN2_TX]   = LED_D4,
+	[LEDMAN_COM1_RX]   = LED_D5,
+	[LEDMAN_COM1_TX]   = LED_D5,
+	[LEDMAN_COM2_RX]   = LED_D5,
+	[LEDMAN_COM2_TX]   = LED_D5,
+	[LEDMAN_ONLINE]    = LED_D6,
+	[LEDMAN_VPN]       = LED_D7,
+	[LEDMAN_NVRAM_1]   = LED_D2 | LED_D3 | LED_D6 | LED_D7,
+	[LEDMAN_NVRAM_2]   = LED_D4 | LED_D5,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+};
+
+static leddef_t	lite3_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+
+#elif defined(CONFIG_MACH_PFW)
+/*
+ *	LED definitions for the PFW platform. Pretty simple, just 2 LEDs.
+ */
+#define LED_D1  0x0008
+#define LED_D2  0x0004
+#define LEDMASK 0x000c
+
+static ledmap_t	lite3_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_POWER]     = LED_D2,
+	[LEDMAN_HEARTBEAT] = LED_D1,
+	[LEDMAN_NVRAM_1]   = LED_D1,
+};
+
+static leddef_t	lite3_def = {
+	[LEDS_ON] = LED_D2,
+	[LEDS_FLASH] = LED_D1,
+};
+
+#else
 /*
  *	Here is the definition of the LED's on the SnapGear/LITE3 circuit board,
  *	as per the labels next to them. There is only 2 software programmable
@@ -2186,359 +2122,418 @@ static void ledman_initarch(void)
  *	LED - D1   D2
  *	HEX - 002  004
  */
+#define LED_D1  0x0002
+#define LED_D2  0x0004
+#define LEDMASK 0x0006
+
 static ledmap_t	lite3_std = {
-	0x006, 0x004, 0x002, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000, 0x000, 0x002, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_POWER]     = LED_D2,
+	[LEDMAN_HEARTBEAT] = LED_D1,
+	[LEDMAN_NVRAM_1]   = LED_D1,
 };
 
 static leddef_t	lite3_def = {
-	0x0000, 0x0004, 0x0000, 0x0002,
+	[LEDS_ON] = LED_D2,
+	[LEDS_FLASH] = LED_D1,
 };
+#endif
 
-static volatile unsigned int *ledman_gpio;
-
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-	volatile unsigned int *intstatp;
-
-	intstatp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_STATUS);
-	*intstatp |= 0x4;
-
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
 static void lite3_set(unsigned long bits)
 {
-	*ledman_gpio = (*ledman_gpio & ~0x6) | (~bits & 0x6);
+	__raw_writel(
+		(__raw_readl(KS8695_GPIO_VA + KS8695_IOPD) & ~LEDMASK) | (~bits & LEDMASK),
+		KS8695_GPIO_VA + KS8695_IOPD);
 }
 
 static void ledman_initarch(void)
 {
-	volatile unsigned int *gpiop, *intenp;
+	unsigned int m, i;
 
-	/* Enable LED lines as outputs */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_MODE);
-	*gpiop = (*gpiop | 0x6) & ~0x1;
-
-	/* Turn LEDs off */
-	ledman_gpio = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA);
-	*ledman_gpio = (*ledman_gpio & ~0x6);
-
-	/* Configure GPIO0 as interrupt input (ERASE switch) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_CTRL);
-	*gpiop = (*gpiop & ~0x7) | 0xc;
-
-	intenp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_ENABLE);
-	*intenp |= 0x4;
-
-	if (request_irq(2, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ2 for ERASE witch\n");
-	else
-		printk("LED: registered ERASE switch on IRQ2\n");
-}
-
-/****************************************************************************/
-#endif /* CONFIG_MACH_LITE300 */
-/****************************************************************************/
-/****************************************************************************/
-#if defined(CONFIG_MACH_SE4200)
-/****************************************************************************/
-
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
-
-/*
- *	Virtual IO address of GPIO data register.
- */
-#define	KS8695_GPIO_ADDR	(IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA)
-
-/*
- *	Here is the definition of the LED's on the Cyberguard/SE4200 circuit board,
- *	as per the labels next to them. There is 2 LEDs on board, but they are
- *	dual color - orange and green.
- *
- *	LED - D2      D3
- *	HEX - 008 010 020 040
- */
-static ledmap_t	se4200_std = {
-	0x078, 0x008, 0x020, 0x000, 0x000, 0x000, 0x000, 0x040, 0x040, 0x040,
-	0x040, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000
-};
-
-static leddef_t	se4200_def = {
-	0x0000, 0x0008, 0x0000, 0x0020,
-};
-
-static volatile unsigned int *ledman_gpio;
-
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	volatile unsigned int *intstatp;
-
-	intstatp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_STATUS);
-	*intstatp |= 0x4;
-
-	ledman_signalreset();
-}
-
-static void se4200_set(unsigned long bits)
-{
-	*ledman_gpio = (*ledman_gpio & ~0x78) | (~bits & 0x78);
-}
-
-static void ledman_initarch(void)
-{
-	volatile unsigned int *gpiop, *intenp;
-
-	/* Enable LED lines as outputs */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_MODE);
-	*gpiop = (*gpiop | 0x78) & ~0x1;
-
-	/* Turn LEDs off */
-	ledman_gpio = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA);
-	*ledman_gpio = (*ledman_gpio & ~0x78);
-
-	/* Configure GPIO0 as interrupt input (ERASE switch) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_CTRL);
-	*gpiop = (*gpiop & ~0x7) | 0xc;
-
-	intenp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_ENABLE);
-	*intenp |= 0x4;
-
-	if (request_irq(2, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ2 for ERASE witch\n");
-	else
-		printk("LED: registered ERASE switch on IRQ2\n");
-}
-
-/****************************************************************************/
-#endif /* CONFIG_MACH_SE4200 */
-/****************************************************************************/
-/****************************************************************************/
-#if defined(CONFIG_MACH_CM4008)
-/****************************************************************************/
-
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
-
-/*
- *	Virtual IO address of GPIO data register.
- */
-#define	KS8695_GPIO_ADDR	(IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA)
-
-/*
- *	Here is the definition of the LED's on the OpenGear/CM4008 circuit board.
- *	As per the labels on them, there is one power LED, and 8 serial port
- *	activity LEDs.
- *
- *	LED -  D2   D3   D4   D5   D6   D7   D8   D9   D10
- *	HEX - 0020 0200 0400 0800 1000 2000 4000 8000 0010
- */
-static ledmap_t	cm4008_std = {
-	0xfe31, 0x0010, 0x0000, 0x0200, 0x0400, 0x0800, 0x1000, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x2000, 0x4000, 0x8000, 0x0020, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000
-};
-
-static leddef_t	cm4008_def = {
-	0x0000, 0x0010, 0x0000, 0x0001,
-};
-
-static unsigned int ledman_oldbits;
-static unsigned int ledman_idlecount, ledman_scanindex;
-static unsigned int ledman_scan[] = {
-		0x0000, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000, 0x4000, 0x8000,
-	   	0x0020, 0x8000, 0x4000, 0x2000, 0x1000, 0x0800, 0x0400,
-};
-#define	ledman_scansize	(sizeof(ledman_scan) / sizeof(unsigned int))
-
-static volatile unsigned int *ledman_gpio;
-
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	volatile unsigned int *intstatp;
-
-	intstatp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_STATUS);
-	*intstatp |= 0x20;
-
-	ledman_signalreset();
-}
-
-static void cm4008_set(unsigned long bits)
-{
-	if (bits & 0xfe20)
-		ledman_idlecount = ledman_scanindex = 0;
-
-	/* Show _some_ LED activity if idle to show we are still alive */
-	if ((ledman_oldbits & 0x1) != (bits & 0x1)) {
-		if (ledman_idlecount++ > 150)
-			if (++ledman_scanindex >= ledman_scansize)
-				ledman_scanindex = 1;
+	/* Enable LED lines as outputs and turn them off */
+	for (i = 0, m = 0x1; (i < 32); i++, m <<= 1) {
+		if (LEDMASK & m)
+			gpio_direction_output(i, 1);
 	}
+
+	/* Configure GPIO0 as interrupt input (ERASE switch) */
+	ks8695_gpio_interrupt(KS8695_GPIO_0, IRQ_TYPE_EDGE_FALLING);
+	if (request_irq(2, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ2 for ERASE witch\n");
+	else
+		pr_info("registered ERASE switch on IRQ2\n");
+}
+
+/****************************************************************************/
+#endif /* CONFIG_ARCH_KS8695 */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_MACH_CM4002)
+/****************************************************************************/
+
+#include <linux/gpio.h>
+#include <mach/hardware.h>
+#include <mach/regs-gpio.h>
+#include <mach/gpio-ks8695.h>
+
+/*
+ *	Definitions of the LED's on the OpenGear/CM4002 circuit board.
+ *	As per the labels on them, there are 3 software controlled LEDs.
+ */
+#define	LED_D6	0x0008
+#define	LED_D4	0x0010
+#define	LED_D7	0x0020
+#define	LEDMASK	0x0038
+
+static ledmap_t	og_std = {
+	[LEDMAN_ALL]		= LEDMASK | 0x1,
+	[LEDMAN_HEARTBEAT]	= LED_D7,
+	[LEDMAN_COM1_RX]	= LED_D6,
+	[LEDMAN_COM1_TX]	= LED_D6,
+	[LEDMAN_COM2_RX]	= LED_D4,
+	[LEDMAN_COM2_TX]	= LED_D4,
+};
+
+static leddef_t	og_def = {
+	[LEDS_ON]			= LED_D7,
+	[LEDS_FLASH]		= 0x1,
+};
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
+{
+	ledman_signalreset();
+	return IRQ_HANDLED;
+}
+
+static unsigned int ledman_oldbits, ledman_idlecount;
+
+static void og_set(unsigned long bits)
+{
+	unsigned int gpio;
+
+	if (bits & 0x18)
+		ledman_idlecount = 0;
+	else if ((ledman_oldbits & 0x1) != (bits & 0x1))
+		ledman_idlecount++;
+
 	ledman_oldbits = bits;
 
-	if (ledman_scanindex)
-			bits |= ledman_scan[ledman_scanindex];
+	/* Show _some_ LED activity if idle to show we are still alive */
+	if (ledman_idlecount > 150)
+			bits |= ((bits & 0x1) ? 0x10 : 0x08);
 
-	*ledman_gpio = (*ledman_gpio & ~0xfe30) | (~bits & 0xfe30);
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio = (gpio & ~LEDMASK) | (~bits & LEDMASK);
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
 }
 
 static void ledman_initarch(void)
 {
-	volatile unsigned int *gpiop, *intenp;
+	unsigned int gpio;
 
-	/* Enable LED lines as outputs (and GPIO3 as input) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_MODE);
-	*gpiop = (*gpiop | 0xfe30) & ~0x8;
+	/* Enable LED lines as outputs */
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPM);
+	gpio |= LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPM);
 
 	/* Turn LEDs off */
-	ledman_gpio = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA);
-	*ledman_gpio = (*ledman_gpio & ~0xfe30);
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio &= ~LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
 
-	/* Configure GPIO3 as interrupt input (ERASE switch) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_CTRL);
-	*gpiop = (*gpiop & ~0xf000) | 0xc000;
-
-	intenp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_ENABLE);
-	*intenp |= 0x20;
-
-	if (request_irq(5, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ5 for ERASE witch\n");
+	/* Configure GPIO0 as interrupt input (ERASE switch) */
+	ks8695_gpio_interrupt(KS8695_GPIO_0, IRQ_TYPE_EDGE_FALLING);
+	if (request_irq(2, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ2 for ERASE switch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ5\n");
+		pr_info("registered ERASE switch on IRQ2\n");
 }
 
 /****************************************************************************/
+#endif /* CONFIG_MACH_CM4002 */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_MACH_CM4008) || defined(CONFIG_MACH_IM4004)
+/****************************************************************************/
+
+#include <linux/gpio.h>
+#include <mach/hardware.h>
+#include <mach/regs-gpio.h>
+#include <mach/gpio-ks8695.h>
+
+#if defined(CONFIG_MACH_CM4008)
+/*
+ *	LED definitions for the CM4008 platform.
+ */
+#define	LED_D2	0x0020
+#define	LED_D3	0x0200
+#define	LED_D4	0x0400
+#define	LED_D5	0x0800
+#define	LED_D6	0x1000
+#define	LED_D7	0x2000
+#define	LED_D8	0x4000
+#define	LED_D9	0x8000
+#define	LED_D10	0x0010
+#define	LEDMASK	0xfe20
+
+static ledmap_t	og_std = {
+	[LEDMAN_ALL]		= LEDMASK | 0x1,
+	[LEDMAN_POWER]		= LED_D10,
+	[LEDMAN_COM1_RX]	= LED_D3,
+	[LEDMAN_COM1_TX]	= LED_D4,
+	[LEDMAN_COM2_RX]	= LED_D5,
+	[LEDMAN_COM2_TX]	= LED_D6,
+	[LEDMAN_USB1_RX]	= LED_D7,
+	[LEDMAN_USB1_TX]	= LED_D8,
+	[LEDMAN_USB2_RX]	= LED_D9,
+	[LEDMAN_USB2_TX]	= LED_D2,
+};
+
+static leddef_t	og_def = {
+	[LEDS_ON]			= LED_D10,
+	[LEDS_FLASH]		= 0x1,
+};
+
+#define	LBITS(b)	(~(b) & LEDMASK)
+
+static unsigned int og_scan[] = {
+	0x0000, 0x0200, 0x0400, 0x0800, 0x1000, 0x2000, 0x4000, 0x8000,
+	0x0020, 0x8000, 0x4000, 0x2000, 0x1000, 0x0800, 0x0400,
+};
 #endif /* CONFIG_MACH_CM4008 */
-/****************************************************************************/
-/****************************************************************************/
-#if defined(CONFIG_MACH_CM41xx)
-/****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
-
+#if defined(CONFIG_MACH_IM4004)
 /*
- *	Virtual IO address of GPIO data register.
+ *	LED definitions for the IM4004 platform.
  */
-#define	KS8695_GPIO_ADDR	(IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA)
+#define	LED_D0	0x0100
+#define	LED_D1	0x0200
+#define	LED_D2	0x0400
+#define	LED_D3	0x0800
+#define	LED_D4	0x1000
+#define	LED_D5	0x2000
+#define	LED_D6	0x4000
+#define	LED_D7	0x8000
+#define	LEDMASK	0xff00
 
-/*
- *	Here is the definition of the LED's on the OpenGear/CM41xx circuit board.
- *	As per the labels on them, there is 2 software controlled LEDs.
- *
- *	LED -  D1   D2
- *	HEX - 0200 0400
- */
-static ledmap_t	cm41xx_std = {
-	0x0600, 0x0400, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
-   	0x0000, 0x0000
+static ledmap_t	og_std = {
+	[LEDMAN_ALL]		= LEDMASK | 0x1,
+	[LEDMAN_COM1_RX]	= LED_D2,
+	[LEDMAN_COM1_TX]	= LED_D0,
+	[LEDMAN_COM2_RX]	= LED_D6,
+	[LEDMAN_COM2_TX]	= LED_D4,
+	[LEDMAN_USB1_RX]	= LED_D3,
+	[LEDMAN_USB1_TX]	= LED_D1,
+	[LEDMAN_USB2_RX]	= LED_D7,
+	[LEDMAN_USB2_TX]	= LED_D5,
 };
 
-static leddef_t	cm41xx_def = {
-	0x0000, 0x0400, 0x0000, 0x0200,
+static leddef_t	og_def = {
+	[LEDS_FLASH]		= 0x1,
 };
 
-static volatile unsigned int *ledman_gpio;
+#define	LBITS(b)	(b)
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static unsigned int og_scan[] = {
+		0x0000, 0x2400, 0x8100, 0x4200, 0x1800, 0x4200, 0x8100,
+};
+#endif /* CONFIG_MACH_IM4004 */
+
+static unsigned int og_oldbits;
+static unsigned int og_idlecount, og_scanindex;
+#define	og_scansize	(sizeof(og_scan) / sizeof(unsigned int))
+
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-	volatile unsigned int *intstatp;
-
-	intstatp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_STATUS);
-	*intstatp |= 0x20;
-
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
-static void cm41xx_set(unsigned long bits)
+static void og_set(unsigned long bits)
 {
-	*ledman_gpio = (*ledman_gpio & ~0x0600) | (~bits & 0x0600);
+	unsigned int gpio;
+
+	if (bits & LEDMASK)
+		og_idlecount = og_scanindex = 0;
+
+	/* Show _some_ LED activity if idle to show we are still alive */
+	if ((og_oldbits & 0x1) != (bits & 0x1)) {
+		if (og_idlecount++ > 150)
+			if (++og_scanindex >= og_scansize)
+				og_scanindex = 1;
+	}
+	og_oldbits = bits;
+
+	if (og_scanindex)
+			bits |= og_scan[og_scanindex];
+
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio = (gpio & ~LEDMASK) | LBITS(bits);
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
 }
+
 
 static void ledman_initarch(void)
 {
-	volatile unsigned int *gpiop, *intenp;
+	unsigned int gpio;
 
-	/* Enable LED lines as outputs (and GPIO3 as input) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_MODE);
-	*gpiop = (*gpiop | 0x0600) & ~0x8;
+	/* Enable LED lines as outputs */
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPM);
+	gpio |= LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPM);
 
 	/* Turn LEDs off */
-	ledman_gpio = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA);
-	*ledman_gpio = (*ledman_gpio & ~0x0600);
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio &= ~LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
 
 	/* Configure GPIO3 as interrupt input (ERASE switch) */
-	gpiop = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_CTRL);
-	*gpiop = (*gpiop & ~0xf000) | 0xc000;
-
-	intenp = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_INT_ENABLE);
-	*intenp |= 0x20;
-
-	if (request_irq(5, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ5 for ERASE witch\n");
+	ks8695_gpio_interrupt(KS8695_GPIO_3, IRQ_TYPE_EDGE_FALLING);
+	if (request_irq(5, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ5 for ERASE switch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ5\n");
+		pr_info("registered ERASE switch on IRQ5\n");
 }
 
 /****************************************************************************/
-#endif /* CONFIG_MACH_CM41xx */
+#endif /* CONFIG_MACH_CM4008 || CONFIG_MACH_IM4004 */
 /****************************************************************************/
 /****************************************************************************/
-#if defined(CONFIG_SG310)
+#if defined(CONFIG_MACH_CM41xx) || defined(CONFIG_MACH_IM42xx)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/io.h>
+#include <linux/gpio.h>
+#include <mach/hardware.h>
+#include <mach/regs-gpio.h>
+#include <mach/gpio-ks8695.h>
 
-static ledmap_t	sg310_std;
-static leddef_t	sg310_def;
+/*
+ *	Definitions of the LED's on the OpenGear/CM41xx circuit board.
+ *	As per the labels on them, there are 2 software controlled LEDs.
+ */
+#define	LED_D1	0x0200
+#define	LED_D2	0x0400
+#define	LEDMASK	0x0600
 
-static void sg310_set(unsigned long bits)
+static ledmap_t	og_std = {
+	[LEDMAN_ALL]		= LEDMASK,
+	[LEDMAN_HEARTBEAT]	= LED_D1,
+};
+
+static leddef_t	og_def = {
+	[LEDS_ON]			= LED_D2,
+	[LEDS_FLASH]		= LED_D1,
+};
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-}
-
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-#if 0
-	while (inl(VIC1RAWINTR) & 0x1)
-		;
 	ledman_signalreset();
-#endif
+	return IRQ_HANDLED;
+}
+
+static void og_set(unsigned long bits)
+{
+	unsigned int gpio;
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio = (gpio & ~LEDMASK) | (~bits & LEDMASK);
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
 }
 
 static void ledman_initarch(void)
 {
-#if 0
-	if (request_irq(32, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ32 for ERASE witch\n");
+	unsigned int gpio;
+
+	/* Enable LED lines as outputs */
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPM);
+	gpio |= LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPM);
+
+	/* Turn LEDs off */
+	gpio = __raw_readl(KS8695_GPIO_VA + KS8695_IOPD);
+	gpio &= ~LEDMASK;
+	__raw_writel(gpio, KS8695_GPIO_VA + KS8695_IOPD);
+
+	/* Configure GPIO3 as interrupt input (ERASE switch) */
+	ks8695_gpio_interrupt(KS8695_GPIO_3, IRQ_TYPE_EDGE_FALLING);
+	if (request_irq(5, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ5 for ERASE switch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ32\n");
-#endif
+		pr_info("registered ERASE switch on IRQ5\n");
 }
 
 /****************************************************************************/
-#endif /* CONFIG_SG310 */
+#endif /* CONFIG_MACH_CM41xx || CONFIG_MACH_IM42xx */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_MACH_ACM500X)
+/****************************************************************************/
+
+#include <linux/interrupt.h>
+#include <asm/io.h>
+#include <mach/platform.h>
+
+/*
+ *	Definitions of the LED's on the OpenGear/ACM500X circuit board, as
+ *	per the labels next to them. There are 4 software controlled LEDs.
+ */
+#define	LED_D1	0x00080000
+#define	LED_D2	0x00040000
+#define	LED_D3	0x00020000
+#define	LED_D4	0x00010000
+#define	LEDMASK	0x000f0000
+
+static ledmap_t	og_std = {
+	[LEDMAN_ALL]		= LEDMASK,
+	[LEDMAN_COM1_RX]	= LED_D4,
+	[LEDMAN_COM1_TX]	= LED_D3,
+	[LEDMAN_COM2_RX]	= LED_D2,
+	[LEDMAN_COM2_TX]	= LED_D1,
+};
+
+static leddef_t	og_def;
+
+irqreturn_t ledman_interrupt(int irq, void *dev_id)
+{
+	ledman_signalreset();
+	return IRQ_HANDLED;
+}
+
+static void og_set(unsigned long bits)
+{
+	unsigned int gpio;
+	gpio = __raw_readl(VIO(KS8692_GPIO_DATA));
+	gpio = (gpio & ~LEDMASK) | (bits & LEDMASK);
+	__raw_writel(gpio, VIO(KS8692_GPIO_DATA));
+}
+
+static void ledman_initarch(void)
+{
+	unsigned int gpio;
+
+	/* Enable LED GPIO lines as outputs */
+	gpio = __raw_readl(VIO(KS8692_GPIO_MODE));
+	gpio |= LEDMASK;
+	__raw_writel(gpio, VIO(KS8692_GPIO_MODE));
+
+	/* Turn LEDs off */
+	og_set(0);
+}
+
+/****************************************************************************/
+#endif /* CONFIG_MACH_ACM500X */
 /****************************************************************************/
 /****************************************************************************/
 #if defined(CONFIG_ARCH_EP9312)
 /****************************************************************************/
 
-#include <linux/interrupt.h>
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 
 /*
  *	Here is the definition of the LED's on the Trusonic IPD Board
@@ -2553,120 +2548,745 @@ static void ipd_set(unsigned long bits)
 {
 }
 
-static void ledman_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_r ledman_interrupt(int irq, void *dev_id)
 {
 	while (inl(VIC1RAWINTR) & 0x1)
 		;
 	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
 static void ledman_initarch(void)
 {
-	if (request_irq(32, ledman_interrupt, SA_INTERRUPT, "Erase", NULL))
-		printk("LED: failed to register IRQ32 for ERASE witch\n");
+	if (request_irq(32, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ32 for ERASE witch\n");
 	else
-		printk("LED: registered ERASE switch on IRQ32\n");
+		pr_info("registered ERASE switch on IRQ32\n");
 }
 
 /****************************************************************************/
 #endif /* CONFIG_ARCH_EP9312 */
 /****************************************************************************/
-#ifdef CONFIG_BD_TIBURON
+/****************************************************************************/
+#if defined(CONFIG_SG590) || defined(CONFIG_SG8200)
 /****************************************************************************/
 
+#include <asm/mach-cavium-octeon/gpio.h>
+#include <asm/mach-cavium-octeon/irq.h>
+
+#ifdef CONFIG_SG8200
 /*
- *	This is a dummy mapping as the Tiburon board uses one GPIO per LED
- *
- *	We simply count the LEDs on the front from the left to the right side,
- *	i.e. we ignore the defined constants in ledman.h
- *
- *	Please note that the board has connections for 7 LEDs, but the shipped
- *	device only has 4 LEDs connected; we support controlling all 7 LEDs,
- *	there might be people who want to connect them
- *
- *	Also note that LED 1 (power) and LED 3/4 (ethernet 1 and 2) are
- *	hardware controlled - we do count them but we ignore any request to
- *	control them
- *
- *	LED 8 ist not actually a LED but the reset line for the internal modem;
- *	if it is set, it will be automatically unset after 100 ms
+ *	Here is the definition of the LEDs on the SG8200.
  */
+#define LED_D2  0x0004
+#define LED_D3  0x0008
+#define LED_D4  0x0010
+#define LED_D5  0x0020
+#define LED_D6  0x0040
+#define LED_D7  0x0080
+#define LED_D8  0x0100
+#define	LED_D9	0x0400
+#define LEDMASK 0x05fc
 
-#include <asm/arch/bsptypes.h>
-#include <asm/arch/gpio.h>
-
-static ledmap_t tiburon_std = {
-	0x04e, 0x080, 0x040, 0x020, 0x010, 0x008, 0x004, 0x002, 0x001, 0x000,
-	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000, 0x000,
-	0x000, 0x000, 0x000, 0x000
+#ifdef CONFIG_VENDOR_ATT_NETGATE
+static ledmap_t sgoct_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_COM1_RX]   = LED_D3,
+	[LEDMAN_LAN1_RX]   = LED_D7,
+	[LEDMAN_LAN1_TX]   = LED_D7,
+	[LEDMAN_LAN2_RX]   = LED_D5,
+	[LEDMAN_LAN2_TX]   = LED_D5,
+	[LEDMAN_NVRAM_1]   = LED_D5 | LED_D8,
+	[LEDMAN_NVRAM_2]   = LED_D6 | LED_D7,
+	[LEDMAN_VPN]       = LED_D4,
+	[LEDMAN_LAN2_DHCP] = LED_D2,
+	[LEDMAN_VPN_RX]    = LED_D8,
+	[LEDMAN_VPN_TX]    = LED_D8,
+	[LEDMAN_LAN3_RX]   = LED_D6,
+	[LEDMAN_LAN3_TX]   = LED_D6,
+	[LEDMAN_HIGHAVAIL] = LED_D9,
 };
 
-static leddef_t	tiburon_def = {
-	0x000, 0x000, 0x04f, 0x000,
+static leddef_t sgoct_def = {
+	[LEDS_FLASH] = 0,
+};
+#else
+/*
+ *	For SG support we do a couple of things a little different.
+ *	The "ONLINE" LED becomes our usual heartbeat.. The "Dial" LED
+ *	becomes a general serial acivity (not just modem).
+ */
+static ledmap_t sgoct_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_COM1_RX]   = LED_D3,
+	[LEDMAN_COM1_TX]   = LED_D3,
+	[LEDMAN_COM2_RX]   = LED_D3,
+	[LEDMAN_COM2_TX]   = LED_D3,
+	[LEDMAN_LAN1_RX]   = LED_D7,
+	[LEDMAN_LAN1_TX]   = LED_D7,
+	[LEDMAN_LAN2_RX]   = LED_D5,
+	[LEDMAN_LAN2_TX]   = LED_D5,
+	[LEDMAN_NVRAM_1]   = LED_D5 | LED_D8,
+	[LEDMAN_NVRAM_2]   = LED_D6 | LED_D7,
+	[LEDMAN_VPN]       = LED_D4,
+	[LEDMAN_VPN_RX]    = LED_D8,
+	[LEDMAN_VPN_TX]    = LED_D8,
+	[LEDMAN_LAN3_RX]   = LED_D6,
+	[LEDMAN_LAN3_TX]   = LED_D6,
+	[LEDMAN_HIGHAVAIL] = LED_D9,
 };
 
-static void release_tiburon_modemreset(void)
+static leddef_t sgoct_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+#endif /* !CONFIG_VENDOR_ATT_NETGATE */
+
+#else
+/*
+ *	Here is the definition of the LEDs on the SG590.
+ */
+#define LED_D2  0x0004
+#define LED_D3  0x0008
+#define LED_D4  0x0010
+#define LED_D5  0x0020
+#define LED_D6  0x0040
+#define LED_D7  0x0080
+#define LED_D8  0x0100
+#define LEDMASK 0x01fc
+
+static ledmap_t	sgoct_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_LAN1_RX]   = LED_D3,
+	[LEDMAN_LAN1_TX]   = LED_D3,
+	[LEDMAN_LAN2_RX]   = LED_D4,
+	[LEDMAN_LAN2_TX]   = LED_D4,
+	[LEDMAN_HIGHAVAIL] = LED_D5,
+	[LEDMAN_COM1_RX]   = LED_D6,
+	[LEDMAN_COM1_TX]   = LED_D6,
+	[LEDMAN_COM2_RX]   = LED_D6,
+	[LEDMAN_COM2_TX]   = LED_D6,
+	[LEDMAN_ONLINE]    = LED_D7,
+	[LEDMAN_VPN]       = LED_D8,
+	[LEDMAN_NVRAM_1]   = LED_D2 | LED_D3 | LED_D7 | LED_D8,
+	[LEDMAN_NVRAM_2]   = LED_D4 | LED_D5 | LED_D6,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+};
+
+static leddef_t	sgoct_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+#endif /* !CONFIG_SG8200 */
+
+#define	ERASEGPIO	11
+#define	ERASEIRQ	51
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
 {
-	release_tiburon_modemreset_timerlist.expires = 0;
-	ledman_cmd(LEDMAN_CMD_OFF, 8);
+	octeon_gpio_interrupt_ack(ERASEGPIO);
+	ledman_signalreset();
+	return IRQ_HANDLED;
 }
 
-static void tiburon_set(unsigned long bits)
+static void sgoct_set(unsigned long bits)
 {
-	/* 0x80 = LED 1 = power - hardware controlled! */
-
-	/* 0x40 = LED 2 = modem */
-	if (bits & 0x40) {
-		WriteGPIOData(GPIO19, 0);
-	} else {
-		WriteGPIOData(GPIO19, 1);
-	}
-
-	/* 0x20 = LED 3 = ethernet 1 - hardware controlled! */
-
-	/* 0x10 = LED 4 = ethernet 2 - hardware controlled! */
-
-	/* 0x08 = LED 5 - not connected on the shipped device */
-	if (bits & 0x08) {
-		WriteGPIOData(GPIO7, 0);
-	} else {
-		WriteGPIOData(GPIO7, 1);
-	}
-
-	/* 0x04 = LED 6 - not connected on the shipped device */
-	if (bits & 0x04) {
-		WriteGPIOData(GPIO8, 0);
-	} else {
-		WriteGPIOData(GPIO8, 1);
-	}
-
-	/* 0x02 = LED 7 - not connected on the shipped device */
-	if (bits & 0x02) {
-		WriteGPIOData(GPIO18, 0);
-	} else {
-		WriteGPIOData(GPIO18, 1);
-	}
-
-	/* 0x01 = LED 8 = no actual LED, but modem reset */
-	if (bits & 0x01) {
-		WriteGPIOData(GPIO17, 0);
-		if (release_tiburon_modemreset_timerlist.expires==0) {
-			release_tiburon_modemreset_timerlist.expires = jiffies + HZ/10;
-			add_timer(&release_tiburon_modemreset_timerlist);
-		}
-	} else {
-		WriteGPIOData(GPIO17, 1);
-	}
+	octeon_gpio_clear(bits & LEDMASK);
+	octeon_gpio_set(~bits & LEDMASK);
 }
 
 static void ledman_initarch(void)
 {
-	release_tiburon_modemreset_timerlist.expires = 0;
-	release_tiburon_modemreset_timerlist.function = release_tiburon_modemreset;
-	release_tiburon_modemreset_timerlist.data = 0;
+	int i;
+
+	/* SET all LED GPIO bits as outputs */
+	for (i = 0; (i < 32); i++) {
+		if ((0x1 << i) & LEDMASK)
+			octeon_gpio_config(i, OCTEON_GPIO_OUTPUT);
+	}
+	sgoct_set(0);
+
+	/* Set up the factory erase button GPIO line */
+	if (request_irq(ERASEIRQ, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
+	else
+		pr_info("registered ERASE switch on IRQ%d\n", ERASEIRQ);
+
+	octeon_gpio_config(ERASEGPIO, OCTEON_GPIO_INTERRUPT |
+		OCTEON_GPIO_INT_EDGE | OCTEON_GPIO_INPUT_XOR);
 }
 
 /****************************************************************************/
-#endif /* CONFIG_BD_TIBURON */
+#endif /* CONFIG_SG590 || CONFIG_SG8200 */
 /****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_SG770)
+/****************************************************************************/
+
+#include <asm/mach-cavium-octeon/gpio.h>
+#include <asm/mach-cavium-octeon/irq.h>
+
+/*
+ *	Here is the definition of the LEDs on the SG770.
+ */
+#define LED0	0x01
+#define LED1	0x02
+#define LED2	0x04
+#define LED3	0x08
+#define LED4	0x10
+#define LED5	0x20
+#define LED6	0x40
+#define LEDMASK 0x7f
+
+static ledmap_t	sgoct_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED0,
+	[LEDMAN_LAN1_RX]   = LED2,
+	[LEDMAN_LAN1_TX]   = LED2,
+	[LEDMAN_LAN2_RX]   = LED3,
+	[LEDMAN_LAN2_TX]   = LED3,
+	[LEDMAN_HIGHAVAIL] = LED4,
+	[LEDMAN_COM1_RX]   = LED1,
+	[LEDMAN_COM1_TX]   = LED1,
+	[LEDMAN_COM2_RX]   = LED1,
+	[LEDMAN_COM2_TX]   = LED1,
+	[LEDMAN_ONLINE]    = LED5,
+	[LEDMAN_VPN]       = LED6,
+	[LEDMAN_NVRAM_1]   = LED1 | LED3 | LED5,
+	[LEDMAN_NVRAM_2]   = LED0 | LED2 | LED4 | LED6,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+};
+
+static leddef_t	sgoct_def = {
+	[LEDS_FLASH] = LED0,
+};
+
+#define	ERASEGPIO	8
+#define	ERASEIRQ	OCTEON_IRQ_GPIO8
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
+{
+	octeon_gpio_interrupt_ack(ERASEGPIO);
+	ledman_signalreset();
+	return IRQ_HANDLED;
+}
+
+static volatile void *sgoct_ledlatch;
+
+static void sgoct_set(unsigned long bits)
+{
+	writeb(~bits, sgoct_ledlatch);
+}
+
+static void ledman_initarch(void)
+{
+	/* SET all LED GPIO bits as outputs */
+	sgoct_ledlatch = ioremap(0x1f800000, 4096);
+	sgoct_set(0);
+
+	/* Set up the factory erase button GPIO line */
+	if (request_irq(ERASEIRQ, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
+	else
+		pr_info("registered ERASE switch on IRQ%d\n", ERASEIRQ);
+
+	octeon_gpio_config(ERASEGPIO, OCTEON_GPIO_INTERRUPT |
+		OCTEON_GPIO_INT_EDGE | OCTEON_GPIO_INPUT_XOR);
+}
+
+/****************************************************************************/
+#endif /* CONFIG_SG770 */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_MACH_UTM300)
+/****************************************************************************/
+
+#include <linux/gpio.h>
+
+/*
+ * Here is the GPIO line definition of the LEDs on the UTM300.
+ */
+#define LED_D2  0x01 /* HEARTBEAT */
+#define LED_D3  0x02 /* ETH */
+#define LED_D4  0x04 /* USB */
+#define LED_D5  0x08 /* SERIAL */
+#define LED_D6  0x10 /* HA */
+#define LED_D7  0x20 /* ONLINE */
+#define LED_D8  0x40 /* VPN */
+#define LEDMASK 0x7f
+
+static int led_to_pin[] = {
+	38, /* LED_D2 - HEARTBEAT */
+	39, /* LED_D3 - ETH */
+	40, /* LED_D4 - USB */
+	41, /* LED_D5 - SERIAL */
+	42, /* LED_D6 - HA */
+	43, /* LED_D7 - ONLINE */
+	44, /* LED_D8 - VPN */
+};
+
+static ledmap_t	utm300_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_LAN1_RX]   = LED_D3,
+	[LEDMAN_LAN1_TX]   = LED_D3,
+	[LEDMAN_LAN2_RX]   = LED_D3,
+	[LEDMAN_LAN2_TX]   = LED_D3,
+	[LEDMAN_LAN3_RX]   = LED_D3,
+	[LEDMAN_LAN3_TX]   = LED_D3,
+	[LEDMAN_USB1_RX]   = LED_D4,
+	[LEDMAN_USB1_TX]   = LED_D4,
+	[LEDMAN_COM1_RX]   = LED_D5,
+	[LEDMAN_COM1_TX]   = LED_D5,
+	[LEDMAN_HIGHAVAIL] = LED_D6,
+	[LEDMAN_ONLINE]    = LED_D7,
+	[LEDMAN_VPN]       = LED_D8,
+	[LEDMAN_NVRAM_1]   = LED_D2 | LED_D4 | LED_D6 | LED_D8,
+	[LEDMAN_NVRAM_2]   = LED_D3 | LED_D5 | LED_D7,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+};
+
+static leddef_t	utm300_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+
+#define	ERASEGPIO	37
+#define	ERASEIRQ	gpio_to_irq(ERASEGPIO)
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
+{
+	ledman_signalreset();
+	return IRQ_HANDLED;
+}
+
+static void utm300_set(unsigned long bits)
+{
+	int i;
+	for (i = 0; i < 7; i++)
+		gpio_set_value(led_to_pin[i], (bits & (1 << i)) ? 0 : 1);
+}
+
+static void ledman_initarch(void)
+{
+	irq_set_irq_type(ERASEIRQ, IRQ_TYPE_EDGE_FALLING);
+
+	/* Set up the factory erase button GPIO line */
+	if (request_irq(ERASEIRQ, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
+	else
+		pr_info("registered ERASE switch on IRQ%d\n", ERASEIRQ);
+
+	utm300_set(0);
+}
+
+/****************************************************************************/
+#endif /* CONFIG_MACH_UTM300 */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_MACH_UTM400)
+/****************************************************************************/
+
+#include <linux/gpio.h>
+
+/*
+ * Here is the GPIO line definition of the LEDs on the UTM400.
+ */
+
+#define LED_D2  0x01 /* HEARTBEAT */
+#define LED_D3  0x02 /* ETH */
+#define LED_D4  0x04 /* USB */
+#define LED_D5  0x08 /* SERIAL */
+#define LED_D6  0x10 /* HA */
+#define LED_D7  0x20 /* ONLINE */
+#define LED_D8  0x40 /* VPN */
+#define LEDMASK 0x7f
+
+static int led_to_pin[] = {
+	12, /* LED_D2 - HEARTBEAT */
+	13, /* LED_D3 - ETH */
+	28, /* LED_D4 - USB */
+	29, /* LED_D5 - SERIAL */
+	36, /* LED_D6 - HA */
+	37, /* LED_D7 - ONLINE */
+	38, /* LED_D8 - VPN */
+};
+
+static ledmap_t	utm400_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED_D2,
+	[LEDMAN_LAN1_RX]   = LED_D3,
+	[LEDMAN_LAN1_TX]   = LED_D3,
+	[LEDMAN_LAN2_RX]   = LED_D3,
+	[LEDMAN_LAN2_TX]   = LED_D3,
+	[LEDMAN_LAN3_RX]   = LED_D3,
+	[LEDMAN_LAN3_TX]   = LED_D3,
+	[LEDMAN_USB1_RX]   = LED_D4,
+	[LEDMAN_USB1_TX]   = LED_D4,
+	[LEDMAN_COM1_RX]   = LED_D5,
+	[LEDMAN_COM1_TX]   = LED_D5,
+	[LEDMAN_HIGHAVAIL] = LED_D6,
+	[LEDMAN_ONLINE]    = LED_D7,
+	[LEDMAN_VPN]       = LED_D8,
+	[LEDMAN_NVRAM_1]   = LED_D2 | LED_D4 | LED_D6 | LED_D8,
+	[LEDMAN_NVRAM_2]   = LED_D3 | LED_D5 | LED_D7,
+	[LEDMAN_LAN1_DHCP] = LEDMASK,
+};
+
+static leddef_t	utm400_def = {
+	[LEDS_FLASH] = LED_D2,
+};
+
+#define	ERASEGPIO	41
+#define	ERASEIRQ	gpio_to_irq(ERASEGPIO)
+
+static irqreturn_t ledman_interrupt(int irq, void *dev_id)
+{
+	ledman_signalreset();
+	return IRQ_HANDLED;
+}
+
+static void utm400_set(unsigned long bits)
+{
+	int i;
+	for (i = 0; i < 8; i++)
+		gpio_set_value(led_to_pin[i], (bits & (1 << i)) ? 0 : 1);
+}
+
+static void ledman_initarch(void)
+{
+	irq_set_irq_type(ERASEIRQ, IRQ_TYPE_EDGE_FALLING);
+
+	/* Set up the factory erase button GPIO line */
+	if (request_irq(ERASEIRQ, ledman_interrupt, IRQF_DISABLED, "Erase", NULL))
+		pr_err("failed to register IRQ%d for ERASE witch\n", ERASEIRQ);
+	else
+		pr_info("registered ERASE switch on IRQ%d\n", ERASEIRQ);
+
+	utm400_set(0);
+}
+
+/****************************************************************************/
+#endif /* CONFIG_MACH_UTM400 */
+/****************************************************************************/
+/****************************************************************************/
+#if defined(CONFIG_ATH79_MACH_NETREACH)
+/****************************************************************************/
+
+#include <linux/gpio.h>
+
+/*
+ *	Here is the definition of the LEDs on the NetReach. They are labelled
+ *	on the board as LEDx.
+ */
+#define GPIO_LED2	0
+#define GPIO_LED3	1
+#define GPIO_LED4	13
+#define GPIO_LED5	17
+#define GPIO_LED6	27
+
+#define	LED2		0x1
+#define	LED3		0x2
+#define	LED4		0x4
+#define	LED5		0x8
+#define	LED6		0x10
+#define LEDMASK		0x1f
+
+static ledmap_t netreach_std = {
+	[LEDMAN_ALL]       = LEDMASK,
+	[LEDMAN_HEARTBEAT] = LED3,
+	[LEDMAN_LAN1_RX]   = LED4,
+	[LEDMAN_LAN1_TX]   = LED4,
+	[LEDMAN_LAN2_RX]   = LED5,
+	[LEDMAN_LAN2_TX]   = LED5,
+	[LEDMAN_LAN3_RX]   = LED2,
+	[LEDMAN_LAN3_TX]   = LED2,
+	[LEDMAN_NVRAM_1]   = LED6,
+};
+
+static leddef_t netreach_def = {
+	[LEDS_FLASH] = LED3,
+};
+
+#define	GPIO_BUTTON_RESET	12
+#define	GPIO_BUTTON_WPS		11
+
+#define	BUTTON_RESET		(1 << GPIO_BUTTON_RESET)
+#define	BUTTON_WPS		(1 << GPIO_BUTTON_WPS)
+
+#define	POLLTIME		(HZ / 20)	/* poll timer - 5ms */
+
+static unsigned int netreach_buttons;
+static struct timer_list netreach_timer;
+
+static void netreach_poll(unsigned long data)
+{
+	if (gpio_get_value(GPIO_BUTTON_RESET) == 0) {
+		if ((netreach_buttons & BUTTON_RESET) == 0) {
+			netreach_buttons |= BUTTON_RESET;
+			printk("LEDMAN: RESET button pushed!\n");
+			ledman_signalreset();
+		}
+	} else {
+		netreach_buttons &= ~BUTTON_RESET;
+	}
+
+	if (gpio_get_value(GPIO_BUTTON_WPS) == 1) {
+		if ((netreach_buttons & BUTTON_WPS) == 0) {
+			netreach_buttons |= BUTTON_WPS;
+			ledman_cmd(LEDMAN_CMD_SET, LEDMAN_NVRAM_1);
+			printk("LEDMAN: WPS button pushed!\n");
+		}
+	} else {
+		netreach_buttons &= ~BUTTON_WPS;
+	}
+
+	netreach_timer.expires = jiffies + POLLTIME;
+	add_timer(&netreach_timer);
+}
+
+static void netreach_set(unsigned long bits)
+{
+	gpio_set_value(GPIO_LED2, (bits & LED2));
+	gpio_set_value(GPIO_LED3, (bits & LED3));
+	gpio_set_value(GPIO_LED4, (bits & LED4));
+	gpio_set_value(GPIO_LED5, !(bits & LED5));
+	gpio_set_value(GPIO_LED6, !(bits & LED6));
+}
+
+static void ledman_initarch(void)
+{
+	gpio_request(GPIO_LED2, "WLAN");
+	gpio_direction_output(GPIO_LED2, 1);
+	gpio_request(GPIO_LED3, "HEARTBEAT");
+	gpio_direction_output(GPIO_LED3, 1);
+	gpio_request(GPIO_LED4, "LAN");
+	gpio_direction_output(GPIO_LED4, 1);
+	gpio_request(GPIO_LED5, "WAN");
+	gpio_direction_output(GPIO_LED5, 1);
+	gpio_request(GPIO_LED6, "WPS");
+	gpio_direction_output(GPIO_LED6, 1);
+
+	gpio_request(GPIO_BUTTON_RESET, "RESET BUTTON");
+	gpio_direction_input(GPIO_BUTTON_RESET);
+	gpio_request(GPIO_BUTTON_WPS, "WPS BUTTON");
+	gpio_direction_input(GPIO_BUTTON_WPS);
+
+	init_timer(&netreach_timer);
+	netreach_timer.function = netreach_poll;
+	netreach_timer.expires = jiffies + POLLTIME;
+	add_timer(&netreach_timer);
+
+	netreach_set(0);
+}
+
+/****************************************************************************/
+#endif /* CONFIG_ATH79_MACH_NETREACH */
+/****************************************************************************/
+
+static struct ledmode led_mode[] = {
+
+#ifdef ENTERASYS /* first in the list is the default */
+	{ "enterasys", enterasys_std, enterasys_def, ledman_bits, ledman_tick, nettel_set, LT },
+#endif
+
+#if defined(CONFIG_X86)
+	{ "std", nettel_std, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
+#endif
+
+#if defined(CONFIG_NETtel) && defined(CONFIG_M5307)
+	/*
+	 * by default the first entry is used.  You can select the old-style
+	 * LED patterns for acient boards with the command line parameter:
+	 *
+	 *      ledman=old
+	 */
+	{ "new", nettel_new, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
+	{ "old", nettel_old, nettel_def, ledman_bits, ledman_tick, nettel_set, LT },
+#endif
+
+#if defined(CONFIG_NETtel) && defined(CONFIG_M5272)
+	{ "std", nt5272_std, nt5272_def, ledman_bits, ledman_tick, nt5272_set, LT },
+#endif
+
+#if defined(CONFIG_NETtel) && defined(CONFIG_M5206e)
+	{ "std", nt1500_std, nt1500_def, ledman_bits, ledman_tick, nt1500_set, LT },
+#endif
+
+#if defined(CONFIG_SE1100)
+	{ "std", se1100_std, se1100_def, ledman_bits, ledman_tick, se1100_set, LT },
+#endif
+
+#if defined(CONFIG_GILBARCONAP) && defined(CONFIG_M5272)
+	{ "std", nap5272_std, nap5272_def, ledman_bits, ledman_tick, nap5272_set, LT },
+#endif
+
+#if defined(CONFIG_SH_SECUREEDGE5410)
+	{ "std", se5410_std, se5410_def, ledman_bits, ledman_tick, se5410_set, LT },
+#endif
+
+#ifdef CONFIG_eLIA
+	{ "std", elia_std, elia_def, ledman_bits, ledman_tick, elia_set, LT },
+#endif
+
+#if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
+	{ "std",keywest_std,keywest_def,keywest_bits,keywest_tick,keywest_set,HZ/10},
+#endif
+
+#if defined(CONFIG_MACH_MONTEJADE) || defined(CONFIG_MACH_IXDPG425) || \
+	defined(CONFIG_MACH_SE5100)
+	{ "std",montejade_std,montejade_def,ledman_bits,ledman_tick,montejade_set,LT},
+#endif
+
+#if defined(CONFIG_ARCH_SE4000) || defined(CONFIG_MACH_ESS710) || \
+	defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG560USB) || \
+	defined(CONFIG_MACH_SG560ADSL) || defined(CONFIG_MACH_SG565) || \
+	defined(CONFIG_MACH_SG580) || defined(CONFIG_MACH_SG590) || \
+	defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SG720) || \
+	defined(CONFIG_MACH_SG8100)
+	{ "std",snapgear425_std,snapgear425_def,ledman_bits,ledman_tick,snapgear425_set,LT},
+#endif
+
+#ifdef CONFIG_MACH_IVPN
+	{ "std",ivpn_std,ivpn_def,ledman_bits,ledman_tick,ivpn_set,LT},
+#endif
+
+#if defined(CONFIG_MACH_LITE300) || defined(CONFIG_MACH_SG310)
+	{ "std",lite3_std,lite3_def,ledman_bits,ledman_tick,lite3_set,LT},
+#endif
+
+#if defined(CONFIG_MACH_CM4002) || defined(CONFIG_MACH_CM4008) || \
+	defined(CONFIG_MACH_CM41xx) || defined(CONFIG_MACH_IM42xx) || \
+    defined(CONFIG_MACH_IM4004) || defined(CONFIG_MACH_ACM500X)
+	{ "std", og_std, og_def, ledman_bits, ledman_tick, og_set, LT},
+#endif
+
+#if defined(CONFIG_ARCH_EP9312)
+	{ "std", ipd_std, ipd_def, ledman_bits, ledman_tick, ipd_set, LT},
+#endif
+
+#if defined(CONFIG_AVNET5282)
+	{ "std", ads5282_std, ads5282_def, ledman_bits, ledman_tick, ads5282_set, LT },
+#endif
+
+#if defined(CONFIG_SG590) || defined(CONFIG_SG8200) || defined(CONFIG_SG770)
+	{ "std", sgoct_std, sgoct_def, ledman_bits, ledman_tick, sgoct_set, LT },
+#endif
+
+#if defined(CONFIG_MACH_UTM300)
+	{ "std", utm300_std, utm300_def, ledman_bits, ledman_tick, utm300_set, LT },
+#endif
+
+#if defined(CONFIG_MACH_UTM400)
+	{ "std", utm400_std, utm400_def, ledman_bits, ledman_tick, utm400_set, LT },
+#endif
+
+#if defined(CONFIG_ATH79_MACH_NETREACH)
+	{ "std", netreach_std, netreach_def, ledman_bits, ledman_tick, netreach_set, LT },
+#endif
+
+	{ "",  NULL, NULL, NULL }
+};
+
+/****************************************************************************/
+/*
+ *	cmd - from ledman.h
+ *	led - led code from ledman.h
+ *
+ *	check parameters and then call
+ */
+
+int
+ledman_cmd(int cmd, unsigned long led)
+{
+	int			i;
+
+	switch (cmd & ~LEDMAN_CMD_ALTBIT) {
+	case LEDMAN_CMD_SET:
+	case LEDMAN_CMD_ON:
+	case LEDMAN_CMD_OFF:
+	case LEDMAN_CMD_FLASH:
+	case LEDMAN_CMD_RESET:
+	case LEDMAN_CMD_ALT_ON:
+	case LEDMAN_CMD_ALT_OFF:
+		break;
+	case LEDMAN_CMD_STARTTIMER:
+		ledman_starttimer();
+		return 0;
+	case LEDMAN_CMD_KILLTIMER:
+		ledman_killtimer();
+		return 0;
+	case LEDMAN_CMD_MODE:
+		for (i = 0; led_mode[i].name[0]; i++)
+			if (strcmp((char *) led, led_mode[i].name) == 0) {
+				lmp = led_mode + i;
+				if (initted)
+					ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_ALL);
+				return 0;
+			}
+		return -EINVAL;
+	default:
+		return -EINVAL;
+	}
+
+	if (led < 0 || led >= LEDMAN_MAX)
+		return -EINVAL;
+
+	if (lmp)
+		lmp->bits(cmd, lmp->map[led]);
+	return 0;
+}
+
+/****************************************************************************/
+
+static const struct file_operations ledman_fops = {
+	.unlocked_ioctl = ledman_ioctl,
+};
+
+/****************************************************************************/
+
+INIT_RET_TYPE ledman_init(void)
+{
+	int expires;
+	pr_info("Copyright (C) SnapGear, 2000-2010.\n");
+
+	if (register_chrdev(LEDMAN_MAJOR, "nled",  &ledman_fops) < 0) {
+		pr_err("ledman_init() can't get Major %d\n", LEDMAN_MAJOR);
+		return -EBUSY;
+	}
+
+	lmp = led_mode;
+
+#if defined(CONFIG_SH_KEYWEST) || defined(CONFIG_SH_BIGSUR)
+	ledman_initkeywest();
+#endif
+
+#if defined(CONFIG_X86) || defined(CONFIG_ARM) || defined(CONFIG_MIPS)
+	ledman_initarch();
+#endif
+
+/*
+ *	set the LEDs up correctly at boot
+ */
+	ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_ALL);
+/*
+ *	start the timer
+ */
+	init_timer(&ledman_timerlist);
+	if (lmp->tick)
+		expires = jiffies + lmp->jiffies;
+	else
+		expires = jiffies + HZ;
+	ledman_timerlist.function = ledman_poll;
+	ledman_timerlist.data = 0;
+	mod_timer(&ledman_timerlist, expires);
+
+#if LINUX_VERSION_CODE < 0x020100
+	register_symtab(&ledman_syms);
+#endif
+
+	initted = 1;
+	return 0;
+}
+
+Module_init(ledman_init);
+

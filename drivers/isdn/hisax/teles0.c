@@ -1,11 +1,11 @@
-/* $Id: teles0.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: teles0.c,v 2.15.2.4 2004/01/13 23:48:39 keil Exp $
  *
  * low level stuff for Teles Memory IO isdn cards
  *
  * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -15,81 +15,78 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isdnl1.h"
 #include "isac.h"
 #include "hscx.h"
 
-extern const char *CardType[];
-
-const char *teles0_revision = "$Revision: 1.1.4.1 $";
+static const char *teles0_revision = "$Revision: 2.15.2.4 $";
 
 #define TELES_IOMEM_SIZE	0x400
-#define byteout(addr,val) outb(val,addr)
+#define byteout(addr, val) outb(val, addr)
 #define bytein(addr) inb(addr)
 
 static inline u_char
-readisac(unsigned long adr, u_char off)
+readisac(void __iomem *adr, u_char off)
 {
 	return readb(adr + ((off & 1) ? 0x2ff : 0x100) + off);
 }
 
 static inline void
-writeisac(unsigned long adr, u_char off, u_char data)
+writeisac(void __iomem *adr, u_char off, u_char data)
 {
 	writeb(data, adr + ((off & 1) ? 0x2ff : 0x100) + off); mb();
 }
 
 
 static inline u_char
-readhscx(unsigned long adr, int hscx, u_char off)
+readhscx(void __iomem *adr, int hscx, u_char off)
 {
 	return readb(adr + (hscx ? 0x1c0 : 0x180) +
 		     ((off & 1) ? 0x1ff : 0) + off);
 }
 
 static inline void
-writehscx(unsigned long adr, int hscx, u_char off, u_char data)
+writehscx(void __iomem *adr, int hscx, u_char off, u_char data)
 {
 	writeb(data, adr + (hscx ? 0x1c0 : 0x180) +
 	       ((off & 1) ? 0x1ff : 0) + off); mb();
 }
 
 static inline void
-read_fifo_isac(unsigned long adr, u_char * data, int size)
+read_fifo_isac(void __iomem *adr, u_char *data, int size)
 {
 	register int i;
-	register u_char *ad = (u_char *)adr + 0x100;
+	register u_char __iomem *ad = adr + 0x100;
 	for (i = 0; i < size; i++)
 		data[i] = readb(ad);
 }
 
 static inline void
-write_fifo_isac(unsigned long adr, u_char * data, int size)
+write_fifo_isac(void __iomem *adr, u_char *data, int size)
 {
 	register int i;
-	register u_char *ad = (u_char *)adr + 0x100;
+	register u_char __iomem *ad = adr + 0x100;
 	for (i = 0; i < size; i++) {
 		writeb(data[i], ad); mb();
 	}
 }
 
 static inline void
-read_fifo_hscx(unsigned long adr, int hscx, u_char * data, int size)
+read_fifo_hscx(void __iomem *adr, int hscx, u_char *data, int size)
 {
 	register int i;
-	register u_char *ad = (u_char *) (adr + (hscx ? 0x1c0 : 0x180));
+	register u_char __iomem *ad = adr + (hscx ? 0x1c0 : 0x180);
 	for (i = 0; i < size; i++)
 		data[i] = readb(ad);
 }
 
 static inline void
-write_fifo_hscx(unsigned long adr, int hscx, u_char * data, int size)
+write_fifo_hscx(void __iomem *adr, int hscx, u_char *data, int size)
 {
 	int i;
-	register u_char *ad = (u_char *) (adr + (hscx ? 0x1c0 : 0x180));
+	register u_char __iomem *ad = adr + (hscx ? 0x1c0 : 0x180);
 	for (i = 0; i < size; i++) {
 		writeb(data[i], ad); mb();
 	}
@@ -110,13 +107,13 @@ WriteISAC(struct IsdnCardState *cs, u_char offset, u_char value)
 }
 
 static void
-ReadISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+ReadISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	read_fifo_isac(cs->hw.teles0.membase, data, size);
 }
 
 static void
-WriteISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+WriteISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	write_fifo_isac(cs->hw.teles0.membase, data, size);
 }
@@ -144,23 +141,21 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 
 #include "hscx_irq.c"
 
-static void
-teles0_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+teles0_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
+	u_long flags;
 	int count = 0;
 
-	if (!cs) {
-		printk(KERN_WARNING "Teles0: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	val = readhscx(cs->hw.teles0.membase, 1, HSCX_ISTA);
-      Start_HSCX:
+Start_HSCX:
 	if (val)
 		hscx_int_main(cs, val);
 	val = readisac(cs->hw.teles0.membase, ISAC_ISTA);
-      Start_ISAC:
+Start_ISAC:
 	if (val)
 		isac_interrupt(cs, val);
 	count++;
@@ -182,14 +177,16 @@ teles0_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	writeisac(cs->hw.teles0.membase, ISAC_MASK, 0x0);
 	writehscx(cs->hw.teles0.membase, 0, HSCX_MASK, 0x0);
 	writehscx(cs->hw.teles0.membase, 1, HSCX_MASK, 0x0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
-void
+static void
 release_io_teles0(struct IsdnCardState *cs)
 {
 	if (cs->hw.teles0.cfg_reg)
 		release_region(cs->hw.teles0.cfg_reg, 8);
-	iounmap((unsigned char *)cs->hw.teles0.membase);
+	iounmap(cs->hw.teles0.membase);
 	release_mem_region(cs->hw.teles0.phymem, TELES_IOMEM_SIZE);
 }
 
@@ -197,39 +194,36 @@ static int
 reset_teles0(struct IsdnCardState *cs)
 {
 	u_char cfval;
-	long flags;
 
-	save_flags(flags);
-	sti();
 	if (cs->hw.teles0.cfg_reg) {
 		switch (cs->irq) {
-			case 2:
-			case 9:
-				cfval = 0x00;
-				break;
-			case 3:
-				cfval = 0x02;
-				break;
-			case 4:
-				cfval = 0x04;
-				break;
-			case 5:
-				cfval = 0x06;
-				break;
-			case 10:
-				cfval = 0x08;
-				break;
-			case 11:
-				cfval = 0x0A;
-				break;
-			case 12:
-				cfval = 0x0C;
-				break;
-			case 15:
-				cfval = 0x0E;
-				break;
-			default:
-				return(1);
+		case 2:
+		case 9:
+			cfval = 0x00;
+			break;
+		case 3:
+			cfval = 0x02;
+			break;
+		case 4:
+			cfval = 0x04;
+			break;
+		case 5:
+			cfval = 0x06;
+			break;
+		case 10:
+			cfval = 0x08;
+			break;
+		case 11:
+			cfval = 0x0A;
+			break;
+		case 12:
+			cfval = 0x0C;
+			break;
+		case 15:
+			cfval = 0x0E;
+			break;
+		default:
+			return (1);
 		}
 		cfval |= ((cs->hw.teles0.phymem >> 9) & 0xF0);
 		byteout(cs->hw.teles0.cfg_reg + 4, cfval);
@@ -241,30 +235,35 @@ reset_teles0(struct IsdnCardState *cs)
 	HZDELAY(HZ / 5 + 1);
 	writeb(1, cs->hw.teles0.membase + 0x80); mb();
 	HZDELAY(HZ / 5 + 1);
-	restore_flags(flags);
-	return(0);
+	return (0);
 }
 
 static int
 Teles_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+
 	switch (mt) {
-		case CARD_RESET:
-			reset_teles0(cs);
-			return(0);
-		case CARD_RELEASE:
-			release_io_teles0(cs);
-			return(0);
-		case CARD_INIT:
-			inithscxisac(cs, 3);
-			return(0);
-		case CARD_TEST:
-			return(0);
+	case CARD_RESET:
+		spin_lock_irqsave(&cs->lock, flags);
+		reset_teles0(cs);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return (0);
+	case CARD_RELEASE:
+		release_io_teles0(cs);
+		return (0);
+	case CARD_INIT:
+		spin_lock_irqsave(&cs->lock, flags);
+		inithscxisac(cs, 3);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return (0);
+	case CARD_TEST:
+		return (0);
 	}
-	return(0);
+	return (0);
 }
 
-int __init
+int __devinit
 setup_teles0(struct IsdnCard *card)
 {
 	u_char val;
@@ -284,20 +283,18 @@ setup_teles0(struct IsdnCard *card)
 	if (card->para[1] < 0x10000) {
 		card->para[1] <<= 4;
 		printk(KERN_INFO
-		   "Teles0: membase configured DOSish, assuming 0x%lx\n",
+		       "Teles0: membase configured DOSish, assuming 0x%lx\n",
 		       (unsigned long) card->para[1]);
 	}
 	cs->irq = card->para[0];
 	if (cs->hw.teles0.cfg_reg) {
-		if (check_region(cs->hw.teles0.cfg_reg, 8)) {
+		if (!request_region(cs->hw.teles0.cfg_reg, 8, "teles cfg")) {
 			printk(KERN_WARNING
-			  "HiSax: %s config port %x-%x already in use\n",
+			       "HiSax: %s config port %x-%x already in use\n",
 			       CardType[card->typ],
 			       cs->hw.teles0.cfg_reg,
 			       cs->hw.teles0.cfg_reg + 8);
 			return (0);
-		} else {
-			request_region(cs->hw.teles0.cfg_reg, 8, "teles cfg");
 		}
 	}
 	if (cs->hw.teles0.cfg_reg) {
@@ -314,8 +311,8 @@ setup_teles0(struct IsdnCard *card)
 			return (0);
 		}
 		val = bytein(cs->hw.teles0.cfg_reg + 2);	/* 0x1e=without AB
-								   * 0x1f=with AB
-								   * 0x1c 16.3 ???
+								 * 0x1f=with AB
+								 * 0x1c 16.3 ???
 								 */
 		if (val != 0x1e && val != 0x1f) {
 			printk(KERN_WARNING "Teles0: 16.0 Byte at %x is %x\n",
@@ -327,23 +324,19 @@ setup_teles0(struct IsdnCard *card)
 	/* 16.0 and 8.0 designed for IOM1 */
 	test_and_set_bit(HW_IOM1, &cs->HW_Flags);
 	cs->hw.teles0.phymem = card->para[1];
-	if (check_mem_region(cs->hw.teles0.phymem, TELES_IOMEM_SIZE)) {
+	if (!request_mem_region(cs->hw.teles0.phymem, TELES_IOMEM_SIZE, "teles iomem")) {
 		printk(KERN_WARNING
-			"HiSax: %s memory region %lx-%lx already in use\n",
-			CardType[card->typ],
-			cs->hw.teles0.phymem,
-			cs->hw.teles0.phymem + TELES_IOMEM_SIZE);
+		       "HiSax: %s memory region %lx-%lx already in use\n",
+		       CardType[card->typ],
+		       cs->hw.teles0.phymem,
+		       cs->hw.teles0.phymem + TELES_IOMEM_SIZE);
 		if (cs->hw.teles0.cfg_reg)
 			release_region(cs->hw.teles0.cfg_reg, 8);
 		return (0);
-	} else {
-		request_mem_region(cs->hw.teles0.phymem, TELES_IOMEM_SIZE,
-			"teles iomem");
 	}
-	cs->hw.teles0.membase =
-		(unsigned long) ioremap(cs->hw.teles0.phymem, TELES_IOMEM_SIZE);
+	cs->hw.teles0.membase = ioremap(cs->hw.teles0.phymem, TELES_IOMEM_SIZE);
 	printk(KERN_INFO
-	       "HiSax: %s config irq:%d mem:0x%lX cfg:0x%X\n",
+	       "HiSax: %s config irq:%d mem:%p cfg:0x%X\n",
 	       CardType[cs->typ], cs->irq,
 	       cs->hw.teles0.membase, cs->hw.teles0.cfg_reg);
 	if (reset_teles0(cs)) {
@@ -351,6 +344,7 @@ setup_teles0(struct IsdnCard *card)
 		release_io_teles0(cs);
 		return (0);
 	}
+	setup_isac(cs);
 	cs->readisac = &ReadISAC;
 	cs->writeisac = &WriteISAC;
 	cs->readisacfifo = &ReadISACfifo;
@@ -363,7 +357,7 @@ setup_teles0(struct IsdnCard *card)
 	ISACVersion(cs, "Teles0:");
 	if (HscxVersion(cs, "Teles0:")) {
 		printk(KERN_WARNING
-		 "Teles0: wrong HSCX versions check IO/MEM addresses\n");
+		       "Teles0: wrong HSCX versions check IO/MEM addresses\n");
 		release_io_teles0(cs);
 		return (0);
 	}

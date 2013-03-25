@@ -5,10 +5,7 @@
 # Copyright (C) Alex Williamson (alex_williamson@hp.com)
 #
 
-O_TARGET := common.o
-
-export-objs := sba_iommu.o
-
 obj-y := sba_iommu.o
-
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_IA64_HP_ZX1_SWIOTLB) += hwsw_iommu.o
+obj-$(CONFIG_IA64_GENERIC) += hwsw_iommu.o
+obj-$(CONFIG_IA64_HP_AML_NFW) += aml_nfw.o

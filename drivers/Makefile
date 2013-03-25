@@ -5,53 +5,132 @@
 # Rewritten to use lists instead of if-statements.
 #
 
+# GPIO must come after pinctrl as gpios may need to mux pins etc
+obj-y				+= pinctrl/
+obj-y				+= gpio/
+obj-$(CONFIG_PCI)		+= pci/
+obj-$(CONFIG_PARISC)		+= parisc/
+obj-$(CONFIG_RAPIDIO)		+= rapidio/
+obj-y				+= video/
+obj-y				+= idle/
+obj-$(CONFIG_ACPI)		+= acpi/
+obj-$(CONFIG_SFI)		+= sfi/
+# PnP must come after ACPI since it will eventually need to check if acpi
+# was used and do nothing if so
+obj-$(CONFIG_PNP)		+= pnp/
+obj-$(CONFIG_ARM_AMBA)		+= amba/
+# Many drivers will want to use DMA so this has to be made available
+# really early.
+obj-$(CONFIG_DMA_ENGINE)	+= dma/
 
-mod-subdirs :=	dio hil mtd sbus video macintosh usb input telephony ide \
-		message/i2o message/fusion scsi md ieee1394 pnp isdn atm \
-		fc4 net/hamradio i2c acpi bluetooth usb/gadget pcmcia
+obj-$(CONFIG_VIRTIO)		+= virtio/
+obj-$(CONFIG_XEN)		+= xen/
 
-subdir-y :=	parport serial char block net sound misc media cdrom hotplug 
-subdir-m :=	$(subdir-y)
+# regulators early, since some subsystems rely on them to initialize
+obj-$(CONFIG_REGULATOR)		+= regulator/
 
+# tty/ comes before char/ so that the VT console is the boot-time
+# default.
+obj-y				+= tty/
+obj-y				+= char/
 
-subdir-$(CONFIG_DIO)		+= dio
-subdir-$(CONFIG_PCI)		+= pci
-subdir-$(CONFIG_GSC)		+= gsc
-subdir-$(CONFIG_HIL)		+= hil
-subdir-$(CONFIG_PCMCIA)		+= pcmcia
-subdir-$(CONFIG_MTD)		+= mtd
-subdir-$(CONFIG_SBUS)		+= sbus
-subdir-$(CONFIG_ZORRO)		+= zorro
-subdir-$(CONFIG_NUBUS)		+= nubus
-subdir-$(CONFIG_TC)		+= tc
-subdir-$(CONFIG_VT)		+= video
-subdir-$(CONFIG_MAC)		+= macintosh
-subdir-$(CONFIG_PPC32)		+= macintosh
-subdir-$(CONFIG_USB)		+= usb
-subdir-$(CONFIG_USB_GADGET)	+= usb/gadget
-subdir-$(CONFIG_INPUT)		+= input
-subdir-$(CONFIG_PHONE)		+= telephony
-subdir-$(CONFIG_IDE)		+= ide
-subdir-$(CONFIG_SCSI)		+= scsi
-subdir-$(CONFIG_I2O)		+= message/i2o
-subdir-$(CONFIG_FUSION)		+= message/fusion
-subdir-$(CONFIG_MD)		+= md
-subdir-$(CONFIG_IEEE1394)	+= ieee1394
-subdir-$(CONFIG_PNP)		+= pnp
-subdir-$(CONFIG_ISDN_BOOL)	+= isdn
-subdir-$(CONFIG_ATM)		+= atm
-subdir-$(CONFIG_FC4)		+= fc4
-subdir-$(CONFIG_FUJITSU)	+= fujitsu
-subdir-$(CONFIG_FRV_ACPI_EMU)	+= frv_acpi
+# gpu/ comes after char for AGP vs DRM startup
+obj-y				+= gpu/
 
-# CONFIG_HAMRADIO can be set without CONFIG_NETDEVICE being set  -- ch
-subdir-$(CONFIG_HAMRADIO)	+= net/hamradio
-subdir-$(CONFIG_I2C)		+= i2c
-subdir-$(CONFIG_SPI)		+= spi
-subdir-$(CONFIG_ACPI_BOOT)	+= acpi
+obj-$(CONFIG_CONNECTOR)		+= connector/
 
-subdir-$(CONFIG_BLUEZ)		+= bluetooth
+# i810fb and intelfb depend on char/agp/
+obj-$(CONFIG_FB_I810)           += video/i810/
+obj-$(CONFIG_FB_INTEL)          += video/intelfb/
 
-subdir-$(CONFIG_ARCH_AT91RM9200)+= at91
+obj-$(CONFIG_PARPORT)		+= parport/
+obj-y				+= base/ block/ misc/ mfd/ nfc/
+obj-$(CONFIG_NUBUS)		+= nubus/
+obj-y				+= macintosh/
+obj-$(CONFIG_IDE)		+= ide/
+obj-$(CONFIG_SCSI)		+= scsi/
+obj-$(CONFIG_ATA)		+= ata/
+obj-$(CONFIG_TARGET_CORE)	+= target/
+obj-$(CONFIG_MTD)		+= mtd/
+obj-$(CONFIG_SPI)		+= spi/
+obj-y				+= hsi/
+obj-y				+= net/
+obj-$(CONFIG_ATM)		+= atm/
+obj-$(CONFIG_FUSION)		+= message/
+obj-y				+= firewire/
+obj-$(CONFIG_UIO)		+= uio/
+obj-y				+= cdrom/
+obj-y				+= auxdisplay/
+obj-$(CONFIG_PCCARD)		+= pcmcia/
+obj-$(CONFIG_DIO)		+= dio/
+obj-$(CONFIG_SBUS)		+= sbus/
+obj-$(CONFIG_ZORRO)		+= zorro/
+obj-$(CONFIG_MAC)		+= macintosh/
+obj-$(CONFIG_ATA_OVER_ETH)	+= block/aoe/
+obj-$(CONFIG_PARIDE) 		+= block/paride/
+obj-$(CONFIG_TC)		+= tc/
+obj-$(CONFIG_UWB)		+= uwb/
+obj-$(CONFIG_USB_OTG_UTILS)	+= usb/
+obj-$(CONFIG_USB)		+= usb/
+obj-$(CONFIG_PCI)		+= usb/
+obj-$(CONFIG_USB_GADGET)	+= usb/
+obj-$(CONFIG_SERIO)		+= input/serio/
+obj-$(CONFIG_GAMEPORT)		+= input/gameport/
+obj-$(CONFIG_INPUT)		+= input/
+obj-$(CONFIG_I2O)		+= message/
+obj-$(CONFIG_RTC_LIB)		+= rtc/
+obj-y				+= i2c/ media/
+obj-$(CONFIG_PPS)		+= pps/
+obj-$(CONFIG_PTP_1588_CLOCK)	+= ptp/
+obj-$(CONFIG_W1)		+= w1/
+obj-$(CONFIG_POWER_SUPPLY)	+= power/
+obj-$(CONFIG_HWMON)		+= hwmon/
+obj-$(CONFIG_THERMAL)		+= thermal/
+obj-$(CONFIG_WATCHDOG)		+= watchdog/
+obj-$(CONFIG_MD)		+= md/
+obj-$(CONFIG_BT)		+= bluetooth/
+obj-$(CONFIG_ACCESSIBILITY)	+= accessibility/
+obj-$(CONFIG_ISDN)		+= isdn/
+obj-$(CONFIG_EDAC)		+= edac/
+obj-$(CONFIG_MCA)		+= mca/
+obj-$(CONFIG_EISA)		+= eisa/
+obj-y				+= lguest/
+obj-$(CONFIG_CPU_FREQ)		+= cpufreq/
+obj-$(CONFIG_CPU_IDLE)		+= cpuidle/
+obj-y				+= mmc/
+obj-$(CONFIG_MEMSTICK)		+= memstick/
+obj-y				+= leds/
+obj-$(CONFIG_INFINIBAND)	+= infiniband/
+obj-$(CONFIG_SGI_SN)		+= sn/
+obj-y				+= firmware/
+obj-$(CONFIG_CRYPTO)		+= crypto/
+obj-$(CONFIG_SUPERH)		+= sh/
+obj-$(CONFIG_ARCH_SHMOBILE)	+= sh/
+ifndef CONFIG_ARCH_USES_GETTIMEOFFSET
+obj-y				+= clocksource/
+endif
+obj-$(CONFIG_DCA)		+= dca/
+obj-$(CONFIG_HID)		+= hid/
+obj-$(CONFIG_PPC_PS3)		+= ps3/
+obj-$(CONFIG_OF)		+= of/
+obj-$(CONFIG_SSB)		+= ssb/
+obj-$(CONFIG_BCMA)		+= bcma/
+obj-$(CONFIG_VHOST_NET)		+= vhost/
+obj-$(CONFIG_VLYNQ)		+= vlynq/
+obj-$(CONFIG_STAGING)		+= staging/
+obj-y				+= platform/
+obj-y				+= ieee802154/
+#common clk code
+obj-y				+= clk/
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_HWSPINLOCK)	+= hwspinlock/
+obj-$(CONFIG_NFC)		+= nfc/
+obj-$(CONFIG_IOMMU_SUPPORT)	+= iommu/
+obj-$(CONFIG_REMOTEPROC)	+= remoteproc/
+obj-$(CONFIG_RPMSG)		+= rpmsg/
+
+# Virtualization drivers
+obj-$(CONFIG_VIRT_DRIVERS)	+= virt/
+obj-$(CONFIG_HYPERV)		+= hv/
+
+obj-$(CONFIG_PM_DEVFREQ)	+= devfreq/

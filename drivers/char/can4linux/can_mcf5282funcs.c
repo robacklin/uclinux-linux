@@ -10,7 +10,7 @@
  * Copyright (c) 2003-2005 port GmbH Halle/Saale
  * (c) 2003 Heinz-Jürgen Oertel (oe@port.de)
  *------------------------------------------------------------------
- * $Header: /home/oertel/pakete/cf_5282/uClinux-dist-2.4/linux-2.4.x/drivers/char/can4linux/RCS/can_mcf5282funcs.c,v 1.2 2005/11/08 11:31:48 oe Exp $
+ * $Header: /cvs/sw/linux-3.x/drivers/char/can4linux/can_mcf5282funcs.c,v 1.1 2009-01-27 04:27:11 gerg Exp $
  *
  *--------------------------------------------------------------------------
  *
@@ -35,6 +35,17 @@
  * modification history
  * --------------------
  * $Log: can_mcf5282funcs.c,v $
+ * Revision 1.1  2009-01-27 04:27:11  gerg
+ * #10381
+ *
+ * > 09_can4linux.patch
+ * >   can4linux (new whole directory)
+ * >   -- this is can4linux release with modification for M532x and M528x
+ *
+ * Signed-off-by:  David Wu <david.wu@arcturusnetworks.com>
+ * Acked-by: Michael Durrant <mdurrant@arcturusnetworks.com>
+ * Acked-by: Oleksandr Zhadan <oleks@arcturusnetworks.com>
+ *
  * Revision 1.2  2005/11/08 11:31:48  oe
  * massive changes for SSV IGW/900
  *
@@ -83,7 +94,7 @@ static const BTR_TAB_TOUCAN_T can_btr_tab_toucan[] = {
 */
 
 
-#ifdef DEBUG
+#if DEBUG
 int CAN_ShowStat (int board)
 {
     if (dbgMask && (dbgMask & DBG_DATA)) {
@@ -136,7 +147,7 @@ unsigned long flags;
     /* Collect information about the RX and TX buffer usage */
     /* Disable CAN Interrupts */
     /* !!!!!!!!!!!!!!!!!!!!! */
-    save_flags(flags); cli();
+    local_irq_save(flags);
     Fifo = &Rx_Buf[board];
     stat->rx_buffer_size = MAX_BUFSIZE;	/**< size of rx buffer  */
     /* number of messages */
@@ -151,7 +162,7 @@ unsigned long flags;
     	? (MAX_BUFSIZE - Fifo->tail + Fifo->head) : (Fifo->head - Fifo->tail);
     /* Enable CAN Interrupts */
     /* !!!!!!!!!!!!!!!!!!!!! */
-    restore_flags(flags);
+    local_irq_restore(flags);
     return 0;
 }
 
@@ -175,10 +186,7 @@ int i;
     /* 
      * Initialize Port AS PAR to have Can TX/RX signals enabled 
      */
-#define MCF5282_GPIO_PASPAR  	(*(volatile u16 *)(void *)(0x40100056))
     MCF5282_GPIO_PASPAR = 0x0FF0;
-    /* printk("I/O %p %04x\n", (volatile u16 *)(void *)(0x40100056), MCF5282_GPIO_PASPAR); */
-	
 
     /*
      * go to INIT mode
@@ -193,7 +201,6 @@ int i;
     udelay(10);
     /* Test Reset Status */
     if(CANtestw(board, canmcr, CAN_MCR_SOFT_RST) != 0) {
-	MOD_DEC_USE_COUNT;
 	DBGout();return -1;
     }
 
@@ -472,14 +479,11 @@ int CAN_SendMessage (int board, canmsg_t *tx)
     0 - FlexCAN is receiving when IDLE = 0
     1 - FlexCAN is transmitting when IDLE = 0
     */
-
-    while ( 
-    	    ((stat = CANinw(board, estat)) & (CAN_ESTAT_IDLE + CAN_ESTAT_TX_RX))
-    	    == CAN_ESTAT_TX_RX
-    	  ) {
-
-	    if( current->need_resched ) schedule();
-	    /* if( need_resched ) schedule(); */
+    while (
+            ((stat = CANinw(board, estat)) & (CAN_ESTAT_IDLE + CAN_ESTAT_TX_RX))
+            == CAN_ESTAT_TX_RX
+          ) {
+	    if( need_resched() ) schedule();
     }
 
     /* DBGprint(DBG_DATA,( */
@@ -653,7 +657,7 @@ int CAN_VendorInit (int minor)
  *   sec. ISR shorter than first, why? it's the same message
  */
 
-void CAN_Interrupt ( int irq, void *dev_id, struct pt_regs *ptregs )
+irqreturn_t CAN_Interrupt ( int irq, void *dev_id, struct pt_regs *ptregs )
 {
 volatile unsigned int		estat;
 volatile unsigned int		ctrl;
@@ -664,14 +668,6 @@ int		board;
 msg_fifo_t	*RxFifo; 
 msg_fifo_t	*TxFifo;
 int 		i;
-
-/* do we have some LEDS on the ColdFire EVA ?? */
-#if CONFIG_TIME_MEASURE   
-    
-#endif
-  /* printk(" CAN ISR %d\n", irq);  */
-
-
     board = *(int *)dev_id;
 
     RxFifo = &Rx_Buf[board]; 
@@ -850,8 +846,7 @@ DBGprint(DBG_DATA, (" => got  TX IRQ[%d]: 0x%0x\n", board, irqsrc));
 
 
         /* enter critical section */
-        save_flags(flags);cli();
-
+        local_irq_save(flags);
         while ((ctrl = CAN_READ_CTRL(TRANSMIT_OBJ)
                  & (REC_CODE_BUSY << 4)) == (REC_CODE_BUSY << 4)) {
         	/* printk("CAN_int, tx REC_CODE_BUSY"); */
@@ -901,7 +896,7 @@ DBGprint(DBG_DATA, (" => got  TX IRQ[%d]: 0x%0x\n", board, irqsrc));
 	    TxFifo->tail = ++(TxFifo->tail) % MAX_BUFSIZE;
 
 	    /* leave critical section */
-	    restore_flags(flags);
+	    local_irq_restore(flags);
 	}
 
 	/* Reset Interrupt pending at Transmit Object */
@@ -912,12 +907,12 @@ DBGprint(DBG_DATA, (" => got  TX IRQ[%d]: 0x%0x\n", board, irqsrc));
    } 
 
     DBGprint(DBG_DATA, (" => leave IRQ[%d]\n", board));
-    return 0;
+    return IRQ_HANDLED;
 }
 
 
 /* dump all FlexCAN registers to printk */
-void CAN_register_dump(void)
+void CAN_register_dump(int board)
 {
 volatile flex_can_t *tou_can = (flex_can_t *)(MCF_MBAR + 0x1c0000);
 
@@ -925,16 +920,19 @@ volatile flex_can_t *tou_can = (flex_can_t *)(MCF_MBAR + 0x1c0000);
 
 #define  printregister(s, name) printk(s, &name , name)
     
-    /* printk(" %p: 0x%x \n", tou_can, *(unsigned char *)tou_can); */
-    /* printk(" %p: 0x%x \n", (unsigned char *)tou_can + 1, *(((unsigned char *)tou_can) + 1)); */
+    printregister
+    (" CAN_ModulConfigRegister      %p %0x\n", CAN_ModulConfigRegister);
+    printregister
+    (" CAN_ControlReg0              %p %0x\n", CAN_ControlReg0);
+    printregister
+    (" CAN_ControlReg1              %p %0x\n", CAN_ControlReg1);
+    printregister
+    (" CAN_ControlReg2              %p %0x\n", CAN_ControlReg2);
 
-    printregister(" CAN_ModulConfigRegister      %p %0x\n", CAN_ModulConfigRegister);
-    printregister(" CAN_ControlReg0              %p %0x\n", CAN_ControlReg0);
-    printregister(" CAN_ControlReg1              %p %0x\n", CAN_ControlReg1);
-    printregister(" CAN_ControlReg2              %p %0x\n", CAN_ControlReg2);
-
-    printregister(" CAN_PrescalerDividerRegister %p %0x\n", CAN_PrescalerDividerRegister);
-    printregister(" CAN_TimerRegister            %p %0x\n", CAN_TimerRegister);
+    printregister
+    (" CAN_PrescalerDividerRegister %p %0x\n", CAN_PrescalerDividerRegister);
+    printregister
+    (" CAN_TimerRegister            %p %0x\n", CAN_TimerRegister);
 #if 0
     printregister(" CAN_ReceiveGlobalMask        %p %0x\n", CAN_ReceiveGlobalMask);
     printregister(" CAN_ReceiveBuffer14Mask      %p %0x\n", CAN_ReceiveBuffer14Mask);

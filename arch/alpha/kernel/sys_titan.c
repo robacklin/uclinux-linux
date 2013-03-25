@@ -12,24 +12,23 @@
  *	Granite
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_titan.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -55,7 +54,7 @@ static unsigned long titan_cached_irq_mask;
 /*
  * Need SMP-safe access to interrupt CSRs
  */
-spinlock_t titan_irq_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(titan_irq_lock);
 
 static void
 titan_update_irq_hw(unsigned long mask)
@@ -65,10 +64,11 @@ titan_update_irq_hw(unsigned long mask)
 	register int bcpu = boot_cpuid;
 
 #ifdef CONFIG_SMP
-	register unsigned long cpm = cpu_present_mask;
+	cpumask_t cpm;
 	volatile unsigned long *dim0, *dim1, *dim2, *dim3;
 	unsigned long mask0, mask1, mask2, mask3, dummy;
 
+	cpumask_copy(&cpm, cpu_present_mask);
 	mask &= ~isa_enable;
 	mask0 = mask & titan_cpu_irq_affinity[0];
 	mask1 = mask & titan_cpu_irq_affinity[1];
@@ -84,10 +84,10 @@ titan_update_irq_hw(unsigned long mask)
 	dim1 = &cchip->dim1.csr;
 	dim2 = &cchip->dim2.csr;
 	dim3 = &cchip->dim3.csr;
-	if ((cpm & 1) == 0) dim0 = &dummy;
-	if ((cpm & 2) == 0) dim1 = &dummy;
-	if ((cpm & 4) == 0) dim2 = &dummy;
-	if ((cpm & 8) == 0) dim3 = &dummy;
+	if (!cpumask_test_cpu(0, &cpm)) dim0 = &dummy;
+	if (!cpumask_test_cpu(1, &cpm)) dim1 = &dummy;
+	if (!cpumask_test_cpu(2, &cpm)) dim2 = &dummy;
+	if (!cpumask_test_cpu(3, &cpm)) dim3 = &dummy;
 
 	*dim0 = mask0;
 	*dim1 = mask1;
@@ -112,8 +112,9 @@ titan_update_irq_hw(unsigned long mask)
 }
 
 static inline void
-titan_enable_irq(unsigned int irq)
+titan_enable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	spin_lock(&titan_irq_lock);
 	titan_cached_irq_mask |= 1UL << (irq - 16);
 	titan_update_irq_hw(titan_cached_irq_mask);
@@ -121,35 +122,22 @@ titan_enable_irq(unsigned int irq)
 }
 
 static inline void
-titan_disable_irq(unsigned int irq)
+titan_disable_irq(struct irq_data *d)
 {
+	unsigned int irq = d->irq;
 	spin_lock(&titan_irq_lock);
 	titan_cached_irq_mask &= ~(1UL << (irq - 16));
 	titan_update_irq_hw(titan_cached_irq_mask);
 	spin_unlock(&titan_irq_lock);
 }
 
-static unsigned int
-titan_startup_irq(unsigned int irq)
-{
-	titan_enable_irq(irq);
-	return 0;	/* never anything pending */
-}
-
 static void
-titan_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		titan_enable_irq(irq);
-}
-
-static void
-titan_cpu_set_irq_affinity(unsigned int irq, unsigned long affinity)
+titan_cpu_set_irq_affinity(unsigned int irq, cpumask_t affinity)
 {
 	int cpu;
 
 	for (cpu = 0; cpu < 4; cpu++) {
-		if (affinity & (1UL << cpu))
+		if (cpumask_test_cpu(cpu, &affinity))
 			titan_cpu_irq_affinity[cpu] |= 1UL << irq;
 		else
 			titan_cpu_irq_affinity[cpu] &= ~(1UL << irq);
@@ -157,59 +145,61 @@ titan_cpu_set_irq_affinity(unsigned int irq, unsigned long affinity)
 
 }
 
-static void
-titan_set_irq_affinity(unsigned int irq, unsigned long affinity)
+static int
+titan_set_irq_affinity(struct irq_data *d, const struct cpumask *affinity,
+		       bool force)
 { 
+	unsigned int irq = d->irq;
 	spin_lock(&titan_irq_lock);
-	titan_cpu_set_irq_affinity(irq - 16, affinity);
+	titan_cpu_set_irq_affinity(irq - 16, *affinity);
 	titan_update_irq_hw(titan_cached_irq_mask);
 	spin_unlock(&titan_irq_lock);
+
+	return 0;
 }
 
 static void
-titan_device_interrupt(unsigned long vector, struct pt_regs * regs)
+titan_device_interrupt(unsigned long vector)
 {
-	printk("titan_device_interrupt: NOT IMPLEMENTED YET!! \n");
+	printk("titan_device_interrupt: NOT IMPLEMENTED YET!!\n");
 }
 
 static void 
-titan_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+titan_srm_device_interrupt(unsigned long vector)
 {
 	int irq;
 
 	irq = (vector - 0x800) >> 4;
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 
 static void __init
-init_titan_irqs(struct hw_interrupt_type * ops, int imin, int imax)
+init_titan_irqs(struct irq_chip * ops, int imin, int imax)
 {
 	long i;
 	for (i = imin; i <= imax; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = ops;
+		irq_set_chip_and_handler(i, ops, handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 }
 
-static struct hw_interrupt_type titan_irq_type = {
-	typename:	"TITAN",
-	startup:	titan_startup_irq,
-	shutdown:	titan_disable_irq,
-	enable:		titan_enable_irq,
-	disable:	titan_disable_irq,
-	ack:		titan_disable_irq,
-	end:		titan_end_irq,
-	set_affinity:	titan_set_irq_affinity,
+static struct irq_chip titan_irq_type = {
+       .name			= "TITAN",
+       .irq_unmask		= titan_enable_irq,
+       .irq_mask		= titan_disable_irq,
+       .irq_mask_ack		= titan_disable_irq,
+       .irq_set_affinity	= titan_set_irq_affinity,
 };
 
-static void
-titan_intr_nop(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+titan_intr_nop(int irq, void *dev_id)
 {
-	/*
-	 * This is a NOP interrupt handler for the purposes of
-	 * event counting -- just return.
-	 */
+      /*
+       * This is a NOP interrupt handler for the purposes of
+       * event counting -- just return.
+       */                                                                     
+       return IRQ_HANDLED;
 }
 
 static void __init
@@ -224,7 +214,7 @@ titan_init_irq(void)
 
 	init_titan_irqs(&titan_irq_type, 16, 63 + 16);
 }
-
+  
 static void __init
 titan_legacy_init_irq(void)
 {
@@ -242,7 +232,7 @@ titan_legacy_init_irq(void)
 }
 
 void
-titan_dispatch_irqs(u64 mask, struct pt_regs *regs)
+titan_dispatch_irqs(u64 mask)
 {
 	unsigned long vector;
 
@@ -256,20 +246,32 @@ titan_dispatch_irqs(u64 mask, struct pt_regs *regs)
 	 */
 	while (mask) {
 		/* convert to SRM vector... priority is <63> -> <0> */
-		__asm__("ctlz %1, %0" : "=r"(vector) : "r"(mask));
-		vector = 63 - vector;
+		vector = 63 - __kernel_ctlz(mask);
 		mask &= ~(1UL << vector);	/* clear it out 	 */
 		vector = 0x900 + (vector << 4);	/* convert to SRM vector */
 		
 		/* dispatch it */
-		alpha_mv.device_interrupt(vector, regs);
+		alpha_mv.device_interrupt(vector);
 	}
 }
-
+  
 
 /*
  * Titan Family
  */
+static void __init
+titan_request_irq(unsigned int irq, irq_handler_t handler,
+		  unsigned long irqflags, const char *devname,
+		  void *dev_id)
+{
+	int err;
+	err = request_irq(irq, handler, irqflags, devname, dev_id);
+	if (err) {
+		printk("titan_request_irq for IRQ %d returned %d; ignoring\n",
+		       irq, err);
+	}
+}
+
 static void __init
 titan_late_init(void)
 {
@@ -278,15 +280,15 @@ titan_late_init(void)
 	 * all reported to the kernel as machine checks, so the handler
 	 * is a nop so it can be called to count the individual events.
 	 */
-	request_irq(63+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(63+16, titan_intr_nop, IRQF_DISABLED,
 		    "CChip Error", NULL);
-	request_irq(62+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(62+16, titan_intr_nop, IRQF_DISABLED,
 		    "PChip 0 H_Error", NULL);
-	request_irq(61+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(61+16, titan_intr_nop, IRQF_DISABLED,
 		    "PChip 1 H_Error", NULL);
-	request_irq(60+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(60+16, titan_intr_nop, IRQF_DISABLED,
 		    "PChip 0 C_Error", NULL);
-	request_irq(59+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(59+16, titan_intr_nop, IRQF_DISABLED,
 		    "PChip 1 C_Error", NULL);
 
 	/* 
@@ -302,7 +304,7 @@ titan_late_init(void)
 }
 
 static int __devinit
-titan_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+titan_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	u8 intline;
 	int irq;
@@ -328,12 +330,11 @@ titan_init_pci(void)
  	 */
  	titan_late_init();
  
-	pci_probe_only = 1;
+	/* Indicate that we trust the console to configure things properly */
+	pci_set_flags(PCI_PROBE_ONLY);
 	common_init_pci();
 	SMC669_Init(0);
-#ifdef CONFIG_VGA_HOSE
 	locate_and_init_vga(NULL);
-#endif
 }
 
 
@@ -347,9 +348,9 @@ privateer_init_pci(void)
 	 * Hook a couple of extra err interrupts that the
 	 * common titan code won't.
 	 */
-	request_irq(53+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(53+16, titan_intr_nop, IRQF_DISABLED,
 		    "NMI", NULL);
-	request_irq(50+16, titan_intr_nop, SA_INTERRUPT, 
+	titan_request_irq(50+16, titan_intr_nop, IRQF_DISABLED,
 		    "Temperature Warning", NULL);
 
 	/*
@@ -363,58 +364,56 @@ privateer_init_pci(void)
  * The System Vectors.
  */
 struct alpha_machine_vector titan_mv __initmv = {
-	vector_name:		"TITAN",
+	.vector_name		= "TITAN",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TITAN_IO,
-	DO_TITAN_BUS,
-	machine_check:		titan_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		TITAN_DAC_OFFSET,
+	.machine_check		= titan_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TITAN_DAC_OFFSET,
 
-	nr_irqs:		80,	/* 64 + 16 */
+	.nr_irqs		= 80,	/* 64 + 16 */
 	/* device_interrupt will be filled in by titan_init_irq */
 
-	agp_info:		titan_agp_info,
+	.agp_info		= titan_agp_info,
 
-	init_arch:		titan_init_arch,
-	init_irq:		titan_legacy_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		titan_init_pci,
+	.init_arch		= titan_init_arch,
+	.init_irq		= titan_legacy_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= titan_init_pci,
 
-	kill_arch:		titan_kill_arch,
-	pci_map_irq:		titan_map_irq,
-	pci_swizzle:		common_swizzle,
+	.kill_arch		= titan_kill_arch,
+	.pci_map_irq		= titan_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(titan)
 
 struct alpha_machine_vector privateer_mv __initmv = {
-	vector_name:		"PRIVATEER",
+	.vector_name		= "PRIVATEER",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_TITAN_IO,
-	DO_TITAN_BUS,
-	machine_check:		privateer_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		TITAN_DAC_OFFSET,
+	.machine_check		= privateer_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= TITAN_DAC_OFFSET,
 
-	nr_irqs:		80,	/* 64 + 16 */
+	.nr_irqs		= 80,	/* 64 + 16 */
 	/* device_interrupt will be filled in by titan_init_irq */
 
-	agp_info:		titan_agp_info,
+	.agp_info		= titan_agp_info,
 
-	init_arch:		titan_init_arch,
-	init_irq:		titan_legacy_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		privateer_init_pci,
+	.init_arch		= titan_init_arch,
+	.init_irq		= titan_legacy_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= privateer_init_pci,
 
-	kill_arch:		titan_kill_arch,
-	pci_map_irq:		titan_map_irq,
-	pci_swizzle:		common_swizzle,
+	.kill_arch		= titan_kill_arch,
+	.pci_map_irq		= titan_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
-/* No alpha_mv alias for privateer since we compile it
+/* No alpha_mv alias for privateer since we compile it 
    in unconditionally with titan; setup_arch knows how to cope. */

@@ -1,4 +1,4 @@
-/* $Id: rem.S,v 1.7 1996/09/30 02:22:34 davem Exp $
+/*
  * rem.S:       This routine was taken from glibc-1.09 and is covered
  *              by the GNU Library General Public License Version 2.
  */
@@ -43,7 +43,9 @@
 
 
 	.globl .rem
+	.globl _Rem
 .rem:
+_Rem:	/* needed for export */
 	! compute sign of result; if neither is negative, no problem
 	orcc	%o1, %o0, %g0	! either negative?
 	bge	2f			! no, go do the divide

@@ -1,26 +1,45 @@
 /*
- * $Id: redboot.c,v 1.6 2001/10/25 09:16:06 dwmw2 Exp $
- *
  * Parse RedBoot-style Flash Image System (FIS) tables and
  * produce a Linux partition array to match.
+ *
+ * Copyright © 2001      Red Hat UK Limited
+ * Copyright © 2001-2010 David Woodhouse <dwmw2@infradead.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
  */
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/init.h>
+#include <linux/vmalloc.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/partitions.h>
+#include <linux/module.h>
 
 struct fis_image_desc {
     unsigned char name[16];      // Null terminated name
-    unsigned long flash_base;    // Address within FLASH of image
-    unsigned long mem_base;      // Address in memory where it executes
-    unsigned long size;          // Length of image
-    unsigned long entry_point;   // Execution entry point
-    unsigned long data_length;   // Length of actual data
-    unsigned char _pad[256-(16+7*sizeof(unsigned long))];
-    unsigned long desc_cksum;    // Checksum over image descriptor
-    unsigned long file_cksum;    // Checksum over image data
+    uint32_t	  flash_base;    // Address within FLASH of image
+    uint32_t	  mem_base;      // Address in memory where it executes
+    uint32_t	  size;          // Length of image
+    uint32_t	  entry_point;   // Execution entry point
+    uint32_t	  data_length;   // Length of actual data
+    unsigned char _pad[256-(16+7*sizeof(uint32_t))];
+    uint32_t	  desc_cksum;    // Checksum over image descriptor
+    uint32_t	  file_cksum;    // Checksum over image data
 };
 
 struct fis_list {
@@ -28,13 +47,18 @@ struct fis_list {
 	struct fis_list *next;
 };
 
+static int directory = CONFIG_MTD_REDBOOT_DIRECTORY_BLOCK;
+module_param(directory, int, 0);
+
 static inline int redboot_checksum(struct fis_image_desc *img)
 {
 	/* RedBoot doesn't actually write the desc_cksum field yet AFAICT */
 	return 1;
 }
 
-int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **pparts, unsigned long fis_origin)
+static int parse_redboot_partitions(struct mtd_info *master,
+				    struct mtd_partition **pparts,
+				    struct mtd_part_parser_data *data)
 {
 	int nrparts = 0;
 	struct fis_image_desc *buf;
@@ -43,21 +67,43 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 	int ret, i;
 	size_t retlen;
 	char *names;
-	int namelen = 0;
 	char *nullname;
+	int namelen = 0;
 	int nulllen = 0;
+	int numslots;
+	unsigned long offset;
 #ifdef CONFIG_MTD_REDBOOT_PARTS_UNALLOCATED
 	static char nullstring[] = "unallocated";
 #endif
 
-	buf = kmalloc(master->erasesize, GFP_KERNEL);
+	if ( directory < 0 ) {
+		offset = master->size + directory * master->erasesize;
+		while (mtd_block_isbad(master, offset)) {
+			if (!offset) {
+			nogood:
+				printk(KERN_NOTICE "Failed to find a non-bad block to check for RedBoot partition table\n");
+				return -EIO;
+			}
+			offset -= master->erasesize;
+		}
+	} else {
+		offset = directory * master->erasesize;
+		while (mtd_block_isbad(master, offset)) {
+			offset += master->erasesize;
+			if (offset == master->size)
+				goto nogood;
+		}
+	}
+	buf = vmalloc(master->erasesize);
 
 	if (!buf)
 		return -ENOMEM;
 
-	/* Read the start of the last erase block */
-	ret = master->read(master, master->size - master->erasesize,
-			   master->erasesize, &retlen, (void *)buf);
+	printk(KERN_NOTICE "Searching for RedBoot partition table in %s at offset 0x%lx\n",
+	       master->name, offset);
+
+	ret = mtd_read(master, offset, master->erasesize, &retlen,
+		       (void *)buf);
 
 	if (ret)
 		goto out;
@@ -67,12 +113,62 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 		goto out;
 	}
 
-	/* RedBoot image could appear in any of the first three slots */
-	for (i = 0; i < 3; i++) {
-		if (!memcmp(buf[i].name, "RedBoot", 8))
+	numslots = (master->erasesize / sizeof(struct fis_image_desc));
+	for (i = 0; i < numslots; i++) {
+		if (!memcmp(buf[i].name, "FIS directory", 14)) {
+			/* This is apparently the FIS directory entry for the
+			 * FIS directory itself.  The FIS directory size is
+			 * one erase block; if the buf[i].size field is
+			 * swab32(erasesize) then we know we are looking at
+			 * a byte swapped FIS directory - swap all the entries!
+			 * (NOTE: this is 'size' not 'data_length'; size is
+			 * the full size of the entry.)
+			 */
+
+			/* RedBoot can combine the FIS directory and
+			   config partitions into a single eraseblock;
+			   we assume wrong-endian if either the swapped
+			   'size' matches the eraseblock size precisely,
+			   or if the swapped size actually fits in an
+			   eraseblock while the unswapped size doesn't. */
+			if (swab32(buf[i].size) == master->erasesize ||
+			    (buf[i].size > master->erasesize
+			     && swab32(buf[i].size) < master->erasesize)) {
+				int j;
+				/* Update numslots based on actual FIS directory size */
+				numslots = swab32(buf[i].size) / sizeof (struct fis_image_desc);
+				for (j = 0; j < numslots; ++j) {
+
+					/* A single 0xff denotes a deleted entry.
+					 * Two of them in a row is the end of the table.
+					 */
+					if (buf[j].name[0] == 0xff) {
+				  		if (buf[j].name[1] == 0xff) {
+							break;
+						} else {
+							continue;
+						}
+					}
+
+					/* The unsigned long fields were written with the
+					 * wrong byte sex, name and pad have no byte sex.
+					 */
+					swab32s(&buf[j].flash_base);
+					swab32s(&buf[j].mem_base);
+					swab32s(&buf[j].size);
+					swab32s(&buf[j].entry_point);
+					swab32s(&buf[j].data_length);
+					swab32s(&buf[j].desc_cksum);
+					swab32s(&buf[j].file_cksum);
+				}
+			} else if (buf[i].size < master->erasesize) {
+				/* Update numslots based on actual FIS directory size */
+				numslots = buf[i].size / sizeof(struct fis_image_desc);
+			}
 			break;
+		}
 	}
-	if (i == 3) {
+	if (i == numslots) {
 		/* Didn't find it */
 		printk(KERN_NOTICE "No RedBoot partition table detected in %s\n",
 		       master->name);
@@ -80,18 +176,16 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 		goto out;
 	}
 
-	if (fis_origin == ULONG_MAX)
-		fis_origin = buf->flash_base;
-	else if (fis_origin != buf->flash_base)
-		printk(KERN_NOTICE
-		       "RedBoot says flash is at %lx, but it's actually at %lx\n",
-		       buf->flash_base, fis_origin);
-
-	for (i = 0; i < master->erasesize / sizeof(struct fis_image_desc); i++) {
+	for (i = 0; i < numslots; i++) {
 		struct fis_list *new_fl, **prev;
 
-		if (buf[i].name[0] == 0xff)
-			break;
+		if (buf[i].name[0] == 0xff) {
+			if (buf[i].name[1] == 0xff) {
+				break;
+			} else {
+				continue;
+			}
+		}
 		if (!redboot_checksum(&buf[i]))
 			break;
 
@@ -102,11 +196,10 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 			goto out;
 		}
 		new_fl->img = &buf[i];
-		if (fis_origin) {
-			buf[i].flash_base -= fis_origin;
-		} else {
+		if (data && data->origin)
+			buf[i].flash_base -= data->origin;
+		else
 			buf[i].flash_base &= master->size-1;
-		}
 
 		/* I'm sure the JFFS2 code has done me permanent damage.
 		 * I now think the following is _normal_
@@ -132,14 +225,12 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 		}
 	}
 #endif
-	parts = kmalloc(sizeof(*parts)*nrparts + nulllen + namelen, GFP_KERNEL);
+	parts = kzalloc(sizeof(*parts)*nrparts + nulllen + namelen, GFP_KERNEL);
 
 	if (!parts) {
 		ret = -ENOMEM;
 		goto out;
 	}
-
-	memset(parts, 0, sizeof(*parts)*nrparts + nulllen + namelen);
 
 	nullname = (char *)&parts[nrparts];
 #ifdef CONFIG_MTD_REDBOOT_PARTS_UNALLOCATED
@@ -153,9 +244,9 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 
 #ifdef CONFIG_MTD_REDBOOT_PARTS_UNALLOCATED
 	if (fl->img->flash_base) {
-		parts[0].name = nullname;
-		parts[0].size = fl->img->flash_base;
-		parts[0].offset = 0;
+	       parts[0].name = nullname;
+	       parts[0].size = fl->img->flash_base;
+	       parts[0].offset = 0;
 		i++;
 	}
 #endif
@@ -194,12 +285,32 @@ int parse_redboot_partitions(struct mtd_info *master, struct mtd_partition **ppa
 		fl = fl->next;
 		kfree(old);
 	}
-	kfree(buf);
+	vfree(buf);
 	return ret;
 }
 
-EXPORT_SYMBOL(parse_redboot_partitions);
+static struct mtd_part_parser redboot_parser = {
+	.owner = THIS_MODULE,
+	.parse_fn = parse_redboot_partitions,
+	.name = "RedBoot",
+};
+
+/* mtd parsers will request the module by parser name */
+MODULE_ALIAS("RedBoot");
+
+static int __init redboot_parser_init(void)
+{
+	return register_mtd_parser(&redboot_parser);
+}
+
+static void __exit redboot_parser_exit(void)
+{
+	deregister_mtd_parser(&redboot_parser);
+}
+
+module_init(redboot_parser_init);
+module_exit(redboot_parser_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Red Hat, Inc. - David Woodhouse <dwmw2@cambridge.redhat.com>");
+MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
 MODULE_DESCRIPTION("Parsing code for RedBoot Flash Image System (FIS) tables");

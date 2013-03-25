@@ -16,23 +16,21 @@
  * Changelog:
  *   02-05-1999	RMK	Various cleanups
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/leds.h>
 #include <asm/mach-types.h>
-#include <asm/system.h>
 
 #define LED_STATE_ENABLED	1
 #define LED_STATE_CLAIMED	2
 static char led_state;
 static char hw_led_state;
 
-static spinlock_t leds_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(leds_lock);
 
 static void ebsa285_leds_event(led_event_t evt)
 {
@@ -129,7 +127,7 @@ static void ebsa285_leds_event(led_event_t evt)
 
 static int __init leds_init(void)
 {
-	if (machine_is_ebsa285() || machine_is_co285())
+	if (machine_is_ebsa285())
 		leds_event = ebsa285_leds_event;
 
 	leds_event(led_start);

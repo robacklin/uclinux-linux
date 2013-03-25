@@ -1,14 +1,6 @@
 #
 # Makefile for the Linux/MIPS kernel FPU emulation.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-
-USE_STANDARD_AS_RULE := true
-
-O_TARGET:= fpu_emulator.o
 
 obj-y	:= cp1emu.o ieee754m.o ieee754d.o ieee754dp.o ieee754sp.o ieee754.o \
 	   ieee754xcpt.o dp_frexp.o dp_modf.o dp_div.o dp_mul.o dp_sub.o \
@@ -18,4 +10,3 @@ obj-y	:= cp1emu.o ieee754m.o ieee754d.o ieee754dp.o ieee754sp.o ieee754.o \
 	   sp_scalb.o sp_simple.o sp_tint.o sp_fint.o sp_tlong.o sp_flong.o \
 	   dp_sqrt.o sp_sqrt.o kernel_linkage.o dsemul.o
 
-include $(TOPDIR)/Rules.make

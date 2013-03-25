@@ -1,4 +1,4 @@
-/* $Id: icn.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+/* $Id: icn.h,v 1.30.6.5 2001/09/23 22:24:55 kai Exp $
  *
  * ISDN lowlevel-module for the ICN active ISDN-Card.
  *
@@ -35,11 +35,9 @@ typedef struct icn_cdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -56,7 +54,7 @@ typedef struct icn_cdef {
 
 /* some useful macros for debugging */
 #ifdef ICN_DEBUG_PORT
-#define OUTB_P(v,p) {printk(KERN_DEBUG "icn: outb_p(0x%02x,0x%03x)\n",v,p); outb_p(v,p);}
+#define OUTB_P(v, p) {printk(KERN_DEBUG "icn: outb_p(0x%02x,0x%03x)\n", v, p); outb_p(v, p);}
 #else
 #define OUTB_P outb
 #endif
@@ -71,11 +69,10 @@ typedef struct icn_cdef {
 #define ICN_FLAGS_RUNNING  4    /* Cards driver activated                  */
 #define ICN_FLAGS_RBTIMER  8    /* cyclic scheduling of B-Channel-poll     */
 
-#define ICN_BOOT_TIMEOUT1  (HZ) /* Delay for Boot-download (jiffies)       */
-#define ICN_CHANLOCK_DELAY (HZ/10)	/* Delay for Channel-mapping (jiffies)     */
+#define ICN_BOOT_TIMEOUT1  1000 /* Delay for Boot-download (msecs)         */
 
-#define ICN_TIMER_BCREAD (HZ/100)	/* B-Channel poll-cycle                    */
-#define ICN_TIMER_DCREAD (HZ/2) /* D-Channel poll-cycle                    */
+#define ICN_TIMER_BCREAD (HZ / 100)	/* B-Channel poll-cycle                    */
+#define ICN_TIMER_DCREAD (HZ / 2) /* D-Channel poll-cycle                    */
 
 #define ICN_CODE_STAGE1 4096    /* Size of bootcode                        */
 #define ICN_CODE_STAGE2 65536   /* Size of protocol-code                   */
@@ -143,15 +140,15 @@ typedef struct icn_card {
 	int myid;               /* Driver-Nr. assigned by linklevel */
 	int rvalid;             /* IO-portregion has been requested */
 	int leased;             /* Flag: This Adapter is connected  */
-	/*       to a leased line           */
+				/*       to a leased line           */
 	unsigned short flags;   /* Statusflags                      */
 	int doubleS0;           /* Flag: ICN4B                      */
 	int secondhalf;         /* Flag: Second half of a doubleS0  */
 	int fw_rev;             /* Firmware revision loaded         */
 	int ptype;              /* Protocol type (1TR6 or Euro)     */
-	struct timer_list st_timer;	/* Timer for Status-Polls           */
-	struct timer_list rb_timer;	/* Timer for B-Channel-Polls        */
-	u_char rcvbuf[ICN_BCH][4096];	/* B-Channel-Receive-Buffers        */
+	struct timer_list st_timer;   /* Timer for Status-Polls     */
+	struct timer_list rb_timer;   /* Timer for B-Channel-Polls  */
+	u_char rcvbuf[ICN_BCH][4096]; /* B-Channel-Receive-Buffers  */
 	int rcvidx[ICN_BCH];    /* Index for above buffers          */
 	int l2_proto[ICN_BCH];  /* Current layer-2-protocol         */
 	isdn_if interface;      /* Interface to upper layer         */
@@ -163,20 +160,20 @@ typedef struct icn_card {
 	char *msg_buf_end;      /* Pointer to end of statusbuffer   */
 	int sndcount[ICN_BCH];  /* Byte-counters for B-Ch.-send     */
 	int xlen[ICN_BCH];      /* Byte-counters/Flags for sent-ACK */
-	struct sk_buff *xskb[ICN_BCH];
-	                        /* Current transmitted skb          */
-	struct sk_buff_head
-	 spqueue[ICN_BCH];      /* Sendqueue                        */
+	struct sk_buff *xskb[ICN_BCH]; /* Current transmitted skb   */
+	struct sk_buff_head spqueue[ICN_BCH];  /* Sendqueue         */
 	char regname[35];       /* Name used for request_region     */
-	u_char xmit_lock[ICN_BCH];	/* Semaphore for pollbchan_send()   */
+	u_char xmit_lock[ICN_BCH]; /* Semaphore for pollbchan_send()*/
+	spinlock_t lock;        /* protect critical operations      */
 } icn_card;
 
 /*
  * Main driver data
  */
 typedef struct icn_dev {
+	spinlock_t devlock;     /* spinlock to protect this struct  */
 	unsigned long memaddr;	/* Address of memory mapped buffers */
-	icn_shmem *shmem;       /* Pointer to memory-mapped-buffers */
+	icn_shmem __iomem *shmem;       /* Pointer to memory-mapped-buffers */
 	int mvalid;             /* IO-shmem has been requested      */
 	int channel;            /* Currently mapped channel         */
 	struct icn_card *mcard; /* Currently mapped card            */
@@ -200,16 +197,16 @@ static icn_dev dev;
 
 /* Macros for accessing ports */
 #define ICN_CFG    (card->port)
-#define ICN_MAPRAM (card->port+1)
-#define ICN_RUN    (card->port+2)
-#define ICN_BANK   (card->port+3)
+#define ICN_MAPRAM (card->port + 1)
+#define ICN_RUN    (card->port + 2)
+#define ICN_BANK   (card->port + 3)
 
 /* Return true, if there is a free transmit-buffer */
-#define sbfree (((readb(&dev.shmem->data_control.scns)+1) & 0xf) != \
+#define sbfree (((readb(&dev.shmem->data_control.scns) + 1) & 0xf) !=	\
 		readb(&dev.shmem->data_control.scnr))
 
 /* Switch to next transmit-buffer */
-#define sbnext (writeb((readb(&dev.shmem->data_control.scns)+1) & 0xf, \
+#define sbnext (writeb((readb(&dev.shmem->data_control.scns) + 1) & 0xf,	\
 		       &dev.shmem->data_control.scns))
 
 /* Shortcuts for transmit-buffer-access */
@@ -223,7 +220,7 @@ static icn_dev dev;
 		readb(&dev.shmem->data_control.ecns))
 
 /* Switch to next receive-buffer */
-#define rbnext (writeb((readb(&dev.shmem->data_control.ecnr)+1) & 0xf, \
+#define rbnext (writeb((readb(&dev.shmem->data_control.ecnr) + 1) & 0xf,	\
 		       &dev.shmem->data_control.ecnr))
 
 /* Shortcuts for receive-buffer-access */
@@ -237,18 +234,18 @@ static icn_dev dev;
 #define cmd_i (dev.shmem->comm_control.pcio_i)
 
 /* Return free space in command-buffer */
-#define cmd_free ((readb(&cmd_i)>=readb(&cmd_o))? \
-		  0x100-readb(&cmd_i)+readb(&cmd_o): \
-		  readb(&cmd_o)-readb(&cmd_i))
+#define cmd_free ((readb(&cmd_i) >= readb(&cmd_o)) ?		\
+		  0x100 - readb(&cmd_i) + readb(&cmd_o) :	\
+		  readb(&cmd_o) - readb(&cmd_i))
 
 /* Shortcuts for message-buffer-access */
 #define msg_o (dev.shmem->comm_control.iopc_o)
 #define msg_i (dev.shmem->comm_control.iopc_i)
 
 /* Return length of Message, if avail. */
-#define msg_avail ((readb(&msg_o)>readb(&msg_i))? \
-		   0x100-readb(&msg_o)+readb(&msg_i): \
-		   readb(&msg_i)-readb(&msg_o))
+#define msg_avail ((readb(&msg_o) > readb(&msg_i)) ?		\
+		   0x100 - readb(&msg_o) + readb(&msg_i) :	\
+		   readb(&msg_i) - readb(&msg_o))
 
 #define CID (card->interface.id)
 

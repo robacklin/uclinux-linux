@@ -1,9 +1,7 @@
 /*
  *  linux/arch/arm/mach-integrator/cpu.c
  *
- *  Copyright (C) 2001 Deep Blue Solutions Ltd.
- *
- *  $Id: cpu.c,v 1.2.2.1 2002/05/30 15:08:03 db Exp $
+ *  Copyright (C) 2001-2002 Deep Blue Solutions Ltd.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -11,124 +9,216 @@
  *
  * CPU support functions
  */
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/cpufreq.h>
+#include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/init.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
+#include <mach/platform.h>
+#include <asm/mach-types.h>
+#include <asm/hardware/icst.h>
 
-#define CM_ID  	(IO_ADDRESS(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_ID_OFFSET)
-#define CM_OSC	(IO_ADDRESS(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_OSC_OFFSET)
-#define CM_STAT (IO_ADDRESS(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_STAT_OFFSET)
-#define CM_LOCK (IO_ADDRESS(INTEGRATOR_HDR_BASE)+INTEGRATOR_HDR_LOCK_OFFSET)
+static struct cpufreq_driver integrator_driver;
 
-struct vco {
-	unsigned char vdw;
-	unsigned char od;
+#define CM_ID  	IO_ADDRESS(INTEGRATOR_HDR_ID)
+#define CM_OSC	IO_ADDRESS(INTEGRATOR_HDR_OSC)
+#define CM_STAT IO_ADDRESS(INTEGRATOR_HDR_STAT)
+#define CM_LOCK IO_ADDRESS(INTEGRATOR_HDR_LOCK)
+
+static const struct icst_params lclk_params = {
+	.ref		= 24000000,
+	.vco_max	= ICST525_VCO_MAX_5V,
+	.vco_min	= ICST525_VCO_MIN,
+	.vd_min		= 8,
+	.vd_max		= 132,
+	.rd_min		= 24,
+	.rd_max		= 24,
+	.s2div		= icst525_s2div,
+	.idx2s		= icst525_idx2s,
+};
+
+static const struct icst_params cclk_params = {
+	.ref		= 24000000,
+	.vco_max	= ICST525_VCO_MAX_5V,
+	.vco_min	= ICST525_VCO_MIN,
+	.vd_min		= 12,
+	.vd_max		= 160,
+	.rd_min		= 24,
+	.rd_max		= 24,
+	.s2div		= icst525_s2div,
+	.idx2s		= icst525_idx2s,
 };
 
 /*
- * Divisors for each OD setting.
+ * Validate the speed policy.
  */
-static unsigned char cc_divisor[8] = { 10, 2, 8, 4, 5, 7, 9, 6 };
-
-static unsigned int vco_to_freq(struct vco vco, int factor)
+static int integrator_verify_policy(struct cpufreq_policy *policy)
 {
-	return 2000 * (vco.vdw + 8) / cc_divisor[vco.od] / factor;
-}
+	struct icst_vco vco;
 
-#ifdef CONFIG_CPU_FREQ
-/*
- * Divisor indexes for in ascending divisor order
- */
-static unsigned char s2od[] = { 1, 3, 4, 7, 5, 2, 6, 0 };
+	cpufreq_verify_within_limits(policy, 
+				     policy->cpuinfo.min_freq, 
+				     policy->cpuinfo.max_freq);
 
-static struct vco freq_to_vco(unsigned int freq_khz, int factor)
-{
-	struct vco vco = {0, 0};
-	unsigned int i, f;
+	vco = icst_hz_to_vco(&cclk_params, policy->max * 1000);
+	policy->max = icst_hz(&cclk_params, vco) / 1000;
 
-	freq_khz *= factor;
+	vco = icst_hz_to_vco(&cclk_params, policy->min * 1000);
+	policy->min = icst_hz(&cclk_params, vco) / 1000;
 
-	for (i = 0; i < 8; i++) {
-		f = freq_khz * cc_divisor[s2od[i]];
-		/* f must be between 10MHz and 320MHz */
-		if (f > 10000 && f <= 320000)
-			break;
-	}
-
-	vco.od  = s2od[i];
-	vco.vdw = f / 2000 - 8;
-
-	return vco;
-}
-
-/*
- * Validate the speed in khz.  If it is outside our
- * range, then return the lowest.
- */
-unsigned int integrator_validatespeed(unsigned int freq_khz)
-{
-	struct vco vco;
-
-	if (freq_khz < 12000)
-		freq_khz = 12000;
-	if (freq_khz > 160000)
-		freq_khz = 160000;
-
-	vco = freq_to_vco(freq_khz, 1);
-
-	if (vco.vdw < 4 || vco.vdw > 152)
-		return -EINVAL;
-
-	return vco_to_freq(vco, 1);
-}
-
-void integrator_setspeed(unsigned int freq_khz)
-{
-	struct vco vco = freq_to_vco(freq_khz, 1);
-	u_int cm_osc;
-
-	cm_osc = __raw_readl(CM_OSC);
-	cm_osc &= 0xfffff800;
-	cm_osc |= vco.vdw | vco.od << 8;
-
-	__raw_writel(0xa05f, CM_LOCK);
-	__raw_writel(cm_osc, CM_OSC);
-	__raw_writel(0, CM_LOCK);
-}
-#endif
-
-static int __init cpu_init(void)
-{
-	u_int cm_osc, cm_stat, cpu_freq_khz, mem_freq_khz;
-	struct vco vco;
-
-	cm_osc = __raw_readl(CM_OSC);
-
-	vco.od  = (cm_osc >> 20) & 7;
-	vco.vdw = (cm_osc >> 12) & 255;
-	mem_freq_khz = vco_to_freq(vco, 2);
-
-	printk(KERN_INFO "Memory clock = %d.%03d MHz\n",
-		mem_freq_khz / 1000, mem_freq_khz % 1000);
-
-	vco.od = (cm_osc >> 8) & 7;
-	vco.vdw = cm_osc & 255;
-	cpu_freq_khz = vco_to_freq(vco, 1);
-
-#ifdef CONFIG_CPU_FREQ
-	cpufreq_init(cpu_freq_khz, 1000, 0);
-	cpufreq_setfunctions(integrator_validatespeed, integrator_setspeed);
-#endif
-
-	cm_stat = __raw_readl(CM_STAT);
-	printk("Module id: %d\n", cm_stat & 255);
+	cpufreq_verify_within_limits(policy, 
+				     policy->cpuinfo.min_freq, 
+				     policy->cpuinfo.max_freq);
 
 	return 0;
 }
 
-__initcall(cpu_init);
+
+static int integrator_set_target(struct cpufreq_policy *policy,
+				 unsigned int target_freq,
+				 unsigned int relation)
+{
+	cpumask_t cpus_allowed;
+	int cpu = policy->cpu;
+	struct icst_vco vco;
+	struct cpufreq_freqs freqs;
+	u_int cm_osc;
+
+	/*
+	 * Save this threads cpus_allowed mask.
+	 */
+	cpus_allowed = current->cpus_allowed;
+
+	/*
+	 * Bind to the specified CPU.  When this call returns,
+	 * we should be running on the right CPU.
+	 */
+	set_cpus_allowed(current, cpumask_of_cpu(cpu));
+	BUG_ON(cpu != smp_processor_id());
+
+	/* get current setting */
+	cm_osc = __raw_readl(CM_OSC);
+
+	if (machine_is_integrator()) {
+		vco.s = (cm_osc >> 8) & 7;
+	} else if (machine_is_cintegrator()) {
+		vco.s = 1;
+	}
+	vco.v = cm_osc & 255;
+	vco.r = 22;
+	freqs.old = icst_hz(&cclk_params, vco) / 1000;
+
+	/* icst_hz_to_vco rounds down -- so we need the next
+	 * larger freq in case of CPUFREQ_RELATION_L.
+	 */
+	if (relation == CPUFREQ_RELATION_L)
+		target_freq += 999;
+	if (target_freq > policy->max)
+		target_freq = policy->max;
+	vco = icst_hz_to_vco(&cclk_params, target_freq * 1000);
+	freqs.new = icst_hz(&cclk_params, vco) / 1000;
+
+	freqs.cpu = policy->cpu;
+
+	if (freqs.old == freqs.new) {
+		set_cpus_allowed(current, cpus_allowed);
+		return 0;
+	}
+
+	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
+
+	cm_osc = __raw_readl(CM_OSC);
+
+	if (machine_is_integrator()) {
+		cm_osc &= 0xfffff800;
+		cm_osc |= vco.s << 8;
+	} else if (machine_is_cintegrator()) {
+		cm_osc &= 0xffffff00;
+	}
+	cm_osc |= vco.v;
+
+	__raw_writel(0xa05f, CM_LOCK);
+	__raw_writel(cm_osc, CM_OSC);
+	__raw_writel(0, CM_LOCK);
+
+	/*
+	 * Restore the CPUs allowed mask.
+	 */
+	set_cpus_allowed(current, cpus_allowed);
+
+	cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
+
+	return 0;
+}
+
+static unsigned int integrator_get(unsigned int cpu)
+{
+	cpumask_t cpus_allowed;
+	unsigned int current_freq;
+	u_int cm_osc;
+	struct icst_vco vco;
+
+	cpus_allowed = current->cpus_allowed;
+
+	set_cpus_allowed(current, cpumask_of_cpu(cpu));
+	BUG_ON(cpu != smp_processor_id());
+
+	/* detect memory etc. */
+	cm_osc = __raw_readl(CM_OSC);
+
+	if (machine_is_integrator()) {
+		vco.s = (cm_osc >> 8) & 7;
+	} else {
+		vco.s = 1;
+	}
+	vco.v = cm_osc & 255;
+	vco.r = 22;
+
+	current_freq = icst_hz(&cclk_params, vco) / 1000; /* current freq */
+
+	set_cpus_allowed(current, cpus_allowed);
+
+	return current_freq;
+}
+
+static int integrator_cpufreq_init(struct cpufreq_policy *policy)
+{
+
+	/* set default policy and cpuinfo */
+	policy->cpuinfo.max_freq = 160000;
+	policy->cpuinfo.min_freq = 12000;
+	policy->cpuinfo.transition_latency = 1000000; /* 1 ms, assumed */
+	policy->cur = policy->min = policy->max = integrator_get(policy->cpu);
+
+	return 0;
+}
+
+static struct cpufreq_driver integrator_driver = {
+	.verify		= integrator_verify_policy,
+	.target		= integrator_set_target,
+	.get		= integrator_get,
+	.init		= integrator_cpufreq_init,
+	.name		= "integrator",
+};
+
+static int __init integrator_cpu_init(void)
+{
+	return cpufreq_register_driver(&integrator_driver);
+}
+
+static void __exit integrator_cpu_exit(void)
+{
+	cpufreq_unregister_driver(&integrator_driver);
+}
+
+MODULE_AUTHOR ("Russell M. King");
+MODULE_DESCRIPTION ("cpufreq driver for ARM Integrator CPUs");
+MODULE_LICENSE ("GPL");
+
+module_init(integrator_cpu_init);
+module_exit(integrator_cpu_exit);

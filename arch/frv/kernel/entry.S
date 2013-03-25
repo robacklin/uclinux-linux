@@ -1,6 +1,6 @@
 /* entry.S: FR-V entry
  *
- * Copyright (C) 2003, 2004 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2003 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -27,9 +27,8 @@
  *
  */
 
-#include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
+#include <asm/thread_info.h>
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/ptrace.h>
@@ -37,14 +36,9 @@
 #include <asm/cache.h>
 #include <asm/spr-regs.h>
 
-sigpending	=	0x00000008
-need_resched	=	0x00000014
-tsk_ptrace	=	0x00000018
+#define nr_syscalls ((syscall_table_size)/4)
 
-#define PT_TRACESYS	0x00000002
-
-        .file		"entry.S"
-	.text
+	.section	.text..entry
 	.balign		4
 
 .macro LEDS val
@@ -52,6 +46,21 @@ tsk_ptrace	=	0x00000018
 #	setlo		%lo(0xe1200004),gr30
 #	setlos		#~\val,gr31
 #	st		gr31,@(gr30,gr0)
+#	sethi.p		%hi(0xffc00100),gr30
+#	setlo		%lo(0xffc00100),gr30
+#	sth		gr0,@(gr30,gr0)
+#	membar
+.endm
+
+.macro LEDS32
+#	not		gr31,gr31
+#	sethi.p		%hi(0xe1200004),gr30
+#	setlo		%lo(0xe1200004),gr30
+#	st.p		gr31,@(gr30,gr0)
+#	srli		gr31,#16,gr31
+#	sethi.p		%hi(0xffc00100),gr30
+#	setlo		%lo(0xffc00100),gr30
+#	sth		gr31,@(gr30,gr0)
 #	membar
 .endm
 
@@ -61,6 +70,7 @@ tsk_ptrace	=	0x00000018
 #
 ###############################################################################
 	.globl		__entry_uspace_external_interrupt
+        .type		__entry_uspace_external_interrupt,@function
 __entry_uspace_external_interrupt:
 	LEDS		0x6200
 	sethi.p		%hi(__kernel_frame0_ptr),gr28
@@ -129,14 +139,18 @@ __entry_uspace_external_interrupt_reentry:
 
 	movsg		gner0,gr4
 	movsg		gner1,gr5
-	stdi		gr4,@(gr28,#REG_GNER0)
+	stdi.p		gr4,@(gr28,#REG_GNER0)
+
+	# interrupts start off fully disabled in the interrupt handler
+	subcc		gr0,gr0,gr0,icc2		/* set Z and clear C */
 
 	# set up kernel global registers
 	sethi.p		%hi(__kernel_current_task),gr5
 	setlo		%lo(__kernel_current_task),gr5
 	sethi.p		%hi(_gp),gr16
 	setlo		%lo(_gp),gr16
-	ldi.p		@(gr5,#0),gr29
+	ldi		@(gr5,#0),gr29
+	ldi.p		@(gr29,#4),gr15		; __current_thread_info = current->thread_info
 
 	# make sure we (the kernel) get div-zero and misalignment exceptions
 	setlos		#ISR_EDE|ISR_DTT_DIVBYZERO|ISR_EMAM_EXCEPTION,gr5
@@ -148,26 +162,28 @@ __entry_uspace_external_interrupt_reentry:
 	movgs		gr6,tbr
 
 	# set the return address
-	sethi.p		%hi(__entry_return_from_exception),gr4
-	setlo		%lo(__entry_return_from_exception),gr4
+	sethi.p		%hi(__entry_return_from_user_interrupt),gr4
+	setlo		%lo(__entry_return_from_user_interrupt),gr4
 	movgs		gr4,lr
 
 	# raise the minimum interrupt priority to 15 (NMI only) and enable exceptions
 	movsg		psr,gr4
 
-	ori		gr4,#PSR_PIL,gr4
+	ori		gr4,#PSR_PIL_14,gr4
 	movgs		gr4,psr
-	ori		gr4,#PSR_PIL|PSR_ET,gr4
+	ori		gr4,#PSR_PIL_14|PSR_ET,gr4
 	movgs		gr4,psr
 
 	LEDS		0x6202
 	bra		do_IRQ
 
+	.size		__entry_uspace_external_interrupt,.-__entry_uspace_external_interrupt
 
 ###############################################################################
 #
 # entry point for External interrupts received whilst executing kernel code
 # - on arriving here, the following registers should already be set up:
+#	GR15	- current thread_info struct pointer
 #	GR16	- kernel GP-REL pointer
 #	GR29	- current task struct pointer
 #	TBR	- kernel trap vector table
@@ -175,8 +191,11 @@ __entry_uspace_external_interrupt_reentry:
 #
 ###############################################################################
 	.globl		__entry_kernel_external_interrupt
+        .type		__entry_kernel_external_interrupt,@function
 __entry_kernel_external_interrupt:
 	LEDS		0x6210
+//	sub		sp,gr15,gr31
+//	LEDS32
 
 	# set up the stack pointer
 	or.p		sp,gr0,gr30
@@ -212,7 +231,10 @@ __entry_kernel_external_interrupt_reentry:
 	stdi		gr24,@(gr28,#REG_GR(24))
 	stdi		gr26,@(gr28,#REG_GR(26))
 	sti		gr29,@(gr28,#REG_GR(29))
-	stdi		gr30,@(gr28,#REG_GR(30))
+	stdi.p		gr30,@(gr28,#REG_GR(30))
+
+	# note virtual interrupts will be fully enabled upon return
+	subicc		gr0,#1,gr0,icc2			/* clear Z, set C */
 
 	movsg		tbr ,gr20
 	movsg		psr ,gr22
@@ -231,7 +253,7 @@ __entry_kernel_external_interrupt_reentry:
 	andi.p		gr5,#~PSR_ET,gr5
 
 	# set CCCR.CC3 to Undefined to abort atomic-modify completion inside the kernel
-	# - for an explanation of how it works, see: Documentation/fujitsu/frv/atomic-ops.txt
+	# - for an explanation of how it works, see: Documentation/frv/atomic-ops.txt
 	andi		gr25,#~0xc0,gr25
 
 	sti		gr20,@(gr28,#REG_TBR)
@@ -248,11 +270,14 @@ __entry_kernel_external_interrupt_reentry:
 
 	movsg		gner0,gr4
 	movsg		gner1,gr5
-	stdi		gr4,@(gr28,#REG_GNER0)
+	stdi.p		gr4,@(gr28,#REG_GNER0)
+
+	# interrupts start off fully disabled in the interrupt handler
+	subcc		gr0,gr0,gr0,icc2			/* set Z and clear C */
 
 	# set the return address
-	sethi.p		%hi(__entry_return_from_exception),gr4
-	setlo		%lo(__entry_return_from_exception),gr4
+	sethi.p		%hi(__entry_return_from_kernel_interrupt),gr4
+	setlo		%lo(__entry_return_from_kernel_interrupt),gr4
 	movgs		gr4,lr
 
 	# clear power-saving mode flags
@@ -262,7 +287,7 @@ __entry_kernel_external_interrupt_reentry:
 
 	# raise the minimum interrupt priority to 15 (NMI only) and enable exceptions
 	movsg		psr,gr4
-	ori		gr4,#PSR_PIL,gr4
+	ori		gr4,#PSR_PIL_14,gr4
 	movgs		gr4,psr
 	ori		gr4,#PSR_ET,gr4
 	movgs		gr4,psr
@@ -270,6 +295,47 @@ __entry_kernel_external_interrupt_reentry:
 	LEDS		0x6212
 	bra		do_IRQ
 
+	.size		__entry_kernel_external_interrupt,.-__entry_kernel_external_interrupt
+
+###############################################################################
+#
+# deal with interrupts that were actually virtually disabled
+# - we need to really disable them, flag the fact and return immediately
+# - if you change this, you must alter break.S also
+#
+###############################################################################
+	.balign		L1_CACHE_BYTES
+	.globl		__entry_kernel_external_interrupt_virtually_disabled
+	.type		__entry_kernel_external_interrupt_virtually_disabled,@function
+__entry_kernel_external_interrupt_virtually_disabled:
+	movsg		psr,gr30
+	andi		gr30,#~PSR_PIL,gr30
+	ori		gr30,#PSR_PIL_14,gr30		; debugging interrupts only
+	movgs		gr30,psr
+	subcc		gr0,gr0,gr0,icc2		; leave Z set, clear C
+	rett		#0
+
+	.size		__entry_kernel_external_interrupt_virtually_disabled,.-__entry_kernel_external_interrupt_virtually_disabled
+
+###############################################################################
+#
+# deal with re-enablement of interrupts that were pending when virtually re-enabled
+# - set ICC2.C, re-enable the real interrupts and return
+# - we can clear ICC2.Z because we shouldn't be here if it's not 0 [due to TIHI]
+# - if you change this, you must alter break.S also
+#
+###############################################################################
+	.balign		L1_CACHE_BYTES
+	.globl		__entry_kernel_external_interrupt_virtual_reenable
+	.type		__entry_kernel_external_interrupt_virtual_reenable,@function
+__entry_kernel_external_interrupt_virtual_reenable:
+	movsg		psr,gr30
+	andi		gr30,#~PSR_PIL,gr30		; re-enable interrupts
+	movgs		gr30,psr
+	subicc		gr0,#1,gr0,icc2			; clear Z, set C
+	rett		#0
+
+	.size		__entry_kernel_external_interrupt_virtual_reenable,.-__entry_kernel_external_interrupt_virtual_reenable
 
 ###############################################################################
 #
@@ -277,10 +343,11 @@ __entry_kernel_external_interrupt_reentry:
 #
 ###############################################################################
 	.globl		__entry_uspace_softprog_interrupt
+        .type		__entry_uspace_softprog_interrupt,@function
 	.globl		__entry_uspace_handle_mmu_fault
 __entry_uspace_softprog_interrupt:
 	LEDS		0x6000
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		ear0,gr28
 __entry_uspace_handle_mmu_fault:
 	movgs		gr28,scr2
@@ -310,10 +377,16 @@ __entry_uspace_softprog_interrupt_reentry:
 	movsg		tbr,gr20
 	movsg		pcsr,gr21
 	movsg		psr,gr22
+
+	sethi.p		%hi(__entry_return_from_user_exception),gr23
+	setlo		%lo(__entry_return_from_user_exception),gr23
+
 	bra		__entry_common
 
+	.size		__entry_uspace_softprog_interrupt,.-__entry_uspace_softprog_interrupt
+
 	# single-stepping was disabled on entry to a TLB handler that then faulted
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.globl		__entry_uspace_handle_mmu_fault_sstep
 __entry_uspace_handle_mmu_fault_sstep:
 	movgs		gr28,scr2
@@ -333,10 +406,11 @@ __entry_uspace_handle_mmu_fault_sstep:
 #
 ###############################################################################
 	.globl		__entry_kernel_softprog_interrupt
+        .type		__entry_kernel_softprog_interrupt,@function
 __entry_kernel_softprog_interrupt:
 	LEDS		0x6004
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		ear0,gr30
 	movgs		gr30,scr2
 #endif
@@ -371,7 +445,7 @@ __entry_kernel_softprog_interrupt_reentry:
 	sti		gr22,@(sp,#REG_SP)
 
 	# set CCCR.CC3 to Undefined to abort atomic-modify completion inside the kernel
-	# - for an explanation of how it works, see: Documentation/fujitsu/frv/atomic-ops.txt
+	# - for an explanation of how it works, see: Documentation/frv/atomic-ops.txt
 	movsg		cccr,gr20
 	andi		gr20,#~0xc0,gr20
 	movgs		gr20,cccr
@@ -380,10 +454,14 @@ __entry_kernel_softprog_interrupt_reentry:
 	movsg		pcsr,gr21
 	movsg		psr,gr22
 
+	sethi.p		%hi(__entry_return_from_kernel_exception),gr23
+	setlo		%lo(__entry_return_from_kernel_exception),gr23
 	bra		__entry_common
 
+	.size		__entry_kernel_softprog_interrupt,.-__entry_kernel_softprog_interrupt
+
 	# single-stepping was disabled on entry to a TLB handler that then faulted
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.globl		__entry_kernel_handle_mmu_fault_sstep
 __entry_kernel_handle_mmu_fault_sstep:
 	# set up the stack pointer
@@ -409,12 +487,14 @@ __entry_kernel_handle_mmu_fault_sstep:
 #	GR20	- saved TBR
 #	GR21	- saved PC
 #	GR22	- saved PSR
+#	GR23	- return handler address
 #	GR28	- exception frame on stack
 #	SCR2	- saved EAR0 where applicable (clobbered by ICI & ICEF insns on FR451)
 #	PSR	- PSR.S 1, PSR.ET 0
 #
 ###############################################################################
 	.globl		__entry_common
+        .type		__entry_common,@function
 __entry_common:
 	LEDS		0x6008
 
@@ -433,11 +513,12 @@ __entry_common:
 	sti		gr29,@(gr28,#REG_GR(29))
 	stdi		gr30,@(gr28,#REG_GR(30))
 
-	movsg		isr ,gr23
-	movsg		ccr ,gr24
-	movsg		cccr,gr25
-	movsg		lr  ,gr26
 	movsg		lcr ,gr27
+	movsg		lr  ,gr26
+	movgs		gr23,lr
+	movsg		cccr,gr25
+	movsg		ccr ,gr24
+	movsg		isr ,gr23
 
 	setlos.p	#-1,gr4
 	andi		gr22,#PSR_PS,gr5		/* try to rebuild original PSR value */
@@ -460,7 +541,10 @@ __entry_common:
 
 	movsg		gner0,gr4
 	movsg		gner1,gr5
-	stdi		gr4,@(gr28,#REG_GNER0)
+	stdi.p		gr4,@(gr28,#REG_GNER0)
+
+	# set up virtual interrupt disablement
+	subicc		gr0,#1,gr0,icc2			/* clear Z flag, set C flag */
 
 	# set up kernel global registers
 	sethi.p		%hi(__kernel_current_task),gr5
@@ -468,6 +552,7 @@ __entry_common:
 	sethi.p		%hi(_gp),gr16
 	setlo		%lo(_gp),gr16
 	ldi		@(gr5,#0),gr29
+	ldi		@(gr29,#4),gr15		; __current_thread_info = current->thread_info
 
 	# switch to the kernel trap table
 	sethi.p		%hi(__entry_kerneltrap_table),gr6
@@ -488,22 +573,21 @@ __entry_common:
 	sethi		%hi(__entry_vector_table),gr6
 	and.p		gr20,gr3,gr5
 	setlo		%lo(__entry_vector_table),gr6
-	srli.p		gr5,#2,gr5
-	sethi		%hi(__entry_return_from_exception),gr4
-	ld.p		@(gr5,gr6),gr5
-	setlo		%lo(__entry_return_from_exception),gr4
-	movgs		gr4,lr
+	srli		gr5,#2,gr5
+	ld		@(gr5,gr6),gr5
 
 	LEDS		0x6009
 	jmpl		@(gr5,gr0)
 
+
+	.size		__entry_common,.-__entry_common
 
 ###############################################################################
 #
 # handle instruction MMU fault
 #
 ###############################################################################
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.globl		__entry_insn_mmu_fault
 __entry_insn_mmu_fault:
 	LEDS		0x6010
@@ -520,6 +604,7 @@ __entry_insn_mmu_fault:
 	setlo		%lo(do_page_fault),gr5
 	jmpl		@(gr5,gr0)	; call do_page_fault(0,esr0,ear0)
 #endif
+
 
 ###############################################################################
 #
@@ -571,6 +656,26 @@ __entry_debug_exception:
 
 ###############################################################################
 #
+# handle atomic operation emulation for userspace
+#
+###############################################################################
+	.globl		__entry_atomic_op
+__entry_atomic_op:
+	LEDS		0x6012
+	sethi.p		%hi(atomic_operation),gr5
+	setlo		%lo(atomic_operation),gr5
+	movsg		esfr1,gr8
+	movsg		epcr0,gr9
+	movsg		esr0,gr10
+
+	# now that we've accessed the exception regs, we can enable exceptions
+	movsg		psr,gr4
+	ori		gr4,#PSR_ET,gr4
+	movgs		gr4,psr
+	jmpl		@(gr5,gr0)	; call atomic_operation(esfr1,epcr0,esr0)
+
+###############################################################################
+#
 # handle media exception
 #
 ###############################################################################
@@ -594,7 +699,7 @@ __entry_media_exception:
 # handle data DAT fault (write-protect exception)
 #
 ###############################################################################
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.globl		__entry_data_mmu_fault
 __entry_data_mmu_fault:
 	.globl		__entry_data_dat_fault
@@ -752,15 +857,7 @@ __entry_do_NMI:
 	.globl		ret_from_fork
 ret_from_fork:
 	LEDS		0x6100
-	call		SYMBOL_NAME(schedule_tail)
-
-	# rebuild saved psr
-	ldi		@(gr28,#REG_PSR),gr22
-	srli		gr22,#1,gr5
-	andi.p		gr22,#~PSR_PS,gr22
-	andi		gr5,#PSR_PS,gr5
-	or		gr5,gr22,gr22
-	ori		gr22,#PSR_S,gr22
+	call		schedule_tail
 
 	# fork & co. return 0 to child
 	setlos.p	#0,gr8
@@ -774,6 +871,7 @@ ret_from_fork:
 # less clear than it otherwise should be.
 #
 ###################################################################################################
+	.balign		L1_CACHE_BYTES
 	.globl		system_call
 system_call:
 	LEDS		0x6101
@@ -782,22 +880,32 @@ system_call:
 	movgs		gr4,psr
 
 	sti		gr7,@(gr28,#REG_SYSCALLNO)
-	sti		gr8,@(gr28,#REG_ORIG_GR8)
+	sti.p		gr8,@(gr28,#REG_ORIG_GR8)
 
-	ldi		@(gr29,#tsk_ptrace),gr4
-	andicc		gr4,#PT_TRACESYS,gr0,icc0
-	bne		icc0,#0,__syscall_trace
-//	bra		__syscall_trace
-
-__syscall_call:
-	subicc		gr7,#NR_syscalls,gr0,icc0
+	subicc		gr7,#nr_syscalls,gr0,icc0
 	bnc		icc0,#0,__syscall_badsys
 
+	ldi		@(gr15,#TI_FLAGS),gr4
+	andicc		gr4,#_TIF_SYSCALL_TRACE,gr0,icc0
+	bne		icc0,#0,__syscall_trace_entry
+
+__syscall_call:
 	slli.p		gr7,#2,gr7
 	sethi		%hi(sys_call_table),gr5
 	setlo		%lo(sys_call_table),gr5
 	ld		@(gr5,gr7),gr4
 	calll		@(gr4,gr0)
+
+
+###############################################################################
+#
+# return to interrupted process
+#
+###############################################################################
+__syscall_exit:
+	LEDS		0x6300
+
+	sti		gr8,@(gr28,#REG_GR(8))	; save return value
 
 	# rebuild saved psr - execve will change it for init/main.c
 	ldi		@(gr28,#REG_PSR),gr22
@@ -807,41 +915,23 @@ __syscall_call:
 	or		gr5,gr22,gr22
 	ori		gr22,#PSR_S,gr22
 
-__syscall_exit:
-	LEDS		0x6102
-	sti		gr8,@(gr28,#REG_GR(8))	; save return value
-	ldi		@(gr29,#tsk_ptrace),gr4
-	andicc		gr4,#PT_TRACESYS,gr0,icc0
-	bne		icc0,#0,__syscall_trace_exit
-//	bra		__syscall_trace_exit
+	# keep current PSR in GR23
+	movsg		psr,gr23
 
-###############################################################################
-#
-# return to interrupted process
-#
-###############################################################################
-__entry_return_from_exception:
-	LEDS		0x6103
+	# make sure we don't miss an interrupt setting need_resched or sigpending between
+	# sampling and the RETT
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
 
-	# don't resched or process signals if returning to kernel space
-	andicc		gr22,#PSR_PS,gr0,icc0
-	bne		icc0,#0,__entry_return_direct
+	ldi		@(gr15,#TI_FLAGS),gr4
+	sethi.p		%hi(_TIF_ALLWORK_MASK),gr5
+	setlo		%lo(_TIF_ALLWORK_MASK),gr5
+	andcc		gr4,gr5,gr0,icc0
+	bne		icc0,#0,__syscall_exit_work
 
-	# need_resched and signals must be tested atomically
-	movsg		psr,gr4
-	ori		gr4,#PSR_PIL_15,gr4
-	movgs		gr4,psr
-
-	ldi		@(gr29,#need_resched),gr4
-	ldi.p		@(gr29,#sigpending),gr5
-	andcc		gr4,gr4,gr0,icc0
-	andcc.p		gr5,gr5,gr0,icc1
-
-	bne		icc0,#0,__entry_reschedule
-	bne		icc1,#0,__entry_process_signal
-
+	# restore all registers and return
 __entry_return_direct:
-	LEDS		0x6104
+	LEDS		0x6301
 
 	andi		gr22,#~PSR_ET,gr22
 	movgs		gr22,psr
@@ -896,6 +986,8 @@ __entry_return_direct:
 	ldi		@(gr28,#REG_GR(28)),gr28
 
 	LEDS		0x67fe
+//	movsg		pcsr,gr31
+//	LEDS32
 
 #if 0
 	# store the current frame in the workram on the FR451
@@ -937,6 +1029,7 @@ __entry_return_direct:
 
 	rett		#0
 
+	# return via break.S
 __entry_return_singlestep:
 	movgs		gr2,ccr
 	lddi		@(gr28,#REG_GR(2)) ,gr2
@@ -948,42 +1041,144 @@ __entry_return_singlestep:
 __entry_return_singlestep_breaks_here:
 	nop
 
-__entry_reschedule:
-	LEDS		0x6700
-	call		SYMBOL_NAME(schedule)
-	bra		__entry_return_from_exception
 
-__entry_process_signal:
-	LEDS		0x6701
-
-	# we can get here from an interrupt handler
-	movsg		psr,gr4
-	andi		gr4,#~PSR_PIL_15,gr4
-	movgs		gr4,psr
-
-	ori.p		gr28,#0,gr8
-	xor		gr9,gr9,gr9
-	call		SYMBOL_NAME(do_signal)
+###############################################################################
+#
+# return to a process interrupted in kernel space
+# - we need to consider preemption if that is enabled
+#
+###############################################################################
+	.balign		L1_CACHE_BYTES
+__entry_return_from_kernel_exception:
+	LEDS		0x6302
+	movsg		psr,gr23
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
 	bra		__entry_return_direct
 
-__syscall_badsys:
-	setlos.p	#-ENOSYS,gr4
-	bra		__syscall_exit
+	.balign		L1_CACHE_BYTES
+__entry_return_from_kernel_interrupt:
+	LEDS		0x6303
+	movsg		psr,gr23
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
 
-__syscall_trace:
-	setlos.p	#0,gr8
-	call		SYMBOL_NAME(syscall_trace)
+#ifdef CONFIG_PREEMPT
+	ldi		@(gr15,#TI_PRE_COUNT),gr5
+	subicc		gr5,#0,gr0,icc0
+	beq		icc0,#0,__entry_return_direct
 
-	ldi		@(gr28,#REG_SYSCALLNO),gr7
-	lddi		@(gr28,#REG_GR(8)) ,gr8
+__entry_preempt_need_resched:
+	ldi		@(gr15,#TI_FLAGS),gr4
+	andicc		gr4,#_TIF_NEED_RESCHED,gr0,icc0
+	beq		icc0,#1,__entry_return_direct
+
+	setlos		#PREEMPT_ACTIVE,gr5
+	sti		gr5,@(gr15,#TI_FLAGS)
+
+	andi		gr23,#~PSR_PIL,gr23
+	movgs		gr23,psr
+
+	call		schedule
+	sti		gr0,@(gr15,#TI_PRE_COUNT)
+
+	movsg		psr,gr23
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
+	bra		__entry_preempt_need_resched
+#else
+	bra		__entry_return_direct
+#endif
+
+
+###############################################################################
+#
+# perform work that needs to be done immediately before resumption
+#
+###############################################################################
+	.globl		__entry_return_from_user_exception
+	.balign		L1_CACHE_BYTES
+__entry_return_from_user_exception:
+	LEDS		0x6501
+
+__entry_resume_userspace:
+	# make sure we don't miss an interrupt setting need_resched or sigpending between
+	# sampling and the RETT
+	movsg		psr,gr23
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
+
+__entry_return_from_user_interrupt:
+	LEDS		0x6402
+	ldi		@(gr15,#TI_FLAGS),gr4
+	sethi.p		%hi(_TIF_WORK_MASK),gr5
+	setlo		%lo(_TIF_WORK_MASK),gr5
+	andcc		gr4,gr5,gr0,icc0
+	beq		icc0,#1,__entry_return_direct
+
+__entry_work_pending:
+	LEDS		0x6404
+	andicc		gr4,#_TIF_NEED_RESCHED,gr0,icc0
+	beq		icc0,#1,__entry_work_notifysig
+
+__entry_work_resched:
+	LEDS		0x6408
+	movsg		psr,gr23
+	andi		gr23,#~PSR_PIL,gr23
+	movgs		gr23,psr
+	call		schedule
+	movsg		psr,gr23
+	ori		gr23,#PSR_PIL_14,gr23
+	movgs		gr23,psr
+
+	LEDS		0x6401
+	ldi		@(gr15,#TI_FLAGS),gr4
+	sethi.p		%hi(_TIF_WORK_MASK),gr5
+	setlo		%lo(_TIF_WORK_MASK),gr5
+	andcc		gr4,gr5,gr0,icc0
+	beq		icc0,#1,__entry_return_direct
+	andicc		gr4,#_TIF_NEED_RESCHED,gr0,icc0
+	bne		icc0,#1,__entry_work_resched
+
+__entry_work_notifysig:
+	LEDS		0x6410
+	ori.p		gr4,#0,gr8
+	call		do_notify_resume
+	bra		__entry_resume_userspace
+
+	# perform syscall entry tracing
+__syscall_trace_entry:
+	LEDS		0x6320
+	call		syscall_trace_entry
+
+	lddi.p		@(gr28,#REG_GR(8)) ,gr8
+	ori		gr8,#0,gr7		; syscall_trace_entry() returned new syscallno
 	lddi		@(gr28,#REG_GR(10)),gr10
 	lddi.p		@(gr28,#REG_GR(12)),gr12
+
+	subicc		gr7,#nr_syscalls,gr0,icc0
+	bnc		icc0,#0,__syscall_badsys
 	bra		__syscall_call
 
-__syscall_trace_exit:
-	setlos.p	#1,gr8
-	call		SYMBOL_NAME(syscall_trace)
-	bra		__entry_return_from_exception
+	# perform syscall exit tracing
+__syscall_exit_work:
+	LEDS		0x6340
+	andicc		gr4,#_TIF_SYSCALL_TRACE,gr0,icc0
+	beq		icc0,#1,__entry_work_pending
+
+	movsg		psr,gr23
+	andi		gr23,#~PSR_PIL,gr23	; could let syscall_trace_exit() call schedule()
+	movgs		gr23,psr
+
+	call		syscall_trace_exit
+	bra		__entry_resume_userspace
+
+__syscall_badsys:
+	LEDS		0x6380
+	setlos		#-ENOSYS,gr8
+	sti		gr8,@(gr28,#REG_GR(8))	; save return value
+	bra		__entry_resume_userspace
+
 
 ###############################################################################
 #
@@ -993,283 +1188,344 @@ __syscall_trace_exit:
 	.section .rodata
 ALIGN
 	.globl		sys_call_table
-SYMBOL_NAME_LABEL(sys_call_table)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 0  -  old "setup()" system call*/
-	.long SYMBOL_NAME(sys_exit)
-	.long SYMBOL_NAME(sys_fork)
-	.long SYMBOL_NAME(sys_read)
-	.long SYMBOL_NAME(sys_write)
-	.long SYMBOL_NAME(sys_open)		/* 5 */
-	.long SYMBOL_NAME(sys_close)
-	.long SYMBOL_NAME(sys_waitpid)
-	.long SYMBOL_NAME(sys_creat)
-	.long SYMBOL_NAME(sys_link)
-	.long SYMBOL_NAME(sys_unlink)		/* 10 */
-	.long SYMBOL_NAME(sys_execve)
-	.long SYMBOL_NAME(sys_chdir)
-	.long SYMBOL_NAME(sys_time)
-	.long SYMBOL_NAME(sys_mknod)
-	.long SYMBOL_NAME(sys_chmod)		/* 15 */
-	.long SYMBOL_NAME(sys_lchown16)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old break syscall holder */
-	.long SYMBOL_NAME(sys_stat)
-	.long SYMBOL_NAME(sys_lseek)
-	.long SYMBOL_NAME(sys_getpid)		/* 20 */
-	.long SYMBOL_NAME(sys_mount)
-	.long SYMBOL_NAME(sys_oldumount)
-	.long SYMBOL_NAME(sys_setuid16)
-	.long SYMBOL_NAME(sys_getuid16)
-	.long SYMBOL_NAME(sys_stime)		/* 25 */
-	.long SYMBOL_NAME(sys_ptrace)
-	.long SYMBOL_NAME(sys_alarm)
-	.long SYMBOL_NAME(sys_fstat)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* pause */
-	.long SYMBOL_NAME(sys_utime)		/* 30 */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old stty syscall holder */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old gtty syscall holder */
-	.long SYMBOL_NAME(sys_access)
-	.long SYMBOL_NAME(sys_nice)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 35 */	/* old ftime syscall holder */
-	.long SYMBOL_NAME(sys_sync)
-	.long SYMBOL_NAME(sys_kill)
-	.long SYMBOL_NAME(sys_rename)
-	.long SYMBOL_NAME(sys_mkdir)
-	.long SYMBOL_NAME(sys_rmdir)		/* 40 */
-	.long SYMBOL_NAME(sys_dup)
-	.long SYMBOL_NAME(sys_pipe)
-	.long SYMBOL_NAME(sys_times)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old prof syscall holder */
-	.long SYMBOL_NAME(sys_brk)		/* 45 */
-	.long SYMBOL_NAME(sys_setgid16)
-	.long SYMBOL_NAME(sys_getgid16)
-	.long SYMBOL_NAME(sys_signal)
-	.long SYMBOL_NAME(sys_geteuid16)
-	.long SYMBOL_NAME(sys_getegid16)	/* 50 */
-	.long SYMBOL_NAME(sys_acct)
-	.long SYMBOL_NAME(sys_umount)				/* recycled never used phys() */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old lock syscall holder */
-	.long SYMBOL_NAME(sys_ioctl)
-	.long SYMBOL_NAME(sys_fcntl)		/* 55 */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old mpx syscall holder */
-	.long SYMBOL_NAME(sys_setpgid)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old ulimit syscall holder */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old old uname syscall */
-	.long SYMBOL_NAME(sys_umask)		/* 60 */
-	.long SYMBOL_NAME(sys_chroot)
-	.long SYMBOL_NAME(sys_ustat)
-	.long SYMBOL_NAME(sys_dup2)
-	.long SYMBOL_NAME(sys_getppid)
-	.long SYMBOL_NAME(sys_getpgrp)		/* 65 */
-	.long SYMBOL_NAME(sys_setsid)
-	.long SYMBOL_NAME(sys_sigaction)
-	.long SYMBOL_NAME(sys_sgetmask)
-	.long SYMBOL_NAME(sys_ssetmask)
-	.long SYMBOL_NAME(sys_setreuid16)	/* 70 */
-	.long SYMBOL_NAME(sys_setregid16)
-	.long SYMBOL_NAME(sys_sigsuspend)
-	.long SYMBOL_NAME(sys_sigpending)
-	.long SYMBOL_NAME(sys_sethostname)
-	.long SYMBOL_NAME(sys_setrlimit)	/* 75 */
-	.long SYMBOL_NAME(sys_old_getrlimit)
-	.long SYMBOL_NAME(sys_getrusage)
-	.long SYMBOL_NAME(sys_gettimeofday)
-	.long SYMBOL_NAME(sys_settimeofday)
-	.long SYMBOL_NAME(sys_getgroups16)	/* 80 */
-	.long SYMBOL_NAME(sys_setgroups16)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old_select slot */
-	.long SYMBOL_NAME(sys_symlink)
-	.long SYMBOL_NAME(sys_lstat)
-	.long SYMBOL_NAME(sys_readlink)		/* 85 */
-	.long SYMBOL_NAME(sys_uselib)
-	.long SYMBOL_NAME(sys_swapon)
-	.long SYMBOL_NAME(sys_reboot)
-	.long SYMBOL_NAME(old_readdir)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 90 */	/* old_mmap slot */
-	.long SYMBOL_NAME(sys_munmap)
-	.long SYMBOL_NAME(sys_truncate)
-	.long SYMBOL_NAME(sys_ftruncate)
-	.long SYMBOL_NAME(sys_fchmod)
-	.long SYMBOL_NAME(sys_fchown16)		/* 95 */
-	.long SYMBOL_NAME(sys_getpriority)
-	.long SYMBOL_NAME(sys_setpriority)
-	.long SYMBOL_NAME(sys_ni_syscall)			/* old profil syscall holder */
-	.long SYMBOL_NAME(sys_statfs)
-	.long SYMBOL_NAME(sys_fstatfs)		/* 100 */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* ioperm for i386 */
-	.long SYMBOL_NAME(sys_socketcall)
-	.long SYMBOL_NAME(sys_syslog)
-	.long SYMBOL_NAME(sys_setitimer)
-	.long SYMBOL_NAME(sys_getitimer)	/* 105 */
-	.long SYMBOL_NAME(sys_newstat)
-	.long SYMBOL_NAME(sys_newlstat)
-	.long SYMBOL_NAME(sys_newfstat)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* obsolete olduname() syscall */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* iopl for i386 */ /* 110 */
-	.long SYMBOL_NAME(sys_vhangup)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* obsolete idle() syscall */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* vm86old for i386 */
-	.long SYMBOL_NAME(sys_wait4)
-	.long SYMBOL_NAME(sys_swapoff)		/* 115 */
-	.long SYMBOL_NAME(sys_sysinfo)
-	.long SYMBOL_NAME(sys_ipc)
-	.long SYMBOL_NAME(sys_fsync)
-	.long SYMBOL_NAME(sys_sigreturn)
-	.long SYMBOL_NAME(sys_clone)		/* 120 */
-	.long SYMBOL_NAME(sys_setdomainname)
-	.long SYMBOL_NAME(sys_newuname)
-	.long SYMBOL_NAME(sys_cacheflush)	/* modify_ldt for i386 */
-	.long SYMBOL_NAME(sys_adjtimex)
-	.long SYMBOL_NAME(sys_mprotect)		/* 125 */
-	.long SYMBOL_NAME(sys_sigprocmask)
-	.long SYMBOL_NAME(sys_create_module)
-	.long SYMBOL_NAME(sys_init_module)
-	.long SYMBOL_NAME(sys_delete_module)
-	.long SYMBOL_NAME(sys_get_kernel_syms)	/* 130 */
-	.long SYMBOL_NAME(sys_quotactl)
-	.long SYMBOL_NAME(sys_getpgid)
-	.long SYMBOL_NAME(sys_fchdir)
-	.long SYMBOL_NAME(sys_bdflush)
-	.long SYMBOL_NAME(sys_sysfs)		/* 135 */
-	.long SYMBOL_NAME(sys_personality)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* for afs_syscall */
-	.long SYMBOL_NAME(sys_setfsuid16)
-	.long SYMBOL_NAME(sys_setfsgid16)
-	.long SYMBOL_NAME(sys_llseek)		/* 140 */
-	.long SYMBOL_NAME(sys_getdents)
-	.long SYMBOL_NAME(sys_select)
-	.long SYMBOL_NAME(sys_flock)
-	.long SYMBOL_NAME(sys_msync)
-	.long SYMBOL_NAME(sys_readv)		/* 145 */
-	.long SYMBOL_NAME(sys_writev)
-	.long SYMBOL_NAME(sys_getsid)
-	.long SYMBOL_NAME(sys_fdatasync)
-	.long SYMBOL_NAME(sys_sysctl)
-	.long SYMBOL_NAME(sys_mlock)		/* 150 */
-	.long SYMBOL_NAME(sys_munlock)
-	.long SYMBOL_NAME(sys_mlockall)
-	.long SYMBOL_NAME(sys_munlockall)
-	.long SYMBOL_NAME(sys_sched_setparam)
-	.long SYMBOL_NAME(sys_sched_getparam)   /* 155 */
-	.long SYMBOL_NAME(sys_sched_setscheduler)
-	.long SYMBOL_NAME(sys_sched_getscheduler)
-	.long SYMBOL_NAME(sys_sched_yield)
-	.long SYMBOL_NAME(sys_sched_get_priority_max)
-	.long SYMBOL_NAME(sys_sched_get_priority_min)  /* 160 */
-	.long SYMBOL_NAME(sys_sched_rr_get_interval)
-	.long SYMBOL_NAME(sys_nanosleep)
-	.long SYMBOL_NAME(sys_mremap)
-	.long SYMBOL_NAME(sys_setresuid16)
-	.long SYMBOL_NAME(sys_getresuid16)	/* 165 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* for vm86 */
-	.long SYMBOL_NAME(sys_query_module)
-	.long SYMBOL_NAME(sys_poll)
-	.long SYMBOL_NAME(sys_nfsservctl)
-	.long SYMBOL_NAME(sys_setresgid16)	/* 170 */
-	.long SYMBOL_NAME(sys_getresgid16)
-	.long SYMBOL_NAME(sys_prctl)
-	.long SYMBOL_NAME(sys_rt_sigreturn)
-	.long SYMBOL_NAME(sys_rt_sigaction)
-	.long SYMBOL_NAME(sys_rt_sigprocmask)	/* 175 */
-	.long SYMBOL_NAME(sys_rt_sigpending)
-	.long SYMBOL_NAME(sys_rt_sigtimedwait)
-	.long SYMBOL_NAME(sys_rt_sigqueueinfo)
-	.long SYMBOL_NAME(sys_rt_sigsuspend)
-	.long SYMBOL_NAME(sys_pread)		/* 180 */
-	.long SYMBOL_NAME(sys_pwrite)
-	.long SYMBOL_NAME(sys_chown16)
-	.long SYMBOL_NAME(sys_getcwd)
-	.long SYMBOL_NAME(sys_capget)
-	.long SYMBOL_NAME(sys_capset)           /* 185 */
-	.long SYMBOL_NAME(sys_sigaltstack)
-	.long SYMBOL_NAME(sys_sendfile)
-	.long SYMBOL_NAME(sys_ni_syscall)		/* streams1 */
-	.long SYMBOL_NAME(sys_ni_syscall)		/* streams2 */
-	.long SYMBOL_NAME(sys_vfork)            /* 190 */
-	.long SYMBOL_NAME(sys_getrlimit)
-	.long SYMBOL_NAME(sys_mmap2)
-	.long SYMBOL_NAME(sys_truncate64)
-	.long SYMBOL_NAME(sys_ftruncate64)
-	.long SYMBOL_NAME(sys_stat64)		/* 195 */
-	.long SYMBOL_NAME(sys_lstat64)
-	.long SYMBOL_NAME(sys_fstat64)
-	.long SYMBOL_NAME(sys_lchown)
-	.long SYMBOL_NAME(sys_getuid)
-	.long SYMBOL_NAME(sys_getgid)		/* 200 */
-	.long SYMBOL_NAME(sys_geteuid)
-	.long SYMBOL_NAME(sys_getegid)
-	.long SYMBOL_NAME(sys_setreuid)
-	.long SYMBOL_NAME(sys_setregid)
-	.long SYMBOL_NAME(sys_getgroups)	/* 205 */
-	.long SYMBOL_NAME(sys_setgroups)
-	.long SYMBOL_NAME(sys_fchown)
-	.long SYMBOL_NAME(sys_setresuid)
-	.long SYMBOL_NAME(sys_getresuid)
-	.long SYMBOL_NAME(sys_setresgid)	/* 210 */
-	.long SYMBOL_NAME(sys_getresgid)
-	.long SYMBOL_NAME(sys_chown)
-	.long SYMBOL_NAME(sys_setuid)
-	.long SYMBOL_NAME(sys_setgid)
-	.long SYMBOL_NAME(sys_setfsuid)		/* 215 */
-	.long SYMBOL_NAME(sys_setfsgid)
-	.long SYMBOL_NAME(sys_pivot_root)
-	.long SYMBOL_NAME(sys_mincore)
-	.long SYMBOL_NAME(sys_madvise)
-	.long SYMBOL_NAME(sys_getdents64)	/* 220 */
-	.long SYMBOL_NAME(sys_fcntl64)
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for TUX */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* Reserved for Security */
-	.long SYMBOL_NAME(sys_gettid)
-	.long SYMBOL_NAME(sys_readahead)	/* 225 */
-	.long SYMBOL_NAME(sys_setxattr)
-	.long SYMBOL_NAME(sys_lsetxattr)
-	.long SYMBOL_NAME(sys_fsetxattr)
-	.long SYMBOL_NAME(sys_getxattr)
-	.long SYMBOL_NAME(sys_lgetxattr)	/* 230 */
-	.long SYMBOL_NAME(sys_fgetxattr)
-	.long SYMBOL_NAME(sys_listxattr)
-	.long SYMBOL_NAME(sys_llistxattr)
-	.long SYMBOL_NAME(sys_flistxattr)
-	.long SYMBOL_NAME(sys_removexattr)	/* 235 */
-	.long SYMBOL_NAME(sys_lremovexattr)
-	.long SYMBOL_NAME(sys_fremovexattr)
- 	.long SYMBOL_NAME(sys_tkill)
-	.long SYMBOL_NAME(sys_sendfile64)
-#ifndef CONFIG_UCLINUX
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 240 */	/* futex */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* sched_setaffinity */
-	.long SYMBOL_NAME(sys_ni_syscall)			/* sched_getaffinity */
-#else
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 240 reserved for futex */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_setaffinity */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* reserved for sched_getaffinity */
-#endif
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_set_thread_area */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_get_thread_area */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 245 sys_io_setup */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_destroy */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_getevents */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_submit */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_io_cancel */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* 250 sys_alloc_hugepages */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_free_hugepages */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_exit_group */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_lookup_dcookie */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_create */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_ctl 255 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_epoll_wait */
- 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_remap_file_pages */
- 	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_set_tid_address */
+sys_call_table:
+	.long sys_restart_syscall	/* 0 - old "setup()" system call, used for restarting */
+	.long sys_exit
+	.long sys_fork
+	.long sys_read
+	.long sys_write
+	.long sys_open		/* 5 */
+	.long sys_close
+	.long sys_waitpid
+	.long sys_creat
+	.long sys_link
+	.long sys_unlink		/* 10 */
+	.long sys_execve
+	.long sys_chdir
+	.long sys_time
+	.long sys_mknod
+	.long sys_chmod		/* 15 */
+	.long sys_lchown16
+	.long sys_ni_syscall			/* old break syscall holder */
+	.long sys_stat
+	.long sys_lseek
+	.long sys_getpid		/* 20 */
+	.long sys_mount
+	.long sys_oldumount
+	.long sys_setuid16
+	.long sys_getuid16
+	.long sys_ni_syscall // sys_stime		/* 25 */
+	.long sys_ptrace
+	.long sys_alarm
+	.long sys_fstat
+	.long sys_pause
+	.long sys_utime		/* 30 */
+	.long sys_ni_syscall			/* old stty syscall holder */
+	.long sys_ni_syscall			/* old gtty syscall holder */
+	.long sys_access
+	.long sys_nice
+	.long sys_ni_syscall	/* 35 */	/* old ftime syscall holder */
+	.long sys_sync
+	.long sys_kill
+	.long sys_rename
+	.long sys_mkdir
+	.long sys_rmdir		/* 40 */
+	.long sys_dup
+	.long sys_pipe
+	.long sys_times
+	.long sys_ni_syscall			/* old prof syscall holder */
+	.long sys_brk		/* 45 */
+	.long sys_setgid16
+	.long sys_getgid16
+	.long sys_ni_syscall // sys_signal
+	.long sys_geteuid16
+	.long sys_getegid16	/* 50 */
+	.long sys_acct
+	.long sys_umount				/* recycled never used phys( */
+	.long sys_ni_syscall			/* old lock syscall holder */
+	.long sys_ioctl
+	.long sys_fcntl		/* 55 */
+	.long sys_ni_syscall			/* old mpx syscall holder */
+	.long sys_setpgid
+	.long sys_ni_syscall			/* old ulimit syscall holder */
+	.long sys_ni_syscall			/* old old uname syscall */
+	.long sys_umask		/* 60 */
+	.long sys_chroot
+	.long sys_ustat
+	.long sys_dup2
+	.long sys_getppid
+	.long sys_getpgrp	/* 65 */
+	.long sys_setsid
+	.long sys_sigaction
+	.long sys_ni_syscall // sys_sgetmask
+	.long sys_ni_syscall // sys_ssetmask
+	.long sys_setreuid16	/* 70 */
+	.long sys_setregid16
+	.long sys_sigsuspend
+	.long sys_ni_syscall // sys_sigpending
+	.long sys_sethostname
+	.long sys_setrlimit	/* 75 */
+	.long sys_ni_syscall // sys_old_getrlimit
+	.long sys_getrusage
+	.long sys_gettimeofday
+	.long sys_settimeofday
+	.long sys_getgroups16	/* 80 */
+	.long sys_setgroups16
+	.long sys_ni_syscall			/* old_select slot */
+	.long sys_symlink
+	.long sys_lstat
+	.long sys_readlink		/* 85 */
+	.long sys_uselib
+	.long sys_swapon
+	.long sys_reboot
+	.long sys_ni_syscall // old_readdir
+	.long sys_ni_syscall	/* 90 */	/* old_mmap slot */
+	.long sys_munmap
+	.long sys_truncate
+	.long sys_ftruncate
+	.long sys_fchmod
+	.long sys_fchown16		/* 95 */
+	.long sys_getpriority
+	.long sys_setpriority
+	.long sys_ni_syscall			/* old profil syscall holder */
+	.long sys_statfs
+	.long sys_fstatfs		/* 100 */
+	.long sys_ni_syscall			/* ioperm for i386 */
+	.long sys_socketcall
+	.long sys_syslog
+	.long sys_setitimer
+	.long sys_getitimer	/* 105 */
+	.long sys_newstat
+	.long sys_newlstat
+	.long sys_newfstat
+	.long sys_ni_syscall	/* obsolete olduname( syscall */
+	.long sys_ni_syscall	/* iopl for i386 */ /* 110 */
+	.long sys_vhangup
+	.long sys_ni_syscall	/* obsolete idle( syscall */
+	.long sys_ni_syscall	/* vm86old for i386 */
+	.long sys_wait4
+	.long sys_swapoff		/* 115 */
+	.long sys_sysinfo
+	.long sys_ipc
+	.long sys_fsync
+	.long sys_sigreturn
+	.long sys_clone		/* 120 */
+	.long sys_setdomainname
+	.long sys_newuname
+	.long sys_ni_syscall	/* old "cacheflush" */
+	.long sys_adjtimex
+	.long sys_mprotect	/* 125 */
+	.long sys_sigprocmask
+	.long sys_ni_syscall	/* old "create_module" */
+	.long sys_init_module
+	.long sys_delete_module
+	.long sys_ni_syscall	/* old "get_kernel_syms" */
+	.long sys_quotactl
+	.long sys_getpgid
+	.long sys_fchdir
+	.long sys_bdflush
+	.long sys_sysfs		/* 135 */
+	.long sys_personality
+	.long sys_ni_syscall	/* for afs_syscall */
+	.long sys_setfsuid16
+	.long sys_setfsgid16
+	.long sys_llseek		/* 140 */
+	.long sys_getdents
+	.long sys_select
+	.long sys_flock
+	.long sys_msync
+	.long sys_readv		/* 145 */
+	.long sys_writev
+	.long sys_getsid
+	.long sys_fdatasync
+	.long sys_sysctl
+	.long sys_mlock		/* 150 */
+	.long sys_munlock
+	.long sys_mlockall
+	.long sys_munlockall
+	.long sys_sched_setparam
+	.long sys_sched_getparam   /* 155 */
+	.long sys_sched_setscheduler
+	.long sys_sched_getscheduler
+	.long sys_sched_yield
+	.long sys_sched_get_priority_max
+	.long sys_sched_get_priority_min  /* 160 */
+	.long sys_sched_rr_get_interval
+	.long sys_nanosleep
+	.long sys_mremap
+	.long sys_setresuid16
+	.long sys_getresuid16	/* 165 */
+	.long sys_ni_syscall	/* for vm86 */
+	.long sys_ni_syscall	/* Old sys_query_module */
+	.long sys_poll
+	.long sys_ni_syscall	/* Old nfsservctl */
+	.long sys_setresgid16	/* 170 */
+	.long sys_getresgid16
+	.long sys_prctl
+	.long sys_rt_sigreturn
+	.long sys_rt_sigaction
+	.long sys_rt_sigprocmask	/* 175 */
+	.long sys_rt_sigpending
+	.long sys_rt_sigtimedwait
+	.long sys_rt_sigqueueinfo
+	.long sys_rt_sigsuspend
+	.long sys_pread64		/* 180 */
+	.long sys_pwrite64
+	.long sys_chown16
+	.long sys_getcwd
+	.long sys_capget
+	.long sys_capset           /* 185 */
+	.long sys_sigaltstack
+	.long sys_sendfile
+	.long sys_ni_syscall		/* streams1 */
+	.long sys_ni_syscall		/* streams2 */
+	.long sys_vfork            /* 190 */
+	.long sys_getrlimit
+	.long sys_mmap2
+	.long sys_truncate64
+	.long sys_ftruncate64
+	.long sys_stat64		/* 195 */
+	.long sys_lstat64
+	.long sys_fstat64
+	.long sys_lchown
+	.long sys_getuid
+	.long sys_getgid		/* 200 */
+	.long sys_geteuid
+	.long sys_getegid
+	.long sys_setreuid
+	.long sys_setregid
+	.long sys_getgroups	/* 205 */
+	.long sys_setgroups
+	.long sys_fchown
+	.long sys_setresuid
+	.long sys_getresuid
+	.long sys_setresgid	/* 210 */
+	.long sys_getresgid
+	.long sys_chown
+	.long sys_setuid
+	.long sys_setgid
+	.long sys_setfsuid		/* 215 */
+	.long sys_setfsgid
+	.long sys_pivot_root
+	.long sys_mincore
+	.long sys_madvise
+	.long sys_getdents64	/* 220 */
+	.long sys_fcntl64
+	.long sys_ni_syscall	/* reserved for TUX */
+	.long sys_ni_syscall	/* Reserved for Security */
+	.long sys_gettid
+	.long sys_readahead	/* 225 */
+	.long sys_setxattr
+	.long sys_lsetxattr
+	.long sys_fsetxattr
+	.long sys_getxattr
+	.long sys_lgetxattr	/* 230 */
+	.long sys_fgetxattr
+	.long sys_listxattr
+	.long sys_llistxattr
+	.long sys_flistxattr
+	.long sys_removexattr	/* 235 */
+	.long sys_lremovexattr
+	.long sys_fremovexattr
+ 	.long sys_tkill
+	.long sys_sendfile64
+	.long sys_futex		/* 240 */
+	.long sys_sched_setaffinity
+	.long sys_sched_getaffinity
+	.long sys_ni_syscall	//sys_set_thread_area
+	.long sys_ni_syscall	//sys_get_thread_area
+	.long sys_io_setup	/* 245 */
+	.long sys_io_destroy
+	.long sys_io_getevents
+	.long sys_io_submit
+	.long sys_io_cancel
+	.long sys_fadvise64	/* 250 */
+	.long sys_ni_syscall
+	.long sys_exit_group
+	.long sys_lookup_dcookie
+	.long sys_epoll_create
+	.long sys_epoll_ctl	/* 255 */
+	.long sys_epoll_wait
+ 	.long sys_remap_file_pages
+ 	.long sys_set_tid_address
+ 	.long sys_timer_create
+ 	.long sys_timer_settime		/* 260 */
+ 	.long sys_timer_gettime
+ 	.long sys_timer_getoverrun
+ 	.long sys_timer_delete
+ 	.long sys_clock_settime
+ 	.long sys_clock_gettime		/* 265 */
+ 	.long sys_clock_getres
+ 	.long sys_clock_nanosleep
+	.long sys_statfs64
+	.long sys_fstatfs64
+	.long sys_tgkill	/* 270 */
+	.long sys_utimes
+ 	.long sys_fadvise64_64
+	.long sys_ni_syscall	/* sys_vserver */
+	.long sys_mbind
+	.long sys_get_mempolicy
+	.long sys_set_mempolicy
+	.long sys_mq_open
+	.long sys_mq_unlink
+	.long sys_mq_timedsend
+	.long sys_mq_timedreceive	/* 280 */
+	.long sys_mq_notify
+	.long sys_mq_getsetattr
+	.long sys_ni_syscall		/* reserved for kexec */
+	.long sys_waitid
+	.long sys_ni_syscall		/* 285 */ /* available */
+	.long sys_add_key
+	.long sys_request_key
+	.long sys_keyctl
+	.long sys_ioprio_set
+	.long sys_ioprio_get		/* 290 */
+	.long sys_inotify_init
+	.long sys_inotify_add_watch
+	.long sys_inotify_rm_watch
+	.long sys_migrate_pages
+	.long sys_openat		/* 295 */
+	.long sys_mkdirat
+	.long sys_mknodat
+	.long sys_fchownat
+	.long sys_futimesat
+	.long sys_fstatat64		/* 300 */
+	.long sys_unlinkat
+	.long sys_renameat
+	.long sys_linkat
+	.long sys_symlinkat
+	.long sys_readlinkat		/* 305 */
+	.long sys_fchmodat
+	.long sys_faccessat
+	.long sys_pselect6
+	.long sys_ppoll
+	.long sys_unshare		/* 310 */
+	.long sys_set_robust_list
+	.long sys_get_robust_list
+	.long sys_splice
+	.long sys_sync_file_range
+	.long sys_tee			/* 315 */
+	.long sys_vmsplice
+	.long sys_move_pages
+	.long sys_getcpu
+	.long sys_epoll_pwait
+	.long sys_utimensat		/* 320 */
+	.long sys_signalfd
+	.long sys_timerfd_create
+	.long sys_eventfd
+	.long sys_fallocate
+	.long sys_timerfd_settime	/* 325 */
+	.long sys_timerfd_gettime
+	.long sys_signalfd4
+	.long sys_eventfd2
+	.long sys_epoll_create1
+	.long sys_dup3			/* 330 */
+	.long sys_pipe2
+	.long sys_inotify_init1
+	.long sys_preadv
+	.long sys_pwritev
+	.long sys_rt_tgsigqueueinfo	/* 335 */
+	.long sys_perf_event_open
+	.long sys_setns
 
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_timer_create */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_timer_settime */		/* 260 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_timer_gettime */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_timer_getoverrun */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_timer_delete */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_clock_settime */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_clock_gettime */		/* 265 */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_clock_getres */
-	.long SYMBOL_NAME(sys_ni_syscall)	/* sys_clock_nanosleep */
-
-	.rept NR_syscalls-(.-sys_call_table)/4
-		.long SYMBOL_NAME(sys_ni_syscall)
-	.endr
+syscall_table_size = (. - sys_call_table)

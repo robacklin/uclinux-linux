@@ -1,7 +1,5 @@
-#include <linux/fs.h>
-#include <linux/minix_fs.h>
-#include <linux/locks.h>
-#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
+#include "minix.h"
 
 enum {DIRECT = 7, DEPTH = 4};	/* Have triple indirect */
 
@@ -19,32 +17,41 @@ static inline block_t cpu_to_block(unsigned long n)
 
 static inline block_t *i_data(struct inode *inode)
 {
-	return (block_t *)inode->u.minix_i.u.i2_data;
+	return (block_t *)minix_i(inode)->u.i2_data;
 }
+
+#define DIRCOUNT 7
+#define INDIRCOUNT(sb) (1 << ((sb)->s_blocksize_bits - 2))
 
 static int block_to_path(struct inode * inode, long block, int offsets[DEPTH])
 {
 	int n = 0;
+	char b[BDEVNAME_SIZE];
+	struct super_block *sb = inode->i_sb;
 
 	if (block < 0) {
-		printk("minix_bmap: block<0");
-	} else if (block >= (inode->i_sb->u.minix_sb.s_max_size/BLOCK_SIZE)) {
-		printk("minix_bmap: block>big");
-	} else if (block < 7) {
+		printk("MINIX-fs: block_to_path: block %ld < 0 on dev %s\n",
+			block, bdevname(sb->s_bdev, b));
+	} else if (block >= (minix_sb(inode->i_sb)->s_max_size/sb->s_blocksize)) {
+		if (printk_ratelimit())
+			printk("MINIX-fs: block_to_path: "
+			       "block %ld too big on dev %s\n",
+				block, bdevname(sb->s_bdev, b));
+	} else if (block < DIRCOUNT) {
 		offsets[n++] = block;
-	} else if ((block -= 7) < 256) {
-		offsets[n++] = 7;
+	} else if ((block -= DIRCOUNT) < INDIRCOUNT(sb)) {
+		offsets[n++] = DIRCOUNT;
 		offsets[n++] = block;
-	} else if ((block -= 256) < 256*256) {
-		offsets[n++] = 8;
-		offsets[n++] = block>>8;
-		offsets[n++] = block & 255;
+	} else if ((block -= INDIRCOUNT(sb)) < INDIRCOUNT(sb) * INDIRCOUNT(sb)) {
+		offsets[n++] = DIRCOUNT + 1;
+		offsets[n++] = block / INDIRCOUNT(sb);
+		offsets[n++] = block % INDIRCOUNT(sb);
 	} else {
-		block -= 256*256;
-		offsets[n++] = 9;
-		offsets[n++] = block>>16;
-		offsets[n++] = (block>>8) & 255;
-		offsets[n++] = block & 255;
+		block -= INDIRCOUNT(sb) * INDIRCOUNT(sb);
+		offsets[n++] = DIRCOUNT + 2;
+		offsets[n++] = (block / INDIRCOUNT(sb)) / INDIRCOUNT(sb);
+		offsets[n++] = (block / INDIRCOUNT(sb)) % INDIRCOUNT(sb);
+		offsets[n++] = block % INDIRCOUNT(sb);
 	}
 	return n;
 }
@@ -60,4 +67,9 @@ int V2_minix_get_block(struct inode * inode, long block,
 void V2_minix_truncate(struct inode * inode)
 {
 	truncate(inode);
+}
+
+unsigned V2_minix_blocks(loff_t size, struct super_block *sb)
+{
+	return nblocks(size, sb);
 }

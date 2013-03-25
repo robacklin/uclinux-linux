@@ -3,7 +3,7 @@
  *
  * Authors:
  * - Christoph Goos <cgoos@syskonnect.de>
- * - Adam Fritzler <mid@auk.cx>
+ * - Adam Fritzler
  */
 
 #ifndef __LINUX_TMS380TR_H
@@ -11,12 +11,14 @@
 
 #ifdef __KERNEL__
 
+#include <linux/interrupt.h>
+
 /* module prototypes */
+extern const struct net_device_ops tms380tr_netdev_ops;
 int tms380tr_open(struct net_device *dev);
 int tms380tr_close(struct net_device *dev);
-void tms380tr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-int tmsdev_init(struct net_device *dev, unsigned long dmalimit,
-		struct pci_dev *pdev);
+irqreturn_t tms380tr_interrupt(int irq, void *dev_id);
+int tmsdev_init(struct net_device *dev, struct device *pdev);
 void tmsdev_term(struct net_device *dev);
 void tms380tr_wait(unsigned long time);
 
@@ -440,7 +442,7 @@ typedef struct {
 #define PASS_FIRST_BUF_ONLY	0x0100	/* Passes only first internal buffer
 					 * of each received frame; FrameSize
 					 * of RPLs must contain internal
-					 * BUFFER_SIZE bits for promiscous mode.
+					 * BUFFER_SIZE bits for promiscuous mode.
 					 */
 #define ENABLE_FULL_DUPLEX_SELECTION	0x2000 
  					/* Enable the use of full-duplex
@@ -475,13 +477,13 @@ typedef struct {
 				 * bytes = 0xC000
 				 */
 	u_int32_t FunctAddr;	/* High order bytes = 0xC000 */
-	u_int16_t RxListSize;	/* RPL size: 0 (=26), 14, 20 or
+	__be16 RxListSize;	/* RPL size: 0 (=26), 14, 20 or
 				 * 26 bytes read by the adapter.
 				 * (Depending on the number of 
 				 * fragments/list)
 				 */
-	u_int16_t TxListSize;	/* TPL size */
-	u_int16_t BufSize;	/* Is automatically rounded up to the
+	__be16 TxListSize;	/* TPL size */
+	__be16 BufSize;		/* Is automatically rounded up to the
 				 * nearest nK boundary.
 				 */
 	u_int16_t FullDuplex;
@@ -579,14 +581,14 @@ typedef struct {
 /*--------------------- Send and Receive definitions -------------------*/
 #pragma pack(1)
 typedef struct {
-	u_int16_t DataCount;	/* Value 0, even and odd values are
+	__be16 DataCount;	/* Value 0, even and odd values are
 				 * permitted; value is unaltered most
 				 * significant bit set: following
 				 * fragments last fragment: most
 				 * significant bit is not evaluated.
 				 * (???)
 				 */
-	u_int32_t DataAddr;	/* Pointer to frame data fragment;
+	__be32 DataAddr;	/* Pointer to frame data fragment;
 				 * even or odd.
 				 */
 } Fragment;
@@ -596,7 +598,6 @@ typedef struct {
 				 * in one RPL/TPL. (depending on TI firmware 
 				 * version)
 				 */
-#define MAX_TX_QUEUE	    10	/* Maximal number of skb's queued in driver. */
 
 /*
  * AC (1), FC (1), Dst (6), Src (6), RIF (18), Data (4472) = 4504
@@ -679,7 +680,7 @@ typedef struct {
 typedef struct s_TPL TPL;
 
 struct s_TPL {	/* Transmit Parameter List (align on even word boundaries) */
-	u_int32_t NextTPLAddr;		/* Pointer to next TPL in chain; if
+	__be32 NextTPLAddr;		/* Pointer to next TPL in chain; if
 					 * pointer is odd: this is the last
 					 * TPL. Pointing to itself can cause
 					 * problems!
@@ -689,7 +690,7 @@ struct s_TPL {	/* Transmit Parameter List (align on even word boundaries) */
 					 * significant bit first! Set by the
 					 * adapter: CSTAT_COMPLETE status.
 					 */
-	u_int16_t FrameSize;		/* Number of bytes to be transmitted
+	__be16 FrameSize;		/* Number of bytes to be transmitted
 					 * as a frame including AC/FC,
 					 * Destination, Source, Routing field
 					 * not including CRC, FS, End Delimiter
@@ -718,7 +719,7 @@ struct s_TPL {	/* Transmit Parameter List (align on even word boundaries) */
 	struct sk_buff *Skb;
 	unsigned char TPLIndex;
 	volatile unsigned char BusyFlag;/* Flag: TPL busy? */
-	dma_addr_t DMABuff;		/* DMA IO bus address from pci_map */
+	dma_addr_t DMABuff;		/* DMA IO bus address from dma_map */
 };
 
 /* ---------------------Receive Functions-------------------------------*
@@ -1020,7 +1021,7 @@ enum SKB_STAT {
 #pragma pack(1)
 typedef struct s_RPL RPL;
 struct s_RPL {	/* Receive Parameter List */
-	u_int32_t NextRPLAddr;		/* Pointer to next RPL in chain
+	__be32 NextRPLAddr;		/* Pointer to next RPL in chain
 					 * (normalized = physical 32 bit
 					 * address) if pointer is odd: this
 					 * is last RPL. Pointing to itself can
@@ -1031,7 +1032,7 @@ struct s_RPL {	/* Receive Parameter List */
 					 * adapter in lists that start or end
 					 * a frame.
 					 */
-	volatile u_int16_t FrameSize;	 /* Number of bytes received as a
+	volatile __be16 FrameSize;	 /* Number of bytes received as a
 					 * frame including AC/FC, Destination,
 					 * Source, Routing field not including 
 					 * CRC, FS (Frame Status), End Delimiter
@@ -1059,7 +1060,7 @@ struct s_RPL {	/* Receive Parameter List */
 	struct sk_buff *Skb;
 	SKB_STAT SkbStat;
 	int RPLIndex;
-	dma_addr_t DMABuff;		/* DMA IO bus address from pci_map */
+	dma_addr_t DMABuff;		/* DMA IO bus address from dma_map */
 };
 
 /* Information that need to be kept for each board. */
@@ -1090,7 +1091,7 @@ typedef struct net_local {
 	RPL *RplTail;
 	unsigned char LocalRxBuffers[RPL_NUM][DEFAULT_PACKET_SIZE];
 
-	struct pci_dev *pdev;
+	struct device *pdev;
 	int DataRate;
 	unsigned char ScbInUse;
 	unsigned short CMDqueue;
@@ -1112,9 +1113,6 @@ typedef struct net_local {
 	unsigned long StartTime;
 	unsigned long LastSendTime;
 
-	struct sk_buff_head SendSkbQueue;
-	unsigned short QueueSkb;
-
 	struct tr_statistics MacStat;	/* MAC statistics structure */
 
 	unsigned long dmalimit; /* the max DMA address (ie, ISA) */
@@ -1135,6 +1133,7 @@ typedef struct net_local {
 	unsigned short (*sifreadw)(struct net_device *, unsigned short);
 	void (*sifwritew)(struct net_device *, unsigned short, unsigned short);
 
+	spinlock_t lock;                /* SMP protection */
 	void *tmspriv;
 } NET_LOCAL;
 

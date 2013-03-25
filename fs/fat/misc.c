@@ -6,561 +6,273 @@
  *		 and date_dos2unix for date==0 by Igor Zhbanov(bsg@uniyar.ac.ru)
  */
 
+#include <linux/module.h>
 #include <linux/fs.h>
-#include <linux/msdos_fs.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/stat.h>
-
-#if 0
-#  define PRINTK(x)	printk x
-#else
-#  define PRINTK(x)
-#endif
-#define Printk(x)	printk x
-
-/* Well-known binary file extensions - of course there are many more */
-
-static char ascii_extensions[] =
-  "TXT" "ME " "HTM" "1ST" "LOG" "   " 	/* text files */
-  "C  " "H  " "CPP" "LIS" "PAS" "FOR"  /* programming languages */
-  "F  " "MAK" "INC" "BAS" 		/* programming languages */
-  "BAT" "SH "				/* program code :) */
-  "INI"					/* config files */
-  "PBM" "PGM" "DXF"			/* graphics */
-  "TEX";				/* TeX */
-
+#include <linux/buffer_head.h>
+#include <linux/time.h>
+#include "fat.h"
 
 /*
- * fat_fs_panic reports a severe file system problem and sets the file system
- * read-only. The file system can be made writable again by remounting it.
+ * fat_fs_error reports a file system problem that might indicate fa data
+ * corruption/inconsistency. Depending on 'errors' mount option the
+ * panic() is called, or error message is printed FAT and nothing is done,
+ * or filesystem is remounted read-only (default behavior).
+ * In case the file system is remounted read-only, it can be made writable
+ * again by remounting it.
  */
-
-void fat_fs_panic(struct super_block *s,const char *msg)
+void __fat_fs_error(struct super_block *sb, int report, const char *fmt, ...)
 {
-	int not_ro;
+	struct fat_mount_options *opts = &MSDOS_SB(sb)->options;
+	va_list args;
+	struct va_format vaf;
 
-	not_ro = !(s->s_flags & MS_RDONLY);
-	if (not_ro) s->s_flags |= MS_RDONLY;
-	printk("Filesystem panic (dev %s).\n  %s\n", kdevname(s->s_dev), msg);
-	if (not_ro)
-		printk("  File system has been set read-only\n");
-}
+	if (report) {
+		va_start(args, fmt);
+		vaf.fmt = fmt;
+		vaf.va = &args;
+		printk(KERN_ERR "FAT-fs (%s): error, %pV\n", sb->s_id, &vaf);
+		va_end(args);
+	}
 
-
-/*
- * fat_is_binary selects optional text conversion based on the conversion mode
- * and the extension part of the file name.
- */
-
-int fat_is_binary(char conversion,char *extension)
-{
-	char *walk;
-
-	switch (conversion) {
-		case 'b':
-			return 1;
-		case 't':
-			return 0;
-		case 'a':
-			for (walk = ascii_extensions; *walk; walk += 3)
-				if (!strncmp(extension,walk,3)) return 0;
-			return 1;	/* default binary conversion */
-		default:
-			printk("Invalid conversion mode - defaulting to "
-			    "binary.\n");
-			return 1;
+	if (opts->errors == FAT_ERRORS_PANIC)
+		panic("FAT-fs (%s): fs panic from previous error\n", sb->s_id);
+	else if (opts->errors == FAT_ERRORS_RO && !(sb->s_flags & MS_RDONLY)) {
+		sb->s_flags |= MS_RDONLY;
+		printk(KERN_ERR "FAT-fs (%s): Filesystem has been "
+				"set read-only\n", sb->s_id);
 	}
 }
+EXPORT_SYMBOL_GPL(__fat_fs_error);
 
-void lock_fat(struct super_block *sb)
+/**
+ * fat_msg() - print preformated FAT specific messages. Every thing what is
+ * not fat_fs_error() should be fat_msg().
+ */
+void fat_msg(struct super_block *sb, const char *level, const char *fmt, ...)
 {
-	down(&(MSDOS_SB(sb)->fat_lock));
-}
+	struct va_format vaf;
+	va_list args;
 
-void unlock_fat(struct super_block *sb)
-{
-	up(&(MSDOS_SB(sb)->fat_lock));
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+	printk("%sFAT-fs (%s): %pV\n", level, sb->s_id, &vaf);
+	va_end(args);
 }
 
 /* Flushes the number of free clusters on FAT32 */
 /* XXX: Need to write one per FSINFO block.  Currently only writes 1 */
-void fat_clusters_flush(struct super_block *sb)
+int fat_clusters_flush(struct super_block *sb)
 {
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
 	struct buffer_head *bh;
 	struct fat_boot_fsinfo *fsinfo;
 
-	bh = fat_bread(sb, MSDOS_SB(sb)->fsinfo_sector);
+	if (sbi->fat_bits != 32)
+		return 0;
+
+	bh = sb_bread(sb, sbi->fsinfo_sector);
 	if (bh == NULL) {
-		printk("FAT bread failed in fat_clusters_flush\n");
-		return;
+		fat_msg(sb, KERN_ERR, "bread failed in fat_clusters_flush");
+		return -EIO;
 	}
 
 	fsinfo = (struct fat_boot_fsinfo *)bh->b_data;
 	/* Sanity check */
 	if (!IS_FSINFO(fsinfo)) {
-		printk("FAT: Did not find valid FSINFO signature.\n"
-		       "Found signature1 0x%x signature2 0x%x sector=%ld.\n",
-		       CF_LE_L(fsinfo->signature1), CF_LE_L(fsinfo->signature2),
-		       MSDOS_SB(sb)->fsinfo_sector);
-		return;
+		fat_msg(sb, KERN_ERR, "Invalid FSINFO signature: "
+		       "0x%08x, 0x%08x (sector = %lu)",
+		       le32_to_cpu(fsinfo->signature1),
+		       le32_to_cpu(fsinfo->signature2),
+		       sbi->fsinfo_sector);
+	} else {
+		if (sbi->free_clusters != -1)
+			fsinfo->free_clusters = cpu_to_le32(sbi->free_clusters);
+		if (sbi->prev_free != -1)
+			fsinfo->next_cluster = cpu_to_le32(sbi->prev_free);
+		mark_buffer_dirty(bh);
 	}
-	fsinfo->free_clusters = CF_LE_L(MSDOS_SB(sb)->free_clusters);
-	fsinfo->next_cluster = CF_LE_L(MSDOS_SB(sb)->prev_free);
-	fat_mark_buffer_dirty(sb, bh);
-	fat_brelse(sb, bh);
+	brelse(bh);
+
+	return 0;
 }
 
 /*
- * fat_add_cluster tries to allocate a new cluster and adds it to the
- * file represented by inode.
+ * fat_chain_add() adds a new cluster to the chain of clusters represented
+ * by inode.
  */
-int fat_add_cluster(struct inode *inode)
+int fat_chain_add(struct inode *inode, int new_dclus, int nr_cluster)
 {
 	struct super_block *sb = inode->i_sb;
-	int count, nr, limit, last, curr, file_cluster;
-	int cluster_size = MSDOS_SB(sb)->cluster_size;
-	int res = -ENOSPC;
-	
-	lock_fat(sb);
-	
-	if (MSDOS_SB(sb)->free_clusters == 0) {
-		unlock_fat(sb);
-		return res;
+	struct msdos_sb_info *sbi = MSDOS_SB(sb);
+	int ret, new_fclus, last;
+
+	/*
+	 * We must locate the last cluster of the file to add this new
+	 * one (new_dclus) to the end of the link list (the FAT).
+	 */
+	last = new_fclus = 0;
+	if (MSDOS_I(inode)->i_start) {
+		int fclus, dclus;
+
+		ret = fat_get_cluster(inode, FAT_ENT_EOF, &fclus, &dclus);
+		if (ret < 0)
+			return ret;
+		new_fclus = fclus + 1;
+		last = dclus;
 	}
-	limit = MSDOS_SB(sb)->clusters;
-	nr = limit; /* to keep GCC happy */
-	for (count = 0; count < limit; count++) {
-		nr = ((count + MSDOS_SB(sb)->prev_free) % limit) + 2;
-		if (fat_access(sb, nr, -1) == 0)
-			break;
-	}
-	if (count >= limit) {
-		MSDOS_SB(sb)->free_clusters = 0;
-		unlock_fat(sb);
-		return res;
-	}
-	
-	MSDOS_SB(sb)->prev_free = (count + MSDOS_SB(sb)->prev_free + 1) % limit;
-	fat_access(sb, nr, EOF_FAT(sb));
-	if (MSDOS_SB(sb)->free_clusters != -1)
-		MSDOS_SB(sb)->free_clusters--;
-	if (MSDOS_SB(sb)->fat_bits == 32)
-		fat_clusters_flush(sb);
-	
-	unlock_fat(sb);
-	
-	/* We must locate the last cluster of the file to add this
-	   new one (nr) to the end of the link list (the FAT).
-	   
-	   Here file_cluster will be the number of the last cluster of the
-	   file (before we add nr).
-	   
-	   last is the corresponding cluster number on the disk. We will
-	   use last to plug the nr cluster. We will use file_cluster to
-	   update the cache.
-	*/
-	last = file_cluster = 0;
-	if ((curr = MSDOS_I(inode)->i_start) != 0) {
-		fat_cache_lookup(inode, INT_MAX, &last, &curr);
-		file_cluster = last;
-		while (curr && curr != -1){
-			file_cluster++;
-			if (!(curr = fat_access(sb, last = curr,-1))) {
-				fat_fs_panic(sb, "File without EOF");
-				return res;
-			}
-		}
-	}
+
+	/* add new one to the last of the cluster chain */
 	if (last) {
-		fat_access(sb, last, nr);
-		fat_cache_add(inode, file_cluster, nr);
+		struct fat_entry fatent;
+
+		fatent_init(&fatent);
+		ret = fat_ent_read(inode, &fatent, last);
+		if (ret >= 0) {
+			int wait = inode_needs_sync(inode);
+			ret = fat_ent_write(inode, &fatent, new_dclus, wait);
+			fatent_brelse(&fatent);
+		}
+		if (ret < 0)
+			return ret;
+//		fat_cache_add(inode, new_fclus, new_dclus);
 	} else {
-		MSDOS_I(inode)->i_start = nr;
-		MSDOS_I(inode)->i_logstart = nr;
-		mark_inode_dirty(inode);
+		MSDOS_I(inode)->i_start = new_dclus;
+		MSDOS_I(inode)->i_logstart = new_dclus;
+		/*
+		 * Since generic_write_sync() synchronizes regular files later,
+		 * we sync here only directories.
+		 */
+		if (S_ISDIR(inode->i_mode) && IS_DIRSYNC(inode)) {
+			ret = fat_sync_inode(inode);
+			if (ret)
+				return ret;
+		} else
+			mark_inode_dirty(inode);
 	}
-	if (file_cluster
-	    != inode->i_blocks / cluster_size / (sb->s_blocksize / 512)) {
-		printk ("file_cluster badly computed!!! %d <> %ld\n",
-			file_cluster,
-			inode->i_blocks / cluster_size / (sb->s_blocksize / 512));
+	if (new_fclus != (inode->i_blocks >> (sbi->cluster_bits - 9))) {
+		fat_fs_error(sb, "clusters badly computed (%d != %llu)",
+			     new_fclus,
+			     (llu)(inode->i_blocks >> (sbi->cluster_bits - 9)));
 		fat_cache_inval_inode(inode);
 	}
-	inode->i_blocks += (1 << MSDOS_SB(sb)->cluster_bits) / 512;
+	inode->i_blocks += nr_cluster << (sbi->cluster_bits - 9);
 
-	return nr;
+	return 0;
 }
-
-struct buffer_head *fat_extend_dir(struct inode *inode)
-{
-	struct super_block *sb = inode->i_sb;
-	int nr, sector, last_sector;
-	struct buffer_head *bh, *res = NULL;
-	int cluster_size = MSDOS_SB(sb)->cluster_size;
-
-	if (MSDOS_SB(sb)->fat_bits != 32) {
-		if (inode->i_ino == MSDOS_ROOT_INO)
-			return res;
-	}
-
-	nr = fat_add_cluster(inode);
-	if (nr < 0)
-		return res;
-	
-	sector = MSDOS_SB(sb)->data_start + (nr - 2) * cluster_size;
-	last_sector = sector + cluster_size;
-	if (MSDOS_SB(sb)->cvf_format && MSDOS_SB(sb)->cvf_format->zero_out_cluster)
-		MSDOS_SB(sb)->cvf_format->zero_out_cluster(inode, nr);
-	else {
-		for ( ; sector < last_sector; sector++) {
-#ifdef DEBUG
-			printk("zeroing sector %d\n", sector);
-#endif
-			if (!(bh = fat_getblk(sb, sector)))
-				printk("getblk failed\n");
-			else {
-				memset(bh->b_data, 0, sb->s_blocksize);
-				fat_set_uptodate(sb, bh, 1);
-				fat_mark_buffer_dirty(sb, bh);
-				if (!res)
-					res = bh;
-				else
-					fat_brelse(sb, bh);
-			}
-		}
-	}
-	if (inode->i_size & (sb->s_blocksize - 1)) {
-		fat_fs_panic(sb, "Odd directory size");
-		inode->i_size = (inode->i_size + sb->s_blocksize)
-			& ~(sb->s_blocksize - 1);
-	}
-	inode->i_size += 1 << MSDOS_SB(sb)->cluster_bits;
-	MSDOS_I(inode)->mmu_private += 1 << MSDOS_SB(sb)->cluster_bits;
-	mark_inode_dirty(inode);
-
-	return res;
-}
-
-/* Linear day numbers of the respective 1sts in non-leap years. */
-
-static int day_n[] = { 0,31,59,90,120,151,181,212,243,273,304,334,0,0,0,0 };
-		  /* JanFebMarApr May Jun Jul Aug Sep Oct Nov Dec */
-
 
 extern struct timezone sys_tz;
 
-
-/* Convert a MS-DOS time/date pair to a UNIX date (seconds since 1 1 70). */
-
-int date_dos2unix(unsigned short time,unsigned short date)
-{
-	int month,year,secs;
-
-	/* first subtract and mask after that... Otherwise, if
-	   date == 0, bad things happen */
-	month = ((date >> 5) - 1) & 15;
-	year = date >> 9;
-	secs = (time & 31)*2+60*((time >> 5) & 63)+(time >> 11)*3600+86400*
-	    ((date & 31)-1+day_n[month]+(year/4)+year*365-((year & 3) == 0 &&
-	    month < 2 ? 1 : 0)+3653);
-			/* days since 1.1.70 plus 80's leap day */
-	secs += sys_tz.tz_minuteswest*60;
-	return secs;
-}
-
-
-/* Convert linear UNIX date to a MS-DOS time/date pair. */
-
-void fat_date_unix2dos(int unix_date,unsigned short *time,
-    unsigned short *date)
-{
-	int day,year,nl_day,month;
-
-	unix_date -= sys_tz.tz_minuteswest*60;
-
-	/* Jan 1 GMT 00:00:00 1980. But what about another time zone? */
-	if (unix_date < 315532800)
-		unix_date = 315532800;
-
-	*time = (unix_date % 60)/2+(((unix_date/60) % 60) << 5)+
-	    (((unix_date/3600) % 24) << 11);
-	day = unix_date/86400-3652;
-	year = day/365;
-	if ((year+3)/4+365*year > day) year--;
-	day -= (year+3)/4+365*year;
-	if (day == 59 && !(year & 3)) {
-		nl_day = day;
-		month = 2;
-	}
-	else {
-		nl_day = (year & 3) || day <= 59 ? day : day-1;
-		for (month = 0; month < 12; month++)
-			if (day_n[month] > nl_day) break;
-	}
-	*date = nl_day-day_n[month-1]+1+(month << 5)+(year << 9);
-}
-
-
-/* Returns the inode number of the directory entry at offset pos. If bh is
-   non-NULL, it is brelse'd before. Pos is incremented. The buffer header is
-   returned in bh.
-   AV. Most often we do it item-by-item. Makes sense to optimize.
-   AV. OK, there we go: if both bh and de are non-NULL we assume that we just
-   AV. want the next entry (took one explicit de=NULL in vfat/namei.c).
-   AV. It's done in fat_get_entry() (inlined), here the slow case lives.
-   AV. Additionally, when we return -1 (i.e. reached the end of directory)
-   AV. we make bh NULL. 
- */
-
-int fat__get_entry(struct inode *dir, loff_t *pos,struct buffer_head **bh,
-		   struct msdos_dir_entry **de, loff_t *i_pos)
-{
-	struct super_block *sb = dir->i_sb;
-	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	int sector;
-	loff_t offset;
-
-	while (1) {
-		offset = *pos;
-		PRINTK (("get_entry offset %d\n",offset));
-		if (*bh)
-			fat_brelse(sb, *bh);
-		*bh = NULL;
-		if ((sector = fat_bmap(dir,offset >> sb->s_blocksize_bits)) == -1)
-			return -1;
-		PRINTK (("get_entry sector %d %p\n",sector,*bh));
-		PRINTK (("get_entry sector apres brelse\n"));
-		if (!sector)
-			return -1; /* beyond EOF */
-		*pos += sizeof(struct msdos_dir_entry);
-		if (!(*bh = fat_bread(sb, sector))) {
-			printk("Directory sread (sector 0x%x) failed\n",sector);
-			continue;
-		}
-		PRINTK (("get_entry apres sread\n"));
-
-		offset &= sb->s_blocksize - 1;
-		*de = (struct msdos_dir_entry *) ((*bh)->b_data + offset);
-		*i_pos = ((loff_t)sector << sbi->dir_per_block_bits) + (offset >> MSDOS_DIR_BITS);
-
-		return 0;
-	}
-}
-
-
 /*
- * Now an ugly part: this set of directory scan routines works on clusters
- * rather than on inodes and sectors. They are necessary to locate the '..'
- * directory "inode". raw_scan_sector operates in four modes:
- *
- * name     number   ino      action
- * -------- -------- -------- -------------------------------------------------
- * non-NULL -        X        Find an entry with that name
- * NULL     non-NULL non-NULL Find an entry whose data starts at *number
- * NULL     non-NULL NULL     Count subdirectories in *number. (*)
- * NULL     NULL     non-NULL Find an empty entry
- *
- * (*) The return code should be ignored. It DOES NOT indicate success or
- *     failure. *number has to be initialized to zero.
- *
- * - = not used, X = a value is returned unless NULL
- *
- * If res_bh is non-NULL, the buffer is not deallocated but returned to the
- * caller on success. res_de is set accordingly.
- *
- * If cont is non-zero, raw_found continues with the entry after the one
- * res_bh/res_de point to.
+ * The epoch of FAT timestamp is 1980.
+ *     :  bits :     value
+ * date:  0 -  4: day	(1 -  31)
+ * date:  5 -  8: month	(1 -  12)
+ * date:  9 - 15: year	(0 - 127) from 1980
+ * time:  0 -  4: sec	(0 -  29) 2sec counts
+ * time:  5 - 10: min	(0 -  59)
+ * time: 11 - 15: hour	(0 -  23)
  */
+#define SECS_PER_MIN	60
+#define SECS_PER_HOUR	(60 * 60)
+#define SECS_PER_DAY	(SECS_PER_HOUR * 24)
+/* days between 1.1.70 and 1.1.80 (2 leap days) */
+#define DAYS_DELTA	(365 * 10 + 2)
+/* 120 (2100 - 1980) isn't leap year */
+#define YEAR_2100	120
+#define IS_LEAP_YEAR(y)	(!((y) & 3) && (y) != YEAR_2100)
 
+/* Linear day numbers of the respective 1sts in non-leap years. */
+static time_t days_in_year[] = {
+	/* Jan  Feb  Mar  Apr  May  Jun  Jul  Aug  Sep  Oct  Nov  Dec */
+	0,   0,  31,  59,  90, 120, 151, 181, 212, 243, 273, 304, 334, 0, 0, 0,
+};
 
-#define RSS_NAME /* search for name */ \
-    done = !strncmp(data[entry].name,name,MSDOS_NAME) && \
-     !(data[entry].attr & ATTR_VOLUME);
-
-#define RSS_START /* search for start cluster */ \
-    done = !IS_FREE(data[entry].name) \
-      && ( \
-           ( \
-             (sbi->fat_bits != 32) ? 0 : (CF_LE_W(data[entry].starthi) << 16) \
-           ) \
-           | CF_LE_W(data[entry].start) \
-         ) == *number;
-
-#define RSS_FREE /* search for free entry */ \
-    { \
-	done = IS_FREE(data[entry].name); \
-    }
-
-#define RSS_COUNT /* count subdirectories */ \
-    { \
-	done = 0; \
-	if (!IS_FREE(data[entry].name) && (data[entry].attr & ATTR_DIR)) \
-	    (*number)++; \
-    }
-
-static int raw_scan_sector(struct super_block *sb, int sector,
-			   const char *name, int *number, loff_t *i_pos,
-			   struct buffer_head **res_bh,
-			   struct msdos_dir_entry **res_de)
+/* Convert a FAT time/date pair to a UNIX date (seconds since 1 1 70). */
+void fat_time_fat2unix(struct msdos_sb_info *sbi, struct timespec *ts,
+		       __le16 __time, __le16 __date, u8 time_cs)
 {
-	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	struct buffer_head *bh;
-	struct msdos_dir_entry *data;
-	int entry,start,done;
+	u16 time = le16_to_cpu(__time), date = le16_to_cpu(__date);
+	time_t second, day, leap_day, month, year;
 
-	if (!(bh = fat_bread(sb, sector)))
-		return -EIO;
-	data = (struct msdos_dir_entry *) bh->b_data;
-	for (entry = 0; entry < sbi->dir_per_block; entry++) {
-/* RSS_COUNT:  if (data[entry].name == name) done=true else done=false. */
-		if (name) {
-			RSS_NAME
-		} else {
-			if (!i_pos) RSS_COUNT
-			else {
-				if (number) RSS_START
-				else RSS_FREE
-			}
-		}
-		if (done) {
-			if (i_pos) {
-				*i_pos = ((loff_t)sector << sbi->dir_per_block_bits) + entry;
-			}
-			start = CF_LE_W(data[entry].start);
-			if (sbi->fat_bits == 32)
-				start |= (CF_LE_W(data[entry].starthi) << 16);
+	year  = date >> 9;
+	month = max(1, (date >> 5) & 0xf);
+	day   = max(1, date & 0x1f) - 1;
 
-			if (!res_bh)
-				fat_brelse(sb, bh);
-			else {
-				*res_bh = bh;
-				*res_de = &data[entry];
-			}
-			return start;
-		}
+	leap_day = (year + 3) / 4;
+	if (year > YEAR_2100)		/* 2100 isn't leap year */
+		leap_day--;
+	if (IS_LEAP_YEAR(year) && month > 2)
+		leap_day++;
+
+	second =  (time & 0x1f) << 1;
+	second += ((time >> 5) & 0x3f) * SECS_PER_MIN;
+	second += (time >> 11) * SECS_PER_HOUR;
+	second += (year * 365 + leap_day
+		   + days_in_year[month] + day
+		   + DAYS_DELTA) * SECS_PER_DAY;
+
+	if (!sbi->options.tz_utc)
+		second += sys_tz.tz_minuteswest * SECS_PER_MIN;
+
+	if (time_cs) {
+		ts->tv_sec = second + (time_cs / 100);
+		ts->tv_nsec = (time_cs % 100) * 10000000;
+	} else {
+		ts->tv_sec = second;
+		ts->tv_nsec = 0;
 	}
-	fat_brelse(sb, bh);
-	return -ENOENT;
 }
 
-
-/*
- * raw_scan_root performs raw_scan_sector on the root directory until the
- * requested entry is found or the end of the directory is reached.
- */
-
-static int raw_scan_root(struct super_block *sb, const char *name,
-			 int *number, loff_t *i_pos,
-			 struct buffer_head **res_bh,
-			 struct msdos_dir_entry **res_de)
+/* Convert linear UNIX date to a FAT time/date pair. */
+void fat_time_unix2fat(struct msdos_sb_info *sbi, struct timespec *ts,
+		       __le16 *time, __le16 *date, u8 *time_cs)
 {
-	int count,cluster;
+	struct tm tm;
+	time_to_tm(ts->tv_sec, sbi->options.tz_utc ? 0 :
+		   -sys_tz.tz_minuteswest * 60, &tm);
 
-	for (count = 0;
-	     count < MSDOS_SB(sb)->dir_entries / MSDOS_SB(sb)->dir_per_block;
-	     count++) {
-		cluster = raw_scan_sector(sb, MSDOS_SB(sb)->dir_start + count,
-					  name, number, i_pos, res_bh, res_de);
-		if (cluster >= 0)
-			return cluster;
+	/*  FAT can only support year between 1980 to 2107 */
+	if (tm.tm_year < 1980 - 1900) {
+		*time = 0;
+		*date = cpu_to_le16((0 << 9) | (1 << 5) | 1);
+		if (time_cs)
+			*time_cs = 0;
+		return;
 	}
-	return -ENOENT;
-}
-
-
-/*
- * raw_scan_nonroot performs raw_scan_sector on a non-root directory until the
- * requested entry is found or the end of the directory is reached.
- */
-
-static int raw_scan_nonroot(struct super_block *sb, int start, const char *name,
-			    int *number, loff_t *i_pos,
-			    struct buffer_head **res_bh,
-			    struct msdos_dir_entry **res_de)
-{
-	struct msdos_sb_info *sbi = MSDOS_SB(sb);
-	int count, cluster, sector;
-
-#ifdef DEBUG
-	printk("raw_scan_nonroot: start=%d\n",start);
-#endif
-	do {
-		for (count = 0; count < sbi->cluster_size; count++) {
-			sector = (start - 2) * sbi->cluster_size
-				+ count + sbi->data_start;
-			cluster = raw_scan_sector(sb, sector, name, number,
-						  i_pos, res_bh, res_de);
-			if (cluster >= 0)
-				return cluster;
-		}
-		if (!(start = fat_access(sb,start,-1))) {
-			fat_fs_panic(sb,"FAT error");
-			break;
-		}
-#ifdef DEBUG
-	printk("next start: %d\n",start);
-#endif
+	if (tm.tm_year > 2107 - 1900) {
+		*time = cpu_to_le16((23 << 11) | (59 << 5) | 29);
+		*date = cpu_to_le16((127 << 9) | (12 << 5) | 31);
+		if (time_cs)
+			*time_cs = 199;
+		return;
 	}
-	while (start != -1);
-	return -ENOENT;
+
+	/* from 1900 -> from 1980 */
+	tm.tm_year -= 80;
+	/* 0~11 -> 1~12 */
+	tm.tm_mon++;
+	/* 0~59 -> 0~29(2sec counts) */
+	tm.tm_sec >>= 1;
+
+	*time = cpu_to_le16(tm.tm_hour << 11 | tm.tm_min << 5 | tm.tm_sec);
+	*date = cpu_to_le16(tm.tm_year << 9 | tm.tm_mon << 5 | tm.tm_mday);
+	if (time_cs)
+		*time_cs = (ts->tv_sec & 1) * 100 + ts->tv_nsec / 10000000;
 }
+EXPORT_SYMBOL_GPL(fat_time_unix2fat);
 
-
-/*
- * raw_scan performs raw_scan_sector on any sector.
- *
- * NOTE: raw_scan must not be used on a directory that is is the process of
- *       being created.
- */
-
-static int raw_scan(struct super_block *sb, int start, const char *name,
-		    loff_t *i_pos, struct buffer_head **res_bh,
-		    struct msdos_dir_entry **res_de)
+int fat_sync_bhs(struct buffer_head **bhs, int nr_bhs)
 {
-	if (start)
-		return raw_scan_nonroot(sb,start,name,NULL,i_pos,res_bh,res_de);
-	else
-		return raw_scan_root(sb,name,NULL,i_pos,res_bh,res_de);
-}
+	int i, err = 0;
 
-/*
- * fat_subdirs counts the number of sub-directories of dir. It can be run
- * on directories being created.
- */
-int fat_subdirs(struct inode *dir)
-{
-	struct msdos_sb_info *sbi = MSDOS_SB(dir->i_sb);
-	int number;
+	for (i = 0; i < nr_bhs; i++)
+		write_dirty_buffer(bhs[i], WRITE);
 
-	number = 0;
-	if ((dir->i_ino == MSDOS_ROOT_INO) && (sbi->fat_bits != 32))
-		raw_scan_root(dir->i_sb, NULL, &number, NULL, NULL, NULL);
-	else {
-		if ((dir->i_ino != MSDOS_ROOT_INO) && !MSDOS_I(dir)->i_start)
-			return 0; /* in mkdir */
-		else {
-			raw_scan_nonroot(dir->i_sb, MSDOS_I(dir)->i_start,
-					 NULL, &number, NULL, NULL, NULL);
-		}
+	for (i = 0; i < nr_bhs; i++) {
+		wait_on_buffer(bhs[i]);
+		if (!err && !buffer_uptodate(bhs[i]))
+			err = -EIO;
 	}
-	return number;
-}
-
-
-/*
- * Scans a directory for a given file (name points to its formatted name) or
- * for an empty directory slot (name is NULL). Returns an error code or zero.
- */
-
-int fat_scan(struct inode *dir, const char *name, struct buffer_head **res_bh,
-	     struct msdos_dir_entry **res_de, loff_t *i_pos)
-{
-	int res;
-
-	res = raw_scan(dir->i_sb, MSDOS_I(dir)->i_start, name, i_pos,
-		       res_bh, res_de);
-	return (res < 0) ? res : 0;
+	return err;
 }

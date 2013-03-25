@@ -31,7 +31,6 @@
 #ifndef IRDA_QOS_H
 #define IRDA_QOS_H
 
-#include <linux/config.h>
 #include <linux/skbuff.h>
 
 #include <net/irda/parameters.h>
@@ -83,18 +82,11 @@ struct qos_info {
 extern int sysctl_max_baud_rate;
 extern int sysctl_max_inactive_time;
 
-extern __u32 data_sizes[];
-extern __u32 min_turn_times[];
-extern __u32 add_bofs[];
-extern __u32 compressions[];
-
 void irda_init_max_qos_capabilies(struct qos_info *qos);
 void irda_qos_compute_intersection(struct qos_info *, struct qos_info *);
 
 __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time);
-__u32 irlap_requested_line_capacity(struct qos_info *qos);
 
-int msb_index(__u16 byte);
 void irda_qos_bits_to_value(struct qos_info *qos);
 
 /* So simple, how could we not inline those two ?

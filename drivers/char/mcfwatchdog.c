@@ -6,30 +6,32 @@
  *	Copyright (C) 1999-2000, Greg Ungerer (gerg@snapgear.com)
  * 	Copyright (C) 2000  Lineo Inc. (www.lineo.com)  
  *
- *  Added MCF5272 watchdog support, 2/9/2003 richard@uclinux.net
- *
  * Changes:
  * 10/28/2004    Christian Magnusson <mag@mag.cx>
  *               Bug: MCFSIM_SYPCR can only be written once after reset!
+ *               MCF5272 support copied from 2.4.x driver.
  *               Reset on overflow. (For 5206e at least)
  *               Added module support.
  *               I have noticed that some flash-identification from mtd
  *                 locks the processor too long, and therefor this watchdog
  *                 has to be used as a module and started after mtd is done.
+ *
+ * Changes:
+ * 06/01/2007    David Wu (www.ArcturusNetworks.com)
+ *               Added support for MCF5329, no IRQ or timer version
  */
 
 /***************************************************************************/
 
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/miscdevice.h>
+#include <linux/watchdog.h>
+#include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/param.h>
 #include <linux/notifier.h>
 #include <linux/reboot.h>
-#include <linux/init.h>
-#include <linux/miscdevice.h>
-#include <linux/watchdog.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
 #include <asm/machdep.h>
@@ -38,6 +40,7 @@
 #include <asm/mcfsim.h>
 #include <asm/irq.h>
 #include <asm/delay.h>
+#include <asm/uaccess.h>
 
 /***************************************************************************/
 
@@ -59,7 +62,11 @@
 /***************************************************************************/
 
 void	watchdog_alive(unsigned long arg);
-void	watchdog_timeout(int irq, void *dummy, struct pt_regs *fp);
+#ifndef CONFIG_M532x
+static irqreturn_t watchdog_timeout(int irq, void *dummy, struct pt_regs *fp);
+#endif
+void watchdog_disable(void);
+void watchdog_enable(void);
 
 #ifndef MODULE
 extern void	dump(struct pt_regs *fp);
@@ -69,8 +76,11 @@ extern void	dump(struct pt_regs *fp);
  *	Data for registering the watchdog alive routine with ticker.
  */
 static struct timer_list	watchdog_timerlist;
-
+#ifndef CONFIG_M532x
 static int watchdog_overflows;
+#endif
+static unsigned long wdt_is_open;
+static char expect_close;
 
 #ifdef CONFIG_OLDMASK
 /*
@@ -89,15 +99,71 @@ int	swt_lastjiffies = 0;		/* Tick count at last watchdog */
 int	swt_reference = SWTREF_COUNT;	/* Refereence tick count */
 #endif
 
+#ifdef CONFIG_M532x
+static ssize_t wdt_write(struct file *file, const char *data,
+                            size_t len, loff_t *ppos)
+{
+        if (len) {
+                if (1) {  /* expect_close can be set */
+                        size_t i;
+
+                        expect_close = 0;
+
+                        for (i = 0; i != len; i++) {
+                                char c;
+
+                                if (get_user(c, data + i))
+                                        return -EFAULT;
+                                if (c == 'V')
+                                        expect_close = 1;
+                        }
+                }
+                /* Refresh watchdog timer. */
+                watchdog_alive(0);
+        }
+ 
+        return len;
+}
+
+static int wdt_open(struct inode *inode, struct file *file)
+{
+        if (test_and_set_bit(0, &wdt_is_open))
+                return -EBUSY;
+	watchdog_enable();
+
+        return 0;
+}
+
+static int wdt_close(struct inode *inode, struct file *file)
+{
+        if (expect_close == 1) {
+		watchdog_disable();
+        } else {
+                printk(KERN_CRIT "Unexpected close, watchdog will be triggered!\n");
+                watchdog_alive(0);
+        }
+
+        clear_bit(0, &wdt_is_open);
+        expect_close = 0;
+
+        return 0;
+}
+#endif
+
 
 static struct file_operations watchdog_fops = {
-  owner:          THIS_MODULE,
+	.owner		= THIS_MODULE,
+#ifdef CONFIG_M532x
+	write:		wdt_write,
+	open:		wdt_open,
+	release:	wdt_close,
+#endif
 };
 
 static struct miscdevice watchdog_miscdev = {
-  minor:          WATCHDOG_MINOR,
-  name:           "watchdog",
-  fops:           &watchdog_fops,
+	.minor	= WATCHDOG_MINOR,
+	.name	= "watchdog",
+	.fops	= &watchdog_fops,
 };
 
 /***************************************************************************/
@@ -116,7 +182,9 @@ void watchdog_enable(void)
 	volatile unsigned char	*mbar = (volatile unsigned char *) MCF_MBAR;
 	*(mbar + MCFSIM_SWSR) = 0x55;
 	*(mbar + MCFSIM_SWSR) = 0xaa; // kick watchdog
-
+#ifdef CONFIG_M532x
+	*(volatile unsigned short *)(MCFSIM_CWCR) = 0x01a0 | 30;  /* timeout = 2^30, CWRI= 01*/
+#else
 	/*
 	  SYPCR Can only be written once after system reset!
 	  0x80 Software Watchdog, 0="Disable" / 1="Enable"
@@ -143,6 +211,7 @@ void watchdog_enable(void)
 	*(mbar + MCFSIM_SYPCR) = 0xbe; // level 7 interrupt, 2^22
 #endif /* RESET_ON_SWTR */
 #endif /* CONFIG_OLDMASK */
+#endif
 #endif /* CONFIG_M5272 */
 }
 
@@ -162,6 +231,10 @@ void watchdog_disable(void)
 	*/
 	*(mbar + MCFSIM_SWSR) = 0x55;
 	*(mbar + MCFSIM_SWSR) = 0xaa;
+#ifdef CONFIG_M532x
+	*(volatile unsigned short *)(MCFSIM_CWCR) &= ~0x0080;  /* disable */
+	return;
+#endif
 #if 0
 	/*
 	  SYPCR Can only be written once after system reset!
@@ -201,7 +274,8 @@ static struct notifier_block watchdog_notifier = {
  *	we just do a process dump. For old broken 5307 we need to verify
  *	if this was a real watchdog event or not...
  */
-void watchdog_timeout(int irq, void *dummy, struct pt_regs *fp)
+#ifndef CONFIG_M532x
+static irqreturn_t watchdog_timeout(int irq, void *dummy, struct pt_regs *fp)
 {
 #ifdef CONFIG_OLDMASK
 #define	TIMEDELAY	45
@@ -243,7 +317,7 @@ void watchdog_timeout(int irq, void *dummy, struct pt_regs *fp)
 
 	  printk("mcfwatchdog: expired!\n");
 #ifndef MODULE
-	  dump(fp);
+	dump(fp);
 #endif
 	  mcf_setimr(mcf_getimr() | MCFSIM_IMR_SWD);
 	  HARD_RESET_NOW();
@@ -255,13 +329,16 @@ void watchdog_timeout(int irq, void *dummy, struct pt_regs *fp)
 	}
 #endif /* RESET_ON_SWTR */
 #endif /* CONFIG_OLDMASK */
+	return IRQ_HANDLED;
 }
-
+#endif
 /***************************************************************************/
 
 static int __init watchdog_init(void)
 {
+#ifndef CONFIG_M532x
 	printk("mcfwatchdog: initializing at vector=%d\n", IRQ_WATCHDOG);
+#endif
 
         if(misc_register(&watchdog_miscdev))
 		return -ENODEV;
@@ -271,6 +348,7 @@ static int __init watchdog_init(void)
 		return 1;
 	}
 
+#ifndef CONFIG_M532x
 	request_irq(IRQ_WATCHDOG, watchdog_timeout, SA_INTERRUPT,
 		    "Watchdog Timer", &watchdog_miscdev);
 
@@ -278,6 +356,7 @@ static int __init watchdog_init(void)
 	watchdog_timerlist.function = watchdog_alive;
  	watchdog_timerlist.expires = (jiffies + 1);
 	add_timer(&watchdog_timerlist);
+#endif
 
 #ifdef CONFIG_M5272
 {
@@ -287,6 +366,12 @@ static int __init watchdog_init(void)
 	watchdog_enable();
 }
 #else  /* CONFIG_M5272 */
+#ifdef CONFIG_M532x
+{
+	printk("mcfwatchdog: Installed\n");
+
+}
+#else  /* CONFIG_M532x */
 {
 	volatile unsigned char	*mbar = (volatile unsigned char *) MCF_MBAR;
 	unsigned char ch;
@@ -312,9 +397,10 @@ static int __init watchdog_init(void)
 #ifdef MODULE
 	if(*(mbar + MCFSIM_SYPCR) & 0x40) {
 	  printk("mcfwatchdog: Warning: If module is unloaded, Watchdog will reset card.\n");
-}
+	}
 #endif
 }
+#endif /* CONFIG_M532x */
 #endif /* CONFIG_M5272 */
 	return 0;
 }
@@ -348,9 +434,11 @@ void watchdog_alive(unsigned long arg)
 	*(mbar + MCFSIM_SWSR) = 0x55;
 	*(mbar + MCFSIM_SWSR) = 0xaa; // kick watchdog
 #endif
+#ifndef CONFIG_M532x
 	/* Re-arm the watchdog alive poll */
 	mod_timer(&watchdog_timerlist, jiffies+TIMEPOLL);
 	watchdog_overflows = 0;
+#endif
 }
 
 /***************************************************************************/

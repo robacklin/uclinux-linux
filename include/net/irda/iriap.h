@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -29,11 +29,10 @@
 #include <linux/types.h>
 #include <linux/skbuff.h>
 
-#include <net/irda/qos.h>
 #include <net/irda/iriap_event.h>
 #include <net/irda/irias_object.h>
-#include <net/irda/irqueue.h>
-#include <net/irda/timer.h>
+#include <net/irda/irqueue.h>		/* irda_queue_t */
+#include <net/irda/timer.h>		/* struct timer_list */
 
 #define IAP_LST 0x80
 #define IAP_ACK 0x40
@@ -67,7 +66,7 @@ struct iriap_cb {
 	__u32        daddr;
 	__u8         operation;
 
-	struct sk_buff *skb;
+	struct sk_buff *request_skb;
 	struct lsap_cb *lsap;
 	__u8 slsap_sel;
 
@@ -98,21 +97,11 @@ void iriap_close(struct iriap_cb *self);
 int iriap_getvaluebyclass_request(struct iriap_cb *self, 
 				  __u32 saddr, __u32 daddr,
 				  char *name, char *attr);
-void iriap_getvaluebyclass_confirm(struct iriap_cb *self, struct sk_buff *skb);
 void iriap_connect_request(struct iriap_cb *self);
 void iriap_send_ack( struct iriap_cb *self);
 void iriap_call_indication(struct iriap_cb *self, struct sk_buff *skb);
 
 void iriap_register_server(void);
-
-void iriap_watchdog_timer_expired(void *data);
-
-static inline void iriap_start_watchdog_timer(struct iriap_cb *self, 
-					      int timeout) 
-{
-	irda_start_timer(&self->watchdog_timer, timeout, self, 
-			 iriap_watchdog_timer_expired);
-}
 
 #endif
 

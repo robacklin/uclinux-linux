@@ -8,13 +8,16 @@
  *
  * Copyright (C) 2000-2001, 2003 Hewlett-Packard Co
  *	Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 2004 Intel Corporation
+ *  Ashok Raj <ashok.raj@intel.com>
  *
  * 05/26/2000	S.Eranian	initial release
  * 08/21/2000	S.Eranian	updated to July 2000 PAL specs
  * 02/05/2001   S.Eranian	fixed module support
  * 10/23/2001	S.Eranian	updated pal_perf_mon_info bug fixes
+ * 03/24/2004	Ashok Raj	updated to work with CPU Hotplug
+ * 10/26/2006   Russ Anderson	updated processor features to rev 2.2 spec
  */
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/init.h>
@@ -22,6 +25,9 @@
 #include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/efi.h>
+#include <linux/notifier.h>
+#include <linux/cpu.h>
+#include <linux/cpumask.h>
 
 #include <asm/pal.h>
 #include <asm/sal.h>
@@ -212,10 +218,10 @@ static int
 cache_info(char *page)
 {
 	char *p = page;
-	u64 i, levels, unique_caches;
+	unsigned long i, levels, unique_caches;
 	pal_cache_config_info_t cci;
 	int j, k;
-	s64 status;
+	long status;
 
 	if ((status = ia64_pal_cache_summary(&levels, &unique_caches)) != 0) {
 		printk(KERN_ERR "ia64_pal_cache_summary=%ld\n", status);
@@ -234,7 +240,7 @@ cache_info(char *page)
 			}
 			p += sprintf(p,
 				     "%s Cache level %lu:\n"
-				     "\tSize           : %lu bytes\n"
+				     "\tSize           : %u bytes\n"
 				     "\tAttributes     : ",
 				     cache_types[j+cci.pcci_unified], i+1,
 				     cci.pcci_cache_size);
@@ -297,108 +303,120 @@ vm_info(char *page)
 	ia64_ptce_info_t ptce;
 	const char *sep;
 	int i, j;
-	s64 status;
+	long status;
 
 	if ((status = ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
 		printk(KERN_ERR "ia64_pal_vm_summary=%ld\n", status);
-		return 0;
-	}
+	} else {
 
-
-	p += sprintf(p,
+		p += sprintf(p,
 		     "Physical Address Space         : %d bits\n"
 		     "Virtual Address Space          : %d bits\n"
 		     "Protection Key Registers(PKR)  : %d\n"
 		     "Implemented bits in PKR.key    : %d\n"
 		     "Hash Tag ID                    : 0x%x\n"
-		     "Size of RR.rid                 : %d\n",
+		     "Size of RR.rid                 : %d\n"
+		     "Max Purges                     : ",
 		     vm_info_1.pal_vm_info_1_s.phys_add_size,
-		     vm_info_2.pal_vm_info_2_s.impl_va_msb+1, vm_info_1.pal_vm_info_1_s.max_pkr+1,
-		     vm_info_1.pal_vm_info_1_s.key_size, vm_info_1.pal_vm_info_1_s.hash_tag_id,
+		     vm_info_2.pal_vm_info_2_s.impl_va_msb+1,
+		     vm_info_1.pal_vm_info_1_s.max_pkr+1,
+		     vm_info_1.pal_vm_info_1_s.key_size,
+		     vm_info_1.pal_vm_info_1_s.hash_tag_id,
 		     vm_info_2.pal_vm_info_2_s.rid_size);
-
-	if (ia64_pal_mem_attrib(&attrib) != 0)
-		return 0;
-
-	p += sprintf(p, "Supported memory attributes    : ");
-	sep = "";
-	for (i = 0; i < 8; i++) {
-		if (attrib & (1 << i)) {
-			p += sprintf(p, "%s%s", sep, mem_attrib[i]);
-			sep = ", ";
-		}
+		if (vm_info_2.pal_vm_info_2_s.max_purges == PAL_MAX_PURGES)
+			p += sprintf(p, "unlimited\n");
+		else
+			p += sprintf(p, "%d\n",
+		     		vm_info_2.pal_vm_info_2_s.max_purges ?
+				vm_info_2.pal_vm_info_2_s.max_purges : 1);
 	}
-	p += sprintf(p, "\n");
+
+	if (ia64_pal_mem_attrib(&attrib) == 0) {
+		p += sprintf(p, "Supported memory attributes    : ");
+		sep = "";
+		for (i = 0; i < 8; i++) {
+			if (attrib & (1 << i)) {
+				p += sprintf(p, "%s%s", sep, mem_attrib[i]);
+				sep = ", ";
+			}
+		}
+		p += sprintf(p, "\n");
+	}
 
 	if ((status = ia64_pal_vm_page_size(&tr_pages, &vw_pages)) !=0) {
 		printk(KERN_ERR "ia64_pal_vm_page_size=%ld\n", status);
-		return 0;
+	} else {
+
+		p += sprintf(p,
+			     "\nTLB walker                     : %simplemented\n"
+			     "Number of DTR                  : %d\n"
+			     "Number of ITR                  : %d\n"
+			     "TLB insertable page sizes      : ",
+			     vm_info_1.pal_vm_info_1_s.vw ? "" : "not ",
+			     vm_info_1.pal_vm_info_1_s.max_dtr_entry+1,
+			     vm_info_1.pal_vm_info_1_s.max_itr_entry+1);
+
+
+		p = bitvector_process(p, tr_pages);
+
+		p += sprintf(p, "\nTLB purgeable page sizes       : ");
+
+		p = bitvector_process(p, vw_pages);
 	}
-
-	p += sprintf(p,
-		     "\nTLB walker                     : %simplemented\n"
-		     "Number of DTR                  : %d\n"
-		     "Number of ITR                  : %d\n"
-		     "TLB insertable page sizes      : ",
-		     vm_info_1.pal_vm_info_1_s.vw ? "" : "not ",
-		     vm_info_1.pal_vm_info_1_s.max_dtr_entry+1,
-		     vm_info_1.pal_vm_info_1_s.max_itr_entry+1);
-
-
-	p = bitvector_process(p, tr_pages);
-
-	p += sprintf(p, "\nTLB purgeable page sizes       : ");
-
-	p = bitvector_process(p, vw_pages);
-
 	if ((status=ia64_get_ptce(&ptce)) != 0) {
 		printk(KERN_ERR "ia64_get_ptce=%ld\n", status);
-		return 0;
-	}
-
-	p += sprintf(p,
+	} else {
+		p += sprintf(p,
 		     "\nPurge base address             : 0x%016lx\n"
 		     "Purge outer loop count         : %d\n"
 		     "Purge inner loop count         : %d\n"
 		     "Purge outer loop stride        : %d\n"
 		     "Purge inner loop stride        : %d\n",
-		     ptce.base, ptce.count[0], ptce.count[1], ptce.stride[0], ptce.stride[1]);
+		     ptce.base, ptce.count[0], ptce.count[1],
+		     ptce.stride[0], ptce.stride[1]);
 
-	p += sprintf(p,
+		p += sprintf(p,
 		     "TC Levels                      : %d\n"
 		     "Unique TC(s)                   : %d\n",
 		     vm_info_1.pal_vm_info_1_s.num_tc_levels,
 		     vm_info_1.pal_vm_info_1_s.max_unique_tcs);
 
-	for(i=0; i < vm_info_1.pal_vm_info_1_s.num_tc_levels; i++) {
-		for (j=2; j>0 ; j--) {
-			tc_pages = 0; /* just in case */
+		for(i=0; i < vm_info_1.pal_vm_info_1_s.num_tc_levels; i++) {
+			for (j=2; j>0 ; j--) {
+				tc_pages = 0; /* just in case */
 
 
-			/* even without unification, some levels may not be present */
-			if ((status=ia64_pal_vm_info(i,j, &tc_info, &tc_pages)) != 0) {
-				continue;
-			}
+				/* even without unification, some levels may not be present */
+				if ((status=ia64_pal_vm_info(i,j, &tc_info, &tc_pages)) != 0) {
+					continue;
+				}
 
-			p += sprintf(p,
+				p += sprintf(p,
 				     "\n%s Translation Cache Level %d:\n"
 				     "\tHash sets           : %d\n"
 				     "\tAssociativity       : %d\n"
 				     "\tNumber of entries   : %d\n"
 				     "\tFlags               : ",
-				     cache_types[j+tc_info.tc_unified], i+1, tc_info.tc_num_sets,
-				     tc_info.tc_associativity, tc_info.tc_num_entries);
+				     cache_types[j+tc_info.tc_unified], i+1,
+				     tc_info.tc_num_sets,
+				     tc_info.tc_associativity,
+				     tc_info.tc_num_entries);
 
-			if (tc_info.tc_pf) p += sprintf(p, "PreferredPageSizeOptimized ");
-			if (tc_info.tc_unified) p += sprintf(p, "Unified ");
-			if (tc_info.tc_reduce_tr) p += sprintf(p, "TCReduction");
+				if (tc_info.tc_pf)
+					p += sprintf(p, "PreferredPageSizeOptimized ");
+				if (tc_info.tc_unified)
+					p += sprintf(p, "Unified ");
+				if (tc_info.tc_reduce_tr)
+					p += sprintf(p, "TCReduction");
 
-			p += sprintf(p, "\n\tSupported page sizes: ");
+				p += sprintf(p, "\n\tSupported page sizes: ");
 
-			p = bitvector_process(p, tc_pages);
+				p = bitvector_process(p, tc_pages);
 
-			/* when unified date (j=2) is enough */
-			if (tc_info.tc_unified) break;
+				/* when unified date (j=2) is enough */
+				if (tc_info.tc_unified)
+					break;
+			}
 		}
 	}
 	p += sprintf(p, "\n");
@@ -413,10 +431,10 @@ register_info(char *page)
 	char *p = page;
 	u64 reg_info[2];
 	u64 info;
-	u64 phys_stacked;
+	unsigned long phys_stacked;
 	pal_hints_u_t hints;
-	u64 iregs, dregs;
-	char *info_type[]={
+	unsigned long iregs, dregs;
+	static const char * const info_type[] = {
 		"Implemented AR(s)",
 		"AR(s) with read side-effects",
 		"Implemented CR(s)",
@@ -434,14 +452,14 @@ register_info(char *page)
 		p += sprintf(p, "\n");
 	}
 
-	if (ia64_pal_rse_info(&phys_stacked, &hints) != 0) return 0;
+	if (ia64_pal_rse_info(&phys_stacked, &hints) == 0) {
 
 	p += sprintf(p,
 		     "RSE stacked physical registers   : %ld\n"
 		     "RSE load/store hints             : %ld (%s)\n",
 		     phys_stacked, hints.ph_data,
-		     hints.ph_data < RSE_HINTS_COUNT ? rse_hints[hints.ph_data]: "(\?\?)");
-
+		     hints.ph_data < RSE_HINTS_COUNT ? rse_hints[hints.ph_data]: "(??)");
+	}
 	if (ia64_pal_debug_info(&iregs, &dregs))
 		return 0;
 
@@ -452,12 +470,16 @@ register_info(char *page)
 	return p - page;
 }
 
-static const char *proc_features[]={
+static char *proc_features_0[]={		/* Feature set 0 */
 	NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
 	NULL,NULL,NULL,NULL,NULL,NULL,NULL, NULL,NULL,
 	NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,
 	NULL,NULL,NULL,NULL,NULL, NULL,NULL,NULL,NULL,
-	NULL,NULL,NULL,NULL,NULL,
+	"Unimplemented instruction address fault",
+	"INIT, PMI, and LINT pins",
+	"Simple unimplemented instr addresses",
+	"Variable P-state performance",
+	"Virtual machine features implemented",
 	"XIP,XPSR,XFS implemented",
 	"XR1-XR3 implemented",
 	"Disable dynamic predicate prediction",
@@ -465,7 +487,11 @@ static const char *proc_features[]={
 	"Disable dynamic data cache prefetch",
 	"Disable dynamic inst cache prefetch",
 	"Disable dynamic branch prediction",
-	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL,
+	"Disable P-states",
+	"Enable MCA on Data Poisoning",
+	"Enable vmsw instruction",
+	"Enable extern environmental notification",
 	"Disable BINIT on processor time-out",
 	"Disable dynamic power management (DPM)",
 	"Disable coherency",
@@ -476,25 +502,92 @@ static const char *proc_features[]={
 	"Enable BERR promotion"
 };
 
+static char *proc_features_16[]={		/* Feature set 16 */
+	"Disable ETM",
+	"Enable ETM",
+	"Enable MCA on half-way timer",
+	"Enable snoop WC",
+	NULL,
+	"Enable Fast Deferral",
+	"Disable MCA on memory aliasing",
+	"Enable RSB",
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	"DP system processor",
+	"Low Voltage",
+	"HT supported",
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL, NULL
+};
+
+static char **proc_features[]={
+	proc_features_0,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NULL, NULL, NULL, NULL,
+	proc_features_16,
+	NULL, NULL, NULL, NULL,
+};
+
+static char * feature_set_info(char *page, u64 avail, u64 status, u64 control,
+							unsigned long set)
+{
+	char *p = page;
+	char **vf, **v;
+	int i;
+
+	vf = v = proc_features[set];
+	for(i=0; i < 64; i++, avail >>=1, status >>=1, control >>=1) {
+
+		if (!(control))		/* No remaining bits set */
+			break;
+		if (!(avail & 0x1))	/* Print only bits that are available */
+			continue;
+		if (vf)
+			v = vf + i;
+		if ( v && *v ) {
+			p += sprintf(p, "%-40s : %s %s\n", *v,
+				avail & 0x1 ? (status & 0x1 ?
+						"On " : "Off"): "",
+				avail & 0x1 ? (control & 0x1 ?
+						"Ctrl" : "NoCtrl"): "");
+		} else {
+			p += sprintf(p, "Feature set %2ld bit %2d\t\t\t"
+					" : %s %s\n",
+				set, i,
+				avail & 0x1 ? (status & 0x1 ?
+						"On " : "Off"): "",
+				avail & 0x1 ? (control & 0x1 ?
+						"Ctrl" : "NoCtrl"): "");
+		}
+	}
+	return p;
+}
 
 static int
 processor_info(char *page)
 {
 	char *p = page;
-	const char **v = proc_features;
-	u64 avail=1, status=1, control=1;
-	int i;
+	u64 avail=1, status=1, control=1, feature_set=0;
 	s64 ret;
 
-	if ((ret=ia64_pal_proc_get_features(&avail, &status, &control)) != 0) return 0;
+	do {
+		ret = ia64_pal_proc_get_features(&avail, &status, &control,
+						feature_set);
+		if (ret < 0) {
+			return p - page;
+		}
+		if (ret == 1) {
+			feature_set++;
+			continue;
+		}
 
-	for(i=0; i < 64; i++, v++,avail >>=1, status >>=1, control >>=1) {
-		if ( ! *v ) continue;
-		p += sprintf(p, "%-40s : %s%s %s\n", *v,
-				avail & 0x1 ? "" : "NotImpl",
-				avail & 0x1 ? (status & 0x1 ? "On" : "Off"): "",
-				avail & 0x1 ? (control & 0x1 ? "Ctrl" : "NoCtrl"): "");
-	}
+		p = feature_set_info(p, avail, status, control, feature_set);
+
+		feature_set++;
+	} while(1);
+
 	return p - page;
 }
 
@@ -556,29 +649,23 @@ version_info(char *page)
 	pal_version_u_t min_ver, cur_ver;
 	char *p = page;
 
-	/* The PAL_VERSION call is advertised as being able to support
-	 * both physical and virtual mode calls. This seems to be a documentation
-	 * bug rather than firmware bug. In fact, it does only support physical mode.
-	 * So now the code reflects this fact and the pal_version() has been updated
-	 * accordingly.
-	 */
-	if (ia64_pal_version(&min_ver, &cur_ver) != 0) return 0;
+	if (ia64_pal_version(&min_ver, &cur_ver) != 0)
+		return 0;
 
 	p += sprintf(p,
 		     "PAL_vendor : 0x%02x (min=0x%02x)\n"
-		     "PAL_A      : %x.%x.%x (min=%x.%x.%x)\n"
-		     "PAL_B      : %x.%x.%x (min=%x.%x.%x)\n",
-		     cur_ver.pal_version_s.pv_pal_vendor, min_ver.pal_version_s.pv_pal_vendor,
-
-		     cur_ver.pal_version_s.pv_pal_a_model>>4,
-		     cur_ver.pal_version_s.pv_pal_a_model&0xf, cur_ver.pal_version_s.pv_pal_a_rev,
-		     min_ver.pal_version_s.pv_pal_a_model>>4,
-		     min_ver.pal_version_s.pv_pal_a_model&0xf, min_ver.pal_version_s.pv_pal_a_rev,
-
-		     cur_ver.pal_version_s.pv_pal_b_model>>4,
-		     cur_ver.pal_version_s.pv_pal_b_model&0xf, cur_ver.pal_version_s.pv_pal_b_rev,
-		     min_ver.pal_version_s.pv_pal_b_model>>4,
-		     min_ver.pal_version_s.pv_pal_b_model&0xf, min_ver.pal_version_s.pv_pal_b_rev);
+		     "PAL_A      : %02x.%02x (min=%02x.%02x)\n"
+		     "PAL_B      : %02x.%02x (min=%02x.%02x)\n",
+		     cur_ver.pal_version_s.pv_pal_vendor,
+		     min_ver.pal_version_s.pv_pal_vendor,
+		     cur_ver.pal_version_s.pv_pal_a_model,
+		     cur_ver.pal_version_s.pv_pal_a_rev,
+		     min_ver.pal_version_s.pv_pal_a_model,
+		     min_ver.pal_version_s.pv_pal_a_rev,
+		     cur_ver.pal_version_s.pv_pal_b_model,
+		     cur_ver.pal_version_s.pv_pal_b_rev,
+		     min_ver.pal_version_s.pv_pal_b_model,
+		     min_ver.pal_version_s.pv_pal_b_rev);
 	return p - page;
 }
 
@@ -627,7 +714,7 @@ frequency_info(char *page)
 {
 	char *p = page;
 	struct pal_freq_ratio proc, itc, bus;
-	u64 base;
+	unsigned long base;
 
 	if (ia64_pal_freq_base(&base) == -1)
 		p += sprintf(p, "Output clock            : not implemented\n");
@@ -637,9 +724,9 @@ frequency_info(char *page)
 	if (ia64_pal_freq_ratios(&proc, &bus, &itc) != 0) return 0;
 
 	p += sprintf(p,
-		     "Processor/Clock ratio   : %ld/%ld\n"
-		     "Bus/Clock ratio         : %ld/%ld\n"
-		     "ITC/Clock ratio         : %ld/%ld\n",
+		     "Processor/Clock ratio   : %d/%d\n"
+		     "Bus/Clock ratio         : %d/%d\n"
+		     "ITC/Clock ratio         : %d/%d\n",
 		     proc.num, proc.den, bus.num, bus.den, itc.num, itc.den);
 
 	return p - page;
@@ -649,43 +736,43 @@ static int
 tr_info(char *page)
 {
 	char *p = page;
-	s64 status;
+	long status;
 	pal_tr_valid_u_t tr_valid;
 	u64 tr_buffer[4];
 	pal_vm_info_1_u_t vm_info_1;
 	pal_vm_info_2_u_t vm_info_2;
-	u64 i, j;
-	u64 max[3], pgm;
+	unsigned long i, j;
+	unsigned long max[3], pgm;
 	struct ifa_reg {
-		u64 valid:1;
-		u64 ig:11;
-		u64 vpn:52;
+		unsigned long valid:1;
+		unsigned long ig:11;
+		unsigned long vpn:52;
 	} *ifa_reg;
 	struct itir_reg {
-		u64 rv1:2;
-		u64 ps:6;
-		u64 key:24;
-		u64 rv2:32;
+		unsigned long rv1:2;
+		unsigned long ps:6;
+		unsigned long key:24;
+		unsigned long rv2:32;
 	} *itir_reg;
 	struct gr_reg {
-		u64 p:1;
-		u64 rv1:1;
-		u64 ma:3;
-		u64 a:1;
-		u64 d:1;
-		u64 pl:2;
-		u64 ar:3;
-		u64 ppn:38;
-		u64 rv2:2;
-		u64 ed:1;
-		u64 ig:11;
+		unsigned long p:1;
+		unsigned long rv1:1;
+		unsigned long ma:3;
+		unsigned long a:1;
+		unsigned long d:1;
+		unsigned long pl:2;
+		unsigned long ar:3;
+		unsigned long ppn:38;
+		unsigned long rv2:2;
+		unsigned long ed:1;
+		unsigned long ig:11;
 	} *gr_reg;
 	struct rid_reg {
-		u64 ig1:1;
-		u64 rv1:1;
-		u64 ig2:6;
-		u64 rid:24;
-		u64 rv2:32;
+		unsigned long ig1:1;
+		unsigned long rv1:1;
+		unsigned long ig2:6;
+		unsigned long rid:24;
+		unsigned long rv2:32;
 	} *rid_reg;
 
 	if ((status = ia64_pal_vm_summary(&vm_info_1, &vm_info_2)) !=0) {
@@ -768,13 +855,12 @@ static palinfo_entry_t palinfo_entries[]={
  * does not do recursion of deletion
  *
  * Notes:
- *	- first +1 accounts for the cpuN entry
- *	- second +1 account for toplevel palinfo
- *
+ *	- +1 accounts for the cpuN directory entry in /proc/pal
  */
-#define NR_PALINFO_PROC_ENTRIES	(NR_CPUS*(NR_PALINFO_ENTRIES+1)+1)
+#define NR_PALINFO_PROC_ENTRIES	(NR_CPUS*(NR_PALINFO_ENTRIES+1))
 
 static struct proc_dir_entry *palinfo_proc_entries[NR_PALINFO_PROC_ENTRIES];
+static struct proc_dir_entry *palinfo_dir;
 
 /*
  * This data structure is used to pass which cpu,function is being requested
@@ -814,12 +900,6 @@ static void
 palinfo_smp_call(void *info)
 {
 	palinfo_smp_data_t *data = (palinfo_smp_data_t *)info;
-	if (data == NULL) {
-		printk(KERN_ERR "palinfo: data pointer is NULL\n");
-		data->ret = 0; /* no output */
-		return;
-	}
-	/* does this actual call */
 	data->ret = (*data->func)(data->page);
 }
 
@@ -841,7 +921,7 @@ int palinfo_handle_smp(pal_func_cpu_u_t *f, char *page)
 
 
 	/* will send IPI to other CPU and wait for completion of remote call */
-	if ((ret=smp_call_function_single(f->req_cpu, palinfo_smp_call, &ptr, 0, 1))) {
+	if ((ret=smp_call_function_single(f->req_cpu, palinfo_smp_call, &ptr, 1))) {
 		printk(KERN_ERR "palinfo: remote CPU call from %d to %d on function %d: "
 		       "error %d\n", smp_processor_id(), f->req_cpu, f->func_id, ret);
 		return 0;
@@ -866,15 +946,16 @@ palinfo_read_entry(char *page, char **start, off_t off, int count, int *eof, voi
 	int len=0;
 	pal_func_cpu_u_t *f = (pal_func_cpu_u_t *)&data;
 
-	MOD_INC_USE_COUNT;
 	/*
 	 * in SMP mode, we may need to call another CPU to get correct
 	 * information. PAL, by definition, is processor specific
 	 */
-	if (f->req_cpu == smp_processor_id())
+	if (f->req_cpu == get_cpu())
 		len = (*palinfo_entries[f->func_id].proc_read)(page);
 	else
 		len = palinfo_handle_smp(f, page);
+
+	put_cpu();
 
 	if (len <= off+count) *eof = 1;
 
@@ -884,50 +965,107 @@ palinfo_read_entry(char *page, char **start, off_t off, int count, int *eof, voi
 	if (len>count) len = count;
 	if (len<0) len = 0;
 
-	MOD_DEC_USE_COUNT;
-
 	return len;
 }
 
-static int __init
-palinfo_init(void)
+static void __cpuinit
+create_palinfo_proc_entries(unsigned int cpu)
 {
 #	define CPUSTR	"cpu%d"
 
 	pal_func_cpu_u_t f;
-	struct proc_dir_entry **pdir = palinfo_proc_entries;
-	struct proc_dir_entry *palinfo_dir, *cpu_dir;
-	int i, j;
+	struct proc_dir_entry **pdir;
+	struct proc_dir_entry *cpu_dir;
+	int j;
 	char cpustr[sizeof(CPUSTR)];
 
-	printk(KERN_INFO "PAL Information Facility v%s\n", PALINFO_VERSION);
-
-	palinfo_dir = proc_mkdir("pal", NULL);
 
 	/*
 	 * we keep track of created entries in a depth-first order for
 	 * cleanup purposes. Each entry is stored into palinfo_proc_entries
 	 */
-	for (i=0; i < NR_CPUS; i++) {
+	sprintf(cpustr,CPUSTR, cpu);
 
-		if (!cpu_online(i)) continue;
+	cpu_dir = proc_mkdir(cpustr, palinfo_dir);
 
-		sprintf(cpustr,CPUSTR, i);
+	f.req_cpu = cpu;
 
-		cpu_dir = proc_mkdir(cpustr, palinfo_dir);
-
-		f.req_cpu = i;
-
-		for (j=0; j < NR_PALINFO_ENTRIES; j++) {
-			f.func_id = j;
-			*pdir = create_proc_read_entry(
-					palinfo_entries[j].name, 0, cpu_dir,
-					palinfo_read_entry, (void *)f.value);
-			pdir++;
-		}
-		*pdir++ = cpu_dir;
+	/*
+	 * Compute the location to store per cpu entries
+	 * We dont store the top level entry in this list, but
+	 * remove it finally after removing all cpu entries.
+	 */
+	pdir = &palinfo_proc_entries[cpu*(NR_PALINFO_ENTRIES+1)];
+	*pdir++ = cpu_dir;
+	for (j=0; j < NR_PALINFO_ENTRIES; j++) {
+		f.func_id = j;
+		*pdir = create_proc_read_entry(
+				palinfo_entries[j].name, 0, cpu_dir,
+				palinfo_read_entry, (void *)f.value);
+		pdir++;
 	}
-	*pdir = palinfo_dir;
+}
+
+static void
+remove_palinfo_proc_entries(unsigned int hcpu)
+{
+	int j;
+	struct proc_dir_entry *cpu_dir, **pdir;
+
+	pdir = &palinfo_proc_entries[hcpu*(NR_PALINFO_ENTRIES+1)];
+	cpu_dir = *pdir;
+	*pdir++=NULL;
+	for (j=0; j < (NR_PALINFO_ENTRIES); j++) {
+		if ((*pdir)) {
+			remove_proc_entry ((*pdir)->name, cpu_dir);
+			*pdir ++= NULL;
+		}
+	}
+
+	if (cpu_dir) {
+		remove_proc_entry(cpu_dir->name, palinfo_dir);
+	}
+}
+
+static int __cpuinit palinfo_cpu_callback(struct notifier_block *nfb,
+					unsigned long action, void *hcpu)
+{
+	unsigned int hotcpu = (unsigned long)hcpu;
+
+	switch (action) {
+	case CPU_ONLINE:
+	case CPU_ONLINE_FROZEN:
+		create_palinfo_proc_entries(hotcpu);
+		break;
+	case CPU_DEAD:
+	case CPU_DEAD_FROZEN:
+		remove_palinfo_proc_entries(hotcpu);
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block __refdata palinfo_cpu_notifier =
+{
+	.notifier_call = palinfo_cpu_callback,
+	.priority = 0,
+};
+
+static int __init
+palinfo_init(void)
+{
+	int i = 0;
+
+	printk(KERN_INFO "PAL Information Facility v%s\n", PALINFO_VERSION);
+	palinfo_dir = proc_mkdir("pal", NULL);
+
+	/* Create palinfo dirs in /proc for all online cpus */
+	for_each_online_cpu(i) {
+		create_palinfo_proc_entries(i);
+	}
+
+	/* Register for future delivery via notify registration */
+	register_hotcpu_notifier(&palinfo_cpu_notifier);
 
 	return 0;
 }
@@ -938,10 +1076,19 @@ palinfo_exit(void)
 	int i = 0;
 
 	/* remove all nodes: depth first pass. Could optimize this  */
-	for (i=0; i< NR_PALINFO_PROC_ENTRIES ; i++) {
-		if (palinfo_proc_entries[i])
-			remove_proc_entry (palinfo_proc_entries[i]->name, NULL);
+	for_each_online_cpu(i) {
+		remove_palinfo_proc_entries(i);
 	}
+
+	/*
+	 * Remove the top level entry finally
+	 */
+	remove_proc_entry(palinfo_dir->name, NULL);
+
+	/*
+	 * Unregister from cpu notifier callbacks
+	 */
+	unregister_hotcpu_notifier(&palinfo_cpu_notifier);
 }
 
 module_init(palinfo_init);

@@ -1,4 +1,4 @@
-/* $Id: isdnif.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
+/* $Id: isdnif.h,v 1.43.2.2 2004/01/12 23:08:35 keil Exp $
  *
  * Linux ISDN subsystem
  * Definition of the interface between the subsystem and its low-level drivers.
@@ -54,7 +54,6 @@
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <linux/skbuff.h>
 
 /***************************************************************************/
@@ -62,7 +61,7 @@
 /*                                                                         */ 
 /* The proceed command holds a incoming call in a state to leave processes */
 /* enough time to check whether ist should be accepted.                    */
-/* The PROT_IO Command extends the interface to make protocol dependant    */
+/* The PROT_IO Command extends the interface to make protocol dependent    */
 /* features available (call diversion, call waiting...).                   */
 /*                                                                         */ 
 /* The PROT_IO Command is executed with the desired driver id and the arg  */
@@ -173,8 +172,8 @@ typedef struct
 #define ISDN_CMD_GETL2   11       /* Get B-Chan. Layer2-Parameter          */
 #define ISDN_CMD_SETL3   12       /* Set B-Chan. Layer3-Parameter          */
 #define ISDN_CMD_GETL3   13       /* Get B-Chan. Layer3-Parameter          */
-#define ISDN_CMD_LOCK    14       /* Signal usage by upper levels          */
-#define ISDN_CMD_UNLOCK  15       /* Release usage-lock                    */
+// #define ISDN_CMD_LOCK    14       /* Signal usage by upper levels          */
+// #define ISDN_CMD_UNLOCK  15       /* Release usage-lock                    */
 #define ISDN_CMD_SUSPEND 16       /* Suspend connection                    */
 #define ISDN_CMD_RESUME  17       /* Resume connection                     */
 #define ISDN_CMD_PROCEED 18       /* Proceed with call establishment       */
@@ -318,7 +317,7 @@ typedef struct T30_s {
 	__u8 r_scantime;
 	__u8 r_id[FAXIDLEN];
 	__u8 r_code;
-} T30_s;
+} __packed T30_s;
 
 #define ISDN_TTY_FAX_CONN_IN	0
 #define ISDN_TTY_FAX_CONN_OUT	1
@@ -436,6 +435,8 @@ typedef struct {
  *
  */
 typedef struct {
+  struct module *owner;
+
   /* Number of channels supported by this driver
    */
   int channels;
@@ -500,26 +501,18 @@ typedef struct {
    * Parameters:
    *             u_char pointer data
    *             int    length of data
-   *             int    Flag: 0 = Call form Kernel-Space (use memcpy,
-   *                              no schedule allowed) 
-   *                          1 = Data is in User-Space (use memcpy_fromfs,
-   *                              may schedule)
    *             int    driverId
    *             int    local channel-number (0 ...)
    */
-  int (*writecmd)(const u_char*, int, int, int, int);
+  int (*writecmd)(const u_char __user *, int, int, int);
 
   /* Read raw Status replies
    *             u_char pointer data (volatile)
    *             int    length of buffer
-   *             int    Flag: 0 = Call form Kernel-Space (use memcpy,
-   *                              no schedule allowed) 
-   *                          1 = Data is in User-Space (use memcpy_fromfs,
-   *                              may schedule)
    *             int    driverId
    *             int    local channel-number (0 ...)
    */
-  int (*readstat)(u_char*, int, int, int, int);
+  int (*readstat)(u_char __user *, int, int, int);
 
   char id[20];
 } isdn_if;

@@ -9,7 +9,6 @@
  * Internal I/O Port Management
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
@@ -27,7 +26,7 @@ static volatile unsigned char *ddrs[] = {
 #define MAX_PORT 11
 #endif
 
-#if defined(CONFIG_H83002) || defined(CONFIG_H8048)
+ #if defined(CONFIG_H83002) || defined(CONFIG_H8048)
 /* Fix me!! */
 #include <asm/regs306x.h>
 static volatile unsigned char *ddrs[] = {
@@ -49,7 +48,7 @@ static volatile unsigned char *ddrs[] = {
 #define MAX_PORT 17
 #endif
 #undef _
-
+ 
 #if !defined(P1DDR)
 #error Unsuppoted CPU Selection
 #endif
@@ -122,7 +121,7 @@ int h8300_get_gpio_dir(int port_bit)
 static char *port_status(int portno)
 {
 	static char result[10];
-	const static char io[2]={'I','O'};
+	static const char io[2]={'I','O'};
 	char *rp;
 	int c;
 	unsigned char used,ddr;
@@ -140,10 +139,10 @@ static char *port_status(int portno)
 }
 
 static int gpio_proc_read(char *buf, char **start, off_t offset, 
-                          int len, int *eof, void *data)
+                          int len, int *unused_i, void *unused_v)
 {
 	int c,outlen;
-	const static char port_name[]="123456789ABCDEFGH";
+	static const char port_name[]="123456789ABCDEFGH";
 	outlen = 0;
 	for (c = 0; c < MAX_PORT; c++) {
 		if (ddrs[c] == NULL)
@@ -172,4 +171,3 @@ void __init h8300_gpio_init(void)
 {
 	memcpy(gpio_regs,_platform_gpio_table(sizeof(gpio_regs)),sizeof(gpio_regs));
 }
-

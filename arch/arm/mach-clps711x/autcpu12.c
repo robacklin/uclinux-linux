@@ -17,16 +17,15 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
+#include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/blk.h>
-#include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/sizes.h>
-#include <asm/io.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -34,10 +33,9 @@
 #include <asm/page.h>
 
 #include <asm/mach/map.h>
-#include <asm/arch/autcpu12.h>
+#include <mach/autcpu12.h>
 
-extern void clps711x_map_io(void);
-extern void clps711x_init_irq(void);
+#include "common.h"
 
 /*
  * The on-chip registers are given a size of 1MB so that a section can
@@ -48,25 +46,28 @@ extern void clps711x_init_irq(void);
 */
 
 static struct map_desc autcpu12_io_desc[] __initdata = {
- /* virtual, physical, length, domain, r, w, c, b */
- /* memory-mapped extra io and CS8900A Ethernet chip */
- /* ethernet chip */
- 	{ AUTCPU12_VIRT_CS8900A, AUTCPU12_PHYS_CS8900A, SZ_1M, DOMAIN_IO, 1, 1, 0, 0 },
-	
- 	LAST_DESC
+	/* memory-mapped extra io and CS8900A Ethernet chip */
+ 	/* ethernet chip */
+ 	{
+		.virtual	= AUTCPU12_VIRT_CS8900A,
+		.pfn		= __phys_to_pfn(AUTCPU12_PHYS_CS8900A),
+		.length		= SZ_1M,
+		.type		= MT_DEVICE
+	}
 };
 
 void __init autcpu12_map_io(void)
 {
         clps711x_map_io();
-        iotable_init(autcpu12_io_desc);
+        iotable_init(autcpu12_io_desc, ARRAY_SIZE(autcpu12_io_desc));
 }
 
 MACHINE_START(AUTCPU12, "autronix autcpu12")
-	MAINTAINER("Thomas Gleixner")
-        BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0020000)
-	MAPIO(autcpu12_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Thomas Gleixner */
+	.atag_offset	= 0x20000,
+	.map_io		= autcpu12_map_io,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END
 

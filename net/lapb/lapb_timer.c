@@ -19,7 +19,7 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -28,7 +28,6 @@
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -37,7 +36,7 @@
 static void lapb_t1timer_expiry(unsigned long);
 static void lapb_t2timer_expiry(unsigned long);
 
-void lapb_start_t1timer(lapb_cb *lapb)
+void lapb_start_t1timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t1timer);
 
@@ -48,7 +47,7 @@ void lapb_start_t1timer(lapb_cb *lapb)
 	add_timer(&lapb->t1timer);
 }
 
-void lapb_start_t2timer(lapb_cb *lapb)
+void lapb_start_t2timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t2timer);
 
@@ -59,24 +58,24 @@ void lapb_start_t2timer(lapb_cb *lapb)
 	add_timer(&lapb->t2timer);
 }
 
-void lapb_stop_t1timer(lapb_cb *lapb)
+void lapb_stop_t1timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t1timer);
 }
 
-void lapb_stop_t2timer(lapb_cb *lapb)
+void lapb_stop_t2timer(struct lapb_cb *lapb)
 {
 	del_timer(&lapb->t2timer);
 }
 
-int lapb_t1timer_running(lapb_cb *lapb)
+int lapb_t1timer_running(struct lapb_cb *lapb)
 {
 	return timer_pending(&lapb->t1timer);
 }
 
 static void lapb_t2timer_expiry(unsigned long param)
 {
-	lapb_cb *lapb = (lapb_cb *)param;
+	struct lapb_cb *lapb = (struct lapb_cb *)param;
 
 	if (lapb->condition & LAPB_ACK_PENDING_CONDITION) {
 		lapb->condition &= ~LAPB_ACK_PENDING_CONDITION;
@@ -86,7 +85,7 @@ static void lapb_t2timer_expiry(unsigned long param)
 
 static void lapb_t1timer_expiry(unsigned long param)
 {
-	lapb_cb *lapb = (lapb_cb *)param;
+	struct lapb_cb *lapb = (struct lapb_cb *)param;
 
 	switch (lapb->state) {
 
@@ -101,25 +100,25 @@ static void lapb_t1timer_expiry(unsigned long param)
 		/*
 		 *	Awaiting connection state, send SABM(E), up to N2 times.
 		 */
-		case LAPB_STATE_1: 
+		case LAPB_STATE_1:
 			if (lapb->n2count == lapb->n2) {
 				lapb_clear_queues(lapb);
 				lapb->state = LAPB_STATE_0;
 				lapb_disconnect_indication(lapb, LAPB_TIMEDOUT);
 #if LAPB_DEBUG > 0
-				printk(KERN_DEBUG "lapb: (%p) S1 -> S0\n", lapb->token);
+				printk(KERN_DEBUG "lapb: (%p) S1 -> S0\n", lapb->dev);
 #endif
 				return;
 			} else {
 				lapb->n2count++;
 				if (lapb->mode & LAPB_EXTENDED) {
 #if LAPB_DEBUG > 1
-					printk(KERN_DEBUG "lapb: (%p) S1 TX SABME(1)\n", lapb->token);
+					printk(KERN_DEBUG "lapb: (%p) S1 TX SABME(1)\n", lapb->dev);
 #endif
 					lapb_send_control(lapb, LAPB_SABME, LAPB_POLLON, LAPB_COMMAND);
 				} else {
 #if LAPB_DEBUG > 1
-					printk(KERN_DEBUG "lapb: (%p) S1 TX SABM(1)\n", lapb->token);
+					printk(KERN_DEBUG "lapb: (%p) S1 TX SABM(1)\n", lapb->dev);
 #endif
 					lapb_send_control(lapb, LAPB_SABM, LAPB_POLLON, LAPB_COMMAND);
 				}
@@ -135,13 +134,13 @@ static void lapb_t1timer_expiry(unsigned long param)
 				lapb->state = LAPB_STATE_0;
 				lapb_disconnect_confirmation(lapb, LAPB_TIMEDOUT);
 #if LAPB_DEBUG > 0
-				printk(KERN_DEBUG "lapb: (%p) S2 -> S0\n", lapb->token);
+				printk(KERN_DEBUG "lapb: (%p) S2 -> S0\n", lapb->dev);
 #endif
 				return;
 			} else {
 				lapb->n2count++;
 #if LAPB_DEBUG > 1
-				printk(KERN_DEBUG "lapb: (%p) S2 TX DISC(1)\n", lapb->token);
+				printk(KERN_DEBUG "lapb: (%p) S2 TX DISC(1)\n", lapb->dev);
 #endif
 				lapb_send_control(lapb, LAPB_DISC, LAPB_POLLON, LAPB_COMMAND);
 			}
@@ -157,7 +156,7 @@ static void lapb_t1timer_expiry(unsigned long param)
 				lapb_stop_t2timer(lapb);
 				lapb_disconnect_indication(lapb, LAPB_TIMEDOUT);
 #if LAPB_DEBUG > 0
-				printk(KERN_DEBUG "lapb: (%p) S3 -> S0\n", lapb->token);
+				printk(KERN_DEBUG "lapb: (%p) S3 -> S0\n", lapb->dev);
 #endif
 				return;
 			} else {
@@ -175,7 +174,7 @@ static void lapb_t1timer_expiry(unsigned long param)
 				lapb->state = LAPB_STATE_0;
 				lapb_disconnect_indication(lapb, LAPB_TIMEDOUT);
 #if LAPB_DEBUG > 0
-				printk(KERN_DEBUG "lapb: (%p) S4 -> S0\n", lapb->token);
+				printk(KERN_DEBUG "lapb: (%p) S4 -> S0\n", lapb->dev);
 #endif
 				return;
 			} else {

@@ -10,14 +10,25 @@
  *     (c) 1996,1997 Claus Schroeter (clausi@chemie.fu-berlin.de)
  *
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_util.c,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: can_util.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -28,8 +39,6 @@
  *   uClinux-dist/user/horch         more sophisticated CAN analyzer example
  *
  * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
- *
- *
  *
  */
 
@@ -63,7 +72,7 @@
 
 msg_fifo_t   Tx_Buf[MAX_CHANNELS];
 msg_fifo_t   Rx_Buf[MAX_CHANNELS];
-#ifdef CAN_USE_FILTER
+#if CAN_USE_FILTER
     msg_filter_t Rx_Filter[MAX_CHANNELS]; 
 #endif
 
@@ -72,8 +81,61 @@ unsigned int can_range[MAX_CHANNELS];		/* ioremapped adresses */
 int selfreception = 0;			/* flag indicating that selfreception
                                            of frames is allowed */
 
-#if defined(MCF5282)
-	/* Motorola ColdFire Board FlexCAN */
+#if defined(CONFIG_M532x)
+
+void mcf_irqsetup(void)
+{
+	int i;
+
+#if DEBUG
+	printk("mcf_irqsetup\n");
+#endif	
+	for (i=0; i<20; i++) {
+		MCF_INTC1_ICR(i) = 0x3; /* priority */
+		MCF_INTC1_CIMR = i;     /* interrupt mask */
+	}
+}
+
+void mcf_irqreset(void)
+{
+	int i;
+	for (i=0; i<20; i++) {
+		MCF_INTC1_SIMR = i; /* interrupt mask */
+	}
+}
+#endif
+
+#if defined(CONFIG_M5253)
+void mcf_m5253_irqsetup(int board)
+{
+	int i, irq_st[] = {45, 43};
+
+#if DEBUG
+	printk("mcf_irqsetup\n");
+#endif	
+	MCF_INTC1_INTBASE = 128;
+
+	for (i=irq_st[board]; i<irq_st[board]+2; i++) {
+		int index, offset;
+		index = (int)(i / 8);
+		offset = i % 8;
+		MCF_INTC1_INTPRI(index) |= (0x3 << (offset*4)); /* priority */
+	}
+}
+
+void mcf_m5253_irqreset(int board)
+{
+	int i, irq_st[] = {45, 43};
+	for (i=irq_st[board]; i<irq_st[board]+2; i++) {
+		int index, offset;
+		index = (int)(i / 8);
+		offset = i % 8;
+		MCF_INTC1_INTPRI(index) &= ~(0xf << (offset*4)); /* priority */
+	}
+}
+#endif
+
+#if defined(CONFIG_M528x)
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
 
@@ -84,8 +146,8 @@ int selfreception = 0;			/* flag indicating that selfreception
 */
 void mcf_irqsetup(void)
 {
-volatile unsigned char *icrp;	/* interrupt control register pointer */
-volatile unsigned long *imrp;	/* interrupt mask register pointer    */
+volatile unsigned char *icrp;   /* interrupt control register pointer */
+volatile unsigned long *imrp;   /* interrupt mask register pointer    */
 
     /* Initialize FlexCAN interrupt handler
       - Initialize the interrupt configurataion register (CANICR with
@@ -97,16 +159,16 @@ volatile unsigned long *imrp;	/* interrupt mask register pointer    */
         and in CANMCR for WAKE interrupt.
         (happens in CAN-ChipReset() too)
 
-	MCF5282 has two interrupt controllers, FlexCAN interrupts are
-	scheduled to INTC1 (the second one, with lower priority)
-	Int source nr  -- Source --                    vector
-	 8             -- message buffer 0             136
-	 9             -- message buffer 1             137
-	   ...
-	23             -- message buffer 15            151
-	24             -- Error Int                    152
-	25             -- Bus-Off Int                  153
-	26             -- Wake-Up Int                  154
+        MCF5282 has two interrupt controllers, FlexCAN interrupts are
+        scheduled to INTC1 (the second one, with lower priority)
+        Int source nr  -- Source --                    vector
+         8             -- message buffer 0             136
+         9             -- message buffer 1             137
+           ...
+        23             -- message buffer 15            151
+        24             -- Error Int                    152
+        25             -- Bus-Off Int                  153
+        26             -- Wake-Up Int                  154
 
 
        Interrupt Vector number is vector_number = 128 + interrupt source number
@@ -114,30 +176,25 @@ volatile unsigned long *imrp;	/* interrupt mask register pointer    */
        vector_number = 137 (std receive object == MB 1) 
 
      */
-    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 + 
-	    MCFINTC_ICR0 + MCFINT_CAN_BUF00 );
+    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 +
+            MCFINTC_ICR0 + MCFINT_CAN_BUF00 );
     *icrp = 0x33; /* CANx with level 6, priority 3 */
-    /* printk("icrp %p = 0x%08x\n", icrp, *icrp); */
 
-    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 + 
-	    MCFINTC_ICR0 + MCFINT_CAN_BUF01 );
+    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 +
+            MCFINTC_ICR0 + MCFINT_CAN_BUF01 );
     *icrp = 0x33; /* CANx with level 6, priority 3 */
-    /* printk("icrp %p = 0x%08x\n", icrp, *icrp); */
 
-    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 + 
-	    MCFINTC_ICR0 + MCFINT_CAN_BUF02 );
+    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 +
+            MCFINTC_ICR0 + MCFINT_CAN_BUF02 );
     *icrp = 0x33; /* CANx with level 6, priority 3 */
-    /* printk("icrp %p = 0x%08x\n", icrp, *icrp); */
-    
-    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 + 
-	    MCFINTC_ICR0 + MCFINT_CAN_WARN );
-    *icrp = 0x33; /* CANx with level 6, priority 3 */
-    /* printk("icrp %p = 0x%08x\n", icrp, *icrp); */
 
-    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 + 
-	    MCFINTC_ICR0 + MCFINT_CAN_BUSOFF );
+    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 +
+            MCFINTC_ICR0 + MCFINT_CAN_WARN );
     *icrp = 0x33; /* CANx with level 6, priority 3 */
-    /* printk("icrp %p = 0x%08x\n", icrp, *icrp); */
+
+    icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC1 +
+            MCFINTC_ICR0 + MCFINT_CAN_BUSOFF );
+    *icrp = 0x33; /* CANx with level 6, priority 3 */
 
     /* set Mask register too
     The IMRHn and IMRLn registers are each 32 bits in size and provide a
@@ -149,20 +206,18 @@ volatile unsigned long *imrp;	/* interrupt mask register pointer    */
     mask-all capability.
     */
     imrp = (volatile unsigned long *) (MCF_MBAR + MCFICM_INTC1 +
-		MCFINTC_IMRL);
+                MCFINTC_IMRL);
     *imrp &= ~(   (1 << (MCFINT_CAN_BUF00 ))
-    	        | (1 << (MCFINT_CAN_BUF01 ))
-    	        | (1 << (MCFINT_CAN_BUF02 ))
-    	        | (1 << (MCFINT_CAN_WARN ))
-    	        | 1);
+                | (1 << (MCFINT_CAN_BUF01 ))
+                | (1 << (MCFINT_CAN_BUF02 ))
+                | (1 << (MCFINT_CAN_WARN ))
+                | 1);
     /*            ^ unmask all */
-
-    /* printk("imrp %p = 0x%08x\n", imrp, *imrp); */
 }
 
 void mcf_irqreset(void)
 {
-volatile unsigned long *imrp;	/* interrupt mask register pointer    */
+volatile unsigned long *imrp;   /* interrupt mask register pointer    */
 
     /* Mask register auch rücksetzen
     The IMRHn and IMRLn registers are each 32 bits in size and provide a
@@ -174,13 +229,98 @@ volatile unsigned long *imrp;	/* interrupt mask register pointer    */
     mask-all capability.
     */
     imrp = (volatile unsigned long *) (MCF_MBAR + MCFICM_INTC1 +
-		MCFINTC_IMRL);
+                MCFINTC_IMRL);
     *imrp |= ((1 << (MCFINT_CAN_BUF00 ))
-    	    | (1 << (MCFINT_CAN_BUF01 )) 
-    	    | (1 << (MCFINT_CAN_BUF02 )) 
-    	    | (1 << (MCFINT_CAN_WARN ))
+            | (1 << (MCFINT_CAN_BUF01 ))
+            | (1 << (MCFINT_CAN_BUF02 ))
+            | (1 << (MCFINT_CAN_WARN ))
             | 1);
 
+}
+#endif
+
+#if defined(CONFIG_FIRE_ENGINE)
+	/* Motorola ColdFire Board FlexCAN */
+#include <asm/coldfire.h>
+#include <asm/m5485sim.h>
+#include <asm/m5485flexcan.h>
+#include <asm/m5485gpio.h>
+
+/* enabel the interrupts at the interrupt controller
+ used:
+  - receivebuffer 1
+
+*/
+void mcf_irqsetup(void)
+{
+    /* Initialize FlexCAN interrupt handler
+      - Initialize the interrupt configurataion register (CANICR with
+        a specific request level and vector base address
+      - Initialize IARB[3:0] to a non zero value in CANMCR
+        ( This is done in CAN-ChipReset() )
+      - Set the required mask bits in the IMASK register (for all message
+        buffer interrupts) in CANCTRL for bus off and error interrupts,
+        and in CANMCR for WAKE interrupt.
+        (happens in CAN-ChipReset() too)
+
+	MCF5485 has one interrupt controller, FlexCAN interrupts are
+	scheduled to INTC 
+	Int source nr  -- Source --                    vector
+	49             -- CAN0 Error Int                113  
+	50             -- CAN0 Bus off Int              114
+	51             -- CAN0 Message Int              115
+	52             -- CAN0 Wake up Int              116
+	...
+	55             -- CAN1 Error Int                119
+	56             -- CAN1 Bus off Int              120
+	57             -- CAN1 Message Int              121
+   
+
+       Interrupt Vector number is vector_number = 64 + interrupt source number
+       (for INTC)                    
+       vector_number = 51 (57) 
+
+     */
+    MCF_ICR(ISC_CANn_MBOR(CAN_MODULE)) = 0x33;
+    printk("ISC_CANn_MBOR(%d) = 0x%08x\n", CAN_MODULE, MCF_ICR(ISC_CANn_MBOR(CAN_MODULE)));
+
+    MCF_ICR(ISC_CANn_ERR(CAN_MODULE)) = 0x33;
+    printk("ISC_CANn_ERR(%d) = 0x%08x\n", CAN_MODULE, MCF_ICR(ISC_CANn_ERR(CAN_MODULE)));
+
+    MCF_ICR(ISC_CANn_BUSOFF(CAN_MODULE)) = 0x33;
+    printk("ISC_CANn_BUSOFF(%d) = 0x%08x\n", CAN_MODULE, MCF_ICR(ISC_CANn_BUSOFF(CAN_MODULE)));
+
+            
+    /* Mask register auch setzen
+    The IMRHn and IMRLn registers are each 32 bits in size and provide a
+    bit map for each interrupt to allow the request to be disabled (1 =
+    disable the request, 0 = enable the request).  The IMRn is set to all
+    ones by reset, disabling all interrupt requests. The IMRn can be read
+    and written. A write that sets bit 0 of the IMR forces the other 63
+    bits to be set, disabling all interrupt sources, and providing a global
+    mask-all capability.
+    */
+    enable_irq(64 + ISC_CANn_ERR(CAN_MODULE));
+    enable_irq(64 + ISC_CANn_MBOR(CAN_MODULE));    
+    printk("IMRH = 0x%08lx\n", MCF_IMRH);
+    	     
+    /*            ^ unmask all */
+
+}
+
+void mcf_irqreset(void)
+{
+    /* Mask register auch rcksetzen
+    The IMRHn and IMRLn registers are each 32 bits in size and provide a
+    bit map for each interrupt to allow the request to be disabled (1 =
+    disable the request, 0 = enable the request).  The IMRn is set to all
+    ones by reset, disabling all interrupt requests. The IMRn can be read
+    and written. A write that sets bit 0 of the IMR forces the other 63
+    bits to be set, disabling all interrupt sources, and providing a global
+    mask-all capability.
+    */
+    disable_irq(64 + ISC_CANn_ERR(CAN_MODULE));
+    disable_irq(64 + ISC_CANn_MBOR(CAN_MODULE));  	     
 }
 #endif
 
@@ -231,42 +371,58 @@ int Can_RequestIrq(int minor, int irq, irqservice_t handler)
 int err=0;
 
     DBGin("Can_RequestIrq");
-    /*
-
-    int request_irq(unsigned int irq,			// interrupt number  
-              void (*handler)(int, void *, struct pt_regs *), // pointer to ISR
-		              irq, dev_id, registers on stack
-              unsigned long irqflags, const char *devname,
-              void *dev_id);
-
-       dev_id - The device ID of this handler (see below).       
-       This parameter is usually set to NULL,
-       but should be non-null if you wish to do  IRQ  sharing.
-       This  doesn't  matter when hooking the
-       interrupt, but is required so  that,  when  free_irq()  is
-       called,  the  correct driver is unhooked.  Since this is a
-       void *, it can point to anything (such  as  a  device-spe­
-       cific  structure,  or even empty space), but make sure you
-       pass the same pointer to free_irq().
-
-    */
 
 #if defined(CONFIG_PPC)
     /* LINUX_PPC */
     err = request_8xxirq( irq, handler, 0, "Can", NULL );
-#elif defined(MCF5282)
-    {
+#elif defined(CONFIG_FIRE_ENGINE)
+  {
     int i;
     	/* 19 Int vectors are used on Interrupt Controller 1 */
-	for( i = 136; i < 155; i++) {
-	    err = request_irq( i, handler, SA_SHIRQ, "Can", &Can_minors[minor]);
+	for(i = 64 + ISC_CANn_ERR(CAN_MODULE); i < 64 + ISC_CANn_MBOR(CAN_MODULE) + 1; i++) {
+	    err = request_irq( i, (void *)handler, 0, "Can", &Can_minors[minor]);
 	    if(err) {
     		DBGout();return err;
 	    }
 	}
     }
+#elif defined(CONFIG_M528x)
+    {
+    int i;
+    	/* 19 Int vectors are used on Interrupt Controller 1 */
+	for(i = 136; i < 155; i++) {
+	    err = request_irq( i, (void *)handler, 0, "Can", &Can_minors[minor]);
+	    if(err) {
+    		DBGout();return err;
+	    }
+	}
+    }
+#elif defined(CONFIG_M532x)
+	{
+		int i;
+		for (i=0; i<20; i++) {
+
+			/* printk("Requesting IRQ %d\n", i+128); */
+
+			err = request_irq( i+128, (void *)handler, 0, "Can", &Can_minors[minor]);
+			if(err) {
+    				DBGout();return err;
+	    		}
+		}
+	}
+#elif defined(CONFIG_M5253)
+	{
+		int i, irq_start[] = {45, 43};
+		for (i=0; i<2; i++) {
+			err = request_irq( irq_start[minor]+i+128, (void *)handler, 
+					    0, "Can", &Can_minors[minor]);
+			if(err) {
+    				DBGout();return err;
+	    		}
+		}
+	}
 #else 
-    err = request_irq( irq, handler, SA_SHIRQ, "Can", &Can_minors[minor]);
+    err = request_irq( irq, (void *)handler, 0, "Can", &Can_minors[minor]);
 #endif
     if( !err ){
 	/* printk("Requested IRQ[%d]: %d @ 0x%x", minor, irq, handler); */
@@ -281,8 +437,14 @@ int err=0;
 #if defined(CCPC104)
 	pc104_irqsetup();
 #endif
-#if defined(MCF5282)
+#if defined(CONFIG_FIRE_ENGINE) || defined(CONFIG_M528x)
 	mcf_irqsetup();
+#endif
+#if defined (CONFIG_M532x)
+	mcf_irqsetup();
+#endif
+#if defined (CONFIG_M5253)
+	mcf_m5253_irqsetup(minor);
 #endif
 
 	irq2minormap[irq] = minor;
@@ -300,16 +462,48 @@ int Can_FreeIrq(int minor, int irq )
     DBGin("Can_FreeIrq");
     IRQ_requested[minor] = 0;
 
-#if defined(MCF5282)
+#if defined(CONFIG_FIRE_ENGINE) || defined(CONFIG_M528x)
     /* reset interrupt masks */
     mcf_irqreset();
 #endif
-#if defined(MCF5282)
+
+#if defined(CONFIG_M532x)
+    mcf_irqreset();
+#endif
+
+#if defined(CONFIG_M5253)
+    mcf_m5253_irqreset(minor);
+#endif
+
+    
+#if defined(CONFIG_FIRE_ENGINE)
+    {
+    int i;
+    	/* 19 Int vectors are used on Interrupt Controller 1 */
+	for(i = 64 + ISC_CANn_ERR(CAN_MODULE); i < 64 + ISC_CANn_MBOR(CAN_MODULE) + 1; i++) {
+	    free_irq(i, &Can_minors[minor]);
+	}
+    }
+#elif defined(CONFIG_M528x)
     {
     int i;
     	/* 19 Int vectors are used on Interrupt Controller 1 */
 	for(i = 136; i < 155; i++) {
 	    free_irq(i, &Can_minors[minor]);
+	}
+    }
+#elif defined(CONFIG_M532x)
+    {
+	int i;
+	for (i=0; i<20; i++) {
+		free_irq( i+128, &Can_minors[minor]);
+	}
+    }
+#elif defined(CONFIG_M5253)
+    {
+	int i, irq_start[] = {45, 43};
+	for (i=0; i<2; i++) {
+		free_irq( irq_start[minor]+i+128, &Can_minors[minor]);
 	}
     }
 #else 
@@ -328,8 +522,6 @@ int Can_WaitInit(int minor)
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 /* soll so sein */
 	init_waitqueue_head(&CanWait[minor]);
-/* das geht */
-	/* CanWait[minor] = NULL; */
 #else
 	CanWait[minor] = NULL;
 #endif
@@ -356,7 +548,7 @@ int i;
     return 0;
 }
 
-#ifdef CAN_USE_FILTER
+#if CAN_USE_FILTER
 int Can_FilterInit(int minor)
 {
 int i;
@@ -466,45 +658,6 @@ canmsg_t *tmp;
 #endif
 #include <asm/io.h>
 
-#if 0
-/* simply dump a memory area bytewise for 2*16 addresses */
-void dump_CAN(unsigned long adress, int offset)
-{
-int i, j;
-unsigned long ptr = (unsigned long)ioremap(adress, 256);
-    printk("     CAN at Adress 0x%x\n", adress);
-    for(i = 0; i < 2; i++) {
-	printk("     ");
-	for(j = 0; j < 16; j++) {
-	    /* printk("%02x ", *ptr++); */
-	    printk("%02x ", readb(ptr));
-	    ptr += offset;
-	}
-	printk("\n");
-    }
-}
-
-/*
- * adress - start address 
- * n      - number of 16 byte rows, 
- * offset - print every n-th byte
- */
-void dump_CAN(unsigned long adress, int n, int offset)
-{
-int i, j;
-    printk("     CAN at Adress 0x%x\n", adress);
-    for(i = 0; i < n; i++) {
-	printk("     ");
-	for(j = 0; j < 16; j++) {
-	    /* printk("%02x ", *ptr++); */
-	    printk("%02x ", readb(adress));
-	    adress += offset;
-	}
-	printk("\n");
-    }
-}
-#endif
-
 #if CAN4LINUX_PCI
 # define REG_OFFSET 4
 #else
@@ -536,8 +689,8 @@ int index = 0;
 }
 #endif
 
-#ifdef CAN4LINUX_PCI
-/* reset both can controllers on the EMS-Wünsche CPC-PCI Board */
+#if CAN4LINUX_PCI
+/* reset both can controllers on the EMS-Wnsche CPC-PCI Board */
 /* writing to the control range at BAR1 of the PCI board */
 void reset_CPC_PCI(unsigned long address)
 {
@@ -573,7 +726,7 @@ unsigned long ptr = (unsigned long)ioremap(address, 32 * offset);
 
 
 
-#ifdef CAN4LINUX_PCI
+#if CAN4LINUX_PCI
 static u32 addresses[] = {
     PCI_BASE_ADDRESS_0,
     PCI_BASE_ADDRESS_1,
@@ -679,16 +832,7 @@ int pcimod_scan(void)
 		    pcibios_write_config_dword(bus, fun, addresses[i], curr);
 		    sti();
 
-		    /* printk("    region %i: mask 0x%08lx, now at 0x%08lx\n", i, */
-				   /* (unsigned long)mask, */
-				   /* (unsigned long)curr); */
-#if 0 /* we don't need this message, so we don't need this code */
-		    if (!mask) {
-			printk("    region %i not existent\n", i);
-			break;
-		    }
-#endif
-		    /* extract the type, and the programmable bits */
+ 		   /* extract the type, and the programmable bits */
 		    if (mask & PCI_BASE_ADDRESS_SPACE) {
 		    type = "I/O"; mask &= PCI_BASE_ADDRESS_IO_MASK;
 		    } else {
@@ -767,5 +911,3 @@ int pcimod_scan(void)
     return 0;
 }
 #endif
-
-

@@ -8,17 +8,17 @@
 
 #include <linux/atm.h>
 #include <linux/atmdev.h>
+#include <linux/interrupt.h>
 #include <linux/sonet.h>
 #include <linux/skbuff.h>
 #include <linux/time.h>
 #include <linux/pci.h>
 #include <linux/spinlock.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include "midway.h"
 
 
-#define KERNEL_OFFSET	0xC0000000	/* kernel 0x0 is at phys 0xC0000000 */
 #define DEV_LABEL	"eni"
 
 #define UBR_BUFFER	(128*1024)	/* UBR buffer size */
@@ -33,12 +33,12 @@
 
 
 struct eni_free {
-	unsigned long start;		/* counting in bytes */
+	void __iomem *start;		/* counting in bytes */
 	int order;
 };
 
 struct eni_tx {
-	unsigned long send;		/* base, 0 if unused */
+	void __iomem *send;		/* base, 0 if unused */
 	int prescaler;			/* shaping prescaler */
 	int resolution;			/* shaping divider */
 	unsigned long tx_pos;		/* current TX write position */
@@ -51,7 +51,7 @@ struct eni_tx {
 
 struct eni_vcc {
 	int (*rx)(struct atm_vcc *vcc);	/* RX function, NULL if none */
-	unsigned long recv;		/* receive buffer */
+	void __iomem *recv;		/* receive buffer */
 	unsigned long words;		/* its size in words */
 	unsigned long descr;		/* next descriptor (RX) */
 	unsigned long rx_pos;		/* current RX descriptor pos */
@@ -59,7 +59,7 @@ struct eni_vcc {
 	int rxing;			/* number of pending PDUs */
 	int servicing;			/* number of waiting VCs (0 or 1) */
 	int txing;			/* number of pending TX bytes */
-	struct timeval timestamp;	/* for RX timing */
+	ktime_t timestamp;		/* for RX timing */
 	struct atm_vcc *next;		/* next pending RX */
 	struct sk_buff *last;		/* last PDU being DMAed (used to carry
 					   discard information) */
@@ -72,13 +72,14 @@ struct eni_dev {
 	u32 events;			/* pending events */
 	/*-------------------------------- base pointers into Midway address
 					   space */
-	unsigned long phy;		/* PHY interface chip registers */
-	unsigned long reg;		/* register base */
-	unsigned long ram;		/* RAM base */
-	unsigned long vci;		/* VCI table */
-	unsigned long rx_dma;		/* RX DMA queue */
-	unsigned long tx_dma;		/* TX DMA queue */
-	unsigned long service;		/* service list */
+	void __iomem *ioaddr;
+	void __iomem *phy;		/* PHY interface chip registers */
+	void __iomem *reg;		/* register base */
+	void __iomem *ram;		/* RAM base */
+	void __iomem *vci;		/* VCI table */
+	void __iomem *rx_dma;		/* RX DMA queue */
+	void __iomem *tx_dma;		/* TX DMA queue */
+	void __iomem *service;		/* service list */
 	/*-------------------------------- TX part */
 	struct eni_tx tx[NR_CHAN];	/* TX channels */
 	struct eni_tx *ubr;		/* UBR channel */
@@ -86,6 +87,10 @@ struct eni_dev {
 	wait_queue_head_t tx_wait;	/* for close */
 	int tx_bw;			/* remaining bandwidth */
 	u32 dma[TX_DMA_BUF*2];		/* DMA request scratch area */
+	struct eni_zero {		/* aligned "magic" zeroes */
+		u32 *addr;
+		dma_addr_t dma;
+	} zero;
 	int tx_mult;			/* buffer size multiplier (percent) */
 	/*-------------------------------- RX part */
 	u32 serv_read;			/* host service read index */

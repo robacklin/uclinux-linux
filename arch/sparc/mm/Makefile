@@ -1,33 +1,25 @@
-# $Id: Makefile,v 1.38 2000/12/15 00:41:22 davem Exp $
 # Makefile for the linux Sparc-specific parts of the memory manager.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-.S.o:
-	$(CC) $(AFLAGS) -ansi -c -o $*.o $<
+asflags-y := -ansi
+ccflags-y := -Werror
 
-O_TARGET	:= mm.o
-obj-y		:= fault.o init.o loadmmu.o generic.o extable.o btfixup.o
+obj-$(CONFIG_SPARC64)   += ultra.o tlb.o tsb.o gup.o
+obj-y                   += fault_$(BITS).o
+obj-y                   += init_$(BITS).o
+obj-$(CONFIG_SPARC32)   += loadmmu.o
+obj-$(CONFIG_SPARC32)   += extable.o btfixup.o srmmu.o iommu.o io-unit.o
+obj-$(CONFIG_SPARC32)   += hypersparc.o viking.o tsunami.o swift.o
+obj-$(CONFIG_SPARC_LEON)+= leon_mm.o
 
-ifeq ($(CONFIG_SUN4),y)
-obj-y		+= nosrmmu.o
-else
-obj-y		+= srmmu.o iommu.o io-unit.o hypersparc.o viking.o \
-			tsunami.o swift.o
-endif
+# Only used by sparc64
+obj-$(CONFIG_HUGETLB_PAGE) += hugetlbpage.o
 
-ifdef CONFIG_HIGHMEM
-obj-y		+= highmem.o
-endif
+# Only used by sparc32
+obj-$(CONFIG_HIGHMEM)   += highmem.o
 
 ifdef CONFIG_SMP
-obj-y		+= nosun4c.o
+obj-$(CONFIG_SPARC32) += nosun4c.o
 else
-obj-y		+= sun4c.o
+obj-$(CONFIG_SPARC32) += sun4c.o
 endif
-
-include $(TOPDIR)/Rules.make

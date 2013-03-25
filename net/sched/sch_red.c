@@ -9,75 +9,21 @@
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
  * Changes:
- * J Hadi Salim <hadi@nortel.com> 980914:	computation fixes
+ * J Hadi Salim 980914:	computation fixes
  * Alexey Makarenko <makar@phoenix.kharkov.ua> 990814: qave on idle link was calculated incorrectly.
- * J Hadi Salim <hadi@nortelnetworks.com> 980816:  ECN support	
+ * J Hadi Salim 980816:  ECN support
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
-#include <asm/uaccess.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/socket.h>
-#include <linux/sockios.h>
-#include <linux/in.h>
-#include <linux/errno.h>
-#include <linux/interrupt.h>
-#include <linux/if_ether.h>
-#include <linux/inet.h>
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/notifier.h>
-#include <net/ip.h>
-#include <net/route.h>
 #include <linux/skbuff.h>
-#include <net/sock.h>
 #include <net/pkt_sched.h>
 #include <net/inet_ecn.h>
+#include <net/red.h>
 
 
-/*	Random Early Detection (RED) algorithm.
-	=======================================
-
-	Source: Sally Floyd and Van Jacobson, "Random Early Detection Gateways
-	for Congestion Avoidance", 1993, IEEE/ACM Transactions on Networking.
-
-	This file codes a "divisionless" version of RED algorithm
-	as written down in Fig.17 of the paper.
-
-Short description.
-------------------
-
-	When a new packet arrives we calculate the average queue length:
-
-	avg = (1-W)*avg + W*current_queue_len,
-
-	W is the filter time constant (choosen as 2^(-Wlog)), it controls
-	the inertia of the algorithm. To allow larger bursts, W should be
-	decreased.
-
-	if (avg > th_max) -> packet marked (dropped).
-	if (avg < th_min) -> packet passes.
-	if (th_min < avg < th_max) we calculate probability:
-
-	Pb = max_P * (avg - th_min)/(th_max-th_min)
-
-	and mark (drop) packet with this probability.
-	Pb changes from 0 (at avg==th_min) to max_P (avg==th_max).
-	max_P should be small (not 1), usually 0.01..0.02 is good value.
-
-	max_P is chosen as a number, so that max_P/(th_max-th_min)
-	is a negative power of two in order arithmetics to contain
-	only shifts.
-
-
-	Parameters, settable by user:
+/*	Parameters, settable by user:
 	-----------------------------
 
 	limit		- bytes (must be > qth_max + burst)
@@ -88,394 +34,357 @@ Short description.
 	arbitrarily high (well, less than ram size)
 	Really, this limit will never be reached
 	if RED works correctly.
-
-	qth_min		- bytes (should be < qth_max/2)
-	qth_max		- bytes (should be at least 2*qth_min and less limit)
-	Wlog	       	- bits (<32) log(1/W).
-	Plog	       	- bits (<32)
-
-	Plog is related to max_P by formula:
-
-	max_P = (qth_max-qth_min)/2^Plog;
-
-	F.e. if qth_max=128K and qth_min=32K, then Plog=22
-	corresponds to max_P=0.02
-
-	Scell_log
-	Stab
-
-	Lookup table for log((1-W)^(t/t_ave).
-
-
-NOTES:
-
-Upper bound on W.
------------------
-
-	If you want to allow bursts of L packets of size S,
-	you should choose W:
-
-	L + 1 - th_min/S < (1-(1-W)^L)/W
-
-	th_min/S = 32         th_min/S = 4
-			                       
-	log(W)	L
-	-1	33
-	-2	35
-	-3	39
-	-4	46
-	-5	57
-	-6	75
-	-7	101
-	-8	135
-	-9	190
-	etc.
  */
 
-struct red_sched_data
-{
-/* Parameters */
-	u32		limit;		/* HARD maximal queue length	*/
-	u32		qth_min;	/* Min average length threshold: A scaled */
-	u32		qth_max;	/* Max average length threshold: A scaled */
-	u32		Rmask;
-	u32		Scell_max;
-	unsigned char	flags;
-	char		Wlog;		/* log(W)		*/
-	char		Plog;		/* random number bits	*/
-	char		Scell_log;
-	u8		Stab[256];
-
-/* Variables */
-	unsigned long	qave;		/* Average queue length: A scaled */
-	int		qcount;		/* Packets since last random number generation */
-	u32		qR;		/* Cached random number */
-
-	psched_time_t	qidlestart;	/* Start of idle period		*/
-	struct tc_red_xstats st;
+struct red_sched_data {
+	u32			limit;		/* HARD maximal queue length */
+	unsigned char		flags;
+	struct timer_list	adapt_timer;
+	struct red_parms	parms;
+	struct red_vars		vars;
+	struct red_stats	stats;
+	struct Qdisc		*qdisc;
 };
 
-static int red_ecn_mark(struct sk_buff *skb)
+static inline int red_use_ecn(struct red_sched_data *q)
 {
-	if (skb->nh.raw + 20 > skb->tail)
-		return 0;
-
-	switch (skb->protocol) {
-	case __constant_htons(ETH_P_IP):
-		if (!INET_ECN_is_capable(skb->nh.iph->tos))
-			return 0;
-		if (INET_ECN_is_not_ce(skb->nh.iph->tos))
-			IP_ECN_set_ce(skb->nh.iph);
-		return 1;
-	case __constant_htons(ETH_P_IPV6):
-		if (!INET_ECN_is_capable(ip6_get_dsfield(skb->nh.ipv6h)))
-			return 0;
-		IP6_ECN_set_ce(skb->nh.ipv6h);
-		return 1;
-	default:
-		return 0;
-	}
+	return q->flags & TC_RED_ECN;
 }
 
-static int
-red_enqueue(struct sk_buff *skb, struct Qdisc* sch)
+static inline int red_use_harddrop(struct red_sched_data *q)
 {
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
+	return q->flags & TC_RED_HARDDROP;
+}
 
-	psched_time_t now;
+static int red_enqueue(struct sk_buff *skb, struct Qdisc *sch)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct Qdisc *child = q->qdisc;
+	int ret;
 
-	if (!PSCHED_IS_PASTPERFECT(q->qidlestart)) {
-		long us_idle;
-		int  shift;
+	q->vars.qavg = red_calc_qavg(&q->parms,
+				     &q->vars,
+				     child->qstats.backlog);
 
-		PSCHED_GET_TIME(now);
-		us_idle = PSCHED_TDIFF_SAFE(now, q->qidlestart, q->Scell_max, 0);
-		PSCHED_SET_PASTPERFECT(q->qidlestart);
+	if (red_is_idling(&q->vars))
+		red_end_of_idle_period(&q->vars);
 
-/*
-   The problem: ideally, average length queue recalcultion should
-   be done over constant clock intervals. This is too expensive, so that
-   the calculation is driven by outgoing packets.
-   When the queue is idle we have to model this clock by hand.
+	switch (red_action(&q->parms, &q->vars, q->vars.qavg)) {
+	case RED_DONT_MARK:
+		break;
 
-   SF+VJ proposed to "generate" m = idletime/(average_pkt_size/bandwidth)
-   dummy packets as a burst after idle time, i.e.
-
-          q->qave *= (1-W)^m
-
-   This is an apparently overcomplicated solution (f.e. we have to precompute
-   a table to make this calculation in reasonable time)
-   I believe that a simpler model may be used here,
-   but it is field for experiments.
-*/
-		shift = q->Stab[us_idle>>q->Scell_log];
-
-		if (shift) {
-			q->qave >>= shift;
-		} else {
-			/* Approximate initial part of exponent
-			   with linear function:
-			   (1-W)^m ~= 1-mW + ...
-
-			   Seems, it is the best solution to
-			   problem of too coarce exponent tabulation.
-			 */
-
-			us_idle = (q->qave * us_idle)>>q->Scell_log;
-			if (us_idle < q->qave/2)
-				q->qave -= us_idle;
-			else
-				q->qave >>= 1;
+	case RED_PROB_MARK:
+		sch->qstats.overlimits++;
+		if (!red_use_ecn(q) || !INET_ECN_set_ce(skb)) {
+			q->stats.prob_drop++;
+			goto congestion_drop;
 		}
-	} else {
-		q->qave += sch->stats.backlog - (q->qave >> q->Wlog);
-		/* NOTE:
-		   q->qave is fixed point number with point at Wlog.
-		   The formulae above is equvalent to floating point
-		   version:
 
-		   qave = qave*(1-W) + sch->stats.backlog*W;
-		                                           --ANK (980924)
-		 */
-	}
+		q->stats.prob_mark++;
+		break;
 
-	if (q->qave < q->qth_min) {
-		q->qcount = -1;
-enqueue:
-		if (sch->stats.backlog + skb->len <= q->limit) {
-			__skb_queue_tail(&sch->q, skb);
-			sch->stats.backlog += skb->len;
-			sch->stats.bytes += skb->len;
-			sch->stats.packets++;
-			return NET_XMIT_SUCCESS;
-		} else {
-			q->st.pdrop++;
+	case RED_HARD_MARK:
+		sch->qstats.overlimits++;
+		if (red_use_harddrop(q) || !red_use_ecn(q) ||
+		    !INET_ECN_set_ce(skb)) {
+			q->stats.forced_drop++;
+			goto congestion_drop;
 		}
-		kfree_skb(skb);
-		sch->stats.drops++;
-		return NET_XMIT_DROP;
-	}
-	if (q->qave >= q->qth_max) {
-		q->qcount = -1;
-		sch->stats.overlimits++;
-mark:
-		if  (!(q->flags&TC_RED_ECN) || !red_ecn_mark(skb)) {
-			q->st.early++;
-			goto drop;
-		}
-		q->st.marked++;
-		goto enqueue;
+
+		q->stats.forced_mark++;
+		break;
 	}
 
-	if (++q->qcount) {
-		/* The formula used below causes questions.
-
-		   OK. qR is random number in the interval 0..Rmask
-		   i.e. 0..(2^Plog). If we used floating point
-		   arithmetics, it would be: (2^Plog)*rnd_num,
-		   where rnd_num is less 1.
-
-		   Taking into account, that qave have fixed
-		   point at Wlog, and Plog is related to max_P by
-		   max_P = (qth_max-qth_min)/2^Plog; two lines
-		   below have the following floating point equivalent:
-		   
-		   max_P*(qave - qth_min)/(qth_max-qth_min) < rnd/qcount
-
-		   Any questions? --ANK (980924)
-		 */
-		if (((q->qave - q->qth_min)>>q->Wlog)*q->qcount < q->qR)
-			goto enqueue;
-		q->qcount = 0;
-		q->qR = net_random()&q->Rmask;
-		sch->stats.overlimits++;
-		goto mark;
+	ret = qdisc_enqueue(skb, child);
+	if (likely(ret == NET_XMIT_SUCCESS)) {
+		sch->q.qlen++;
+	} else if (net_xmit_drop_count(ret)) {
+		q->stats.pdrop++;
+		sch->qstats.drops++;
 	}
-	q->qR = net_random()&q->Rmask;
-	goto enqueue;
+	return ret;
 
-drop:
-	kfree_skb(skb);
-	sch->stats.drops++;
+congestion_drop:
+	qdisc_drop(skb, sch);
 	return NET_XMIT_CN;
 }
 
-static int
-red_requeue(struct sk_buff *skb, struct Qdisc* sch)
-{
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
-
-	PSCHED_SET_PASTPERFECT(q->qidlestart);
-
-	__skb_queue_head(&sch->q, skb);
-	sch->stats.backlog += skb->len;
-	return 0;
-}
-
-static struct sk_buff *
-red_dequeue(struct Qdisc* sch)
+static struct sk_buff *red_dequeue(struct Qdisc *sch)
 {
 	struct sk_buff *skb;
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct Qdisc *child = q->qdisc;
 
-	skb = __skb_dequeue(&sch->q);
+	skb = child->dequeue(child);
 	if (skb) {
-		sch->stats.backlog -= skb->len;
-		return skb;
+		qdisc_bstats_update(sch, skb);
+		sch->q.qlen--;
+	} else {
+		if (!red_is_idling(&q->vars))
+			red_start_of_idle_period(&q->vars);
 	}
-	PSCHED_GET_TIME(q->qidlestart);
-	return NULL;
+	return skb;
 }
 
-static unsigned int red_drop(struct Qdisc* sch)
+static struct sk_buff *red_peek(struct Qdisc *sch)
 {
-	struct sk_buff *skb;
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct Qdisc *child = q->qdisc;
 
-	skb = __skb_dequeue_tail(&sch->q);
-	if (skb) {
-		unsigned int len = skb->len;
-		sch->stats.backlog -= len;
-		sch->stats.drops++;
-		q->st.other++;
-		kfree_skb(skb);
+	return child->ops->peek(child);
+}
+
+static unsigned int red_drop(struct Qdisc *sch)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct Qdisc *child = q->qdisc;
+	unsigned int len;
+
+	if (child->ops->drop && (len = child->ops->drop(child)) > 0) {
+		q->stats.other++;
+		sch->qstats.drops++;
+		sch->q.qlen--;
 		return len;
 	}
-	PSCHED_GET_TIME(q->qidlestart);
+
+	if (!red_is_idling(&q->vars))
+		red_start_of_idle_period(&q->vars);
+
 	return 0;
 }
 
-static void red_reset(struct Qdisc* sch)
+static void red_reset(struct Qdisc *sch)
 {
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
+	struct red_sched_data *q = qdisc_priv(sch);
 
-	__skb_queue_purge(&sch->q);
-	sch->stats.backlog = 0;
-	PSCHED_SET_PASTPERFECT(q->qidlestart);
-	q->qave = 0;
-	q->qcount = -1;
-}
-
-static int red_change(struct Qdisc *sch, struct rtattr *opt)
-{
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
-	struct rtattr *tb[TCA_RED_STAB];
-	struct tc_red_qopt *ctl;
-
-	if (opt == NULL ||
-	    rtattr_parse(tb, TCA_RED_STAB, RTA_DATA(opt), RTA_PAYLOAD(opt)) ||
-	    tb[TCA_RED_PARMS-1] == 0 || tb[TCA_RED_STAB-1] == 0 ||
-	    RTA_PAYLOAD(tb[TCA_RED_PARMS-1]) < sizeof(*ctl) ||
-	    RTA_PAYLOAD(tb[TCA_RED_STAB-1]) < 256)
-		return -EINVAL;
-
-	ctl = RTA_DATA(tb[TCA_RED_PARMS-1]);
-
-	sch_tree_lock(sch);
-	q->flags = ctl->flags;
-	q->Wlog = ctl->Wlog;
-	q->Plog = ctl->Plog;
-	q->Rmask = ctl->Plog < 32 ? ((1<<ctl->Plog) - 1) : ~0UL;
-	q->Scell_log = ctl->Scell_log;
-	q->Scell_max = (255<<q->Scell_log);
-	q->qth_min = ctl->qth_min<<ctl->Wlog;
-	q->qth_max = ctl->qth_max<<ctl->Wlog;
-	q->limit = ctl->limit;
-	memcpy(q->Stab, RTA_DATA(tb[TCA_RED_STAB-1]), 256);
-
-	q->qcount = -1;
-	if (skb_queue_len(&sch->q) == 0)
-		PSCHED_SET_PASTPERFECT(q->qidlestart);
-	sch_tree_unlock(sch);
-	return 0;
-}
-
-static int red_init(struct Qdisc* sch, struct rtattr *opt)
-{
-	int err;
-
-	MOD_INC_USE_COUNT;
-
-	if ((err = red_change(sch, opt)) != 0) {
-		MOD_DEC_USE_COUNT;
-	}
-	return err;
-}
-
-
-int red_copy_xstats(struct sk_buff *skb, struct tc_red_xstats *st)
-{
-        RTA_PUT(skb, TCA_XSTATS, sizeof(*st), st);
-        return 0;
-
-rtattr_failure:
-        return 1;
-}
-
-static int red_dump(struct Qdisc *sch, struct sk_buff *skb)
-{
-	struct red_sched_data *q = (struct red_sched_data *)sch->data;
-	unsigned char	 *b = skb->tail;
-	struct rtattr *rta;
-	struct tc_red_qopt opt;
-
-	rta = (struct rtattr*)b;
-	RTA_PUT(skb, TCA_OPTIONS, 0, NULL);
-	opt.limit = q->limit;
-	opt.qth_min = q->qth_min>>q->Wlog;
-	opt.qth_max = q->qth_max>>q->Wlog;
-	opt.Wlog = q->Wlog;
-	opt.Plog = q->Plog;
-	opt.Scell_log = q->Scell_log;
-	opt.flags = q->flags;
-	RTA_PUT(skb, TCA_RED_PARMS, sizeof(opt), &opt);
-	rta->rta_len = skb->tail - b;
-
-	if (red_copy_xstats(skb, &q->st))
-		goto rtattr_failure;
-
-	return skb->len;
-
-rtattr_failure:
-	skb_trim(skb, b - skb->data);
-	return -1;
+	qdisc_reset(q->qdisc);
+	sch->q.qlen = 0;
+	red_restart(&q->vars);
 }
 
 static void red_destroy(struct Qdisc *sch)
 {
-	MOD_DEC_USE_COUNT;
+	struct red_sched_data *q = qdisc_priv(sch);
+
+	del_timer_sync(&q->adapt_timer);
+	qdisc_destroy(q->qdisc);
 }
 
-struct Qdisc_ops red_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"red",
-	sizeof(struct red_sched_data),
-
-	red_enqueue,
-	red_dequeue,
-	red_requeue,
-	red_drop,
-
-	red_init,
-	red_reset,
-	red_destroy,
-	red_change,
-
-	red_dump,
+static const struct nla_policy red_policy[TCA_RED_MAX + 1] = {
+	[TCA_RED_PARMS]	= { .len = sizeof(struct tc_red_qopt) },
+	[TCA_RED_STAB]	= { .len = RED_STAB_SIZE },
+	[TCA_RED_MAX_P] = { .type = NLA_U32 },
 };
 
+static int red_change(struct Qdisc *sch, struct nlattr *opt)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct nlattr *tb[TCA_RED_MAX + 1];
+	struct tc_red_qopt *ctl;
+	struct Qdisc *child = NULL;
+	int err;
+	u32 max_P;
 
-#ifdef MODULE
-int init_module(void)
+	if (opt == NULL)
+		return -EINVAL;
+
+	err = nla_parse_nested(tb, TCA_RED_MAX, opt, red_policy);
+	if (err < 0)
+		return err;
+
+	if (tb[TCA_RED_PARMS] == NULL ||
+	    tb[TCA_RED_STAB] == NULL)
+		return -EINVAL;
+
+	max_P = tb[TCA_RED_MAX_P] ? nla_get_u32(tb[TCA_RED_MAX_P]) : 0;
+
+	ctl = nla_data(tb[TCA_RED_PARMS]);
+
+	if (ctl->limit > 0) {
+		child = fifo_create_dflt(sch, &bfifo_qdisc_ops, ctl->limit);
+		if (IS_ERR(child))
+			return PTR_ERR(child);
+	}
+
+	sch_tree_lock(sch);
+	q->flags = ctl->flags;
+	q->limit = ctl->limit;
+	if (child) {
+		qdisc_tree_decrease_qlen(q->qdisc, q->qdisc->q.qlen);
+		qdisc_destroy(q->qdisc);
+		q->qdisc = child;
+	}
+
+	red_set_parms(&q->parms,
+		      ctl->qth_min, ctl->qth_max, ctl->Wlog,
+		      ctl->Plog, ctl->Scell_log,
+		      nla_data(tb[TCA_RED_STAB]),
+		      max_P);
+	red_set_vars(&q->vars);
+
+	del_timer(&q->adapt_timer);
+	if (ctl->flags & TC_RED_ADAPTATIVE)
+		mod_timer(&q->adapt_timer, jiffies + HZ/2);
+
+	if (!q->qdisc->q.qlen)
+		red_start_of_idle_period(&q->vars);
+
+	sch_tree_unlock(sch);
+	return 0;
+}
+
+static inline void red_adaptative_timer(unsigned long arg)
+{
+	struct Qdisc *sch = (struct Qdisc *)arg;
+	struct red_sched_data *q = qdisc_priv(sch);
+	spinlock_t *root_lock = qdisc_lock(qdisc_root_sleeping(sch));
+
+	spin_lock(root_lock);
+	red_adaptative_algo(&q->parms, &q->vars);
+	mod_timer(&q->adapt_timer, jiffies + HZ/2);
+	spin_unlock(root_lock);
+}
+
+static int red_init(struct Qdisc *sch, struct nlattr *opt)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+
+	q->qdisc = &noop_qdisc;
+	setup_timer(&q->adapt_timer, red_adaptative_timer, (unsigned long)sch);
+	return red_change(sch, opt);
+}
+
+static int red_dump(struct Qdisc *sch, struct sk_buff *skb)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct nlattr *opts = NULL;
+	struct tc_red_qopt opt = {
+		.limit		= q->limit,
+		.flags		= q->flags,
+		.qth_min	= q->parms.qth_min >> q->parms.Wlog,
+		.qth_max	= q->parms.qth_max >> q->parms.Wlog,
+		.Wlog		= q->parms.Wlog,
+		.Plog		= q->parms.Plog,
+		.Scell_log	= q->parms.Scell_log,
+	};
+
+	sch->qstats.backlog = q->qdisc->qstats.backlog;
+	opts = nla_nest_start(skb, TCA_OPTIONS);
+	if (opts == NULL)
+		goto nla_put_failure;
+	NLA_PUT(skb, TCA_RED_PARMS, sizeof(opt), &opt);
+	NLA_PUT_U32(skb, TCA_RED_MAX_P, q->parms.max_P);
+	return nla_nest_end(skb, opts);
+
+nla_put_failure:
+	nla_nest_cancel(skb, opts);
+	return -EMSGSIZE;
+}
+
+static int red_dump_stats(struct Qdisc *sch, struct gnet_dump *d)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	struct tc_red_xstats st = {
+		.early	= q->stats.prob_drop + q->stats.forced_drop,
+		.pdrop	= q->stats.pdrop,
+		.other	= q->stats.other,
+		.marked	= q->stats.prob_mark + q->stats.forced_mark,
+	};
+
+	return gnet_stats_copy_app(d, &st, sizeof(st));
+}
+
+static int red_dump_class(struct Qdisc *sch, unsigned long cl,
+			  struct sk_buff *skb, struct tcmsg *tcm)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+
+	tcm->tcm_handle |= TC_H_MIN(1);
+	tcm->tcm_info = q->qdisc->handle;
+	return 0;
+}
+
+static int red_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
+		     struct Qdisc **old)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+
+	if (new == NULL)
+		new = &noop_qdisc;
+
+	sch_tree_lock(sch);
+	*old = q->qdisc;
+	q->qdisc = new;
+	qdisc_tree_decrease_qlen(*old, (*old)->q.qlen);
+	qdisc_reset(*old);
+	sch_tree_unlock(sch);
+	return 0;
+}
+
+static struct Qdisc *red_leaf(struct Qdisc *sch, unsigned long arg)
+{
+	struct red_sched_data *q = qdisc_priv(sch);
+	return q->qdisc;
+}
+
+static unsigned long red_get(struct Qdisc *sch, u32 classid)
+{
+	return 1;
+}
+
+static void red_put(struct Qdisc *sch, unsigned long arg)
+{
+}
+
+static void red_walk(struct Qdisc *sch, struct qdisc_walker *walker)
+{
+	if (!walker->stop) {
+		if (walker->count >= walker->skip)
+			if (walker->fn(sch, 1, walker) < 0) {
+				walker->stop = 1;
+				return;
+			}
+		walker->count++;
+	}
+}
+
+static const struct Qdisc_class_ops red_class_ops = {
+	.graft		=	red_graft,
+	.leaf		=	red_leaf,
+	.get		=	red_get,
+	.put		=	red_put,
+	.walk		=	red_walk,
+	.dump		=	red_dump_class,
+};
+
+static struct Qdisc_ops red_qdisc_ops __read_mostly = {
+	.id		=	"red",
+	.priv_size	=	sizeof(struct red_sched_data),
+	.cl_ops		=	&red_class_ops,
+	.enqueue	=	red_enqueue,
+	.dequeue	=	red_dequeue,
+	.peek		=	red_peek,
+	.drop		=	red_drop,
+	.init		=	red_init,
+	.reset		=	red_reset,
+	.destroy	=	red_destroy,
+	.change		=	red_change,
+	.dump		=	red_dump,
+	.dump_stats	=	red_dump_stats,
+	.owner		=	THIS_MODULE,
+};
+
+static int __init red_module_init(void)
 {
 	return register_qdisc(&red_qdisc_ops);
 }
 
-void cleanup_module(void) 
+static void __exit red_module_exit(void)
 {
 	unregister_qdisc(&red_qdisc_ops);
 }
-#endif
+
+module_init(red_module_init)
+module_exit(red_module_exit)
+
 MODULE_LICENSE("GPL");

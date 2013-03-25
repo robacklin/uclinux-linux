@@ -16,7 +16,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *     
@@ -27,7 +27,9 @@
 
 void irlan_check_command_param(struct irlan_cb *self, char *param, 
 			       char *value);
-void handle_filter_request(struct irlan_cb *self, struct sk_buff *skb);
-int irlan_print_filter(int filter_type, char *buf);
+void irlan_filter_request(struct irlan_cb *self, struct sk_buff *skb);
+#ifdef CONFIG_PROC_FS
+void irlan_print_filter(struct seq_file *seq, int filter_type);
+#endif
 
 #endif /* IRLAN_FILTER_H */

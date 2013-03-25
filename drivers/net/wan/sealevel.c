@@ -8,8 +8,11 @@
  *
  *	(c) Copyright 1999, 2001 Alan Cox
  *	(c) Copyright 2001 Red Hat Inc.
+ *	Generic HDLC port Copyright (C) 2008 Krzysztof Halasa <khc@pm.waw.pl>
  *
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -19,21 +22,22 @@
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
 #include <linux/delay.h>
+#include <linux/hdlc.h>
 #include <linux/ioport.h>
+#include <linux/init.h>
+#include <linux/slab.h>
 #include <net/arp.h>
 
+#include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/byteorder.h>
-#include <net/syncppp.h>
 #include "z85230.h"
 
 
 struct slvl_device
 {
-	void *if_ptr;	/* General purpose pointer (used by SPPP) */
 	struct z8530_channel *chan;
-	struct ppp_device netdev;
 	int channel;
 };
 
@@ -49,103 +53,89 @@ struct slvl_board
  *	Network driver support routines
  */
 
+static inline struct slvl_device* dev_to_chan(struct net_device *dev)
+{
+	return (struct slvl_device *)dev_to_hdlc(dev)->priv;
+}
+
 /*
- *	Frame receive. Simple for our card as we do sync ppp and there
+ *	Frame receive. Simple for our card as we do HDLC and there
  *	is no funny garbage involved
  */
- 
+
 static void sealevel_input(struct z8530_channel *c, struct sk_buff *skb)
 {
-	/* Drop the CRC - its not a good idea to try and negotiate it ;) */
-	skb_trim(skb, skb->len-2);
-	skb->protocol=htons(ETH_P_WAN_PPP);
-	skb->mac.raw=skb->data;
-	skb->dev=c->netdevice;
-	/*
-	 *	Send it to the PPP layer. We dont have time to process
-	 *	it right now.
-	 */
+	/* Drop the CRC - it's not a good idea to try and negotiate it ;) */
+	skb_trim(skb, skb->len - 2);
+	skb->protocol = hdlc_type_trans(skb, c->netdevice);
+	skb_reset_mac_header(skb);
+	skb->dev = c->netdevice;
 	netif_rx(skb);
-	c->netdevice->last_rx = jiffies;
 }
- 
+
 /*
  *	We've been placed in the UP state
- */ 
- 
+ */
+
 static int sealevel_open(struct net_device *d)
 {
-	struct slvl_device *slvl=d->priv;
+	struct slvl_device *slvl = dev_to_chan(d);
 	int err = -1;
 	int unit = slvl->channel;
-	
+
 	/*
-	 *	Link layer up. 
+	 *	Link layer up.
 	 */
 
-	switch(unit)
-	{
+	switch (unit) {
 		case 0:
-			err=z8530_sync_dma_open(d, slvl->chan);
+			err = z8530_sync_dma_open(d, slvl->chan);
 			break;
 		case 1:
-			err=z8530_sync_open(d, slvl->chan);
+			err = z8530_sync_open(d, slvl->chan);
 			break;
 	}
-	
-	if(err)
+
+	if (err)
 		return err;
-	/*
-	 *	Begin PPP
-	 */
-	err=sppp_open(d);
-	if(err)
-	{
-		switch(unit)
-		{
+
+	err = hdlc_open(d);
+	if (err) {
+		switch (unit) {
 			case 0:
 				z8530_sync_dma_close(d, slvl->chan);
 				break;
 			case 1:
 				z8530_sync_close(d, slvl->chan);
 				break;
-		}				
+		}
 		return err;
 	}
-	
-	slvl->chan->rx_function=sealevel_input;
-	
+
+	slvl->chan->rx_function = sealevel_input;
+
 	/*
 	 *	Go go go
 	 */
 	netif_start_queue(d);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int sealevel_close(struct net_device *d)
 {
-	struct slvl_device *slvl=d->priv;
+	struct slvl_device *slvl = dev_to_chan(d);
 	int unit = slvl->channel;
-	
+
 	/*
 	 *	Discard new frames
 	 */
-	
-	slvl->chan->rx_function=z8530_null_rx;
-		
-	/*
-	 *	PPP off
-	 */
-	sppp_close(d);
-	/*
-	 *	Link layer down
-	 */
 
+	slvl->chan->rx_function = z8530_null_rx;
+
+	hdlc_close(d);
 	netif_stop_queue(d);
-		
-	switch(unit)
-	{
+
+	switch (unit) {
 		case 0:
 			z8530_sync_dma_close(d, slvl->chan);
 			break;
@@ -153,175 +143,164 @@ static int sealevel_close(struct net_device *d)
 			z8530_sync_close(d, slvl->chan);
 			break;
 	}
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static int sealevel_ioctl(struct net_device *d, struct ifreq *ifr, int cmd)
 {
-	/* struct slvl_device *slvl=d->priv;
+	/* struct slvl_device *slvl=dev_to_chan(d);
 	   z8530_ioctl(d,&slvl->sync.chanA,ifr,cmd) */
-	return sppp_do_ioctl(d, ifr,cmd);
-}
-
-static struct net_device_stats *sealevel_get_stats(struct net_device *d)
-{
-	struct slvl_device *slvl=d->priv;
-	if(slvl)
-		return z8530_get_stats(slvl->chan);
-	else
-		return NULL;
+	return hdlc_ioctl(d, ifr, cmd);
 }
 
 /*
- *	Passed PPP frames, fire them downwind.
+ *	Passed network frames, fire them downwind.
  */
- 
-static int sealevel_queue_xmit(struct sk_buff *skb, struct net_device *d)
+
+static netdev_tx_t sealevel_queue_xmit(struct sk_buff *skb,
+					     struct net_device *d)
 {
-	struct slvl_device *slvl=d->priv;
-	return z8530_queue_xmit(slvl->chan, skb);
+	return z8530_queue_xmit(dev_to_chan(d)->chan, skb);
 }
 
-static int sealevel_neigh_setup(struct neighbour *n)
+static int sealevel_attach(struct net_device *dev, unsigned short encoding,
+			   unsigned short parity)
 {
-	if (n->nud_state == NUD_NONE) {
-		n->ops = &arp_broken_ops;
-		n->output = n->ops->output;
+	if (encoding == ENCODING_NRZ && parity == PARITY_CRC16_PR1_CCITT)
+		return 0;
+	return -EINVAL;
+}
+
+static const struct net_device_ops sealevel_ops = {
+	.ndo_open       = sealevel_open,
+	.ndo_stop       = sealevel_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = sealevel_ioctl,
+};
+
+static int slvl_setup(struct slvl_device *sv, int iobase, int irq)
+{
+	struct net_device *dev = alloc_hdlcdev(sv);
+	if (!dev)
+		return -1;
+
+	dev_to_hdlc(dev)->attach = sealevel_attach;
+	dev_to_hdlc(dev)->xmit = sealevel_queue_xmit;
+	dev->netdev_ops = &sealevel_ops;
+	dev->base_addr = iobase;
+	dev->irq = irq;
+
+	if (register_hdlc_device(dev)) {
+		pr_err("unable to register HDLC device\n");
+		free_netdev(dev);
+		return -1;
 	}
+
+	sv->chan->netdevice = dev;
 	return 0;
 }
 
-static int sealevel_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
-{
-	if (p->tbl->family == AF_INET) {
-		p->neigh_setup = sealevel_neigh_setup;
-		p->ucast_probes = 0;
-		p->mcast_probes = 0;
-	}
-	return 0;
-}
 
 /*
- *	Description block for a Comtrol Hostess SV11 card
+ *	Allocate and setup Sealevel board.
  */
- 
-static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, int slow)
+
+static __init struct slvl_board *slvl_init(int iobase, int irq,
+					   int txdma, int rxdma, int slow)
 {
 	struct z8530_dev *dev;
-	struct slvl_device *sv;
 	struct slvl_board *b;
-	
-	unsigned long flags;
-	int u;
-	
+
 	/*
 	 *	Get the needed I/O space
 	 */
-	 
-	if(!request_region(iobase, 8, "Sealevel 4021"))
-	{	
-		printk(KERN_WARNING "sealevel: I/O 0x%X already in use.\n", iobase);
+
+	if (!request_region(iobase, 8, "Sealevel 4021")) {
+		pr_warn("I/O 0x%X already in use\n", iobase);
 		return NULL;
 	}
-	
-	b=(struct slvl_board *)kmalloc(sizeof(struct slvl_board), GFP_KERNEL);
-	if(!b)
-		goto fail3;
-			
-	memset(b, 0, sizeof(*sv));
 
-	b->dev[0].chan = &b->board.chanA;	
-	b->dev[0].if_ptr = &b->dev[0].netdev;
-	b->dev[0].netdev.dev=(struct net_device *)
-		kmalloc(sizeof(struct net_device), GFP_KERNEL);
-	if(!b->dev[0].netdev.dev)
-		goto fail2;
+	b = kzalloc(sizeof(struct slvl_board), GFP_KERNEL);
+	if (!b)
+		goto err_kzalloc;
+
+	b->dev[0].chan = &b->board.chanA;
+	b->dev[0].channel = 0;
 
 	b->dev[1].chan = &b->board.chanB;
-	b->dev[1].if_ptr = &b->dev[1].netdev;
-	b->dev[1].netdev.dev=(struct net_device *)
-		kmalloc(sizeof(struct net_device), GFP_KERNEL);
-	if(!b->dev[1].netdev.dev)
-		goto fail1_0;
+	b->dev[1].channel = 1;
 
-	dev=&b->board;
-	
+	dev = &b->board;
+
 	/*
 	 *	Stuff in the I/O addressing
 	 */
-	 
+
 	dev->active = 0;
 
 	b->iobase = iobase;
-	
+
 	/*
 	 *	Select 8530 delays for the old board
 	 */
-	 
-	if(slow)
+
+	if (slow)
 		iobase |= Z8530_PORT_SLEEP;
-		
-	dev->chanA.ctrlio=iobase+1;
-	dev->chanA.dataio=iobase;
-	dev->chanB.ctrlio=iobase+3;
-	dev->chanB.dataio=iobase+2;
-	
-	dev->chanA.irqs=&z8530_nop;
-	dev->chanB.irqs=&z8530_nop;
-	
+
+	dev->chanA.ctrlio = iobase + 1;
+	dev->chanA.dataio = iobase;
+	dev->chanB.ctrlio = iobase + 3;
+	dev->chanB.dataio = iobase + 2;
+
+	dev->chanA.irqs = &z8530_nop;
+	dev->chanB.irqs = &z8530_nop;
+
 	/*
 	 *	Assert DTR enable DMA
 	 */
-	 
-	outb(3|(1<<7), b->iobase+4);	
-	
+
+	outb(3 | (1 << 7), b->iobase + 4);
+
 
 	/* We want a fast IRQ for this device. Actually we'd like an even faster
 	   IRQ ;) - This is one driver RtLinux is made for */
-   
-	if(request_irq(irq, &z8530_interrupt, SA_INTERRUPT, "SeaLevel", dev)<0)
-	{
-		printk(KERN_WARNING "sealevel: IRQ %d already in use.\n", irq);
-		goto fail1_1;
-	}
-	
-	dev->irq=irq;
-	dev->chanA.private=&b->dev[0];
-	dev->chanB.private=&b->dev[1];
-	dev->chanA.netdevice=b->dev[0].netdev.dev;
-	dev->chanB.netdevice=b->dev[1].netdev.dev;
-	dev->chanA.dev=dev;
-	dev->chanB.dev=dev;
 
-	dev->chanA.txdma=3;
-	dev->chanA.rxdma=1;
-	if(request_dma(dev->chanA.txdma, "SeaLevel (TX)")!=0)
-		goto fail;
-		
-	if(request_dma(dev->chanA.rxdma, "SeaLevel (RX)")!=0)
-		goto dmafail;
-	
-	save_flags(flags);
-	cli();
-	
+	if (request_irq(irq, z8530_interrupt, IRQF_DISABLED,
+			"SeaLevel", dev) < 0) {
+		pr_warn("IRQ %d already in use\n", irq);
+		goto err_request_irq;
+	}
+
+	dev->irq = irq;
+	dev->chanA.private = &b->dev[0];
+	dev->chanB.private = &b->dev[1];
+	dev->chanA.dev = dev;
+	dev->chanB.dev = dev;
+
+	dev->chanA.txdma = 3;
+	dev->chanA.rxdma = 1;
+	if (request_dma(dev->chanA.txdma, "SeaLevel (TX)"))
+		goto err_dma_tx;
+
+	if (request_dma(dev->chanA.rxdma, "SeaLevel (RX)"))
+		goto err_dma_rx;
+
+	disable_irq(irq);
+
 	/*
 	 *	Begin normal initialise
 	 */
-	 
-	if(z8530_init(dev)!=0)
-	{
-		printk(KERN_ERR "Z8530 series device not found.\n");
-		restore_flags(flags);
-		goto dmafail2;
+
+	if (z8530_init(dev) != 0) {
+		pr_err("Z8530 series device not found\n");
+		enable_irq(irq);
+		goto free_hw;
 	}
-	if(dev->type==Z85C30)
-	{
+	if (dev->type == Z85C30) {
 		z8530_channel_load(&dev->chanA, z8530_hdlc_kilostream);
 		z8530_channel_load(&dev->chanB, z8530_hdlc_kilostream);
-	}
-	else
-	{
+	} else {
 		z8530_channel_load(&dev->chanA, z8530_hdlc_kilostream_85230);
 		z8530_channel_load(&dev->chanB, z8530_hdlc_kilostream_85230);
 	}
@@ -329,113 +308,71 @@ static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, i
 	/*
 	 *	Now we can take the IRQ
 	 */
-	
-	restore_flags(flags);
 
-	for(u=0; u<2; u++)
-	{
-		sv=&b->dev[u];
-		sv->channel = u;
-	
-		if(dev_alloc_name(sv->chan->netdevice,"hdlc%d")>=0)
-		{
-			struct net_device *d=sv->chan->netdevice;
+	enable_irq(irq);
 
-			/* 
-			 *	Initialise the PPP components
-			 */
-			sppp_attach(&sv->netdev);
-		
-			/*
-			 *	Local fields
-			 */	
-			
-			d->base_addr = iobase;
-			d->irq = irq;
-			d->priv = sv;
-			d->init = NULL;
-		
-			d->open = sealevel_open;
-			d->stop = sealevel_close;
-			d->hard_start_xmit = sealevel_queue_xmit;
-			d->get_stats = sealevel_get_stats;
-			d->set_multicast_list = NULL;
-			d->do_ioctl = sealevel_ioctl;
-			d->neigh_setup = sealevel_neigh_setup_dev;
-			d->set_mac_address = NULL;
-		
-			if(register_netdev(d)==-1)
-			{
-				printk(KERN_ERR "%s: unable to register device.\n",
-					d->name);
-				goto fail_unit;
-			}				
+	if (slvl_setup(&b->dev[0], iobase, irq))
+		goto free_hw;
+	if (slvl_setup(&b->dev[1], iobase, irq))
+		goto free_netdev0;
 
-			break;
-		}
-	}
 	z8530_describe(dev, "I/O", iobase);
-	dev->active=1;
+	dev->active = 1;
 	return b;
 
-fail_unit:
-	if(u==1)
-		unregister_netdev(b->dev[0].chan->netdevice);
-	
-dmafail2:
+free_netdev0:
+	unregister_hdlc_device(b->dev[0].chan->netdevice);
+	free_netdev(b->dev[0].chan->netdevice);
+free_hw:
 	free_dma(dev->chanA.rxdma);
-dmafail:
+err_dma_rx:
 	free_dma(dev->chanA.txdma);
-fail:
+err_dma_tx:
 	free_irq(irq, dev);
-fail1_1:
-	kfree(b->dev[1].netdev.dev);
-fail1_0:
-	kfree(b->dev[0].netdev.dev);
-fail2:
+err_request_irq:
 	kfree(b);
-fail3:
-	release_region(iobase,8);
+err_kzalloc:
+	release_region(iobase, 8);
 	return NULL;
 }
 
-static void slvl_shutdown(struct slvl_board *b)
+static void __exit slvl_shutdown(struct slvl_board *b)
 {
 	int u;
 
 	z8530_shutdown(&b->board);
-	
-	for(u=0; u<2; u++)
-	{
-		sppp_detach(b->dev[u].netdev.dev);
-		unregister_netdev(b->dev[u].netdev.dev);
+
+	for (u = 0; u < 2; u++) {
+		struct net_device *d = b->dev[u].chan->netdevice;
+		unregister_hdlc_device(d);
+		free_netdev(d);
 	}
-	
+
 	free_irq(b->board.irq, &b->board);
 	free_dma(b->board.chanA.rxdma);
 	free_dma(b->board.chanA.txdma);
 	/* DMA off on the card, drop DTR */
 	outb(0, b->iobase);
 	release_region(b->iobase, 8);
+	kfree(b);
 }
 
-#ifdef MODULE
 
 static int io=0x238;
 static int txdma=1;
 static int rxdma=3;
 static int irq=5;
-static int slow=0;
+static bool slow=false;
 
-MODULE_PARM(io,"i");
+module_param(io, int, 0);
 MODULE_PARM_DESC(io, "The I/O base of the Sealevel card");
-MODULE_PARM(txdma,"i");
+module_param(txdma, int, 0);
 MODULE_PARM_DESC(txdma, "Transmit DMA channel");
-MODULE_PARM(rxdma,"i");
+module_param(rxdma, int, 0);
 MODULE_PARM_DESC(rxdma, "Receive DMA channel");
-MODULE_PARM(irq,"i");
+module_param(irq, int, 0);
 MODULE_PARM_DESC(irq, "The interrupt line setting for the SeaLevel card");
-MODULE_PARM(slow,"i");
+module_param(slow, bool, 0);
 MODULE_PARM_DESC(slow, "Set this for an older Sealevel card such as the 4012");
 
 MODULE_AUTHOR("Alan Cox");
@@ -444,20 +381,18 @@ MODULE_DESCRIPTION("Modular driver for the SeaLevel 4021");
 
 static struct slvl_board *slvl_unit;
 
-int init_module(void)
+static int __init slvl_init_module(void)
 {
-	printk(KERN_INFO "SeaLevel Z85230 Synchronous Driver v 0.01.\n");
-	printk(KERN_INFO "(c) Copyright 1998, Building Number Three Ltd.\n");	
-	if((slvl_unit=slvl_init(io,irq, txdma, rxdma, slow))==NULL)
-		return -ENODEV;
-	return 0;
+	slvl_unit = slvl_init(io, irq, txdma, rxdma, slow);
+
+	return slvl_unit ? 0 : -ENODEV;
 }
 
-void cleanup_module(void)
+static void __exit slvl_cleanup_module(void)
 {
-	if(slvl_unit)
+	if (slvl_unit)
 		slvl_shutdown(slvl_unit);
 }
 
-#endif
-
+module_init(slvl_init_module);
+module_exit(slvl_cleanup_module);

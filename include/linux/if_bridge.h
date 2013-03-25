@@ -4,8 +4,6 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: if_bridge.h,v 1.1 2000/02/18 16:47:01 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
@@ -16,6 +14,12 @@
 #define _LINUX_IF_BRIDGE_H
 
 #include <linux/types.h>
+
+#define SYSFS_BRIDGE_ATTR	"bridge"
+#define SYSFS_BRIDGE_FDB	"brforward"
+#define SYSFS_BRIDGE_PORT_SUBDIR "brif"
+#define SYSFS_BRIDGE_PORT_ATTR	"brport"
+#define SYSFS_BRIDGE_PORT_LINK	"bridge"
 
 #define BRCTL_VERSION 1
 
@@ -45,8 +49,7 @@
 #define BR_STATE_FORWARDING 3
 #define BR_STATE_BLOCKING 4
 
-struct __bridge_info
-{
+struct __bridge_info {
 	__u64 designated_root;
 	__u64 bridge_id;
 	__u32 root_path_cost;
@@ -68,8 +71,7 @@ struct __bridge_info
 	__u32 gc_timer_value;
 };
 
-struct __port_info
-{
+struct __port_info {
 	__u64 designated_root;
 	__u64 designated_bridge;
 	__u16 port_id;
@@ -85,25 +87,24 @@ struct __port_info
 	__u32 hold_timer_value;
 };
 
-struct __fdb_entry
-{
+struct __fdb_entry {
 	__u8 mac_addr[6];
 	__u8 port_no;
 	__u8 is_local;
 	__u32 ageing_timer_value;
-	__u32 unused;
+	__u8 port_hi;
+	__u8 pad0;
+	__u16 unused;
 };
 
 #ifdef __KERNEL__
 
 #include <linux/netdevice.h>
 
-struct net_bridge;
-struct net_bridge_port;
+extern void brioctl_set(int (*ioctl_hook)(struct net *, unsigned int, void __user *));
 
-extern int (*br_ioctl_hook)(unsigned long arg);
-extern int (*br_handle_frame_hook)(struct sk_buff *skb);
-extern int (*br_should_route_hook)(struct sk_buff **pskb);
+typedef int br_should_route_hook_t(struct sk_buff *skb);
+extern br_should_route_hook_t __rcu *br_should_route_hook;
 
 #endif
 

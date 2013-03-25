@@ -27,20 +27,19 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_immed.c,v 1.10 2001/04/25 18:11:23 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - support for 'immed' inodes.
  */
 #include <linux/fs.h>
 #include <linux/pagemap.h>
+#include <linux/namei.h>
 
 #include "vxfs.h"
+#include "vxfs_extern.h"
 #include "vxfs_inode.h"
 
 
-static int	vxfs_immed_readlink(struct dentry *, char *, int);
-static int	vxfs_immed_follow_link(struct dentry *, struct nameidata *);
+static void *	vxfs_immed_follow_link(struct dentry *, struct nameidata *);
 
 static int	vxfs_immed_readpage(struct file *, struct page *);
 
@@ -50,39 +49,17 @@ static int	vxfs_immed_readpage(struct file *, struct page *);
  * Unliked all other operations we do not go through the pagecache,
  * but do all work directly on the inode.
  */
-struct inode_operations vxfs_immed_symlink_iops = {
-	.readlink =		vxfs_immed_readlink,
+const struct inode_operations vxfs_immed_symlink_iops = {
+	.readlink =		generic_readlink,
 	.follow_link =		vxfs_immed_follow_link,
 };
 
 /*
- * Adress space operations for immed files and directories.
+ * Address space operations for immed files and directories.
  */
-struct address_space_operations vxfs_immed_aops = {
+const struct address_space_operations vxfs_immed_aops = {
 	.readpage =		vxfs_immed_readpage,
 };
-
-
-/**
- * vxfs_immed_readlink - read immed symlink
- * @dp:		dentry for the link
- * @bp:		output buffer
- * @buflen:	length of @bp
- *
- * Description:
- *   vxfs_immed_readlink calls vfs_readlink to read the link
- *   described by @dp into userspace.
- *
- * Returns:
- *   Number of bytes successfully copied to userspace.
- */
-static int
-vxfs_immed_readlink(struct dentry *dp, char *bp, int buflen)
-{
-	struct vxfs_inode_info		*vip = VXFS_INO(dp->d_inode);
-
-	return (vfs_readlink(dp, bp, buflen, vip->vii_immed.vi_immed));
-}
 
 /**
  * vxfs_immed_follow_link - follow immed symlink
@@ -96,12 +73,12 @@ vxfs_immed_readlink(struct dentry *dp, char *bp, int buflen)
  * Returns:
  *   Zero on success, else a negative error code.
  */
-static int
+static void *
 vxfs_immed_follow_link(struct dentry *dp, struct nameidata *np)
 {
 	struct vxfs_inode_info		*vip = VXFS_INO(dp->d_inode);
-
-	return (vfs_follow_link(np, vip->vii_immed.vi_immed));
+	nd_set_link(np, vip->vii_immed.vi_immed);
+	return NULL;
 }
 
 /**
@@ -123,8 +100,8 @@ static int
 vxfs_immed_readpage(struct file *fp, struct page *pp)
 {
 	struct vxfs_inode_info	*vip = VXFS_INO(pp->mapping->host);
-	u_int64_t		offset = pp->index << PAGE_CACHE_SHIFT;
-	caddr_t			kaddr;
+	u_int64_t	offset = (u_int64_t)pp->index << PAGE_CACHE_SHIFT;
+	caddr_t		kaddr;
 
 	kaddr = kmap(pp);
 	memcpy(kaddr, vip->vii_immed.vi_immed + offset, PAGE_CACHE_SIZE);
@@ -132,7 +109,7 @@ vxfs_immed_readpage(struct file *fp, struct page *pp)
 	
 	flush_dcache_page(pp);
 	SetPageUptodate(pp);
-        UnlockPage(pp);
+        unlock_page(pp);
 
 	return 0;
 }

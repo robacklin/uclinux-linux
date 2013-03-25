@@ -176,6 +176,39 @@
 #define AC97_EXTSTAT_PRK          0x2000
 #define AC97_EXTSTAT_PRL          0x4000
 
+/* extended audio ID register bit defines */
+#define AC97_EXTID_VRA            0x0001
+#define AC97_EXTID_DRA            0x0002
+#define AC97_EXTID_SPDIF          0x0004
+#define AC97_EXTID_VRM            0x0008
+#define AC97_EXTID_DSA0           0x0010
+#define AC97_EXTID_DSA1           0x0020
+#define AC97_EXTID_CDAC           0x0040
+#define AC97_EXTID_SDAC           0x0080
+#define AC97_EXTID_LDAC           0x0100
+#define AC97_EXTID_AMAP           0x0200
+#define AC97_EXTID_REV0           0x0400
+#define AC97_EXTID_REV1           0x0800
+#define AC97_EXTID_ID0            0x4000
+#define AC97_EXTID_ID1            0x8000
+
+/* extended status register bit defines */
+#define AC97_EXTSTAT_VRA          0x0001
+#define AC97_EXTSTAT_DRA          0x0002
+#define AC97_EXTSTAT_SPDIF        0x0004
+#define AC97_EXTSTAT_VRM          0x0008
+#define AC97_EXTSTAT_SPSA0        0x0010
+#define AC97_EXTSTAT_SPSA1        0x0020
+#define AC97_EXTSTAT_CDAC         0x0040
+#define AC97_EXTSTAT_SDAC         0x0080
+#define AC97_EXTSTAT_LDAC         0x0100
+#define AC97_EXTSTAT_MADC         0x0200
+#define AC97_EXTSTAT_SPCV         0x0400
+#define AC97_EXTSTAT_PRI          0x0800
+#define AC97_EXTSTAT_PRJ          0x1000
+#define AC97_EXTSTAT_PRK          0x2000
+#define AC97_EXTSTAT_PRL          0x4000
+
 /* useful power states */
 #define AC97_PWR_D0               0x0000      /* everything on */
 #define AC97_PWR_D1              AC97_PWR_PR0|AC97_PWR_PR1|AC97_PWR_PR4
@@ -226,7 +259,7 @@ struct ac97_codec {
 	int type;
 	u32 model;
 
-	int modem:1;
+	unsigned int modem:1;
 
 	struct ac97_ops *codec_ops;
 
@@ -293,13 +326,7 @@ struct ac97_ops
 #define AC97_DEFAULT_POWER_OFF 4 /* Needs warm reset to power up */
 };
 
-extern int ac97_read_proc (char *page_out, char **start, off_t off,
-			   int count, int *eof, void *data);
 extern int ac97_probe_codec(struct ac97_codec *);
-extern unsigned int ac97_set_adc_rate(struct ac97_codec *codec, unsigned int rate);
-extern unsigned int ac97_set_dac_rate(struct ac97_codec *codec, unsigned int rate);
-extern int ac97_save_state(struct ac97_codec *codec);
-extern int ac97_restore_state(struct ac97_codec *codec);
 
 extern struct ac97_codec *ac97_alloc_codec(void);
 extern void ac97_release_codec(struct ac97_codec *codec);
@@ -313,7 +340,23 @@ struct ac97_driver {
 	void (*remove) (struct ac97_codec *codec, struct ac97_driver *driver);
 };
 
-extern int ac97_register_driver(struct ac97_driver *driver);
-extern void ac97_unregister_driver(struct ac97_driver *driver);
+/* quirk types */
+enum {
+	AC97_TUNE_DEFAULT = -1, /* use default from quirk list (not valid in list) */
+	AC97_TUNE_NONE = 0,     /* nothing extra to do */
+	AC97_TUNE_HP_ONLY,      /* headphone (true line-out) control as master only */
+	AC97_TUNE_SWAP_HP,      /* swap headphone and master controls */
+	AC97_TUNE_SWAP_SURROUND, /* swap master and surround controls */
+	AC97_TUNE_AD_SHARING,   /* for AD1985, turn on OMS bit and use headphone */
+	AC97_TUNE_ALC_JACK,     /* for Realtek, enable JACK detection */
+};
+
+struct ac97_quirk {
+	unsigned short vendor;  /* PCI vendor id */
+	unsigned short device;  /* PCI device id */
+	unsigned short mask;    /* device id bit mask, 0 = accept all */
+	const char *name;       /* name shown as info */
+	int type;               /* quirk type above */
+};
 
 #endif /* _AC97_CODEC_H_ */

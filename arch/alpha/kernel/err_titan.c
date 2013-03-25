@@ -14,6 +14,9 @@
 #include <asm/core_titan.h>
 #include <asm/hwrpb.h>
 #include <asm/smp.h>
+#include <asm/err_common.h>
+#include <asm/err_ev6.h>
+#include <asm/irq_regs.h>
 
 #include "err_impl.h"
 #include "proto.h"
@@ -22,8 +25,10 @@
 static int
 titan_parse_c_misc(u64 c_misc, int print)
 {
+#ifdef CONFIG_VERBOSE_MCHECK
 	char *src;
 	int nxs = 0;
+#endif
 	int status = MCHK_DISPOSITION_REPORT;
 
 #define TITAN__CCHIP_MISC__NXM		(1UL << 28)
@@ -70,8 +75,12 @@ titan_parse_p_serror(int which, u64 serror, int print)
 	int status = MCHK_DISPOSITION_REPORT;
 
 #ifdef CONFIG_VERBOSE_MCHECK
-	char *serror_src[] = {"GPCI", "APCI", "AGP HP", "AGP LP"};
-	char *serror_cmd[] = {"DMA Read", "DMA RMW", "SGTE Read", "Reserved"};
+	static const char * const serror_src[] = {
+		"GPCI", "APCI", "AGP HP", "AGP LP"
+	};
+	static const char * const serror_cmd[] = {
+		"DMA Read", "DMA RMW", "SGTE Read", "Reserved"
+	};
 #endif /* CONFIG_VERBOSE_MCHECK */
 
 #define TITAN__PCHIP_SERROR__LOST_UECC	(1UL << 0)
@@ -102,12 +111,12 @@ titan_parse_p_serror(int which, u64 serror, int print)
 	if (!print)
 		return status;
 
-	printk("%s  PChip %d SERROR: %016lx\n", 
+	printk("%s  PChip %d SERROR: %016llx\n",
 	       err_print_prefix, which, serror);
 	if (serror & TITAN__PCHIP_SERROR__ECCMASK) {
 		printk("%s    %sorrectable ECC Error:\n"
 		       "      Source: %-6s  Command: %-8s  Syndrome: 0x%08x\n"
-		       "      Address: 0x%lx\n", 
+		       "      Address: 0x%llx\n",
 		       err_print_prefix,
 		       (serror & TITAN__PCHIP_SERROR__UECC) ? "Unc" : "C",
 		       serror_src[EXTRACT(serror, TITAN__PCHIP_SERROR__SRC)],
@@ -135,14 +144,15 @@ titan_parse_p_perror(int which, int port, u64 perror, int print)
 	int status = MCHK_DISPOSITION_REPORT;
 
 #ifdef CONFIG_VERBOSE_MCHECK
-	char *perror_cmd[] = { "Interrupt Acknowledge", "Special Cycle",
-			       "I/O Read",	       	"I/O Write",
-			       "Reserved",	       	"Reserved",
-			       "Memory Read",		"Memory Write",
-			       "Reserved",		"Reserved",
-			       "Configuration Read",	"Configuration Write",
-			       "Memory Read Multiple",	"Dual Address Cycle",
-			       "Memory Read Line","Memory Write and Invalidate"
+	static const char * const perror_cmd[] = {
+		"Interrupt Acknowledge", "Special Cycle",
+		"I/O Read",		"I/O Write",
+		"Reserved",		"Reserved",
+		"Memory Read",		"Memory Write",
+		"Reserved",		"Reserved",
+		"Configuration Read",	"Configuration Write",
+		"Memory Read Multiple",	"Dual Address Cycle",
+		"Memory Read Line",	"Memory Write and Invalidate"
 	};
 #endif /* CONFIG_VERBOSE_MCHECK */
 
@@ -173,7 +183,7 @@ titan_parse_p_perror(int which, int port, u64 perror, int print)
 #define TITAN__PCHIP_PERROR__CMD__S	(52)
 #define TITAN__PCHIP_PERROR__CMD__M	(0x0f)
 #define TITAN__PCHIP_PERROR__ADDR__S	(14)
-#define TITAN__PCHIP_PERROR__ADDR__M	(0x1ffffffff)
+#define TITAN__PCHIP_PERROR__ADDR__M	(0x1fffffffful)
 
 	if (!(perror & TITAN__PCHIP_PERROR__ERRMASK))
 		return MCHK_DISPOSITION_UNKNOWN_ERROR;
@@ -218,7 +228,7 @@ titan_parse_p_perror(int which, int port, u64 perror, int print)
 	if (!print) 
 		return status;
 
-	printk("%s  PChip %d %cPERROR: %016lx\n", 
+	printk("%s  PChip %d %cPERROR: %016llx\n",
 	       err_print_prefix, which, 
 	       port ? 'A' : 'G', perror);
 	if (perror & TITAN__PCHIP_PERROR__IPTPW)
@@ -263,16 +273,16 @@ titan_parse_p_perror(int which, int port, u64 perror, int print)
 static int
 titan_parse_p_agperror(int which, u64 agperror, int print)
 {
+	int status = MCHK_DISPOSITION_REPORT;
+#ifdef CONFIG_VERBOSE_MCHECK
 	int cmd, len;
 	unsigned long addr;
-	int status = MCHK_DISPOSITION_REPORT;
 
-#ifdef CONFIG_VERBOSE_MCHECK
-	char *agperror_cmd[] = { "Read (low-priority)",	"Read (high-priority)",
-				 "Write (low-priority)",
-				 "Write (high-priority)",
-				 "Reserved",		"Reserved",
-				 "Flush",		"Fence"
+	static const char * const agperror_cmd[] = {
+		"Read (low-priority)",	"Read (high-priority)",
+		"Write (low-priority)",	"Write (high-priority)",
+		"Reserved",		"Reserved",
+		"Flush",		"Fence"
 	};
 #endif /* CONFIG_VERBOSE_MCHECK */
 
@@ -311,7 +321,7 @@ titan_parse_p_agperror(int which, u64 agperror, int print)
 	addr = EXTRACT(agperror, TITAN__PCHIP_AGPERROR__ADDR) << 3;
 	len = EXTRACT(agperror, TITAN__PCHIP_AGPERROR__LEN);
 
-	printk("%s  PChip %d AGPERROR: %016lx\n", err_print_prefix,
+	printk("%s  PChip %d AGPERROR: %016llx\n", err_print_prefix,
 	       which, agperror);
 	if (agperror & TITAN__PCHIP_AGPERROR__NOWINDOW)
 		printk("%s    No Window\n", err_print_prefix);
@@ -375,7 +385,7 @@ titan_process_logout_frame(struct el_common *mchk_header, int print)
 }
 
 void
-titan_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
+titan_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	struct el_common *mchk_header = (struct el_common *)la_ptr;
 	struct el_TITAN_sysdata_mcheck *tmchk =
@@ -403,8 +413,10 @@ titan_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 	/*
 	 * Only handle system errors here 
 	 */
-	if ((vector != SCB_Q_SYSMCHK) && (vector != SCB_Q_SYSERR)) 
-		return ev6_machine_check(vector, la_ptr, regs);
+	if ((vector != SCB_Q_SYSMCHK) && (vector != SCB_Q_SYSERR)) {
+		ev6_machine_check(vector, la_ptr);
+		return;
+	}
 
 	/* 
 	 * It's a system error, handle it here
@@ -434,8 +446,9 @@ titan_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 		       (unsigned int)vector, (int)smp_processor_id());
 		
 #ifdef CONFIG_VERBOSE_MCHECK
-		titan_process_logout_frame(mchk_header, 1);
-		dik_show_regs(regs, NULL);
+		titan_process_logout_frame(mchk_header, alpha_verbose_mcheck);
+		if (alpha_verbose_mcheck)
+			dik_show_regs(get_irq_regs(), NULL);
 #endif /* CONFIG_VERBOSE_MCHECK */
 
 		err_print_prefix = saved_err_prefix;
@@ -445,7 +458,7 @@ titan_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 		 * machine checks to interrupts
 		 */
 		irqmask = tmchk->c_dirx & TITAN_MCHECK_INTERRUPT_MASK;
-		titan_dispatch_irqs(irqmask, regs);
+		titan_dispatch_irqs(irqmask);
 	}	
 
 
@@ -520,8 +533,6 @@ static struct el_subpacket_annotation el_titan_annotations[] = {
 static struct el_subpacket *
 el_process_regatta_subpacket(struct el_subpacket *header)
 {
-	int status;
-
 	if (header->class != EL_CLASS__REGATTA_FAMILY) {
 		printk("%s  ** Unexpected header CLASS %d TYPE %d, aborting\n",
 		       err_print_prefix,
@@ -538,7 +549,7 @@ el_process_regatta_subpacket(struct el_subpacket *header)
 		printk("%s  ** Occurred on CPU %d:\n", 
 		       err_print_prefix,
 		       (int)header->by_type.regatta_frame.cpuid);
-		status = privateer_process_logout_frame((struct el_common *)
+		privateer_process_logout_frame((struct el_common *)
 			header->by_type.regatta_frame.data_start, 1);
 		break;
 	default:
@@ -556,7 +567,7 @@ static struct el_subpacket_handler titan_subpacket_handler =
 	SUBPACKET_HANDLER_INIT(EL_CLASS__REGATTA_FAMILY, 
 			       el_process_regatta_subpacket);
 
-void
+void __init
 titan_register_error_handlers(void)
 {
 	size_t i;
@@ -565,6 +576,8 @@ titan_register_error_handlers(void)
 		cdl_register_subpacket_annotation(&el_titan_annotations[i]);
 
 	cdl_register_subpacket_handler(&titan_subpacket_handler);
+
+	ev6_register_error_handlers();
 }
 
 
@@ -575,28 +588,28 @@ titan_register_error_handlers(void)
 static int
 privateer_process_680_frame(struct el_common *mchk_header, int print)
 {
+	int status = MCHK_DISPOSITION_UNKNOWN_ERROR;
+#ifdef CONFIG_VERBOSE_MCHECK
 	struct el_PRIVATEER_envdata_mcheck *emchk =
 		(struct el_PRIVATEER_envdata_mcheck *)
 		((unsigned long)mchk_header + mchk_header->sys_offset);
-	int status = MCHK_DISPOSITION_UNKNOWN_ERROR;
 
-	/* TODO - catagorize errors, for now, no error */
+	/* TODO - categorize errors, for now, no error */
 
-#ifdef CONFIG_VERBOSE_MCHECK
 	if (!print)
 		return status;
 
 	/* TODO - decode instead of just dumping... */
-	printk("%s  Summary Flags:         %016lx\n"
- 	         "  CChip DIRx:            %016lx\n"
-		 "  System Management IR:  %016lx\n"
-		 "  CPU IR:                %016lx\n"
-		 "  Power Supply IR:       %016lx\n"
-		 "  LM78 Fault Status:     %016lx\n"
-		 "  System Doors:          %016lx\n"
-		 "  Temperature Warning:   %016lx\n"
-		 "  Fan Control:           %016lx\n"
-		 "  Fatal Power Down Code: %016lx\n",
+	printk("%s  Summary Flags:         %016llx\n"
+ 	         "  CChip DIRx:            %016llx\n"
+		 "  System Management IR:  %016llx\n"
+		 "  CPU IR:                %016llx\n"
+		 "  Power Supply IR:       %016llx\n"
+		 "  LM78 Fault Status:     %016llx\n"
+		 "  System Doors:          %016llx\n"
+		 "  Temperature Warning:   %016llx\n"
+		 "  Fan Control:           %016llx\n"
+		 "  Fatal Power Down Code: %016llx\n",
 	       err_print_prefix,
 	       emchk->summary,
 	       emchk->c_dirx,
@@ -692,7 +705,7 @@ privateer_process_logout_frame(struct el_common *mchk_header, int print)
 }
 
 void
-privateer_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
+privateer_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	struct el_common *mchk_header = (struct el_common *)la_ptr;
 	struct el_TITAN_sysdata_mcheck *tmchk =
@@ -714,7 +727,7 @@ privateer_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 	 * Only handle system events here.
 	 */
 	if (vector != SCB_Q_SYSEVENT) 
-		return titan_machine_check(vector, la_ptr, regs);
+		return titan_machine_check(vector, la_ptr);
 
 	/*
 	 * Report the event - System Events should be reported even if no
@@ -737,7 +750,7 @@ privateer_machine_check(u64 vector, u64 la_ptr, struct pt_regs *regs)
 	/*
 	 * Dispatch the interrupt(s).
 	 */
-	titan_dispatch_irqs(irqmask, regs);
+	titan_dispatch_irqs(irqmask);
 
 	/* 
 	 * Release the logout frame.

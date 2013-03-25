@@ -22,31 +22,27 @@
 #include <linux/timer.h>
 #include <linux/spinlock.h>
 #include <net/sock.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
+#include <net/flow.h>
 #include <net/dn.h>
 
 /*
- * Fast timer is for delayed acks (200mS max)
  * Slow timer is for everything else (n * 500mS)
  */
 
-#define FAST_INTERVAL (HZ/5)
 #define SLOW_INTERVAL (HZ/2)
 
 static void dn_slow_timer(unsigned long arg);
 
 void dn_start_slow_timer(struct sock *sk)
 {
-	sk->timer.expires = jiffies + SLOW_INTERVAL;
-	sk->timer.function = dn_slow_timer;
-	sk->timer.data = (unsigned long)sk;
-
-	add_timer(&sk->timer);
+	setup_timer(&sk->sk_timer, dn_slow_timer, (unsigned long)sk);
+	sk_reset_timer(sk, &sk->sk_timer, jiffies + SLOW_INTERVAL);
 }
 
 void dn_stop_slow_timer(struct sock *sk)
 {
-	del_timer(&sk->timer);
+	sk_stop_timer(sk, &sk->sk_timer);
 }
 
 static void dn_slow_timer(unsigned long arg)
@@ -54,12 +50,10 @@ static void dn_slow_timer(unsigned long arg)
 	struct sock *sk = (struct sock *)arg;
 	struct dn_scp *scp = DN_SK(sk);
 
-	sock_hold(sk);
 	bh_lock_sock(sk);
 
-	if (sk->lock.users != 0) {
-		sk->timer.expires = jiffies + HZ / 10;
-		add_timer(&sk->timer);
+	if (sock_owned_by_user(sk)) {
+		sk_reset_timer(sk, &sk->sk_timer, jiffies + HZ / 10);
 		goto out;
 	}
 
@@ -101,55 +95,8 @@ static void dn_slow_timer(unsigned long arg)
 			scp->keepalive_fxn(sk);
 	}
 
-	sk->timer.expires = jiffies + SLOW_INTERVAL;
-
-	add_timer(&sk->timer);
+	sk_reset_timer(sk, &sk->sk_timer, jiffies + SLOW_INTERVAL);
 out:
 	bh_unlock_sock(sk);
 	sock_put(sk);
 }
-
-static void dn_fast_timer(unsigned long arg)
-{
-	struct sock *sk = (struct sock *)arg;
-	struct dn_scp *scp = DN_SK(sk);
-
-	bh_lock_sock(sk);
-	if (sk->lock.users != 0) {
-		scp->delack_timer.expires = jiffies + HZ / 20;
-		add_timer(&scp->delack_timer);
-		goto out;
-	}
-
-	scp->delack_pending = 0;
-
-	if (scp->delack_fxn)
-		scp->delack_fxn(sk);
-out:
-	bh_unlock_sock(sk);
-}
-
-void dn_start_fast_timer(struct sock *sk)
-{
-	struct dn_scp *scp = DN_SK(sk);
-
-	if (!scp->delack_pending) {
-		scp->delack_pending = 1;
-		init_timer(&scp->delack_timer);
-		scp->delack_timer.expires = jiffies + FAST_INTERVAL;
-		scp->delack_timer.data = (unsigned long)sk;
-		scp->delack_timer.function = dn_fast_timer;
-		add_timer(&scp->delack_timer);
-	}
-}
-
-void dn_stop_fast_timer(struct sock *sk)
-{
-	struct dn_scp *scp = DN_SK(sk);
-
-	if (scp->delack_pending) {
-		scp->delack_pending = 0;
-		del_timer(&scp->delack_timer);
-	}
-}
-

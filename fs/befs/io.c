@@ -11,14 +11,14 @@
  *
  */
 
-#include <linux/fs.h>
+#include <linux/buffer_head.h>
 
 #include "befs.h"
 #include "io.h"
 
 /*
  * Converts befs notion of disk addr to a disk offset and uses
- * linux kernel function bread() to get the buffer containing
+ * linux kernel function sb_bread() to get the buffer containing
  * the offset. -Will Dyson
  *
  */
@@ -28,7 +28,6 @@ befs_bread_iaddr(struct super_block *sb, befs_inode_addr iaddr)
 {
 	struct buffer_head *bh = NULL;
 	befs_blocknr_t block = 0;
-	vfs_blocknr_t vfs_block = 0;
 	befs_sb_info *befs_sb = BEFS_SB(sb);
 
 	befs_debug(sb, "---> Enter befs_read_iaddr() "
@@ -42,17 +41,10 @@ befs_bread_iaddr(struct super_block *sb, befs_inode_addr iaddr)
 	}
 
 	block = iaddr2blockno(sb, &iaddr);
-	vfs_block = (vfs_blocknr_t) block;
-
-	if (vfs_block != block) {
-		befs_error(sb, "Error converting to host blocknr_t. %Lu "
-			   "is larger than the host can use", block);
-		goto error;
-	}
 
 	befs_debug(sb, "befs_read_iaddr: offset = %lu", block);
 
-	bh = bread(sb->s_dev, vfs_block, befs_sb->block_size);
+	bh = sb_bread(sb, block);
 
 	if (bh == NULL) {
 		befs_error(sb, "Failed to read block %lu", block);
@@ -71,21 +63,13 @@ struct buffer_head *
 befs_bread(struct super_block *sb, befs_blocknr_t block)
 {
 	struct buffer_head *bh = NULL;
-	befs_sb_info *befs_sb = BEFS_SB(sb);
-	vfs_blocknr_t vfs_block = (vfs_blocknr_t) block;
 
 	befs_debug(sb, "---> Enter befs_read() %Lu", block);
 
-	if (vfs_block != block) {
-		befs_error(sb, "Error converting to host blocknr_t. %Lu "
-			   "is larger than the host can use", block);
-		goto error;
-	}
-
-	bh = bread(sb->s_dev, vfs_block, befs_sb->block_size);
+	bh = sb_bread(sb, block);
 
 	if (bh == NULL) {
-		befs_error(sb, "Failed to read block %lu", vfs_block);
+		befs_error(sb, "Failed to read block %lu", block);
 		goto error;
 	}
 

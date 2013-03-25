@@ -8,10 +8,10 @@
  * for more details.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/seq_file.h>
 #include <linux/tty.h>
 #include <linux/console.h>
 #include <linux/init.h>
@@ -22,33 +22,33 @@
 #include <asm/contregs.h>
 #include <asm/movs.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/sun3-head.h>
 #include <asm/sun3mmu.h>
 #include <asm/rtc.h>
 #include <asm/machdep.h>
+#include <asm/idprom.h>
 #include <asm/intersil.h>
 #include <asm/irq.h>
+#include <asm/sections.h>
 #include <asm/segment.h>
 #include <asm/sun3ints.h>
-
-extern char _text, _end;
 
 char sun3_reserved_pmeg[SUN3_PMEGS_NUM];
 
 extern unsigned long sun3_gettimeoffset(void);
-extern int sun3_get_irq_list (char *);
-extern void sun3_sched_init(void (*handler)(int, void *, struct pt_regs *));
+static void sun3_sched_init(irq_handler_t handler);
 extern void sun3_get_model (char* model);
-extern void idprom_init (void);
-extern void sun3_gettod (int *yearp, int *monp, int *dayp,
-                   int *hourp, int *minp, int *secp);
 extern int sun3_hwclk(int set, struct rtc_time *t);
 
-extern void sun_serial_setup(void);
-volatile char* clock_va; 
-extern volatile unsigned char* sun3_intreg;
+volatile char* clock_va;
 extern unsigned long availmem;
 unsigned long num_pages;
+
+static void sun3_get_hardware_list(struct seq_file *m)
+{
+	seq_printf(m, "PROM Revision:\t%s\n", romvec->pv_monid);
+}
 
 void __init sun3_init(void)
 {
@@ -62,14 +62,14 @@ void __init sun3_init(void)
 	clock_va    =          (char *) 0xfe06000;	/* dark  */
 	sun3_intreg = (unsigned char *) 0xfe0a000;	/* magic */
 	sun3_disable_interrupts();
-	
+
 	prom_init((void *)LINUX_OPPROM_BEGVM);
-		
+
 	GET_CONTROL_BYTE(AC_SENABLE,enable_register);
-	enable_register |= 0x50; /* Enable FPU */	
+	enable_register |= 0x50; /* Enable FPU */
 	SET_CONTROL_BYTE(AC_SENABLE,enable_register);
 	GET_CONTROL_BYTE(AC_SENABLE,enable_register);
-	
+
 	/* This code looks suspicious, because it doesn't subtract
            memory belonging to the kernel from the available space */
 
@@ -106,26 +106,28 @@ static void sun3_halt (void)
 
 /* sun3 bootmem allocation */
 
-void __init sun3_bootmem_alloc(unsigned long memory_start, unsigned long memory_end)
+static void __init sun3_bootmem_alloc(unsigned long memory_start,
+				      unsigned long memory_end)
 {
 	unsigned long start_page;
 
-	/* align start/end to page boundries */
+	/* align start/end to page boundaries */
 	memory_start = ((memory_start + (PAGE_SIZE-1)) & PAGE_MASK);
 	memory_end = memory_end & PAGE_MASK;
-		
+
 	start_page = __pa(memory_start) >> PAGE_SHIFT;
 	num_pages = __pa(memory_end) >> PAGE_SHIFT;
 
 	high_memory = (void *)memory_end;
 	availmem = memory_start;
 
-	availmem += init_bootmem(start_page, num_pages);
+	m68k_setup_node(0);
+	availmem += init_bootmem_node(NODE_DATA(0), start_page, 0, num_pages);
 	availmem = (availmem + (PAGE_SIZE-1)) & PAGE_MASK;
 
 	free_bootmem(__pa(availmem), memory_end - (availmem));
 }
-	
+
 
 void __init config_sun3(void)
 {
@@ -136,48 +138,31 @@ void __init config_sun3(void)
 
 	/* Subtract kernel memory from available memory */
 
-        mach_sched_init      =  sun3_sched_init; 
+        mach_sched_init      =  sun3_sched_init;
         mach_init_IRQ        =  sun3_init_IRQ;
-        mach_default_handler = &sun3_default_handler;
-        mach_request_irq     =  sun3_request_irq;
-        mach_free_irq        =  sun3_free_irq;
-#ifdef CONFIG_VT
-//	mach_keyb_init       =  sun3_keyb_init;
-#endif
-	enable_irq     	     =  sun3_enable_irq;
-        disable_irq  	     =  sun3_disable_irq;
-	mach_process_int     =  sun3_process_int;
-        mach_get_irq_list    =  sun3_get_irq_list;
-        mach_gettod          =  sun3_gettod;	
         mach_reset           =  sun3_reboot;
 	mach_gettimeoffset   =  sun3_gettimeoffset;
 	mach_get_model	     =  sun3_get_model;
 	mach_hwclk           =  sun3_hwclk;
 	mach_halt	     =  sun3_halt;
-#if !defined(CONFIG_SERIAL_CONSOLE) && defined(CONFIG_DUMMY_CONSOLE)
-	conswitchp 	     = &dummy_con;
-#endif
+	mach_get_hardware_list = sun3_get_hardware_list;
 
-	memory_start = ((((int)&_end) + 0x2000) & ~0x1fff);
+	memory_start = ((((unsigned long)_end) + 0x2000) & ~0x1fff);
 // PROM seems to want the last couple of physical pages. --m
 	memory_end   = *(romvec->pv_sun3mem) + PAGE_OFFSET - 2*PAGE_SIZE;
 
 	m68k_num_memory=1;
         m68k_memory[0].size=*(romvec->pv_sun3mem);
-	
-	sun3_bootmem_alloc(memory_start, memory_end);
 
-#ifdef CONFIG_SUN3X_ZS
-	sun_serial_setup();
-#endif
+	sun3_bootmem_alloc(memory_start, memory_end);
 }
 
-void __init sun3_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
+static void __init sun3_sched_init(irq_handler_t timer_routine)
 {
 	sun3_disable_interrupts();
         intersil_clock->cmd_reg=(INTERSIL_RUN|INTERSIL_INT_DISABLE|INTERSIL_24H_MODE);
         intersil_clock->int_reg=INTERSIL_HZ_100_MASK;
- 	intersil_clear();
+	intersil_clear();
         sun3_enable_irq(5);
         intersil_clock->cmd_reg=(INTERSIL_RUN|INTERSIL_INT_ENABLE|INTERSIL_24H_MODE);
         sun3_enable_interrupts();

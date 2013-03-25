@@ -13,6 +13,9 @@
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/fs.h>
+#include <linux/major.h>
+#include <linux/root_dev.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
@@ -25,48 +28,6 @@
 static struct mtd_info *sg_mtd;
 
 /****************************************************************************/
-
-static __u8 sg_read8(struct map_info *map, unsigned long ofs)
-{
-	return(readb(map->map_priv_1 + ofs));
-}
-
-static __u16 sg_read16(struct map_info *map, unsigned long ofs)
-{
-	return(readw(map->map_priv_1 + ofs));
-}
-
-static __u32 sg_read32(struct map_info *map, unsigned long ofs)
-{
-	return(readl(map->map_priv_1 + ofs));
-}
-
-static void sg_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
-{
-	memcpy_fromio(to, map->map_priv_1 + from, len);
-}
-
-static void sg_write8(struct map_info *map, __u8 d, unsigned long adr)
-{
-	writeb(d, map->map_priv_1 + adr);
-}
-
-static void sg_write16(struct map_info *map, __u16 d, unsigned long adr)
-{
-	writew(d, map->map_priv_1 + adr);
-}
-
-static void sg_write32(struct map_info *map, __u32 d, unsigned long adr)
-{
-	writel(d, map->map_priv_1 + adr);
-}
-
-static void sg_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
-{
-	memcpy_toio(map->map_priv_1 + to, from, len);
-}
-
-/****************************************************************************/
 #ifdef CONFIG_MTD_CFI_INTELEXT
 /****************************************************************************/
 
@@ -76,47 +37,40 @@ static void sg_copy_to(struct map_info *map, unsigned long to, const void *from,
  */
 
 static struct map_info sg_map = {
-	name: "SnapGear Intel/StrataFlash",
-	size: 0x800000,
-	buswidth: 1,
-	read8: sg_read8,
-	read16: sg_read16,
-	read32: sg_read32,
-	copy_from: sg_copy_from,
-	write8: sg_write8,
-	write16: sg_write16,
-	write32: sg_write32,
-	copy_to: sg_copy_to
+	.name =	"SnapGear Intel/StrataFlash",
+	.phys = 0xff800000,
+	.size = 0x800000,
+	.bankwidth= 1,
 };
 
 static struct mtd_partition sg_partitions[] = {
 	{
-		name: "SnapGear kernel",
-		offset: 0,
-		size: 0x00100000
+		.name= "SnapGear kernel",
+		.offset= 0,
+		.size= 0x000e0000
 	},
 	{
-		name: "SnapGear filesystem",
-		offset: 0x00100000,
+		.name= "SnapGear filesystem",
+		.offset= 0x00100000,
 	},
 	{
-		name: "SnapGear config",
-		offset: 0x007c0000,
-		size: 0x00020000
+		.name= "SnapGear config",
+		.offset= 0x000e0000,
+		.size= 0x00020000
 	},
 	{
-		name: "SnapGear Intel/StrataFlash",
-		offset: 0
+		.name= "SnapGear Intel/StrataFlash",
+		.offset= 0
 	},
 	{
-		name: "SnapGear BIOS Config",
-		offset: 0x007e0000,
-		size: 0x00020000
+		.name= "SnapGear BIOS Config",
+		.offset= 0x007e0000,
+		.size= 0x00020000
 	},
 	{
-		name: "SnapGear BIOS",
-		offset: 0x007e0000,
-		size: 0x00020000
+		.name= "SnapGear BIOS",
+		.offset= 0x007e0000,
+		.size= 0x00020000
 	},
 };
 
@@ -133,37 +87,30 @@ static struct mtd_partition sg_partitions[] = {
  */
 
 static struct map_info sg_map = {
-	name: "SnapGear AMD/Flash",
-	size: 0x800000,
-	buswidth: 1,
-	read8: sg_read8,
-	read16: sg_read16,
-	read32: sg_read32,
-	copy_from: sg_copy_from,
-	write8: sg_write8,
-	write16: sg_write16,
-	write32: sg_write32,
-	copy_to: sg_copy_to
+	.name = "SnapGear AMD/Flash",
+	.phys = 0xff800000,
+	.size = 0x800000,
+	.bankwidth = 1,
 };
 
 static struct mtd_partition sg_partitions[] = {
 	{
-		name: "SnapGear BIOS config",
-		offset: 0x00000000,
-		size: 0x00010000
+		.name= "SnapGear BIOS config",
+		.offset= 0x000e0000,
+		.size= 0x00010000
 	},
 	{
-		name: "SnapGear BIOS",
-		offset: 0x00010000,
-		size: 0x00010000
+		.name= "SnapGear BIOS",
+		.offset= 0x000f0000,
+		.size= 0x00010000
 	},
 	{
-		name: "SnapGear AMD/Flash",
-		offset: 0
+		.name= "SnapGear AMD/Flash",
+		.offset= 0
 	},
 };
 
-#define	PROBE	"jedec_probe"
+#define	PROBE	"cfi_probe"
 
 /****************************************************************************/
 #endif
@@ -205,27 +152,17 @@ int __init sg_init(void)
 {
 	printk("SNAPGEAR: MTD BIOS setup\n");
 
-#if 0 && defined(CONFIG_MTD_CFI_INTELEXT)
-	/*
-	 *	Disable the LPC ROM. On a true Intel Strata flash only
-	 *	unit this has no real effect. But on a Unit fitted with
-	 *	both LPC boot ROMS and Intel Flash it will make the 
-	 *	Intel flash accessible.
-	 */
-	printk("SNAPGEODE: disabling LPC ROM, enabling Intel strata flash\n");
-	outl((inl(0x6610) & ~0x8000), 0x6610);
-#endif
-
 	/*
 	 *	On the GEODE the ROM CS stays mapped into high memory.
 	 *	So we look for it at the top of the 32bit address space.
 	 */
-	sg_map.map_priv_1 = (unsigned long)
-		ioremap_nocache(0xff800000, 0x800000);
-	if (!sg_map.map_priv_1) {
+	sg_map.virt = ioremap(0xff800000, 0x800000);
+	if (sg_map.virt == 0) {
 		printk("SNAPGEAR: failed to ioremap() ROMCS\n");
 		return -EIO;
 	}
+
+	simple_map_init(&sg_map);
 
 	if ((sg_mtd = do_map_probe(PROBE, &sg_map)) == NULL)
 		return -ENXIO;
@@ -233,13 +170,13 @@ int __init sg_init(void)
 	printk(KERN_NOTICE "SNAPGEAR: %s device size = %dK\n",
 		sg_mtd->name, sg_mtd->size>>10);
 
-	sg_mtd->module = THIS_MODULE;
+	sg_mtd->owner = THIS_MODULE;
+	sg_mtd->priv = &sg_map;
 
 #ifdef CONFIG_MTD_CFI_INTELEXT
 	sg_partitions[1].size = sg_mtd->size -
-		(sg_partitions[1].offset + sg_mtd->erasesize * 2);
+		(sg_partitions[1].offset + sg_mtd->erasesize);
 	if (sg_mtd->size > 0x800000) {
-		sg_partitions[2].offset += sg_mtd->size - 0x800000;
 		sg_partitions[4].offset += sg_mtd->size - 0x800000;
 		sg_partitions[5].offset += sg_mtd->size - 0x800000;
 	}
@@ -248,16 +185,13 @@ int __init sg_init(void)
 	ROOT_DEV = MKDEV(MTD_BLOCK_MAJOR, 1);
 #endif
 #else
-	/*
-	 * Setup the partitions, second from top 64KiB and top 64KiB
-	 */
-	if (sg_mtd->size > 0x20000) {
-		sg_partitions[0].offset += sg_mtd->size - 0x20000;
-		sg_partitions[1].offset += sg_mtd->size - 0x20000;
+	if (sg_mtd->size > 0x100000) {
+		sg_partitions[0].offset += sg_mtd->size - 0x100000;
+		sg_partitions[1].offset += sg_mtd->size - 0x100000;
 	}
 #endif /* !CONFIG_MTD_CFI_INTELEXT */
 
-	return add_mtd_partitions(sg_mtd, sg_partitions, NUM_PARTITIONS);
+	return mtd_device_register(sg_mtd, sg_partitions, NUM_PARTITIONS);
 }
 
 /****************************************************************************/
@@ -268,7 +202,7 @@ void __exit sg_cleanup(void)
 	unregister_reboot_notifier(&sg_notifier_block);
 #endif
 	if (sg_mtd) {
-		del_mtd_partitions(sg_mtd);
+		mtd_device_unregister(sg_mtd);
 		map_destroy(sg_mtd);
 	}
 	if (sg_map.map_priv_1) {

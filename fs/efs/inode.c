@@ -7,24 +7,23 @@
  *              and from work (c) 1998 Mike Shaver.
  */
 
-#include <linux/efs_fs.h>
-#include <linux/efs_fs_sb.h>
+#include <linux/buffer_head.h>
 #include <linux/module.h>
+#include <linux/fs.h>
+#include "efs.h"
+#include <linux/efs_fs_sb.h>
 
-
-extern int efs_get_block(struct inode *, long, struct buffer_head *, int);
 static int efs_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,efs_get_block);
 }
-static int _efs_bmap(struct address_space *mapping, long block)
+static sector_t _efs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,efs_get_block);
 }
-struct address_space_operations efs_aops = {
-	readpage: efs_readpage,
-	sync_page: block_sync_page,
-	bmap: _efs_bmap
+static const struct address_space_operations efs_aops = {
+	.readpage = efs_readpage,
+	.bmap = _efs_bmap
 };
 
 static inline void extent_copy(efs_extent *src, efs_extent *dst) {
@@ -45,15 +44,26 @@ static inline void extent_copy(efs_extent *src, efs_extent *dst) {
 	return;
 }
 
-void efs_read_inode(struct inode *inode) {
+struct inode *efs_iget(struct super_block *super, unsigned long ino)
+{
 	int i, inode_index;
 	dev_t device;
+	u32 rdev;
 	struct buffer_head *bh;
-	struct efs_sb_info    *sb = SUPER_INFO(inode->i_sb);
-	struct efs_inode_info *in = INODE_INFO(inode);
+	struct efs_sb_info    *sb = SUPER_INFO(super);
+	struct efs_inode_info *in;
 	efs_block_t block, offset;
 	struct efs_dinode *efs_inode;
-  
+	struct inode *inode;
+
+	inode = iget_locked(super, ino);
+	if (IS_ERR(inode))
+		return ERR_PTR(-ENOMEM);
+	if (!(inode->i_state & I_NEW))
+		return inode;
+
+	in = INODE_INFO(inode);
+
 	/*
 	** EFS layout:
 	**
@@ -86,13 +96,14 @@ void efs_read_inode(struct inode *inode) {
 	efs_inode = (struct efs_dinode *) (bh->b_data + offset);
     
 	inode->i_mode  = be16_to_cpu(efs_inode->di_mode);
-	inode->i_nlink = be16_to_cpu(efs_inode->di_nlink);
+	set_nlink(inode, be16_to_cpu(efs_inode->di_nlink));
 	inode->i_uid   = (uid_t)be16_to_cpu(efs_inode->di_uid);
 	inode->i_gid   = (gid_t)be16_to_cpu(efs_inode->di_gid);
 	inode->i_size  = be32_to_cpu(efs_inode->di_size);
-	inode->i_atime = be32_to_cpu(efs_inode->di_atime);
-	inode->i_mtime = be32_to_cpu(efs_inode->di_mtime);
-	inode->i_ctime = be32_to_cpu(efs_inode->di_ctime);
+	inode->i_atime.tv_sec = be32_to_cpu(efs_inode->di_atime);
+	inode->i_mtime.tv_sec = be32_to_cpu(efs_inode->di_mtime);
+	inode->i_ctime.tv_sec = be32_to_cpu(efs_inode->di_ctime);
+	inode->i_atime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = 0;
 
 	/* this is the number of blocks in the file */
 	if (inode->i_size == 0) {
@@ -101,20 +112,15 @@ void efs_read_inode(struct inode *inode) {
 		inode->i_blocks = ((inode->i_size - 1) >> EFS_BLOCKSIZE_BITS) + 1;
 	}
 
-	/*
-	 * BUG: irix dev_t is 32-bits. linux dev_t is only 16-bits.
-	 *
-	 * apparently linux will change to 32-bit dev_t sometime during
-	 * linux 2.3.
-	 *
-	 * as is, this code maps devices that can't be represented in
-	 * 16-bits (ie major > 255 or minor > 255) to major = minor = 255.
-	 *
-	 * during 2.3 when 32-bit dev_t become available, we should test
-	 * to see whether odev contains 65535. if this is the case then we
-	 * should then do device = be32_to_cpu(efs_inode->di_u.di_dev.ndev).
-	 */
-    	device = be16_to_cpu(efs_inode->di_u.di_dev.odev);
+	rdev = be16_to_cpu(efs_inode->di_u.di_dev.odev);
+	if (rdev == 0xffff) {
+		rdev = be32_to_cpu(efs_inode->di_u.di_dev.ndev);
+		if (sysv_major(rdev) > 0xfff)
+			device = 0;
+		else
+			device = MKDEV(sysv_major(rdev), sysv_minor(rdev));
+	} else
+		device = old_decode_dev(rdev);
 
 	/* get the number of extents for this object */
 	in->numextents = be16_to_cpu(efs_inode->di_numextents);
@@ -133,7 +139,7 @@ void efs_read_inode(struct inode *inode) {
 	brelse(bh);
    
 #ifdef DEBUG
-	printk(KERN_DEBUG "EFS: read_inode(): inode %lu, extents %d, mode %o\n",
+	printk(KERN_DEBUG "EFS: efs_iget(): inode %lu, extents %d, mode %o\n",
 		inode->i_ino, in->numextents, inode->i_mode);
 #endif
 
@@ -161,13 +167,13 @@ void efs_read_inode(struct inode *inode) {
 			break;
 	}
 
-	return;
+	unlock_new_inode(inode);
+	return inode;
         
 read_inode_error:
 	printk(KERN_WARNING "EFS: failed to read inode %lu\n", inode->i_ino);
-	make_bad_inode(inode);
-
-	return;
+	iget_failed(inode);
+	return ERR_PTR(-EIO);
 }
 
 static inline efs_block_t

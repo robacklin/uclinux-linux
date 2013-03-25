@@ -8,13 +8,14 @@
 
 /****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
+#include <linux/mm.h>
 #include <linux/major.h>
+#include <linux/root_dev.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/partitions.h>
@@ -22,138 +23,107 @@
 
 /****************************************************************************/
 
-__u8 uclinux_read8(struct map_info *map, unsigned long ofs)
-{
-	return(*((__u8 *) (map->map_priv_1 + ofs)));
-}
-
-__u16 uclinux_read16(struct map_info *map, unsigned long ofs)
-{
-	return(*((__u16 *) (map->map_priv_1 + ofs)));
-}
-
-__u32 uclinux_read32(struct map_info *map, unsigned long ofs)
-{
-	return(*((__u32 *) (map->map_priv_1 + ofs)));
-}
-
-void uclinux_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
-{
-	memcpy(to, (void *)(map->map_priv_1 + from), len);
-}
-
-void uclinux_write8(struct map_info *map, __u8 d, unsigned long adr)
-{
-	*((__u8 *) (map->map_priv_1 + adr)) = d;
-}
-
-void uclinux_write16(struct map_info *map, __u16 d, unsigned long adr)
-{
-	*((__u16 *) (map->map_priv_1 + adr)) = d;
-}
-
-void uclinux_write32(struct map_info *map, __u32 d, unsigned long adr)
-{
-	*((__u32 *) (map->map_priv_1 + adr)) = d;
-}
-
-void uclinux_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
-{
-	memcpy((void *) (map->map_priv_1 + to), from, len);
-}
+#if defined(CONFIG_MTD_UCLINUX_EBSS)
+	#define MAP_TYPE	"map_ram"
+	#define MAP_NAME	"RAM"
+	#define  CONFIG_MTD_UCLINUX_ADDRESS &_ebss
+	extern char _ebss;
+#elif defined(CONFIG_MTD_UCLINUX_RAM)
+	#define MAP_TYPE	"map_ram"
+	#define MAP_NAME	"RAM"
+#elif defined(CONFIG_MTD_UCLINUX_ROM)
+	#define MAP_TYPE	"map_rom"
+	#define MAP_NAME	"ROM"
+#else
+	#error "Unknown uClinux map type"
+#endif
 
 /****************************************************************************/
 
-struct map_info uclinux_ram_map = {
-	name:		"RAM",
-	read8:		uclinux_read8,
-	read16:		uclinux_read16,
-	read32:		uclinux_read32,
-	copy_from:	uclinux_copy_from,
-	write8:		uclinux_write8,
-	write16:	uclinux_write16,
-	write32:	uclinux_write32,
-	copy_to:	uclinux_copy_to,
+struct map_info uclinux_map = {
+	.name = MAP_NAME,
 };
 
-struct mtd_info *uclinux_ram_mtdinfo;
+static struct mtd_info *uclinux_mtdinfo;
 
 /****************************************************************************/
 
-int uclinux_point(struct mtd_info *mtd, loff_t from, size_t len,
-	size_t *retlen, u_char **mtdbuf)
+static struct mtd_partition uclinux_fs[] = {
+	{ .name = "ROMfs" }
+};
+
+#define	NUM_PARTITIONS	ARRAY_SIZE(uclinux_fs)
+
+/****************************************************************************/
+
+static int uclinux_point(struct mtd_info *mtd, loff_t from, size_t len,
+	size_t *retlen, void **virt, resource_size_t *phys)
 {
-	struct map_info *map = (struct map_info *) mtd->priv;
-	*mtdbuf = (u_char *) (map->map_priv_1 + ((int) from));
+	struct map_info *map = mtd->priv;
+	*virt = map->virt + from;
+	if (phys)
+		*phys = map->phys + from;
 	*retlen = len;
 	return(0);
 }
 
-static void uclinux_unpoint(struct mtd_info *mtd, u_char *addr, loff_t from,
-	size_t len)
-{
-}
-
 /****************************************************************************/
 
-int __init uclinux_mtd_init(void)
+static int __init uclinux_mtd_init(void)
 {
 	struct mtd_info *mtd;
 	struct map_info *mapp;
-	extern char _ebss;
+	unsigned long addr = (unsigned long) CONFIG_MTD_UCLINUX_ADDRESS;
 
-	mapp = &uclinux_ram_map;
-	mapp->map_priv_2 = (unsigned long) &_ebss;
-	mapp->size = PAGE_ALIGN(ntohl(*((unsigned long *)((&_ebss) + 8))));
-	mapp->buswidth = 4;
+	mapp = &uclinux_map;
+	mapp->phys = addr;
+	if (!mapp->size)
+		mapp->size = PAGE_ALIGN(ntohl(*((unsigned long *)(addr + 8))));
+	mapp->bankwidth = 4;
 
 	printk("uclinux[mtd]: RAM probe address=0x%x size=0x%x\n",
-	       	(int) mapp->map_priv_2, (int) mapp->size);
+	       	(int) mapp->phys, (int) mapp->size);
 
-	mapp->map_priv_1 = (unsigned long)
-		ioremap_nocache(mapp->map_priv_2, mapp->size);
+	mapp->virt = phys_to_virt(mapp->phys);
 
-	if (mapp->map_priv_1 == 0) {
+	if (mapp->virt == 0) {
 		printk("uclinux[mtd]: ioremap_nocache() failed\n");
 		return(-EIO);
 	}
 
-	mtd = do_map_probe("map_ram", mapp);
+	simple_map_init(mapp);
+
+	mtd = do_map_probe(MAP_TYPE, mapp);
 	if (!mtd) {
 		printk("uclinux[mtd]: failed to find a mapping?\n");
-		iounmap((void *) mapp->map_priv_1);
 		return(-ENXIO);
 	}
-		
-	mtd->module = THIS_MODULE;
-	mtd->point = uclinux_point;
-	mtd->unpoint = uclinux_unpoint;
+
+	mtd->owner = THIS_MODULE;
+	mtd->_point = uclinux_point;
 	mtd->priv = mapp;
 
-	uclinux_ram_mtdinfo = mtd;
-	add_mtd_device(mtd);
+	printk("uclinux[mtd]: set %s to be root filesystem\n",
+	     	uclinux_fs[0].name);
+	ROOT_DEV = MKDEV(MTD_BLOCK_MAJOR, 0);
 
-	printk("uclinux[mtd]: root filesystem index=%d\n", mtd->index);
-
-	ROOT_DEV = MKDEV(MTD_BLOCK_MAJOR, mtd->index);
-	put_mtd_device(mtd);
+	uclinux_mtdinfo = mtd;
+	mtd_device_register(mtd, uclinux_fs, NUM_PARTITIONS);
 
 	return(0);
 }
 
 /****************************************************************************/
 
-void __exit uclinux_mtd_cleanup(void)
+static void __exit uclinux_mtd_cleanup(void)
 {
-	if (uclinux_ram_mtdinfo) {
-		del_mtd_partitions(uclinux_ram_mtdinfo);
-		map_destroy(uclinux_ram_mtdinfo);
-		uclinux_ram_mtdinfo = NULL;
+	if (uclinux_mtdinfo) {
+		mtd_device_unregister(uclinux_mtdinfo);
+		map_destroy(uclinux_mtdinfo);
+		uclinux_mtdinfo = NULL;
 	}
-	if (uclinux_ram_map.map_priv_1) {
-		iounmap((void *) uclinux_ram_map.map_priv_1);
-		uclinux_ram_map.map_priv_1 = 0;
-	}
+	if (uclinux_map.virt)
+		uclinux_map.virt = 0;
 }
 
 /****************************************************************************/

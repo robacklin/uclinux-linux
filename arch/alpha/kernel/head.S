@@ -1,5 +1,5 @@
 /*
- * alpha/boot/head.S
+ * arch/alpha/kernel/head.S
  *
  * initial boot stuff.. At this point, the bootloader has already
  * switched into OSF/1 PAL-code, and loaded us at the correct address
@@ -7,13 +7,13 @@
  * the kernel global pointer and jump to the kernel entry-point.
  */
 
-#include <linux/config.h>
-#include <asm/system.h>
+#include <linux/init.h>
+#include <asm/asm-offsets.h>
+#include <asm/pal.h>
+#include <asm/setup.h>
 
-.globl swapper_pg_dir
+__HEAD
 .globl _stext
-swapper_pg_dir=SWAPPER_PGD
-
 	.set noreorder
 	.globl	__start
 	.ent	__start
@@ -22,10 +22,10 @@ __start:
 	.prologue 0
 	br	$27,1f
 1:	ldgp	$29,0($27)
-	/* We need to get current loaded up with our first task...  */
-	lda	$8,init_task_union
+	/* We need to get current_task_info loaded up...  */
+	lda	$8,init_thread_union
 	/* ... and find our stack ... */
-	lda	$30,0x4000($8)
+	lda	$30,0x4000 - SIZEOF_PT_REGS($8)
 	/* ... and then we can start the kernel.  */
 	jsr	$26,start_kernel
 	call_pal PAL_halt

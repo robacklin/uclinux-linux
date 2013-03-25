@@ -1,7 +1,7 @@
-/* 
+/*
  * Atmel AT93C46 serial eeprom driver
  *
- * Brian Murphy <brian.murphy@eicon.com> 
+ * Brian Murphy <brian.murphy@eicon.com>
  *
  */
 #include <linux/kernel.h>
@@ -21,12 +21,12 @@
 
 struct at93c_defs *at93c;
 
-static void at93c_reg_write(u32 val) 
+static void at93c_reg_write(u32 val)
 {
 	*at93c->reg = val;
 }
 
-static u32 at93c_reg_read(void) 
+static u32 at93c_reg_read(void)
 {
 	u32 tmp = *at93c->reg;
 	return tmp;
@@ -73,7 +73,7 @@ static u8 at93c_read_byte(void)
 	int i;
 	u8 data = 0;
 
-	for (i = 0; i<=7; i++) {
+	for (i = 0; i <= 7; i++) {
 		data <<= 1;
 		data |= at93c_read_databit();
 	}
@@ -81,7 +81,7 @@ static u8 at93c_read_byte(void)
 }
 
 static void at93c_write_bits(u32 data, int size)
-{               
+{
 	int i;
 	int shift = size - 1;
 	u32 mask = (1 << shift);
@@ -90,11 +90,12 @@ static void at93c_write_bits(u32 data, int size)
 		at93c_write_databit((data & mask) >> shift);
 		data <<= 1;
 	}
-}       
+}
 
 static void at93c_init_op(void)
 {
-	at93c_reg_write((at93c_reg_read() | at93c->cs) & ~at93c->clk & ~(1 << at93c->rdata_shift));
+	at93c_reg_write((at93c_reg_read() | at93c->cs) &
+			~at93c->clk & ~(1 << at93c->rdata_shift));
 	lasat_ndelay(50);
 }
 
@@ -104,8 +105,8 @@ static void at93c_end_op(void)
 	lasat_ndelay(250);
 }
 
-static void at93c_wait(void) 
-{ 
+static void at93c_wait(void)
+{
 	at93c_init_op();
 	while (!at93c_read_databit())
 		;

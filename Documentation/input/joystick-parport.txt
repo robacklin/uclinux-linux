@@ -1,8 +1,7 @@
 		    Linux Joystick parport drivers v2.0
-	       (c) 1998-2000 Vojtech Pavlik <vojtech@suse.cz>
+	       (c) 1998-2000 Vojtech Pavlik <vojtech@ucw.cz>
 	       (c) 1998 Andree Borrmann <a.borrmann@tu-bs.de>
 			     Sponsored by SuSE
-	$Id: joystick-parport.txt,v 1.5 2001/05/15 06:41:00 vojtech Exp $
 ----------------------------------------------------------------------------
 
 0. Disclaimer
@@ -36,12 +35,12 @@ with them.
 
   All NES and SNES use the same synchronous serial protocol, clocked from
 the computer's side (and thus timing insensitive). To allow up to 5 NES
-and/or SNES gamepads connected to the parallel port at once, the output
-lines of the parallel port are shared, while one of 5 available input lines
-is assigned to each gamepad.
+and/or SNES gamepads and/or SNES mice connected to the parallel port at once,
+the output lines of the parallel port are shared, while one of 5 available
+input lines is assigned to each gamepad.
 
   This protocol is handled by the gamecon.c driver, so that's the one
-you'll use for NES and SNES gamepads.
+you'll use for NES, SNES gamepads and SNES mice.
 
   The main problem with PC parallel ports is that they don't have +5V power
 source on any of their pins. So, if you want a reliable source of power
@@ -106,7 +105,7 @@ A, Turbo B, Select and Start, and is connected through 5 wires, then it is
 either a NES or NES clone and will work with this connection. SNES gamepads
 also use 5 wires, but have more buttons. They will work as well, of course.
 
-Pinout for NES gamepads                 Pinout for SNES gamepads
+Pinout for NES gamepads                 Pinout for SNES gamepads and mice
 
 	   +----> Power                   +-----------------------\
 	   |                            7 | o  o  o  o |  x  x  o  | 1
@@ -273,7 +272,7 @@ if you want to use gamecon.c.
 
   Also, the connection is a bit more complex. You'll need a bunch of diodes,
 and one pullup resistor. First, you connect the Directions and the button
-the same as for db9, however with the diodes inbetween.
+the same as for db9, however with the diodes between.
 
 	    Diodes
 (pin 2) -----|<|----> Up
@@ -335,6 +334,7 @@ controller (compatible with DirectPadPro):
  * Analog PSX Pad (red mode)
  * Analog PSX Pad (green mode)
  * PSX Rumble Pad
+ * PSX DDR Pad
 
 2.4 Sega
 ~~~~~~~~
@@ -434,7 +434,7 @@ Here are described their command lines:
   Using gamecon.c you can connect up to five devices to one parallel port. It
 uses the following kernel/module command line:
 
-	gc=port,pad1,pad2,pad3,pad4,pad5
+	gamecon.map=port,pad1,pad2,pad3,pad4,pad5
 
   Where 'port' the number of the parport interface (eg. 0 for parport0).
 
@@ -452,20 +452,29 @@ uses the following kernel/module command line:
 	  5  | Multisystem 2-button joystick
 	  6  | N64 pad
 	  7  | Sony PSX controller
+	  8  | Sony PSX DDR controller
+	  9  | SNES mouse
 
-  The exact type of the PSX controller type is autoprobed, so you must have
-your controller plugged in before initializing.
+  The exact type of the PSX controller type is autoprobed when used, so
+hot swapping should work (but is not recommended).
 
   Should you want to use more than one of parallel ports at once, you can use
-gc_2 and gc_3 as additional command line parameters for two more parallel
-ports.
+gamecon.map2 and gamecon.map3 as additional command line parameters for two
+more parallel ports.
+
+  There are two options specific to PSX driver portion.  gamecon.psx_delay sets
+the command delay when talking to the controllers. The default of 25 should
+work but you can try lowering it for better performance. If your pads don't
+respond try raising it until they work. Setting the type to 8 allows the
+driver to be used with Dance Dance Revolution or similar games. Arrow keys are
+registered as key presses instead of X and Y axes.
 
 3.2 db9.c
 ~~~~~~~~~
   Apart from making an interface, there is nothing difficult on using the
 db9.c driver. It uses the following kernel/module command line:
 
-	db9=port,type
+	db9.dev=port,type
 
   Where 'port' is the number of the parport interface (eg. 0 for parport0).
 
@@ -489,14 +498,14 @@ Old parallel ports may not have this feature.
 	 10  | Amiga CD32 pad
 
   Should you want to use more than one of these joysticks/pads at once, you
-can use db9_2 and db9_3 as additional command line parameters for two
+can use db9.dev2 and db9.dev3 as additional command line parameters for two
 more joysticks/pads.
 
 3.3 turbografx.c
 ~~~~~~~~~~~~~~~~
   The turbografx.c driver uses a very simple kernel/module command line:
 
-	tgfx=port,js1,js2,js3,js4,js5,js6,js7
+	turbografx.map=port,js1,js2,js3,js4,js5,js6,js7
 
   Where 'port' is the number of the parport interface (eg. 0 for parport0).
 
@@ -504,8 +513,8 @@ more joysticks/pads.
 interface ports 1-7 have. For a standard multisystem joystick, this is 1.
 
   Should you want to use more than one of these interfaces at once, you can
-use tgfx_2 and tgfx_3 as additional command line parameters for two more
-interfaces.
+use turbografx.map2 and turbografx.map3 as additional command line parameters
+for two more interfaces.
 
 3.4 PC parallel port pinout
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

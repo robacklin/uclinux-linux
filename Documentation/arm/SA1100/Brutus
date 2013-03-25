@@ -1,14 +1,13 @@
 Brutus is an evaluation platform for the SA1100 manufactured by Intel.  
 For more details, see:
 
-http://developer.intel.com/design/strong/applnots/sa1100lx/getstart.htm
+http://developer.intel.com
 
 To compile for Brutus, you must issue the following commands:
 
 	make brutus_config
 	make config
 	[accept all the defaults]
-	make dep
 	make zImage
 
 The resulting kernel will end up in linux/arch/arm/boot/zImage.  This file
@@ -61,7 +60,7 @@ little modifications.
 
 Any contribution is welcome.
 
-Please send patches to nico@cam.org
+Please send patches to nico@fluxnic.net
 
 Have Fun !
 

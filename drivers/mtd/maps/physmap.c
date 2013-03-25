@@ -1,214 +1,286 @@
 /*
- * $Id: physmap.c,v 1.21 2002/09/05 05:12:54 acurtis Exp $
- *
  * Normal mappings of chips in physical memory
+ *
+ * Copyright (C) 2003 MontaVista Software Inc.
+ * Author: Jun Sun, jsun@mvista.com or jsun@junsun.net
+ *
+ * 031022 - [jsun] add run-time configure and partition setup
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <asm/io.h>
+#include <linux/init.h>
+#include <linux/slab.h>
+#include <linux/device.h>
+#include <linux/platform_device.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
-#include <linux/config.h>
-
-#ifdef CONFIG_MTD_PARTITIONS
 #include <linux/mtd/partitions.h>
-#endif
+#include <linux/mtd/physmap.h>
+#include <linux/mtd/concat.h>
+#include <linux/io.h>
 
-#define WINDOW_ADDR CONFIG_MTD_PHYSMAP_START
-#define WINDOW_SIZE CONFIG_MTD_PHYSMAP_LEN
-#define BUSWIDTH CONFIG_MTD_PHYSMAP_BUSWIDTH
+#define MAX_RESOURCES		4
 
-static struct mtd_info *mymtd;
-
-__u8 physmap_read8(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readb(map->map_priv_1 + ofs);
-}
-
-__u16 physmap_read16(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readw(map->map_priv_1 + ofs);
-}
-
-__u32 physmap_read32(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readl(map->map_priv_1 + ofs);
-}
-
-void physmap_copy_from(struct map_info *map, void *to, unsigned long from, ssize_t len)
-{
-	memcpy_fromio(to, map->map_priv_1 + from, len);
-}
-
-void physmap_write8(struct map_info *map, __u8 d, unsigned long adr)
-{
-	__raw_writeb(d, map->map_priv_1 + adr);
-	mb();
-}
-
-void physmap_write16(struct map_info *map, __u16 d, unsigned long adr)
-{
-	__raw_writew(d, map->map_priv_1 + adr);
-	mb();
-}
-
-void physmap_write32(struct map_info *map, __u32 d, unsigned long adr)
-{
-	__raw_writel(d, map->map_priv_1 + adr);
-	mb();
-}
-
-void physmap_copy_to(struct map_info *map, unsigned long to, const void *from, ssize_t len)
-{
-	memcpy_toio(map->map_priv_1 + to, from, len);
-}
-
-struct map_info physmap_map = {
-	name: "Physically mapped flash",
-	size: WINDOW_SIZE,
-	buswidth: BUSWIDTH,
-	read8: physmap_read8,
-	read16: physmap_read16,
-	read32: physmap_read32,
-	copy_from: physmap_copy_from,
-	write8: physmap_write8,
-	write16: physmap_write16,
-	write32: physmap_write32,
-	copy_to: physmap_copy_to
+struct physmap_flash_info {
+	struct mtd_info		*mtd[MAX_RESOURCES];
+	struct mtd_info		*cmtd;
+	struct map_info		map[MAX_RESOURCES];
+	spinlock_t		vpp_lock;
+	int			vpp_refcnt;
 };
 
-#ifdef CONFIG_MTD_PARTITIONS
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-static struct mtd_partition *mtd_parts = 0;
-static int                   mtd_parts_nb = 0;
-#else
-static struct mtd_partition physmap_partitions[] = {
-/* Put your own partition definitions here */
-#if 0
-	{
-		name:		"bootROM",
-		size:		0x80000,
-		offset:		0,
-		mask_flags:	MTD_WRITEABLE,  /* force read-only */
-	}, {
-		name:		"zImage",
-		size:		0x100000,
-		offset:		MTDPART_OFS_APPEND,
-		mask_flags:	MTD_WRITEABLE,  /* force read-only */
-	}, {
-		name:		"ramdisk.gz",
-		size:		0x300000,
-		offset:		MTDPART_OFS_APPEND,
-		mask_flags:	MTD_WRITEABLE,  /* force read-only */
-	}, {
-		name:		"User FS",
-		size:		MTDPART_SIZ_FULL,
-		offset:		MTDPART_OFS_APPEND,
-	}
-#endif
-};
-
-#define NUM_PARTITIONS	(sizeof(physmap_partitions)/sizeof(struct mtd_partition))
-
-#endif
-#endif
-
-int __init init_physmap(void)
+static int physmap_flash_remove(struct platform_device *dev)
 {
-	static const char *rom_probe_types[] = { "cfi_probe", "jedec_probe", "map_rom", 0 };
-	const char **type;
-#ifdef CONFIG_MTD_PARTITIONS
-	int nb_parts = 0, parsed_nr_parts = 0;
-	struct mtd_partition *parts;
-	const char *part_type;
-	static struct mtd_partition *parsed_parts;
-#endif
+	struct physmap_flash_info *info;
+	struct physmap_flash_data *physmap_data;
+	int i;
 
-       	printk(KERN_NOTICE "physmap flash device: %x at %x\n", WINDOW_SIZE, WINDOW_ADDR);
-	physmap_map.map_priv_1 = (unsigned long)ioremap(WINDOW_ADDR, WINDOW_SIZE);
-
-	if (!physmap_map.map_priv_1) {
-		printk("Failed to ioremap\n");
-		return -EIO;
-	}
-	
-	mymtd = 0;
-	type = rom_probe_types;
-	for(; !mymtd && *type; type++) {
-		mymtd = do_map_probe(*type, &physmap_map);
-	}
-	if (mymtd) {
-		mymtd->module = THIS_MODULE;
-
-		add_mtd_device(mymtd);
-#ifdef CONFIG_MTD_PARTITIONS
-#ifdef CONFIG_MTD_CMDLINE_PARTS
-		mtd_parts_nb = parse_cmdline_partitions(mymtd, &mtd_parts, 
-							"phys");
-		if (mtd_parts_nb > 0)
-		{
-			printk(KERN_NOTICE 
-			       "Using command line partition definition\n");
-			add_mtd_partitions (mymtd, mtd_parts, mtd_parts_nb);
-		}
-
-		if (parsed_nr_parts == 0) {
-			int ret = parse_cmdline_partitions(mymtd, &parsed_parts, "physmap");
-			if (ret > 0) {
-				part_type = "Command Line";
-				parsed_nr_parts = ret;
-			}
-		}
-#else
-		if (NUM_PARTITIONS != 0) 
-		{
-			printk(KERN_NOTICE 
-			       "Using physmap partition definition\n");
-			add_mtd_partitions (mymtd, physmap_partitions, NUM_PARTITIONS);
-		}
-#endif /* CONFIG_MTD_CMDLINE_PARTS */
-
-		if (parsed_nr_parts > 0) {
-			parts = parsed_parts;
-			nb_parts = parsed_nr_parts;
-		}
-
-		if (nb_parts == 0) {
-			printk(KERN_NOTICE "physmap: no partition info available, "
-					"registering whole flash at once\n");
-			add_mtd_device(mymtd);
-		} else {
-			printk(KERN_NOTICE "physmap: Using %s partition definition\n",
-					part_type);
-			add_mtd_partitions(mymtd, parts, nb_parts);
-		}
-#endif /* CONFIG_MTD_PARTITIONS */
-
+	info = platform_get_drvdata(dev);
+	if (info == NULL)
 		return 0;
+	platform_set_drvdata(dev, NULL);
+
+	physmap_data = dev->dev.platform_data;
+
+	if (info->cmtd) {
+		mtd_device_unregister(info->cmtd);
+		if (info->cmtd != info->mtd[0])
+			mtd_concat_destroy(info->cmtd);
 	}
 
-	iounmap((void *)physmap_map.map_priv_1);
-	return -ENXIO;
+	for (i = 0; i < MAX_RESOURCES; i++) {
+		if (info->mtd[i] != NULL)
+			map_destroy(info->mtd[i]);
+	}
+
+	if (physmap_data->exit)
+		physmap_data->exit(dev);
+
+	return 0;
 }
 
-static void __exit cleanup_physmap(void)
+static void physmap_set_vpp(struct map_info *map, int state)
 {
-	if (mymtd) {
-		del_mtd_device(mymtd);
-		map_destroy(mymtd);
+	struct platform_device *pdev;
+	struct physmap_flash_data *physmap_data;
+	struct physmap_flash_info *info;
+	unsigned long flags;
+
+	pdev = (struct platform_device *)map->map_priv_1;
+	physmap_data = pdev->dev.platform_data;
+
+	if (!physmap_data->set_vpp)
+		return;
+
+	info = platform_get_drvdata(pdev);
+
+	spin_lock_irqsave(&info->vpp_lock, flags);
+	if (state) {
+		if (++info->vpp_refcnt == 1)    /* first nested 'on' */
+			physmap_data->set_vpp(pdev, 1);
+	} else {
+		if (--info->vpp_refcnt == 0)    /* last nested 'off' */
+			physmap_data->set_vpp(pdev, 0);
 	}
-	if (physmap_map.map_priv_1) {
-		iounmap((void *)physmap_map.map_priv_1);
-		physmap_map.map_priv_1 = 0;
-	}
+	spin_unlock_irqrestore(&info->vpp_lock, flags);
 }
 
-module_init(init_physmap);
-module_exit(cleanup_physmap);
+static const char *rom_probe_types[] = {
+					"cfi_probe",
+					"jedec_probe",
+					"qinfo_probe",
+					"map_rom",
+					NULL };
+static const char *part_probe_types[] = { "cmdlinepart", "RedBoot", "afs",
+					  NULL };
 
+static int physmap_flash_probe(struct platform_device *dev)
+{
+	struct physmap_flash_data *physmap_data;
+	struct physmap_flash_info *info;
+	const char **probe_type;
+	const char **part_types;
+	int err = 0;
+	int i;
+	int devices_found = 0;
+
+	physmap_data = dev->dev.platform_data;
+	if (physmap_data == NULL)
+		return -ENODEV;
+
+	info = devm_kzalloc(&dev->dev, sizeof(struct physmap_flash_info),
+			    GFP_KERNEL);
+	if (info == NULL) {
+		err = -ENOMEM;
+		goto err_out;
+	}
+
+	if (physmap_data->init) {
+		err = physmap_data->init(dev);
+		if (err)
+			goto err_out;
+	}
+
+	platform_set_drvdata(dev, info);
+
+	for (i = 0; i < dev->num_resources; i++) {
+		printk(KERN_NOTICE "physmap platform flash device: %.8llx at %.8llx\n",
+		       (unsigned long long)resource_size(&dev->resource[i]),
+		       (unsigned long long)dev->resource[i].start);
+
+		if (!devm_request_mem_region(&dev->dev,
+			dev->resource[i].start,
+			resource_size(&dev->resource[i]),
+			dev_name(&dev->dev))) {
+			dev_err(&dev->dev, "Could not reserve memory region\n");
+			err = -ENOMEM;
+			goto err_out;
+		}
+
+		info->map[i].name = dev_name(&dev->dev);
+		info->map[i].phys = dev->resource[i].start;
+		info->map[i].size = resource_size(&dev->resource[i]);
+		info->map[i].bankwidth = physmap_data->width;
+		info->map[i].set_vpp = physmap_set_vpp;
+		info->map[i].pfow_base = physmap_data->pfow_base;
+		info->map[i].map_priv_1 = (unsigned long)dev;
+
+		info->map[i].virt = devm_ioremap(&dev->dev, info->map[i].phys,
+						 info->map[i].size);
+		if (info->map[i].virt == NULL) {
+			dev_err(&dev->dev, "Failed to ioremap flash region\n");
+			err = -EIO;
+			goto err_out;
+		}
+
+		simple_map_init(&info->map[i]);
+
+		probe_type = rom_probe_types;
+		if (physmap_data->probe_type == NULL) {
+			for (; info->mtd[i] == NULL && *probe_type != NULL; probe_type++)
+				info->mtd[i] = do_map_probe(*probe_type, &info->map[i]);
+		} else
+			info->mtd[i] = do_map_probe(physmap_data->probe_type, &info->map[i]);
+
+		if (info->mtd[i] == NULL) {
+			dev_err(&dev->dev, "map_probe failed\n");
+			err = -ENXIO;
+			goto err_out;
+		} else {
+			devices_found++;
+		}
+		info->mtd[i]->owner = THIS_MODULE;
+		info->mtd[i]->dev.parent = &dev->dev;
+	}
+
+	if (devices_found == 1) {
+		info->cmtd = info->mtd[0];
+	} else if (devices_found > 1) {
+		/*
+		 * We detected multiple devices. Concatenate them together.
+		 */
+		info->cmtd = mtd_concat_create(info->mtd, devices_found, dev_name(&dev->dev));
+		if (info->cmtd == NULL)
+			err = -ENXIO;
+	}
+	if (err)
+		goto err_out;
+
+	spin_lock_init(&info->vpp_lock);
+
+	part_types = physmap_data->part_probe_types ? : part_probe_types;
+
+	mtd_device_parse_register(info->cmtd, part_types, NULL,
+				  physmap_data->parts, physmap_data->nr_parts);
+	return 0;
+
+err_out:
+	physmap_flash_remove(dev);
+	return err;
+}
+
+#ifdef CONFIG_PM
+static void physmap_flash_shutdown(struct platform_device *dev)
+{
+	struct physmap_flash_info *info = platform_get_drvdata(dev);
+	int i;
+
+	for (i = 0; i < MAX_RESOURCES && info->mtd[i]; i++)
+		if (mtd_suspend(info->mtd[i]) == 0)
+			mtd_resume(info->mtd[i]);
+}
+#else
+#define physmap_flash_shutdown NULL
+#endif
+
+static struct platform_driver physmap_flash_driver = {
+	.probe		= physmap_flash_probe,
+	.remove		= physmap_flash_remove,
+	.shutdown	= physmap_flash_shutdown,
+	.driver		= {
+		.name	= "physmap-flash",
+		.owner	= THIS_MODULE,
+	},
+};
+
+
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
+static struct physmap_flash_data physmap_flash_data = {
+	.width		= CONFIG_MTD_PHYSMAP_BANKWIDTH,
+};
+
+static struct resource physmap_flash_resource = {
+	.start		= CONFIG_MTD_PHYSMAP_START,
+	.end		= CONFIG_MTD_PHYSMAP_START + CONFIG_MTD_PHYSMAP_LEN - 1,
+	.flags		= IORESOURCE_MEM,
+};
+
+static struct platform_device physmap_flash = {
+	.name		= "physmap-flash",
+	.id		= 0,
+	.dev		= {
+		.platform_data	= &physmap_flash_data,
+	},
+	.num_resources	= 1,
+	.resource	= &physmap_flash_resource,
+};
+#endif
+
+static int __init physmap_init(void)
+{
+	int err;
+
+	err = platform_driver_register(&physmap_flash_driver);
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
+	if (err == 0) {
+		err = platform_device_register(&physmap_flash);
+		if (err)
+			platform_driver_unregister(&physmap_flash_driver);
+	}
+#endif
+
+	return err;
+}
+
+static void __exit physmap_exit(void)
+{
+#ifdef CONFIG_MTD_PHYSMAP_COMPAT
+	platform_device_unregister(&physmap_flash);
+#endif
+	platform_driver_unregister(&physmap_flash_driver);
+}
+
+module_init(physmap_init);
+module_exit(physmap_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("David Woodhouse <dwmw2@infradead.org>");
 MODULE_DESCRIPTION("Generic configurable MTD map driver");
+
+/* legacy platform drivers can't hotplug or coldplg */
+#ifndef CONFIG_MTD_PHYSMAP_COMPAT
+/* work with hotplug and coldplug */
+MODULE_ALIAS("platform:physmap-flash");
+#endif

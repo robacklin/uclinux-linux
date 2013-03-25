@@ -1,24 +1,27 @@
 #
 # linux/arch/arm/boot/bootp/Makefile
 #
+# This file is included by the global makefile so that you can add your own
+# architecture-specific flags and dependencies.
+#
 
-ZSYSTEM		=$(TOPDIR)/arch/arm/boot/zImage
-ZLDFLAGS	=-p -X -T bootp.lds \
-		 --defsym initrd_addr=$(INITRD_PHYS) \
-		 --defsym params=$(PARAMS_PHYS)
+LDFLAGS_bootp	:=-p --no-undefined -X \
+		 --defsym initrd_phys=$(INITRD_PHYS) \
+		 --defsym params_phys=$(PARAMS_PHYS) -T
+AFLAGS_initrd.o :=-DINITRD=\"$(INITRD)\"
 
-all:		bootp
+targets	:= bootp init.o kernel.o initrd.o
 
 # Note that bootp.lds picks up kernel.o and initrd.o
-bootp:		init.o kernel.o initrd.o bootp.lds
-		$(LD) $(ZLDFLAGS) -o $@ init.o
+$(obj)/bootp:	$(src)/bootp.lds $(addprefix $(obj)/,init.o kernel.o initrd.o) FORCE
+	$(call if_changed,ld)
+	@:
 
-kernel.o:	$(ZSYSTEM)
-		$(LD) -r -s -o $@ -b binary $(ZSYSTEM)
+# kernel.o and initrd.o includes a binary image using
+# .incbin, a dependency which is not tracked automatically
 
-initrd.o:	$(INITRD)
-		$(LD) -r -s -o $@ -b binary $(INITRD)
+$(obj)/kernel.o: arch/arm/boot/zImage FORCE
 
-.PHONY:		$(INITRD) $(ZSYSTEM)
+$(obj)/initrd.o: $(INITRD) FORCE
 
-clean:;		$(RM) bootp
+PHONY += $(INITRD) FORCE

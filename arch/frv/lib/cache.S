@@ -1,4 +1,4 @@
-/* cache.S: cache managment routines
+/* cache.S: cache management routines
  *
  * Copyright (C) 2004 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
@@ -12,7 +12,6 @@
 #include <asm/spr-regs.h>
 #include <asm/cache.h>
 
-        .file		"cache.S"
         .text
         .p2align	4
 
@@ -24,7 +23,7 @@
 ###############################################################################
         .globl		frv_dcache_writeback
         .type		frv_dcache_writeback,@function
-frv_dcache_writeback:	
+frv_dcache_writeback:
 	andi		gr8,~(L1_CACHE_BYTES-1),gr8
 
 2:	dcf		@(gr8,gr0)
@@ -85,7 +84,7 @@ frv_icache_invalidate:
 ###############################################################################
         .globl		frv_cache_wback_inv
         .type		frv_cache_wback_inv,@function
-frv_cache_wback_inv:	
+frv_cache_wback_inv:
 	andi		gr8,~(L1_CACHE_BYTES-1),gr8
 
 2:	dcf		@(gr8,gr0)

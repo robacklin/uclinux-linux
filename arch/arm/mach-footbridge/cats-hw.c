@@ -5,13 +5,20 @@
  *
  * Copyright (C) 1998, 1999 Russell King, Phil Blundell
  */
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/screen_info.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
 
-#include <asm/io.h>
+#include <asm/hardware/dec21285.h>
 #include <asm/mach-types.h>
+#include <asm/setup.h>
+
+#include <asm/mach/arch.h>
+
+#include "common.h"
 
 #define CFG_PORT	0x370
 #define INDEX_PORT	(CFG_PORT)
@@ -63,3 +70,26 @@ static int __init cats_hw_init(void)
 }
 
 __initcall(cats_hw_init);
+
+/*
+ * CATS uses soft-reboot by default, since
+ * hard reboots fail on early boards.
+ */
+static void __init
+fixup_cats(struct tag *tags, char **cmdline, struct meminfo *mi)
+{
+	screen_info.orig_video_lines  = 25;
+	screen_info.orig_video_points = 16;
+	screen_info.orig_y = 24;
+}
+
+MACHINE_START(CATS, "Chalice-CATS")
+	/* Maintainer: Philip Blundell */
+	.atag_offset	= 0x100,
+	.restart_mode	= 's',
+	.fixup		= fixup_cats,
+	.map_io		= footbridge_map_io,
+	.init_irq	= footbridge_init_irq,
+	.timer		= &isa_timer,
+	.restart	= footbridge_restart,
+MACHINE_END

@@ -10,7 +10,6 @@
  */
 
 
-        .file		"insl_ns.S"
         .text
         .p2align	4
 

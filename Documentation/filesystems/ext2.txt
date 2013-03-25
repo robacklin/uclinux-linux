@@ -11,8 +11,8 @@ for NetBSD, FreeBSD, the GNU HURD, Windows 95/98/NT, OS/2 and RISC OS.
 Options
 =======
 
-When mounting an ext2 filesystem, the following options are accepted.
-Defaults are marked with (*).
+Most defaults are determined by the filesystem superblock, and can be
+set using tune2fs(8). Kernel-determined defaults are indicated by (*).
 
 bsddf			(*)	Makes `df' act like BSD.
 minixdf				Makes `df' act like Minix.
@@ -23,17 +23,40 @@ check=none, nocheck	(*)	Don't do extra checking of bitmaps on mount
 debug				Extra debugging information is sent to the
 				kernel syslog.  Useful for developers.
 
-errors=continue		(*)	Keep going on a filesystem error.
+errors=continue			Keep going on a filesystem error.
 errors=remount-ro		Remount the filesystem read-only on an error.
 errors=panic			Panic and halt the machine if an error occurs.
 
 grpid, bsdgroups		Give objects the same group ID as their parent.
-nogrpid, sysvgroups	(*)	New objects have the group ID of their creator.
+nogrpid, sysvgroups		New objects have the group ID of their creator.
+
+nouid32				Use 16-bit UIDs and GIDs.
+
+oldalloc			Enable the old block allocator. Orlov should
+				have better performance, we'd like to get some
+				feedback if it's the contrary for you.
+orlov			(*)	Use the Orlov block allocator.
+				(See http://lwn.net/Articles/14633/ and
+				http://lwn.net/Articles/14446/.)
 
 resuid=n			The user ID which may use the reserved blocks.
-resgid=n			The group ID which may use the reserved blocks. 
+resgid=n			The group ID which may use the reserved blocks.
 
 sb=n				Use alternate superblock at this location.
+
+user_xattr			Enable "user." POSIX Extended Attributes
+				(requires CONFIG_EXT2_FS_XATTR).
+				See also http://acl.bestbits.at
+nouser_xattr			Don't support "user." extended attributes.
+
+acl				Enable POSIX Access Control Lists support
+				(requires CONFIG_EXT2_FS_POSIX_ACL).
+				See also http://acl.bestbits.at
+noacl				Don't support POSIX ACLs.
+
+nobh				Do not attach buffer_heads to file pagecache.
+
+xip				Use execute in place (no caching) if possible
 
 grpquota,noquota,quota,usrquota	Quota options are silently ignored by ext2.
 
@@ -182,7 +205,7 @@ Reserved Space
 
 In ext2, there is a mechanism for reserving a certain number of blocks
 for a particular user (normally the super-user).  This is intended to
-allow for the system to continue functioning even if non-priveleged users
+allow for the system to continue functioning even if non-privileged users
 fill up all the space available to them (this is independent of filesystem
 quotas).  It also keeps the filesystem from filling up entirely which
 helps combat fragmentation.
@@ -299,7 +322,7 @@ an upper limit on the block size imposed by the page size of the kernel,
 so 8kB blocks are only allowed on Alpha systems (and other architectures
 which support larger pages).
 
-There is an upper limit of 32768 subdirectories in a single directory.
+There is an upper limit of 32000 subdirectories in a single directory.
 
 There is a "soft" upper limit of about 10-15k files in a single directory
 with the current linear linked-list directory implementation.  This limit
@@ -336,9 +359,8 @@ and are copied into the filesystem.  If a transaction is incomplete at
 the time of the crash, then there is no guarantee of consistency for
 the blocks in that transaction so they are discarded (which means any
 filesystem changes they represent are also lost).
-
-The ext3 code is currently (Apr 2001) available for 2.2 kernels only,
-and not yet available for 2.4 kernels.
+Check Documentation/filesystems/ext3.txt if you want to read more about
+ext3 and journaling.
 
 References
 ==========
@@ -347,17 +369,15 @@ The kernel source	file:/usr/src/linux/fs/ext2/
 e2fsprogs (e2fsck)	http://e2fsprogs.sourceforge.net/
 Design & Implementation	http://e2fsprogs.sourceforge.net/ext2intro.html
 Journaling (ext3)	ftp://ftp.uk.linux.org/pub/linux/sct/fs/jfs/
-Hashed Directories	http://kernelnewbies.org/~phillips/htree/
 Filesystem Resizing	http://ext2resize.sourceforge.net/
-Extended Attributes &
-Access Control Lists	http://acl.bestbits.at/
-Compression (*)		http://www.netspace.net.au/~reiter/e2compr/
+Compression (*)		http://e2compr.sourceforge.net/
 
 Implementations for:
-Windows 95/98/NT/2000	http://uranus.it.swin.edu.au/~jn/linux/Explore2fs.htm
-Windows 95 (*)		http://www.yipton.demon.co.uk/content.html#FSDEXT2
+Windows 95/98/NT/2000	http://www.chrysocome.net/explore2fs
+Windows 95 (*)		http://www.yipton.net/content.html#FSDEXT2
 DOS client (*)		ftp://metalab.unc.edu/pub/Linux/system/filesystems/ext2/
-OS/2			http://perso.wanadoo.fr/matthieu.willm/ext2-os2/
-RISC OS client		ftp://ftp.barnet.ac.uk/pub/acorn/armlinux/iscafs/
+OS/2 (+)		ftp://metalab.unc.edu/pub/Linux/system/filesystems/ext2/
+RISC OS client		http://www.esw-heim.tu-clausthal.de/~marco/smorbrod/IscaFS/
 
 (*) no longer actively developed/supported (as of Apr 2001)
+(+) no longer actively developed/supported (as of Mar 2009)

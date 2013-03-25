@@ -1,14 +1,12 @@
 /*
  * linux/net/sunrpc/sysctl.c
  *
- * Sysctl interface to sunrpc module. This is for debugging only now.
+ * Sysctl interface to sunrpc module.
  *
  * I would prefer to register the sunrpc table below sys/net, but that's
  * impossible at the moment.
  */
 
-#include <linux/config.h>
-#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/linkage.h>
 #include <linux/ctype.h>
@@ -20,14 +18,24 @@
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/stats.h>
+#include <linux/sunrpc/svc_xprt.h>
+
+#include "netns.h"
 
 /*
  * Declare the debug flags here
  */
 unsigned int	rpc_debug;
+EXPORT_SYMBOL_GPL(rpc_debug);
+
 unsigned int	nfs_debug;
+EXPORT_SYMBOL_GPL(nfs_debug);
+
 unsigned int	nfsd_debug;
+EXPORT_SYMBOL_GPL(nfsd_debug);
+
 unsigned int	nlm_debug;
+EXPORT_SYMBOL_GPL(nlm_debug);
 
 #ifdef RPC_DEBUG
 
@@ -37,14 +45,8 @@ static ctl_table		sunrpc_table[];
 void
 rpc_register_sysctl(void)
 {
-	if (!sunrpc_table_header) {
-		sunrpc_table_header = register_sysctl_table(sunrpc_table, 1);
-#ifdef CONFIG_PROC_FS
-		if (sunrpc_table[0].de)
-			sunrpc_table[0].de->owner = THIS_MODULE;
-#endif
-	}
-			
+	if (!sunrpc_table_header)
+		sunrpc_table_header = register_sysctl_table(sunrpc_table);
 }
 
 void
@@ -56,15 +58,30 @@ rpc_unregister_sysctl(void)
 	}
 }
 
-static int
-proc_dodebug(ctl_table *table, int write, struct file *file,
-				void *buffer, size_t *lenp)
+static int proc_do_xprt(ctl_table *table, int write,
+			void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-	char		tmpbuf[20], *p, c;
+	char tmpbuf[256];
+	size_t len;
+
+	if ((*ppos && !write) || !*lenp) {
+		*lenp = 0;
+		return 0;
+	}
+	len = svc_print_xprts(tmpbuf, sizeof(tmpbuf));
+	return simple_read_from_buffer(buffer, *lenp, ppos, tmpbuf, len);
+}
+
+static int
+proc_dodebug(ctl_table *table, int write,
+				void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	char		tmpbuf[20], c, *s;
+	char __user *p;
 	unsigned int	value;
 	size_t		left, len;
 
-	if ((file->f_pos && !write) || !*lenp) {
+	if ((*ppos && !write) || !*lenp) {
 		*lenp = 0;
 		return 0;
 	}
@@ -74,7 +91,7 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 	if (write) {
 		if (!access_ok(VERIFY_READ, buffer, left))
 			return -EFAULT;
-		p = (char *) buffer;
+		p = buffer;
 		while (left && __get_user(c, p) >= 0 && isspace(c))
 			left--, p++;
 		if (!left)
@@ -82,56 +99,87 @@ proc_dodebug(ctl_table *table, int write, struct file *file,
 
 		if (left > sizeof(tmpbuf) - 1)
 			return -EINVAL;
-		copy_from_user(tmpbuf, p, left);
+		if (copy_from_user(tmpbuf, p, left))
+			return -EFAULT;
 		tmpbuf[left] = '\0';
 
-		for (p = tmpbuf, value = 0; '0' <= *p && *p <= '9'; p++, left--)
-			value = 10 * value + (*p - '0');
-		if (*p && !isspace(*p))
+		for (s = tmpbuf, value = 0; '0' <= *s && *s <= '9'; s++, left--)
+			value = 10 * value + (*s - '0');
+		if (*s && !isspace(*s))
 			return -EINVAL;
-		while (left && isspace(*p))
-			left--, p++;
+		while (left && isspace(*s))
+			left--, s++;
 		*(unsigned int *) table->data = value;
 		/* Display the RPC tasks on writing to rpc_debug */
-		if (table->ctl_name == CTL_RPCDEBUG) {
-			rpc_show_tasks();
-		}
+		if (strcmp(table->procname, "rpc_debug") == 0)
+			rpc_show_tasks(&init_net);
 	} else {
 		if (!access_ok(VERIFY_WRITE, buffer, left))
 			return -EFAULT;
 		len = sprintf(tmpbuf, "%d", *(unsigned int *) table->data);
 		if (len > left)
 			len = left;
-		copy_to_user(buffer, tmpbuf, len);
+		if (__copy_to_user(buffer, tmpbuf, len))
+			return -EFAULT;
 		if ((left -= len) > 0) {
-			put_user('\n', (char *)buffer + len);
+			if (put_user('\n', (char __user *)buffer + len))
+				return -EFAULT;
 			left--;
 		}
 	}
 
 done:
 	*lenp -= left;
-	file->f_pos += *lenp;
+	*ppos += *lenp;
 	return 0;
 }
 
-#define DIRENTRY(nam1, nam2, child)	\
-	{CTL_##nam1, #nam2, NULL, 0, 0555, child }
-#define DBGENTRY(nam1, nam2)	\
-	{CTL_##nam1##DEBUG, #nam2 "_debug", &nam2##_debug, sizeof(int),\
-	 0644, NULL, &proc_dodebug}
 
-static ctl_table		debug_table[] = {
-	DBGENTRY(RPC,  rpc),
-	DBGENTRY(NFS,  nfs),
-	DBGENTRY(NFSD, nfsd),
-	DBGENTRY(NLM,  nlm),
-	{0}
+static ctl_table debug_table[] = {
+	{
+		.procname	= "rpc_debug",
+		.data		= &rpc_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dodebug
+	},
+	{
+		.procname	= "nfs_debug",
+		.data		= &nfs_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dodebug
+	},
+	{
+		.procname	= "nfsd_debug",
+		.data		= &nfsd_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dodebug
+	},
+	{
+		.procname	= "nlm_debug",
+		.data		= &nlm_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dodebug
+	},
+	{
+		.procname	= "transports",
+		.maxlen		= 256,
+		.mode		= 0444,
+		.proc_handler	= proc_do_xprt,
+	},
+	{ }
 };
 
-static ctl_table		sunrpc_table[] = {
-	DIRENTRY(SUNRPC, sunrpc, debug_table),
-	{0}
+static ctl_table sunrpc_table[] = {
+	{
+		.procname	= "sunrpc",
+		.mode		= 0555,
+		.child		= debug_table
+	},
+	{ }
 };
 
 #endif

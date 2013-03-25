@@ -1,177 +1,266 @@
-#ifndef __LINUX_SL811_H
-#define __LINUX_SL811_H
+/*
+ * SL811HS register declarations and HCD data structures
+ *
+ * Copyright (C) 2004 Psion Teklogix
+ * Copyright (C) 2004 David Brownell
+ * Copyright (C) 2001 Cypress Semiconductor Inc. 
+ */
 
-//#define SL811_DEBUG
+/*
+ * SL811HS has transfer registers, and control registers.  In host/master
+ * mode one set of registers is used; in peripheral/slave mode, another.
+ *  - SL11H only has some "A" transfer registers from 0x00-0x04
+ *  - SL811HS also has "B" registers from 0x08-0x0c
+ *  - SL811S (or HS in slave mode) has four A+B sets, at 00, 10, 20, 30
+ */
 
-#ifdef SL811_DEBUG
-	#define PDEBUG(level, fmt, args...) \
-		if (debug >= (level)) info("[%s:%d] " fmt, \
-		__PRETTY_FUNCTION__, __LINE__ , ## args)
+#define SL811_EP_A(base)	((base) + 0)
+#define SL811_EP_B(base)	((base) + 8)
+
+#define SL811_HOST_BUF		0x00
+#define SL811_PERIPH_EP0	0x00
+#define SL811_PERIPH_EP1	0x10
+#define SL811_PERIPH_EP2	0x20
+#define SL811_PERIPH_EP3	0x30
+
+
+/* TRANSFER REGISTERS:  host and peripheral sides are similar
+ * except for the control models (master vs slave).
+ */
+#define SL11H_HOSTCTLREG	0
+#	define SL11H_HCTLMASK_ARM	0x01
+#	define SL11H_HCTLMASK_ENABLE	0x02
+#	define SL11H_HCTLMASK_IN	0x00
+#	define SL11H_HCTLMASK_OUT	0x04
+#	define SL11H_HCTLMASK_ISOCH	0x10
+#	define SL11H_HCTLMASK_AFTERSOF	0x20
+#	define SL11H_HCTLMASK_TOGGLE	0x40
+#	define SL11H_HCTLMASK_PREAMBLE	0x80
+#define SL11H_BUFADDRREG	1
+#define SL11H_BUFLNTHREG	2
+#define SL11H_PKTSTATREG	3	/* read */
+#	define SL11H_STATMASK_ACK	0x01
+#	define SL11H_STATMASK_ERROR	0x02
+#	define SL11H_STATMASK_TMOUT	0x04
+#	define SL11H_STATMASK_SEQ	0x08
+#	define SL11H_STATMASK_SETUP	0x10
+#	define SL11H_STATMASK_OVF	0x20
+#	define SL11H_STATMASK_NAK	0x40
+#	define SL11H_STATMASK_STALL	0x80
+#define SL11H_PIDEPREG		3	/* write */
+#	define	SL_SETUP	0xd0
+#	define	SL_IN		0x90
+#	define	SL_OUT		0x10
+#	define	SL_SOF		0x50
+#	define	SL_PREAMBLE	0xc0
+#	define	SL_NAK		0xa0
+#	define	SL_STALL	0xe0
+#	define	SL_DATA0	0x30
+#	define	SL_DATA1	0xb0
+#define SL11H_XFERCNTREG	4	/* read */
+#define SL11H_DEVADDRREG	4	/* write */
+
+
+/* CONTROL REGISTERS:  host and peripheral are very different.
+ */
+#define SL11H_CTLREG1		5
+#	define SL11H_CTL1MASK_SOF_ENA	0x01
+#	define SL11H_CTL1MASK_FORCE	0x18
+#		define SL11H_CTL1MASK_NORMAL	0x00
+#		define SL11H_CTL1MASK_SE0	0x08	/* reset */
+#		define SL11H_CTL1MASK_J		0x10
+#		define SL11H_CTL1MASK_K		0x18	/* resume */
+#	define SL11H_CTL1MASK_LSPD	0x20
+#	define SL11H_CTL1MASK_SUSPEND	0x40
+#define SL11H_IRQ_ENABLE	6
+#	define SL11H_INTMASK_DONE_A	0x01
+#	define SL11H_INTMASK_DONE_B	0x02
+#	define SL11H_INTMASK_SOFINTR	0x10
+#	define SL11H_INTMASK_INSRMV	0x20	/* to/from SE0 */
+#	define SL11H_INTMASK_RD		0x40
+#	define SL11H_INTMASK_DP		0x80	/* only in INTSTATREG */
+#define SL11S_ADDRESS		7
+
+/* 0x08-0x0c are for the B buffer (not in SL11) */
+
+#define SL11H_IRQ_STATUS	0x0D	/* write to ack */
+#define SL11H_HWREVREG		0x0E	/* read */
+#	define SL11H_HWRMASK_HWREV	0xF0
+#define SL11H_SOFLOWREG		0x0E	/* write */
+#define SL11H_SOFTMRREG		0x0F	/* read */
+
+/* a write to this register enables SL811HS features.
+ * HOST flag presumably overrides the chip input signal?
+ */
+#define SL811HS_CTLREG2		0x0F
+#	define SL811HS_CTL2MASK_SOF_MASK	0x3F
+#	define SL811HS_CTL2MASK_DSWAP		0x40
+#	define SL811HS_CTL2MASK_HOST		0x80
+
+#define SL811HS_CTL2_INIT	(SL811HS_CTL2MASK_HOST | 0x2e)
+
+
+/* DATA BUFFERS: registers from 0x10..0xff are for data buffers;
+ * that's 240 bytes, which we'll split evenly between A and B sides.
+ * Only ISO can use more than 64 bytes per packet.
+ * (The SL11S has 0x40..0xff for buffers.)
+ */
+#define H_MAXPACKET	120		/* bytes in A or B fifos */
+
+#define SL11H_DATA_START	0x10
+#define	SL811HS_PACKET_BUF(is_a)	((is_a) \
+		? SL11H_DATA_START \
+		: (SL11H_DATA_START + H_MAXPACKET))
+
+/*-------------------------------------------------------------------------*/
+
+#define	LOG2_PERIODIC_SIZE	5	/* arbitrary; this matches OHCI */
+#define	PERIODIC_SIZE		(1 << LOG2_PERIODIC_SIZE)
+
+struct sl811 {
+	spinlock_t		lock;
+	void __iomem		*addr_reg;
+	void __iomem		*data_reg;
+	struct sl811_platform_data	*board;
+	struct proc_dir_entry	*pde;
+
+	unsigned long		stat_insrmv;
+	unsigned long		stat_wake;
+	unsigned long		stat_sof;
+	unsigned long		stat_a;
+	unsigned long		stat_b;
+	unsigned long		stat_lost;
+	unsigned long		stat_overrun;
+
+	/* sw model */
+	struct timer_list	timer;
+	struct sl811h_ep	*next_periodic;
+	struct sl811h_ep	*next_async;
+
+	struct sl811h_ep	*active_a;
+	unsigned long		jiffies_a;
+	struct sl811h_ep	*active_b;
+	unsigned long		jiffies_b;
+
+	u32			port1;
+	u8			ctrl1, ctrl2, irq_enable;
+	u16			frame;
+
+	/* async schedule: control, bulk */
+	struct list_head	async;
+
+	/* periodic schedule: interrupt, iso */
+	u16			load[PERIODIC_SIZE];
+	struct sl811h_ep	*periodic[PERIODIC_SIZE];
+	unsigned		periodic_count;
+};
+
+static inline struct sl811 *hcd_to_sl811(struct usb_hcd *hcd)
+{
+	return (struct sl811 *) (hcd->hcd_priv);
+}
+
+static inline struct usb_hcd *sl811_to_hcd(struct sl811 *sl811)
+{
+	return container_of((void *) sl811, struct usb_hcd, hcd_priv);
+}
+
+struct sl811h_ep {
+	struct usb_host_endpoint *hep;
+	struct usb_device	*udev;
+
+	u8			defctrl;
+	u8			maxpacket;
+	u8			epnum;
+	u8			nextpid;
+
+	u16			error_count;
+	u16			nak_count;
+	u16			length;		/* of current packet */
+
+	/* periodic schedule */
+	u16			period;
+	u16			branch;
+	u16			load;
+	struct sl811h_ep	*next;
+
+	/* async schedule */
+	struct list_head	schedule;
+};
+
+/*-------------------------------------------------------------------------*/
+
+/* These register utilities should work for the SL811S register API too
+ * NOTE:  caller must hold sl811->lock.
+ */
+
+static inline u8 sl811_read(struct sl811 *sl811, int reg)
+{
+	writeb(reg, sl811->addr_reg);
+	return readb(sl811->data_reg);
+}
+
+static inline void sl811_write(struct sl811 *sl811, int reg, u8 val)
+{
+	writeb(reg, sl811->addr_reg);
+	writeb(val, sl811->data_reg);
+}
+
+static inline void
+sl811_write_buf(struct sl811 *sl811, int addr, const void *buf, size_t count)
+{
+	const u8	*data;
+	void __iomem	*data_reg;
+
+	if (!count)
+		return;
+	writeb(addr, sl811->addr_reg);
+
+	data = buf;
+	data_reg = sl811->data_reg;
+	do {
+		writeb(*data++, data_reg);
+	} while (--count);
+}
+
+static inline void
+sl811_read_buf(struct sl811 *sl811, int addr, void *buf, size_t count)
+{
+	u8 		*data;
+	void __iomem	*data_reg;
+
+	if (!count)
+		return;
+	writeb(addr, sl811->addr_reg);
+
+	data = buf;
+	data_reg = sl811->data_reg;
+	do {
+		*data++ = readb(data_reg);
+	} while (--count);
+}
+
+/*-------------------------------------------------------------------------*/
+
+#ifdef DEBUG
+#define DBG(stuff...)		printk(KERN_DEBUG "sl811: " stuff)
 #else
-	#define PDEBUG(level, fmt, args...) do {} while(0)
+#define DBG(stuff...)		do{}while(0)
 #endif
 
-//#define SL811_TIMEOUT
-		
-/* Sl811 host control register */
-#define	SL811_CTRL_A		0x00
-#define	SL811_ADDR_A		0x01
-#define	SL811_LEN_A		0x02
-#define	SL811_STS_A		0x03	/* read	*/
-#define	SL811_PIDEP_A		0x03	/* write */
-#define	SL811_CNT_A		0x04	/* read	*/
-#define	SL811_DEV_A		0x04	/* write */
-#define	SL811_CTRL1		0x05
-#define	SL811_INTR		0x06
-#define	SL811_CTRL_B		0x08
-#define	SL811_ADDR_B		0x09
-#define	SL811_LEN_B		0x0A
-#define	SL811_STS_B		0x0B	/* read	*/
-#define	SL811_PIDEP_B		0x0B	/* write */
-#define	SL811_CNT_B		0x0C	/* read	*/
-#define	SL811_DEV_B		0x0C	/* write */
-#define	SL811_INTRSTS		0x0D	/* write clears	bitwise	*/
-#define	SL811_HWREV		0x0E	/* read	*/
-#define	SL811_SOFLOW		0x0E	/* write */
-#define	SL811_SOFCNTDIV		0x0F	/* read	*/
-#define	SL811_CTRL2		0x0F	/* write */
-
-/* USB control register bits (addr 0x00 and addr 0x08) */
-#define	SL811_USB_CTRL_ARM	0x01
-#define	SL811_USB_CTRL_ENABLE	0x02
-#define	SL811_USB_CTRL_DIR_OUT	0x04
-#define	SL811_USB_CTRL_ISO	0x10
-#define	SL811_USB_CTRL_SOF	0x20
-#define	SL811_USB_CTRL_TOGGLE_1	0x40
-#define	SL811_USB_CTRL_PREAMBLE	0x80
-
-/* USB status register bits (addr 0x03 and addr 0x0B) */
-#define	SL811_USB_STS_ACK	0x01
-#define	SL811_USB_STS_ERROR	0x02
-#define	SL811_USB_STS_TIMEOUT	0x04
-#define	SL811_USB_STS_TOGGLE_1	0x08
-#define	SL811_USB_STS_SETUP	0x10
-#define	SL811_USB_STS_OVERFLOW	0x20
-#define	SL811_USB_STS_NAK	0x40
-#define	SL811_USB_STS_STALL	0x80
-
-/* Control register 1 bits (addr 0x05) */
-#define	SL811_CTRL1_SOF		0x01
-#define	SL811_CTRL1_RESET	0x08
-#define	SL811_CTRL1_JKSTATE	0x10
-#define	SL811_CTRL1_SPEED_LOW	0x20
-#define	SL811_CTRL1_SUSPEND	0x40
-
-/* Interrut enable (addr 0x06) and interrupt status register bits (addr 0x0D) */
-#define	SL811_INTR_DONE_A	0x01
-#define	SL811_INTR_DONE_B	0x02
-#define	SL811_INTR_SOF		0x10
-#define	SL811_INTR_INSRMV	0x20
-#define	SL811_INTR_DETECT	0x40
-#define	SL811_INTR_NOTPRESENT	0x40
-#define	SL811_INTR_SPEED_FULL	0x80    /* only in status reg */
-
-/* HW rev and SOF lo register bits (addr 0x0E) */
-#define	SL811_HWR_HWREV		0xF0
-
-/* SOF counter and control reg 2 (addr 0x0F) */
-#define	SL811_CTL2_SOFHI	0x3F
-#define	SL811_CTL2_DSWAP	0x40
-#define	SL811_CTL2_HOST		0x80
-
-/* Set up for 1-ms SOF time. */
-#define SL811_12M_LOW		0xE0
-#define SL811_12M_HI		0x2E
-
-#define SL811_DATA_START	0x10
-#define SL811_DATA_LIMIT	240
-
-
-/* Requests: bRequest << 8 | bmRequestType */
-#define RH_GET_STATUS           0x0080
-#define RH_CLEAR_FEATURE        0x0100
-#define RH_SET_FEATURE          0x0300
-#define RH_SET_ADDRESS		0x0500
-#define RH_GET_DESCRIPTOR	0x0680
-#define RH_SET_DESCRIPTOR       0x0700
-#define RH_GET_CONFIGURATION	0x0880
-#define RH_SET_CONFIGURATION	0x0900
-#define RH_GET_STATE            0x0280
-#define RH_GET_INTERFACE        0x0A80
-#define RH_SET_INTERFACE        0x0B00
-#define RH_SYNC_FRAME           0x0C80
-
-
-#define PIDEP(pid, ep) (((pid) & 0x0f) << 4 | (ep))
-
-/* Virtual Root HUB */
-struct virt_root_hub {
-	int devnum; 			/* Address of Root Hub endpoint */ 
-	void *urb;			/* interrupt URB of root hub */
-	int send;			/* active flag */
-	int interval;			/* intervall of roothub interrupt transfers */
-	struct timer_list rh_int_timer; /* intervall timer for rh interrupt EP */
-};
-
-struct sl811_td {
-	/* hardware */
-	__u8 ctrl;			/* control register */
-	
-	/* write */			
-	__u8 addr;			/* base adrress register */
-	__u8 len;			/* base length register */
-	__u8 pidep;			/* PId and endpoint register */
-	__u8 dev;			/* device address register */
-	
-	/* read */
-	__u8 status;			/* status register */
-	__u8 left;			/* transfer count register */
-	
-	/* software */
-	__u8 errcnt;			/* error count, begin with 3 */
-	__u8 done;			/* is this td tranfer done */
-	__u8 *buf;			/* point to data buffer for tranfer */
-	int bustime;			/* the bus time need by this td */
-	int td_status;			/* the status of this td */
-	int nakcnt;			/* number of naks */
-	struct urb *urb;			/* the urb this td belongs to */
-	struct list_head td_list;	/* link to a list of the urb */
-};
-
-struct sl811_urb_priv {
-	struct urb *urb;			/* the urb this priv beloings to */
-	struct list_head td_list;	/* list of all the td of this urb */
-	struct sl811_td *cur_td;		/* current td is in processing or it will be */
-	struct sl811_td *first_td;		/* the first td of this urb */
-	struct sl811_td *last_td;		/* the last td of this urb */
-	int interval;			/* the query time value for intr urb */
-	int unlink;			/* is the this urb unlinked */
-	unsigned long inserttime;	/* the time when insert to list */
-};
-
-struct sl811_hc {
-	spinlock_t hc_lock;		/* Lock for this structure */
-	
-	int irq;			/* IRQ number this hc use */
-	int addr_io;			/* I/O address line address */
-	int data_io;			/* I/O data line address */
-	struct virt_root_hub rh;		/* root hub */
-	struct usb_port_status rh_status;/* root hub port status */
-	struct list_head urb_list[6];	/* set of urbs, the order is iso,intr,ctrl,bulk,inactive intr, wait */
-	struct list_head *cur_list;	/* the current list is in process */
-	wait_queue_head_t waitq;	/* deletion of URBs and devices needs a waitqueue */
-	struct sl811_td *cur_td;		/* point to the td is in process */
-	struct list_head hc_hcd_list;	/* list of all hci_hcd */
-	struct usb_bus *bus;    	/* our bus */
-	int active_urbs;		/* total number of active usbs */
-	int frame_number;		/* the current frame number, we do't use it, any one need it? */
-};
-
-#define iso_list 	urb_list[0]	/* set of isoc urbs */
-#define intr_list	urb_list[1]	/* ordered (tree) set of int urbs */
-#define ctrl_list	urb_list[2]	/* set of ctrl urbs */
-#define bulk_list	urb_list[3]	/* set of bulk urbs */
-#define idle_intr_list	urb_list[4]	/* set of intr urbs in its idle time*/
-#define wait_list	urb_list[5]	/* set of wait urbs */
-
+#ifdef VERBOSE
+#    define VDBG		DBG
+#else
+#    define VDBG(stuff...)	do{}while(0)
 #endif
+
+#ifdef PACKET_TRACE
+#    define PACKET		VDBG
+#else
+#    define PACKET(stuff...)	do{}while(0)
+#endif
+
+#define ERR(stuff...)		printk(KERN_ERR "sl811: " stuff)
+#define WARNING(stuff...)	printk(KERN_WARNING "sl811: " stuff)
+#define INFO(stuff...)		printk(KERN_INFO "sl811: " stuff)
+

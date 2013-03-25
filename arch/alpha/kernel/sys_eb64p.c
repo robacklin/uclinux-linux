@@ -8,25 +8,24 @@
  * Code supporting the EB64+ and EB66.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_lca.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -44,43 +43,26 @@ eb64p_update_irq_hw(unsigned int irq, unsigned long mask)
 }
 
 static inline void
-eb64p_enable_irq(unsigned int irq)
+eb64p_enable_irq(struct irq_data *d)
 {
-	eb64p_update_irq_hw(irq, cached_irq_mask &= ~(1 << irq));
+	eb64p_update_irq_hw(d->irq, cached_irq_mask &= ~(1 << d->irq));
 }
 
 static void
-eb64p_disable_irq(unsigned int irq)
+eb64p_disable_irq(struct irq_data *d)
 {
-	eb64p_update_irq_hw(irq, cached_irq_mask |= 1 << irq);
+	eb64p_update_irq_hw(d->irq, cached_irq_mask |= 1 << d->irq);
 }
 
-static unsigned int
-eb64p_startup_irq(unsigned int irq)
-{
-	eb64p_enable_irq(irq);
-	return 0; /* never anything pending */
-}
-
-static void
-eb64p_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		eb64p_enable_irq(irq);
-}
-
-static struct hw_interrupt_type eb64p_irq_type = {
-	typename:	"EB64P",
-	startup:	eb64p_startup_irq,
-	shutdown:	eb64p_disable_irq,
-	enable:		eb64p_enable_irq,
-	disable:	eb64p_disable_irq,
-	ack:		eb64p_disable_irq,
-	end:		eb64p_end_irq,
+static struct irq_chip eb64p_irq_type = {
+	.name		= "EB64P",
+	.irq_unmask	= eb64p_enable_irq,
+	.irq_mask	= eb64p_disable_irq,
+	.irq_mask_ack	= eb64p_disable_irq,
 };
 
 static void 
-eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
+eb64p_device_interrupt(unsigned long vector)
 {
 	unsigned long pld;
 	unsigned int i;
@@ -97,9 +79,9 @@ eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		pld &= pld - 1;	/* clear least bit set */
 
 		if (i == 5) {
-			isa_device_interrupt(vector, regs);
+			isa_device_interrupt(vector);
 		} else {
-			handle_irq(16 + i, regs);
+			handle_irq(16 + i);
 		}
 	}
 }
@@ -135,9 +117,9 @@ eb64p_init_irq(void)
 	init_i8259a_irqs();
 
 	for (i = 16; i < 32; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &eb64p_irq_type;
-	}		
+		irq_set_chip_and_handler(i, &eb64p_irq_type, handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
+	}
 
 	common_init_isa_dma();
 	setup_irq(16+5, &isa_cascade_irqaction);
@@ -186,7 +168,7 @@ eb64p_init_irq(void)
  */
 
 static int __init
-eb64p_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+eb64p_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[5][5] __initdata = {
 		/*INT  INTA  INTB  INTC   INTD */
@@ -207,51 +189,49 @@ eb64p_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_EB64P)
 struct alpha_machine_vector eb64p_mv __initmv = {
-	vector_name:		"EB64+",
+	.vector_name		= "EB64+",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
-	DO_APECS_BUS,
-	machine_check:		apecs_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= apecs_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		32,
-	device_interrupt:	eb64p_device_interrupt,
+	.nr_irqs		= 32,
+	.device_interrupt	= eb64p_device_interrupt,
 
-	init_arch:		apecs_init_arch,
-	init_irq:		eb64p_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		NULL,
-	pci_map_irq:		eb64p_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= apecs_init_arch,
+	.init_irq		= eb64p_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= NULL,
+	.pci_map_irq		= eb64p_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(eb64p)
 #endif
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_EB66)
 struct alpha_machine_vector eb66_mv __initmv = {
-	vector_name:		"EB66",
+	.vector_name		= "EB66",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_LCA_IO,
-	DO_LCA_BUS,
-	machine_check:		lca_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= lca_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		32,
-	device_interrupt:	eb64p_device_interrupt,
+	.nr_irqs		= 32,
+	.device_interrupt	= eb64p_device_interrupt,
 
-	init_arch:		lca_init_arch,
-	init_irq:		eb64p_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	pci_map_irq:		eb64p_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= lca_init_arch,
+	.init_irq		= eb64p_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.pci_map_irq		= eb64p_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(eb66)
 #endif

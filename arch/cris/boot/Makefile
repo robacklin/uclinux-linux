@@ -2,15 +2,23 @@
 # arch/cris/boot/Makefile
 #
 
-zImage: compressed/vmlinuz
+objcopyflags-$(CONFIG_ETRAX_ARCH_V10) += -R .note -R .comment
+objcopyflags-$(CONFIG_ETRAX_ARCH_V32) += --remove-section=.bss --remove-section=.note.gnu.build-id
 
-compressed/vmlinuz: $(TOPDIR)/vmlinux
-	@$(MAKE) -C compressed vmlinuz
+OBJCOPYFLAGS = -O binary $(objcopyflags-y)
 
-dep:
-	@$(MAKE) -C compressed depend
-	@$(MAKE) -C rescue depend
 
-clean:
-	rm -f zImage tools/build compressed/vmlinux.out
-	@$(MAKE) -C compressed clean
+subdir- := compressed rescue
+targets := Image
+
+$(obj)/Image: vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready'
+
+$(obj)/compressed/vmlinux: $(obj)/Image FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
+	$(Q)$(MAKE) $(build)=$(obj)/rescue $(obj)/rescue/rescue.bin
+
+$(obj)/zImage:  $(obj)/compressed/vmlinux
+	@cp $< $@
+	@echo '  Kernel: $@ is ready'

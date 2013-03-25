@@ -1,11 +1,11 @@
-/* $Id: tsunami.S,v 1.6 2000/07/16 21:48:52 anton Exp $
+/*
  * tsunami.S: High speed MicroSparc-I mmu/cache operations.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <linux/config.h>
 #include <asm/ptrace.h>
+#include <asm/asm-offsets.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
 #include <asm/page.h>
@@ -23,9 +23,9 @@
 
 	/* Sliiick... */
 tsunami_flush_cache_page:
+tsunami_flush_cache_range:
 	ld	[%o0 + 0x0], %o0	/* XXX vma->vm_mm, GROSS XXX */
 tsunami_flush_cache_mm:
-tsunami_flush_cache_range:
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	tsunami_flush_cache_out
@@ -45,8 +45,9 @@ tsunami_flush_sig_insns:
 	 flush	%o1 + 4
 
 	/* More slick stuff... */
-tsunami_flush_tlb_mm:
 tsunami_flush_tlb_range:
+	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+tsunami_flush_tlb_mm:
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	tsunami_flush_tlb_out
@@ -92,7 +93,6 @@ tsunami_flush_tlb_page_out:
 	ldd	[src + offset + 0x00], t2; \
 	std	t2, [dst + offset + 0x00];
 
-	.globl	tsunami_copy_1page
 tsunami_copy_1page:
 /* NOTE: This routine has to be shorter than 70insns --jj */
 	or	%g0, (PAGE_SIZE >> 8), %g1

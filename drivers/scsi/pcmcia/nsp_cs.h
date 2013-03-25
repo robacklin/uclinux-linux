@@ -10,8 +10,6 @@
 
 =========================================================*/
 
-/* $Id: nsp_cs.h,v 1.20 2003/09/24 10:38:18 elca Exp $ */
-
 #ifndef  __nsp_cs__
 #define  __nsp_cs__
 
@@ -26,9 +24,6 @@
 /************************************
  * Some useful macros...
  */
-#define NUMBER(arr) ((int) (sizeof(arr) / sizeof(arr[0]))) /* from XtNumber() in /usr/X11R6/include/X11/Intrinsic.h */
-#define BIT(x)      (1L << (x))
-#define MIN(a,b)    ((a) > (b) ? (b) : (a))
 
 /* SCSI initiator must be ID 7 */
 #define NSP_INITIATOR_ID  7
@@ -46,20 +41,12 @@
 #  define IRQCONTROL_PHASE_CHANGE_CLEAR BIT(1)
 #  define IRQCONTROL_TIMER_CLEAR        BIT(2)
 #  define IRQCONTROL_FIFO_CLEAR         BIT(3)
-#  define IRQCONTROL_SCSI_IRQ_MASK      BIT(4)
-#  define IRQCONTROL_EXT_IRQ_MASK       BIT(5)
-#  define IRQCONTROL_TIMER_IRQ_MASK     BIT(6)
-#  define IRQCONTROL_FIFO_IRQ_MASK      BIT(7)
-#  define IRQCONTROL_ALL_MASK           (IRQCONTROL_SCSI_IRQ_MASK  | \
-                                         IRQCONTROL_EXT_IRQ_MASK   | \
-                                         IRQCONTROL_TIMER_IRQ_MASK | \
-                                         IRQCONTROL_FIFO_IRQ_MASK  )
-#  define IRQCONTROL_ALL_CLEAR          (IRQCONTROL_RESELECT_CLEAR     | \
+#  define IRQCONTROL_ALLMASK            0xff
+#  define IRQCONTROL_ALLCLEAR           (IRQCONTROL_RESELECT_CLEAR     | \
 					 IRQCONTROL_PHASE_CHANGE_CLEAR | \
 					 IRQCONTROL_TIMER_CLEAR        | \
-					 IRQCONTROL_FIFO_CLEAR         )
-#  define IRQCONTROL_ALL_CLEAR_AND_MASK  (IRQCONTROL_ALL_MASK | \
-                                          IRQCONTROL_ALL_CLEAR)
+					 IRQCONTROL_FIFO_CLEAR          )
+#  define IRQCONTROL_IRQDISABLE         0xf0
 
 #define	IRQSTATUS	0x00  /* W */
 #  define IRQSTATUS_SCSI  BIT(0)
@@ -200,7 +187,7 @@
 #define S_IO		BIT(1)    /* Input/Output line from SCSI bus */
 #define S_CD		BIT(2)    /* Command/Data line from SCSI bus */
 #define S_BUSY		BIT(3)    /* Busy line from SCSI bus         */
-#define S_ACK		BIT(4)    /* Acknowlege line from SCSI bus   */
+#define S_ACK		BIT(4)    /* Acknowledge line from SCSI bus  */
 #define S_REQUEST	BIT(5)    /* Request line from SCSI bus      */
 #define S_SELECT	BIT(6)	  /*                                 */
 #define S_ATN		BIT(7)	  /*                                 */
@@ -235,15 +222,8 @@
 /*====================================================================*/
 
 typedef struct scsi_info_t {
-	dev_link_t             link;
+	struct pcmcia_device	*p_dev;
 	struct Scsi_Host      *host;
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,74))
-	dev_node_t             node;
-#else
-	int	               ndev;
-	dev_node_t             node[8];
-	struct bus_operations *bus;
-#endif
 	int                    stop;
 } scsi_info_t;
 
@@ -271,12 +251,12 @@ typedef struct _nsp_hw_data {
 	unsigned long MmioLength;
 
 	unsigned char ScsiClockDiv;
+
 	unsigned char TransferMode;
-	unsigned char ChipRev;
 
 	int           TimerCount;
 	int           SelectionTimeOut;
-	Scsi_Cmnd    *CurrentSC;
+	struct scsi_cmnd *CurrentSC;
 	//int           CurrnetTarget;
 
 	int           FifoCount;
@@ -300,75 +280,65 @@ typedef struct _nsp_hw_data {
 #endif
 } nsp_hw_data;
 
-
 /****************************************************************************
  *
  */
 
 /* Card service functions */
-static dev_link_t *nsp_cs_attach (void);
-static void        nsp_cs_detach (dev_link_t *link);
-static void        nsp_cs_release(dev_link_t *link);
-static void        nsp_cs_config (dev_link_t *link);
-static int         nsp_cs_event  (event_t event, int priority, event_callback_args_t *args);
+static void        nsp_cs_detach (struct pcmcia_device *p_dev);
+static void        nsp_cs_release(struct pcmcia_device *link);
+static int        nsp_cs_config (struct pcmcia_device *link);
 
 /* Linux SCSI subsystem specific functions */
-static struct Scsi_Host *nsp_detect     (Scsi_Host_Template *sht);
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
-static        int        nsp_detect_old (Scsi_Host_Template *sht);
-static        int        nsp_release_old(struct Scsi_Host *shpnt);
-#endif
+static struct Scsi_Host *nsp_detect     (struct scsi_host_template *sht);
 static const  char      *nsp_info       (struct Scsi_Host *shpnt);
 static        int        nsp_proc_info  (
-#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,5,73))
 	                                 struct Scsi_Host *host,
-#endif
 					 char   *buffer,
 					 char  **start,
 					 off_t   offset,
 					 int     length,
-#if !(LINUX_VERSION_CODE > KERNEL_VERSION(2,5,73))
-					 int     hostno,
-#endif
 					 int     inout);
-static        int        nsp_queuecommand(Scsi_Cmnd *SCpnt, void (* done)(Scsi_Cmnd *SCpnt));
+static int nsp_queuecommand(struct Scsi_Host *h, struct scsi_cmnd *SCpnt);
 
 /* Error handler */
-/*static int nsp_eh_abort       (Scsi_Cmnd *SCpnt);*/
-/*static int nsp_eh_device_reset(Scsi_Cmnd *SCpnt);*/
-static int nsp_eh_bus_reset    (Scsi_Cmnd *SCpnt);
-static int nsp_eh_host_reset   (Scsi_Cmnd *SCpnt);
+/*static int nsp_eh_abort       (struct scsi_cmnd *SCpnt);*/
+/*static int nsp_eh_device_reset(struct scsi_cmnd *SCpnt);*/
+static int nsp_eh_bus_reset    (struct scsi_cmnd *SCpnt);
+static int nsp_eh_host_reset   (struct scsi_cmnd *SCpnt);
 static int nsp_bus_reset       (nsp_hw_data *data);
 
 /* */
 static int  nsphw_init           (nsp_hw_data *data);
-static int  nsphw_start_selection(Scsi_Cmnd *SCpnt);
-static void nsp_start_timer      (Scsi_Cmnd *SCpnt, int time);
-static int  nsp_fifo_count       (Scsi_Cmnd *SCpnt);
-static void nsp_pio_read         (Scsi_Cmnd *SCpnt);
-static void nsp_pio_write        (Scsi_Cmnd *SCpnt);
-static int  nsp_nexus            (Scsi_Cmnd *SCpnt);
-static void nsp_scsi_done        (Scsi_Cmnd *SCpnt);
-static int  nsp_analyze_sdtr     (Scsi_Cmnd *SCpnt);
-static int  nsp_negate_signal    (Scsi_Cmnd *SCpnt, unsigned char mask, char *str);
-static int  nsp_expect_signal    (Scsi_Cmnd *SCpnt, unsigned char current_phase, unsigned char  mask);
-static int  nsp_xfer             (Scsi_Cmnd *SCpnt, int phase);
-static int  nsp_dataphase_bypass (Scsi_Cmnd *SCpnt);
-static int  nsp_reselected       (Scsi_Cmnd *SCpnt);
-static struct Scsi_Host *nsp_detect(Scsi_Host_Template *sht);
+static int  nsphw_start_selection(struct scsi_cmnd *SCpnt);
+static void nsp_start_timer      (struct scsi_cmnd *SCpnt, int time);
+static int  nsp_fifo_count       (struct scsi_cmnd *SCpnt);
+static void nsp_pio_read         (struct scsi_cmnd *SCpnt);
+static void nsp_pio_write        (struct scsi_cmnd *SCpnt);
+static int  nsp_nexus            (struct scsi_cmnd *SCpnt);
+static void nsp_scsi_done        (struct scsi_cmnd *SCpnt);
+static int  nsp_analyze_sdtr     (struct scsi_cmnd *SCpnt);
+static int  nsp_negate_signal    (struct scsi_cmnd *SCpnt,
+				  unsigned char mask, char *str);
+static int  nsp_expect_signal    (struct scsi_cmnd *SCpnt,
+				  unsigned char current_phase,
+				  unsigned char  mask);
+static int  nsp_xfer             (struct scsi_cmnd *SCpnt, int phase);
+static int  nsp_dataphase_bypass (struct scsi_cmnd *SCpnt);
+static int  nsp_reselected       (struct scsi_cmnd *SCpnt);
+static struct Scsi_Host *nsp_detect(struct scsi_host_template *sht);
 
 /* Interrupt handler */
-//static irqreturn_t nspintr(int irq, void *dev_id, struct pt_regs *regs);
+//static irqreturn_t nspintr(int irq, void *dev_id);
 
 /* Module entry point*/
 static int  __init nsp_cs_init(void);
 static void __exit nsp_cs_exit(void);
 
-
 /* Debug */
 #ifdef NSP_DEBUG
-static void show_command (Scsi_Cmnd *SCpnt);
-static void show_phase   (Scsi_Cmnd *SCpnt);
+static void show_command (struct scsi_cmnd *SCpnt);
+static void show_phase   (struct scsi_cmnd *SCpnt);
 static void show_busphase(unsigned char stat);
 static void show_message (nsp_hw_data *data);
 #else
@@ -409,7 +379,6 @@ enum _burst_mode {
 	BURST_MEM32 = 2,
 };
 
-
 /**************************************************************************
  * SCSI messaage
  */
@@ -421,67 +390,8 @@ enum _burst_mode {
 
 #define MSG_EXT_SDTR         0x01
 
-
-/**************************************************************************
- * Compatibility functions
- */
-
-/* for Kernel 2.4 */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0))
-# define scsi_register_host(template)   scsi_register_module(MODULE_SCSI_HA, template)
-# define scsi_unregister_host(template) scsi_unregister_module(MODULE_SCSI_HA, template)
-# define scsi_host_put(host)            scsi_unregister(host)
-
-# define IRQ_NONE      /* */
-# define IRQ_HANDLED   /* */
-# define IRQ_RETVAL(x) /* */
-
-/* This is ad-hoc version of scsi_host_get_next() */
-static inline struct Scsi_Host *scsi_host_get_next(struct Scsi_Host *host)
-{
-	if (host == NULL) {
-		return scsi_hostlist;
-	} else {
-		return host->next;
-	}
-}
-
-/* This is ad-hoc version of scsi_host_hn_get() */
-static inline struct Scsi_Host *scsi_host_hn_get(unsigned short hostno)
-{
-	struct Scsi_Host *host;
-
-	for (host = scsi_host_get_next(NULL); host != NULL;
-	     host = scsi_host_get_next(host)) {
-		if (host->host_no == hostno) {
-			break;
-		}
-	}
-
-	return host;
-}
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-	error_info_t err = { func, ret };
-	CardServices(ReportError, handle, &err);
-}
-
 /* scatter-gather table */
-# define SG_ADDRESS(buffer) ((buffer)->address)
-
-/* host spin lock */
-# define HOST_LOCK          (&io_request_lock)
-#endif
-
-/* for Kernel 2.6 */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0))
-/* scatter-gather table */
-# define SG_ADDRESS(buffer) ((char *) (page_address((buffer)->page)+(buffer)->offset))
-
-/* host spin lock */
-# define HOST_LOCK          (((scsi_info_t *)dev_id)->host->host_lock)
-#endif
+#  define BUFFER_ADDR ((char *)((sg_virt(SCpnt->SCp.buffer))))
 
 #endif  /*__nsp_cs__*/
 /* end */

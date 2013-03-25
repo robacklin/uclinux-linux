@@ -7,8 +7,6 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  *
- *  $Id: pci.c,v 1.2 2003/01/24 13:11:43 dwmw2 Exp $
- * 
  * Generic PCI memory map driver.  We support the following boards:
  *  - Intel IQ80310 ATU.
  *  - Intel EBSA285 (blank rom programming mode). Tested working 27/09/2001
@@ -17,6 +15,7 @@
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -33,11 +32,79 @@ struct mtd_pci_info {
 
 struct map_pci_info {
 	struct map_info map;
-	void *base;
+	void __iomem *base;
 	void (*exit)(struct pci_dev *dev, struct map_pci_info *map);
 	unsigned long (*translate)(struct map_pci_info *map, unsigned long ofs);
 	struct pci_dev *dev;
-};	
+};
+
+static map_word mtd_pci_read8(struct map_info *_map, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+	map_word val;
+	val.x[0]= readb(map->base + map->translate(map, ofs));
+//	printk("read8 : %08lx => %02x\n", ofs, val.x[0]);
+	return val;
+}
+
+#if 0
+static map_word mtd_pci_read16(struct map_info *_map, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+	map_word val;
+	val.x[0] = readw(map->base + map->translate(map, ofs));
+//	printk("read16: %08lx => %04x\n", ofs, val.x[0]);
+	return val;
+}
+#endif
+static map_word mtd_pci_read32(struct map_info *_map, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+	map_word val;
+	val.x[0] = readl(map->base + map->translate(map, ofs));
+//	printk("read32: %08lx => %08x\n", ofs, val.x[0]);
+	return val;
+}
+
+static void mtd_pci_copyfrom(struct map_info *_map, void *to, unsigned long from, ssize_t len)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+	memcpy_fromio(to, map->base + map->translate(map, from), len);
+}
+
+static void mtd_pci_write8(struct map_info *_map, map_word val, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+//	printk("write8 : %08lx <= %02x\n", ofs, val.x[0]);
+	writeb(val.x[0], map->base + map->translate(map, ofs));
+}
+
+#if 0
+static void mtd_pci_write16(struct map_info *_map, map_word val, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+//	printk("write16: %08lx <= %04x\n", ofs, val.x[0]);
+	writew(val.x[0], map->base + map->translate(map, ofs));
+}
+#endif
+static void mtd_pci_write32(struct map_info *_map, map_word val, unsigned long ofs)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+//	printk("write32: %08lx <= %08x\n", ofs, val.x[0]);
+	writel(val.x[0], map->base + map->translate(map, ofs));
+}
+
+static void mtd_pci_copyto(struct map_info *_map, unsigned long to, const void *from, ssize_t len)
+{
+	struct map_pci_info *map = (struct map_pci_info *)_map;
+	memcpy_toio(map->base + map->translate(map, to), from, len);
+}
+
+static const struct map_info mtd_pci_map = {
+	.phys =		NO_XIP,
+	.copy_from =	mtd_pci_copyfrom,
+	.copy_to =	mtd_pci_copyto,
+};
 
 /*
  * Intel IOP80310 Flash driver
@@ -48,7 +115,10 @@ intel_iq80310_init(struct pci_dev *dev, struct map_pci_info *map)
 {
 	u32 win_base;
 
-	map->map.buswidth = 1;
+	map->map.bankwidth = 1;
+	map->map.read = mtd_pci_read8,
+	map->map.write = mtd_pci_write8,
+
 	map->map.size     = 0x00800000;
 	map->base         = ioremap_nocache(pci_resource_start(dev, 0),
 					    pci_resource_len(dev, 0));
@@ -72,7 +142,7 @@ static void
 intel_iq80310_exit(struct pci_dev *dev, struct map_pci_info *map)
 {
 	if (map->base)
-		iounmap((void *)map->base);
+		iounmap(map->base);
 	pci_write_config_dword(dev, 0x44, map->map.map_priv_2);
 }
 
@@ -98,10 +168,10 @@ intel_iq80310_translate(struct map_pci_info *map, unsigned long ofs)
 }
 
 static struct mtd_pci_info intel_iq80310_info = {
-	init:		intel_iq80310_init,
-	exit:		intel_iq80310_exit,
-	translate:	intel_iq80310_translate,
-	map_name:	"cfi_probe",
+	.init =		intel_iq80310_init,
+	.exit =		intel_iq80310_exit,
+	.translate =	intel_iq80310_translate,
+	.map_name =	"cfi_probe",
 };
 
 /*
@@ -133,21 +203,16 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 		 * not enabled, should we be allocating a new resource for it
 		 * or simply enabling it?
 		 */
-		if (!(pci_resource_flags(dev, PCI_ROM_RESOURCE) &
-		     PCI_ROM_ADDRESS_ENABLE)) {
-		     	u32 val;
-			pci_resource_flags(dev, PCI_ROM_RESOURCE) |= PCI_ROM_ADDRESS_ENABLE;
-			pci_read_config_dword(dev, PCI_ROM_ADDRESS, &val);
-			val |= PCI_ROM_ADDRESS_ENABLE;
-			pci_write_config_dword(dev, PCI_ROM_ADDRESS, val);
-			printk("%s: enabling expansion ROM\n", dev->slot_name);
-		}
+		pci_enable_rom(dev);
+		printk("%s: enabling expansion ROM\n", pci_name(dev));
 	}
 
 	if (!len || !base)
 		return -ENXIO;
 
-	map->map.buswidth = 4;
+	map->map.bankwidth = 4;
+	map->map.read = mtd_pci_read32,
+	map->map.write = mtd_pci_write32,
 	map->map.size     = len;
 	map->base         = ioremap_nocache(base, len);
 
@@ -160,18 +225,13 @@ intel_dc21285_init(struct pci_dev *dev, struct map_pci_info *map)
 static void
 intel_dc21285_exit(struct pci_dev *dev, struct map_pci_info *map)
 {
-	u32 val;
-
 	if (map->base)
-		iounmap((void *)map->base);
+		iounmap(map->base);
 
 	/*
 	 * We need to undo the PCI BAR2/PCI ROM BAR address alteration.
 	 */
-	pci_resource_flags(dev, PCI_ROM_RESOURCE) &= ~PCI_ROM_ADDRESS_ENABLE;
-	pci_read_config_dword(dev, PCI_ROM_ADDRESS, &val);
-	val &= ~PCI_ROM_ADDRESS_ENABLE;
-	pci_write_config_dword(dev, PCI_ROM_ADDRESS, val);
+	pci_disable_rom(dev);
 }
 
 static unsigned long
@@ -181,34 +241,32 @@ intel_dc21285_translate(struct map_pci_info *map, unsigned long ofs)
 }
 
 static struct mtd_pci_info intel_dc21285_info = {
-	init:		intel_dc21285_init,
-	exit:		intel_dc21285_exit,
-	translate:	intel_dc21285_translate,
-	map_name:	"jedec_probe",
+	.init =		intel_dc21285_init,
+	.exit =		intel_dc21285_exit,
+	.translate =	intel_dc21285_translate,
+	.map_name =	"jedec_probe",
 };
 
 /*
  * PCI device ID table
  */
 
-static struct pci_device_id mtd_pci_ids[] __devinitdata = {
+static struct pci_device_id mtd_pci_ids[] = {
 	{
-		vendor:		PCI_VENDOR_ID_INTEL,
-		device:		0x530d,
-		subvendor:	PCI_ANY_ID,
-		subdevice:	PCI_ANY_ID,
-		class:		PCI_CLASS_MEMORY_OTHER << 8,
-		class_mask:	0xffff00,
-		driver_data:	(unsigned long)&intel_iq80310_info,
+		.vendor =	PCI_VENDOR_ID_INTEL,
+		.device =	0x530d,
+		.subvendor =	PCI_ANY_ID,
+		.subdevice =	PCI_ANY_ID,
+		.class =	PCI_CLASS_MEMORY_OTHER << 8,
+		.class_mask =	0xffff00,
+		.driver_data =	(unsigned long)&intel_iq80310_info,
 	},
 	{
-		vendor:		PCI_VENDOR_ID_DEC,
-		device:		PCI_DEVICE_ID_DEC_21285,
-		subvendor:	0,	/* DC21285 defaults to 0 on reset */
-		subdevice:	0,	/* DC21285 defaults to 0 on reset */
-		class:		0,
-		class_mask:	0,
-		driver_data:	(unsigned long)&intel_dc21285_info,
+		.vendor =	PCI_VENDOR_ID_DEC,
+		.device =	PCI_DEVICE_ID_DEC_21285,
+		.subvendor =	0,	/* DC21285 defaults to 0 on reset */
+		.subdevice =	0,	/* DC21285 defaults to 0 on reset */
+		.driver_data =	(unsigned long)&intel_dc21285_info,
 	},
 	{ 0, }
 };
@@ -216,74 +274,6 @@ static struct pci_device_id mtd_pci_ids[] __devinitdata = {
 /*
  * Generic code follows.
  */
-
-static u8 mtd_pci_read8(struct map_info *_map, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	u8 val = readb(map->base + map->translate(map, ofs));
-//	printk("read8 : %08lx => %02x\n", ofs, val);
-	return val;
-}
-
-static u16 mtd_pci_read16(struct map_info *_map, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	u16 val = readw(map->base + map->translate(map, ofs));
-//	printk("read16: %08lx => %04x\n", ofs, val);
-	return val;
-}
-
-static u32 mtd_pci_read32(struct map_info *_map, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	u32 val = readl(map->base + map->translate(map, ofs));
-//	printk("read32: %08lx => %08x\n", ofs, val);
-	return val;
-}
-
-static void mtd_pci_copyfrom(struct map_info *_map, void *to, unsigned long from, ssize_t len)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	memcpy_fromio(to, map->base + map->translate(map, from), len);
-}
-
-static void mtd_pci_write8(struct map_info *_map, u8 val, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write8 : %08lx <= %02x\n", ofs, val);
-	writeb(val, map->base + map->translate(map, ofs));
-}
-
-static void mtd_pci_write16(struct map_info *_map, u16 val, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write16: %08lx <= %04x\n", ofs, val);
-	writew(val, map->base + map->translate(map, ofs));
-}
-
-static void mtd_pci_write32(struct map_info *_map, u32 val, unsigned long ofs)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-//	printk("write32: %08lx <= %08x\n", ofs, val);
-	writel(val, map->base + map->translate(map, ofs));
-}
-
-static void mtd_pci_copyto(struct map_info *_map, unsigned long to, const void *from, ssize_t len)
-{
-	struct map_pci_info *map = (struct map_pci_info *)_map;
-	memcpy_toio(map->base + map->translate(map, to), from, len);
-}
-
-static struct map_info mtd_pci_map = {
-	read8:		mtd_pci_read8,
-	read16:		mtd_pci_read16,
-	read32:		mtd_pci_read32,
-	copy_from:	mtd_pci_copyfrom,
-	write8:		mtd_pci_write8,
-	write16:	mtd_pci_write16,
-	write32:	mtd_pci_write32,
-	copy_to:	mtd_pci_copyto,
-};
 
 static int __devinit
 mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
@@ -307,7 +297,7 @@ mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		goto release;
 
 	map->map       = mtd_pci_map;
-	map->map.name  = dev->slot_name;
+	map->map.name  = pci_name(dev);
 	map->dev       = dev;
 	map->exit      = info->exit;
 	map->translate = info->translate;
@@ -322,17 +312,14 @@ mtd_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (!mtd)
 		goto release;
 
-	mtd->module = THIS_MODULE;
-	add_mtd_device(mtd);
+	mtd->owner = THIS_MODULE;
+	mtd_device_register(mtd, NULL, 0);
 
 	pci_set_drvdata(dev, mtd);
 
 	return 0;
 
 release:
-	if (mtd)
-		map_destroy(mtd);
-
 	if (map) {
 		map->exit(dev, map);
 		kfree(map);
@@ -349,7 +336,7 @@ mtd_pci_remove(struct pci_dev *dev)
 	struct mtd_info *mtd = pci_get_drvdata(dev);
 	struct map_pci_info *map = mtd->priv;
 
-	del_mtd_device(mtd);
+	mtd_device_unregister(mtd);
 	map_destroy(mtd);
 	map->exit(dev, map);
 	kfree(map);
@@ -359,15 +346,15 @@ mtd_pci_remove(struct pci_dev *dev)
 }
 
 static struct pci_driver mtd_pci_driver = {
-	name:		"MTD PCI",
-	probe:		mtd_pci_probe,
-	remove:		__devexit_p(mtd_pci_remove),
-	id_table:	mtd_pci_ids,
+	.name =		"MTD PCI",
+	.probe =	mtd_pci_probe,
+	.remove =	__devexit_p(mtd_pci_remove),
+	.id_table =	mtd_pci_ids,
 };
 
 static int __init mtd_pci_maps_init(void)
 {
-	return pci_module_init(&mtd_pci_driver);
+	return pci_register_driver(&mtd_pci_driver);
 }
 
 static void __exit mtd_pci_maps_exit(void)

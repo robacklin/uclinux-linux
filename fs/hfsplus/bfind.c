@@ -11,130 +11,162 @@
 #include <linux/slab.h>
 #include "hfsplus_fs.h"
 
+int hfs_find_init(struct hfs_btree *tree, struct hfs_find_data *fd)
+{
+	void *ptr;
+
+	fd->tree = tree;
+	fd->bnode = NULL;
+	ptr = kmalloc(tree->max_key_len * 2 + 4, GFP_KERNEL);
+	if (!ptr)
+		return -ENOMEM;
+	fd->search_key = ptr;
+	fd->key = ptr + tree->max_key_len + 2;
+	dprint(DBG_BNODE_REFS, "find_init: %d (%p)\n",
+		tree->cnid, __builtin_return_address(0));
+	mutex_lock(&tree->tree_lock);
+	return 0;
+}
+
+void hfs_find_exit(struct hfs_find_data *fd)
+{
+	hfs_bnode_put(fd->bnode);
+	kfree(fd->search_key);
+	dprint(DBG_BNODE_REFS, "find_exit: %d (%p)\n",
+		fd->tree->cnid, __builtin_return_address(0));
+	mutex_unlock(&fd->tree->tree_lock);
+	fd->tree = NULL;
+}
+
 /* Find the record in bnode that best matches key (not greater than...)*/
-void hfsplus_find_rec(hfsplus_bnode *bnode, struct hfsplus_find_data *fd)
+int __hfs_brec_find(struct hfs_bnode *bnode, struct hfs_find_data *fd)
 {
 	int cmpval;
 	u16 off, len, keylen;
 	int rec;
 	int b, e;
+	int res;
 
 	b = 0;
 	e = bnode->num_recs - 1;
+	res = -ENOENT;
 	do {
 		rec = (e + b) / 2;
-		len = hfsplus_brec_lenoff(bnode, rec, &off);
-		keylen = hfsplus_brec_keylen(bnode, rec);
-		hfsplus_bnode_readbytes(bnode, fd->key, off, keylen);
+		len = hfs_brec_lenoff(bnode, rec, &off);
+		keylen = hfs_brec_keylen(bnode, rec);
+		if (keylen == 0) {
+			res = -EINVAL;
+			goto fail;
+		}
+		hfs_bnode_read(bnode, fd->key, off, keylen);
 		cmpval = bnode->tree->keycmp(fd->key, fd->search_key);
 		if (!cmpval) {
-			fd->exact = 1;
 			e = rec;
-			break;
+			res = 0;
+			goto done;
 		}
 		if (cmpval < 0)
 			b = rec + 1;
 		else
 			e = rec - 1;
 	} while (b <= e);
-	//printk("%d: %d,%d,%d\n", bnode->this, b, e, rec);
 	if (rec != e && e >= 0) {
-		len = hfsplus_brec_lenoff(bnode, e, &off);
-		keylen = hfsplus_brec_keylen(bnode, e);
-		hfsplus_bnode_readbytes(bnode, fd->key, off, keylen);
+		len = hfs_brec_lenoff(bnode, e, &off);
+		keylen = hfs_brec_keylen(bnode, e);
+		if (keylen == 0) {
+			res = -EINVAL;
+			goto fail;
+		}
+		hfs_bnode_read(bnode, fd->key, off, keylen);
 	}
+done:
 	fd->record = e;
 	fd->keyoffset = off;
 	fd->keylength = keylen;
 	fd->entryoffset = off + keylen;
 	fd->entrylength = len - keylen;
+fail:
+	return res;
 }
 
 /* Traverse a B*Tree from the root to a leaf finding best fit to key */
 /* Return allocated copy of node found, set recnum to best record */
-int hfsplus_btree_find(struct hfsplus_find_data *fd)
+int hfs_brec_find(struct hfs_find_data *fd)
 {
-	hfsplus_btree *tree;
-	hfsplus_bnode *bnode;
-	u32 data, nidx, parent;
-	int height, err;
+	struct hfs_btree *tree;
+	struct hfs_bnode *bnode;
+	u32 nidx, parent;
+	__be32 data;
+	int height, res;
 
 	tree = fd->tree;
 	if (fd->bnode)
-		hfsplus_put_bnode(fd->bnode);
+		hfs_bnode_put(fd->bnode);
 	fd->bnode = NULL;
-	fd->exact = 0;
 	nidx = tree->root;
 	if (!nidx)
 		return -ENOENT;
 	height = tree->depth;
-	err = 0;
+	res = 0;
 	parent = 0;
 	for (;;) {
-		bnode = hfsplus_find_bnode(tree, nidx);
-		if (!bnode) {
-			err = -EIO;
+		bnode = hfs_bnode_find(tree, nidx);
+		if (IS_ERR(bnode)) {
+			res = PTR_ERR(bnode);
+			bnode = NULL;
 			break;
 		}
 		if (bnode->height != height)
 			goto invalid;
-		if (bnode->kind != (--height ? HFSPLUS_NODE_NDX : HFSPLUS_NODE_LEAF))
+		if (bnode->type != (--height ? HFS_NODE_INDEX : HFS_NODE_LEAF))
 			goto invalid;
 		bnode->parent = parent;
 
-		hfsplus_find_rec(bnode, fd);
-		if (fd->record < 0) {
-			err = -ENOENT;
-			goto release;
-		}
-		if (!height) {
-			if (!fd->exact)
-				err = -ENOENT;
+		res = __hfs_brec_find(bnode, fd);
+		if (!height)
 			break;
-		}
+		if (fd->record < 0)
+			goto release;
 
 		parent = nidx;
-		hfsplus_bnode_readbytes(bnode, &data, fd->entryoffset, 4);
+		hfs_bnode_read(bnode, &data, fd->entryoffset, 4);
 		nidx = be32_to_cpu(data);
-		hfsplus_put_bnode(bnode);
+		hfs_bnode_put(bnode);
 	}
 	fd->bnode = bnode;
-	return err;
+	return res;
 
 invalid:
-	printk("HFS+-fs: inconsistency in B*Tree\n");
-	err = -EIO;
+	printk(KERN_ERR "hfs: inconsistency in B*Tree (%d,%d,%d,%u,%u)\n",
+		height, bnode->height, bnode->type, nidx, parent);
+	res = -EIO;
 release:
-	hfsplus_put_bnode(bnode);
-	return err;
+	hfs_bnode_put(bnode);
+	return res;
 }
 
-int hfsplus_btree_find_entry(struct hfsplus_find_data *fd,
-			     void *entry, int entry_len)
+int hfs_brec_read(struct hfs_find_data *fd, void *rec, int rec_len)
 {
 	int res;
 
-	res = hfsplus_btree_find(fd);
+	res = hfs_brec_find(fd);
 	if (res)
 		return res;
-	if (fd->entrylength > entry_len)
+	if (fd->entrylength > rec_len)
 		return -EINVAL;
-	hfsplus_bnode_readbytes(fd->bnode, entry, fd->entryoffset, fd->entrylength);
+	hfs_bnode_read(fd->bnode, rec, fd->entryoffset, fd->entrylength);
 	return 0;
 }
 
-int hfsplus_btree_move(struct hfsplus_find_data *fd, int cnt)
+int hfs_brec_goto(struct hfs_find_data *fd, int cnt)
 {
-	struct hfsplus_btree *tree;
-	hfsplus_bnode *bnode;
+	struct hfs_btree *tree;
+	struct hfs_bnode *bnode;
 	int idx, res = 0;
 	u16 off, len, keylen;
 
 	bnode = fd->bnode;
 	tree = bnode->tree;
-
-	if (cnt < -0xFFFF || cnt > 0xFFFF)
-		return -EINVAL;
 
 	if (cnt < 0) {
 		cnt = -cnt;
@@ -146,10 +178,11 @@ int hfsplus_btree_move(struct hfsplus_find_data *fd, int cnt)
 				res = -ENOENT;
 				goto out;
 			}
-			hfsplus_put_bnode(bnode);
-			bnode = hfsplus_find_bnode(tree, idx);
-			if (!bnode) {
-				res = -EIO;
+			hfs_bnode_put(bnode);
+			bnode = hfs_bnode_find(tree, idx);
+			if (IS_ERR(bnode)) {
+				res = PTR_ERR(bnode);
+				bnode = NULL;
 				goto out;
 			}
 		}
@@ -163,51 +196,29 @@ int hfsplus_btree_move(struct hfsplus_find_data *fd, int cnt)
 				res = -ENOENT;
 				goto out;
 			}
-			hfsplus_put_bnode(bnode);
-			bnode = hfsplus_find_bnode(tree, idx);
-			if (!bnode) {
-				res = -EIO;
+			hfs_bnode_put(bnode);
+			bnode = hfs_bnode_find(tree, idx);
+			if (IS_ERR(bnode)) {
+				res = PTR_ERR(bnode);
+				bnode = NULL;
 				goto out;
 			}
 		}
 		fd->record += cnt;
 	}
 
-	len = hfsplus_brec_lenoff(bnode, fd->record, &off);
-	keylen = hfsplus_brec_keylen(bnode, fd->record);
+	len = hfs_brec_lenoff(bnode, fd->record, &off);
+	keylen = hfs_brec_keylen(bnode, fd->record);
+	if (keylen == 0) {
+		res = -EINVAL;
+		goto out;
+	}
 	fd->keyoffset = off;
 	fd->keylength = keylen;
 	fd->entryoffset = off + keylen;
 	fd->entrylength = len - keylen;
-	hfsplus_bnode_readbytes(bnode, fd->key, off, keylen);
+	hfs_bnode_read(bnode, fd->key, off, keylen);
 out:
 	fd->bnode = bnode;
 	return res;
-}
-
-int hfsplus_find_init(hfsplus_btree *tree, struct hfsplus_find_data *fd)
-{
-	fd->tree = tree;
-	fd->bnode = NULL;
-	fd->search_key = kmalloc(tree->max_key_len + 2, GFP_KERNEL);
-	if (!fd->search_key)
-		return -ENOMEM;
-	fd->key = kmalloc(tree->max_key_len + 2, GFP_KERNEL);
-	if (!fd->key) {
-		kfree(fd->search_key);
-		return -ENOMEM;
-	}
-	dprint(DBG_BNODE_REFS, "find_init: %d (%p)\n", tree->cnid, __builtin_return_address(0));
-	down(&tree->tree_lock);
-	return 0;
-}
-
-void hfsplus_find_exit(struct hfsplus_find_data *fd)
-{
-	hfsplus_put_bnode(fd->bnode);
-	kfree(fd->search_key);
-	kfree(fd->key);
-	dprint(DBG_BNODE_REFS, "find_exit: %d (%p)\n", fd->tree->cnid, __builtin_return_address(0));
-	up(&fd->tree->tree_lock);
-	fd->tree = NULL;
 }

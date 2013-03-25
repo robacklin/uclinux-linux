@@ -11,14 +11,12 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/version.h>
+#include <linux/buffer_head.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 
 #include "befs.h"
 #include "datastream.h"
 #include "io.h"
-#include "endian.h"
 
 const befs_inode_addr BAD_IADDR = { 0, 0, 0 };
 
@@ -118,7 +116,7 @@ befs_fblock2brun(struct super_block *sb, befs_data_stream * data,
  * befs_read_lsmylink - read long symlink from datastream.
  * @sb: Filesystem superblock 
  * @ds: Datastrem to read from
- * @buf: Buffer in wich to place long symlink data
+ * @buf: Buffer in which to place long symlink data
  * @len: Length of the long symlink in bytes
  *
  * Returns the number of bytes read
@@ -228,7 +226,7 @@ befs_count_blocks(struct super_block * sb, befs_data_stream * ds)
 	
 	Algorithm:
 	Linear search. Checks each element of array[] to see if it
-	contains the blockno-th filesystem block. This is nessisary
+	contains the blockno-th filesystem block. This is necessary
 	because the block runs map variable amounts of data. Simply
 	keeps a count of the number of blocks searched so far (sum),
 	incrementing this by the length of each block run as we come
@@ -237,7 +235,7 @@ befs_count_blocks(struct super_block * sb, befs_data_stream * ds)
 	as in the indirect region code).
 	
 	When/if blockno is found, if blockno is inside of a block 
-	run as stored on disk, we offset the start and lenght members 
+	run as stored on disk, we offset the start and length members
 	of the block run, so that blockno is the start and len is
 	still valid (the run ends in the same place).
 	
@@ -312,7 +310,7 @@ befs_find_brun_indirect(struct super_block *sb,
 	befs_blocknr_t indir_start_blk;
 	befs_blocknr_t search_blk;
 	struct buffer_head *indirblock;
-	befs_block_run *array;
+	befs_disk_block_run *array;
 
 	befs_block_run indirect = data->indirect;
 	befs_blocknr_t indirblockno = iaddr2blockno(sb, &indirect);
@@ -334,7 +332,7 @@ befs_find_brun_indirect(struct super_block *sb,
 			return BEFS_ERR;
 		}
 
-		array = (befs_block_run *) indirblock->b_data;
+		array = (befs_disk_block_run *) indirblock->b_data;
 
 		for (j = 0; j < arraylen; ++j) {
 			int len = fs16_to_cpu(sb, array[j].len);
@@ -427,7 +425,7 @@ befs_find_brun_dblindirect(struct super_block *sb,
 	struct buffer_head *dbl_indir_block;
 	struct buffer_head *indir_block;
 	befs_block_run indir_run;
-	befs_inode_addr *iaddr_array = NULL;
+	befs_disk_inode_addr *iaddr_array = NULL;
 	befs_sb_info *befs_sb = BEFS_SB(sb);
 
 	befs_blocknr_t indir_start_blk =
@@ -467,9 +465,9 @@ befs_find_brun_dblindirect(struct super_block *sb,
 		return BEFS_ERR;
 	}
 
-	dbl_indir_block = befs_bread(sb,
-				     iaddr2blockno(sb, &data->double_indirect) +
-				     dbl_which_block);
+	dbl_indir_block =
+	    befs_bread(sb, iaddr2blockno(sb, &data->double_indirect) +
+					dbl_which_block);
 	if (dbl_indir_block == NULL) {
 		befs_error(sb, "befs_read_brun_dblindirect() couldn't read the "
 			   "double-indirect block at blockno %lu",
@@ -482,7 +480,7 @@ befs_find_brun_dblindirect(struct super_block *sb,
 
 	dbl_block_indx =
 	    dblindir_indx - (dbl_which_block * befs_iaddrs_per_block(sb));
-	iaddr_array = (befs_inode_addr *) dbl_indir_block->b_data;
+	iaddr_array = (befs_disk_inode_addr *) dbl_indir_block->b_data;
 	indir_run = fsrun_to_cpu(sb, iaddr_array[dbl_block_indx]);
 	brelse(dbl_indir_block);
 	iaddr_array = NULL;
@@ -507,7 +505,7 @@ befs_find_brun_dblindirect(struct super_block *sb,
 	}
 
 	block_indx = indir_indx - (which_block * befs_iaddrs_per_block(sb));
-	iaddr_array = (befs_inode_addr *) indir_block->b_data;
+	iaddr_array = (befs_disk_inode_addr *) indir_block->b_data;
 	*run = fsrun_to_cpu(sb, iaddr_array[block_indx]);
 	brelse(indir_block);
 	iaddr_array = NULL;

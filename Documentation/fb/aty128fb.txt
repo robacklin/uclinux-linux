@@ -32,7 +32,7 @@ resolutions.
 You should compile in both vgacon (to boot if you remove your Rage128 from
 box) and aty128fb (for graphics mode). You should not compile-in vesafb
 unless you have primary display on non-Rage128 VBE2.0 device (see 
-Documentation/vesafb.txt for details).
+Documentation/fb/vesafb.txt for details).
 
 
 X11
@@ -54,8 +54,8 @@ Accepted options:
 
 noaccel  - do not use acceleration engine. It is default.
 accel    - use acceleration engine. Not finished.
-vmode:x  - chooses PowerMacintosh video mode <x>. Depreciated.
-cmode:x  - chooses PowerMacintosh colour mode <x>. Depreciated.
+vmode:x  - chooses PowerMacintosh video mode <x>. Deprecated.
+cmode:x  - chooses PowerMacintosh colour mode <x>. Deprecated.
 <XxX@X>  - selects startup videomode. See modedb.txt for detailed
 	   explanation. Default is 640x480x8bpp.
 

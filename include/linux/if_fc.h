@@ -20,6 +20,7 @@
 #ifndef _LINUX_IF_FC_H
 #define _LINUX_IF_FC_H
 
+#include <linux/types.h>
 
 #define FC_ALEN	6		/* Octets in one ethernet addr	 */
 #define FC_HLEN   (sizeof(struct fch_hdr)+sizeof(struct fcllc))
@@ -44,7 +45,7 @@ struct fcllc {
 	__u8  ssap;			/* source SAP */
 	__u8  llc;			/* LLC control field */
 	__u8  protid[3];		/* protocol id */
-	__u16 ethertype;		/* ether type field */
+	__be16 ethertype;		/* ether type field */
 };
 
 #endif	/* _LINUX_IF_FC_H */

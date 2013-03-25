@@ -10,7 +10,6 @@
  */
 
 
-        .file		"__negdi2.S"
         .text
         .p2align	4
 

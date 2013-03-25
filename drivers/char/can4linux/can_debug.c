@@ -8,17 +8,29 @@
  *
  * 
  * Copyright (c) 2001 port GmbH Halle/Saale
- * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
+ * (c) 2001 Heinz-Jrgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: Can_debug.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.1  2003/07/18 00:11:46  gerg
+ * I followed as much rules as possible (I hope) and generated a patch for the
+ * uClinux distribution. It contains an additional driver, the CAN driver, first
+ * for an SJA1000 CAN controller:
+ *   uClinux-dist/linux-2.4.x/drivers/char/can4linux
+ * In the "user" section two entries
+ *   uClinux-dist/user/can4linux     some very simple test examples
+ *   uClinux-dist/user/horch         more sophisticated CAN analyzer example
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  *
  *
  */
@@ -27,6 +39,7 @@
 
 /* default debugging level */
 
+#if 0
 #if DEBUG
 # ifndef DEFAULT_DEBUG
   unsigned int   dbgMask  = \
@@ -38,10 +51,33 @@ unsigned int   dbgMask  = 0;
 #else
 unsigned int   dbgMask  = 0;
 #endif
+#endif
+
+#if DEBUG
+unsigned int dbgMask = DBG_ALL;
+#else
+unsigned int dbgMask = 0;
+#endif
 
 /* Print the string to the appropriate tty, the one
  * the current task uses */
-#ifdef DEBUG
+#if DEBUG
+void print_tty(const char *fmt, ...)
+{
+    va_list args;
+    static char str[1024];
+    int strlength = 0;
+
+    va_start(args, fmt);
+    strcpy(str, "can: ");
+    strlength = vsprintf(str+6, fmt, args);
+    strlength += 6;
+    va_end(args);
+    
+    printk(str);
+}
+
+#if 0
 void print_tty(const char *fmt, ...)
 {
   /* The tty for the current task */
@@ -104,6 +140,7 @@ void print_tty(const char *fmt, ...)
     (*(my_tty->driver).write)(my_tty,  0, "\015\012", 2);
   }
 }
+#endif
 #else
 #endif /* DEBUG */
 

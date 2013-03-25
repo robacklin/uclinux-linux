@@ -1,4 +1,4 @@
-/* $Id: misc.c,v 1.15 1997/05/14 20:45:00 davem Exp $
+/*
  * misc.c:  Miscellaneous prom functions that don't belong
  *          anywhere else.
  *
@@ -19,9 +19,9 @@ void
 prom_reboot(char *bcommand)
 {
 	unsigned long flags;
-	save_flags(flags); cli();
+	local_irq_save(flags);
 	(*(romvec->pv_reboot))(bcommand);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /* Drop into the prom, with the chance to continue with the 'go'
@@ -40,9 +40,9 @@ prom_halt(void)
 {
 	unsigned long flags;
 again:
-	save_flags(flags); cli();
+	local_irq_save(flags);
 	(*(romvec->pv_halt))();
-	restore_flags(flags);
+	local_irq_restore(flags);
 	goto again; /* PROM is out to get me -DaveM */
 }
 

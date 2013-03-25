@@ -22,21 +22,26 @@ kernel_thread_emsg:
 	.text
 	.balign		4
 
-/*
- * Create a kernel thread
- *
- * int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
- */
-	.globl		arch_kernel_thread
-arch_kernel_thread:
+###############################################################################
+#
+# Create a kernel thread
+#
+# int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+#
+###############################################################################
+	.globl		kernel_thread
+	.type		kernel_thread,@function
+kernel_thread:
 	or.p		gr8,gr0,gr4
 	or		gr9,gr0,gr5
-	
+
 	# start by forking the current process, but with shared VM
 	setlos.p	#__NR_clone,gr7		; syscall number
 	ori		gr10,#CLONE_VM,gr8	; first syscall arg	[clone_flags]
 	sethi.p		#0xe4e4,gr9		; second syscall arg	[newsp]
 	setlo		#0xe4e4,gr9
+	setlos.p	#0,gr10			; third syscall arg	[parent_tidptr]
+	setlos		#0,gr11			; fourth syscall arg	[child_tidptr]
 	tira		gr0,#0
 	setlos.p	#4095,gr7
 	andcc		gr8,gr8,gr0,icc0
@@ -62,9 +67,11 @@ kernel_thread_error:
 	sethi.p		%hi(kernel_thread_emsg),gr8
 	setlo		%lo(kernel_thread_emsg),gr8
 
-	call		SYMBOL_NAME(printk)
+	call		printk
 
 	ldi		@(sp,#4),gr4
 	ldi		@(sp,#0),gr8
 	subi		sp,#8,sp
 	jmpl		@(gr4,gr0)
+
+	.size		kernel_thread,.-kernel_thread

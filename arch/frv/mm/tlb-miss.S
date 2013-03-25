@@ -10,14 +10,12 @@
  */
 
 #include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/highmem.h>
 #include <asm/spr-regs.h>
 
-	.section	.text
+	.section	.text..tlbmiss
 	.balign		4
 
 	.globl		__entry_insn_mmu_miss
@@ -82,7 +80,7 @@ __tlb_kernel_fault_sstep:
 	setlo		%lo(__kernel_current_task),gr29
 	ldi.p		@(gr29,#0),gr29			/* restore GR29 */
 	bra		__entry_kernel_handle_mmu_fault_sstep
-	
+
 	.size		__tlb_kernel_fault, .-__tlb_kernel_fault
 
 ###############################################################################
@@ -135,6 +133,16 @@ __tlb_user_fault_sstep:
 	.globl		__entry_kernel_insn_tlb_miss
 	.type		__entry_kernel_insn_tlb_miss,@function
 __entry_kernel_insn_tlb_miss:
+#if 0
+	sethi.p		%hi(0xe1200004),gr30
+	setlo		%lo(0xe1200004),gr30
+	st		gr0,@(gr30,gr0)
+	sethi.p		%hi(0xffc00100),gr30
+	setlo		%lo(0xffc00100),gr30
+	sth		gr30,@(gr30,gr0)
+	membar
+#endif
+
 	movsg		ccr,gr30			/* save CCR */
 	movgs		gr30,scr2
 
@@ -255,6 +263,16 @@ __itlb_k_bigpage:
 	.globl		__entry_kernel_data_tlb_miss
 	.type		__entry_kernel_data_tlb_miss,@function
 __entry_kernel_data_tlb_miss:
+#if 0
+	sethi.p		%hi(0xe1200004),gr30
+	setlo		%lo(0xe1200004),gr30
+	st		gr0,@(gr30,gr0)
+	sethi.p		%hi(0xffc00100),gr30
+	setlo		%lo(0xffc00100),gr30
+	sth		gr30,@(gr30,gr0)
+	membar
+#endif
+
 	movsg		ccr,gr30			/* save CCR */
 	movgs		gr30,scr2
 
@@ -372,6 +390,16 @@ __dtlb_k_bigpage:
 	.globl		__entry_user_insn_tlb_miss
 	.type		__entry_user_insn_tlb_miss,@function
 __entry_user_insn_tlb_miss:
+#if 0
+	sethi.p		%hi(0xe1200004),gr30
+	setlo		%lo(0xe1200004),gr30
+	st		gr0,@(gr30,gr0)
+	sethi.p		%hi(0xffc00100),gr30
+	setlo		%lo(0xffc00100),gr30
+	sth		gr30,@(gr30,gr0)
+	membar
+#endif
+
 	movsg		ccr,gr30			/* save CCR */
 	movgs		gr30,scr2
 
@@ -425,7 +453,7 @@ __itlb_u_nopunt:
 	movgs		gr30,iampr1
 	movgs		gr28,damlr1
 	movgs		gr30,dampr1
-	
+
 	# return, restoring registers
 	movsg		scr2,gr30
 	movgs		gr30,ccr
@@ -480,6 +508,16 @@ __itlb_u_bigpage:
 	.globl		__entry_user_data_tlb_miss
 	.type		__entry_user_data_tlb_miss,@function
 __entry_user_data_tlb_miss:
+#if 0
+	sethi.p		%hi(0xe1200004),gr30
+	setlo		%lo(0xe1200004),gr30
+	st		gr0,@(gr30,gr0)
+	sethi.p		%hi(0xffc00100),gr30
+	setlo		%lo(0xffc00100),gr30
+	sth		gr30,@(gr30,gr0)
+	membar
+#endif
+
 	movsg		ccr,gr30			/* save CCR */
 	movgs		gr30,scr2
 
@@ -561,7 +599,7 @@ __dtlb_u_PTD_miss:
 	movsg		damlr4,gr30
 	bra		__dtlb_u_using_iPTD
 
-__dtlb_u_iPGE_miss:	
+__dtlb_u_iPGE_miss:
 	srli		gr28,#26,gr31			/* calculate PGE offset */
 	slli		gr31,#8,gr31			/* and clear bottom bits */
 

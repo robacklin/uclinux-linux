@@ -1,4 +1,4 @@
-/* $Id: isdnloop.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+/* $Id: isdnloop.h,v 1.5.6.3 2001/09/23 22:24:56 kai Exp $
  *
  * Loopback lowlevel module for testing of linklevel.
  *
@@ -33,11 +33,9 @@ typedef struct isdnloop_sdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -57,7 +55,7 @@ typedef struct isdnloop_sdef {
 #define ISDNLOOP_FLAGS_RBTIMER  8	/* scheduling of B-Channel-poll  */
 #define ISDNLOOP_TIMER_BCREAD 1 /* B-Channel poll-cycle          */
 #define ISDNLOOP_TIMER_DCREAD (HZ/2)	/* D-Channel poll-cycle          */
-#define ISDNLOOP_TIMER_ALERTWAIT (10*HZ)	/* Alert timeout                 */
+#define ISDNLOOP_TIMER_ALERTWAIT (10 * HZ)	/* Alert timeout                 */
 #define ISDNLOOP_MAX_SQUEUE 65536	/* Max. outstanding send-data    */
 #define ISDNLOOP_BCH 2          /* channels per card             */
 
@@ -81,7 +79,7 @@ typedef struct isdnloop_card {
 	struct timer_list st_timer;	/* Timer for Status-Polls           */
 	struct timer_list rb_timer;	/* Timer for B-Channel-Polls        */
 	struct timer_list
-	 c_timer[ISDNLOOP_BCH]; /* Timer for Alerting               */
+	c_timer[ISDNLOOP_BCH]; /* Timer for Alerting               */
 	int l2_proto[ISDNLOOP_BCH];	/* Current layer-2-protocol         */
 	isdn_if interface;      /* Interface to upper layer         */
 	int iptr;               /* Index to imsg-buffer             */
@@ -94,8 +92,9 @@ typedef struct isdnloop_card {
 	char *msg_buf_end;      /* Pointer to end of statusbuffer   */
 	int sndcount[ISDNLOOP_BCH];	/* Byte-counters for B-Ch.-send     */
 	struct sk_buff_head
-	 bqueue[ISDNLOOP_BCH];  /* B-Channel queues                 */
+	bqueue[ISDNLOOP_BCH];  /* B-Channel queues                 */
 	struct sk_buff_head dqueue;	/* D-Channel queue                  */
+	spinlock_t isdnloop_lock;
 } isdnloop_card;
 
 /*

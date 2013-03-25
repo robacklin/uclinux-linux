@@ -13,14 +13,27 @@
  * derived from the the LDDK can4linux version
  *     (c) 1996,1997 Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: $
- *
- *--------------------------------------------------------------------------
  *
  *
  * modification history
  * --------------------
- * $Log: can_close.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.1  2003/07/18 00:11:46  gerg
+ * I followed as much rules as possible (I hope) and generated a patch for the
+ * uClinux distribution. It contains an additional driver, the CAN driver, first
+ * for an SJA1000 CAN controller:
+ *   uClinux-dist/linux-2.4.x/drivers/char/can4linux
+ * In the "user" section two entries
+ *   uClinux-dist/user/can4linux     some very simple test examples
+ *   uClinux-dist/user/horch         more sophisticated CAN analyzer example
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  *
  *
  *
@@ -32,8 +45,8 @@
 /**
 * \file can_close.c
 * \author Heinz-Jürgen Oertel, port GmbH
-* $Revision: 1.5 $
-* $Date: 2002/08/08 17:57:24 $
+* $Revision: 1.1 $
+* $Date: 2009-01-27 04:27:11 $
 *
 *
 */
@@ -82,7 +95,7 @@ __LDDK_CLOSE_TYPE can_close ( __LDDK_CLOSE_PARAM )
 	release_mem_region(Base[minor], can_range[minor] );
 #endif
 
-#ifdef CAN_USE_FILTER
+#if CAN_USE_FILTER
 	Can_FilterCleanup(minor);
 #endif
 	Can_FreeIrq(minor, IRQ[minor]);
@@ -92,7 +105,6 @@ __LDDK_CLOSE_TYPE can_close ( __LDDK_CLOSE_PARAM )
 
 	if(Can_isopen[minor] > 0) {
 	    --Can_isopen[minor];		/* flag device as free */
-	    MOD_DEC_USE_COUNT;
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,2,0)
 	    return 0;
 #endif

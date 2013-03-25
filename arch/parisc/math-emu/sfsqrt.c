@@ -16,13 +16,13 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * BEGIN_DESC
  *
  *  File:
- *	@(#)	pa/spmath/sfsqrt.c		$Revision: $
+ *	@(#)	pa/spmath/sfsqrt.c		$Revision: 1.1 $
  *
  *  Purpose:
  *	Single Floating-point Square Root
@@ -76,7 +76,7 @@ sgl_fsqrt(
                 }
                 /*
                  * Return quiet NaN or positive infinity.
-		 *  Fall thru to negative test if negative infinity.
+		 *  Fall through to negative test if negative infinity.
                  */
 		if (Sgl_iszero_sign(src) || Sgl_isnotzero_mantissa(src)) {
                 	*dstptr = src;

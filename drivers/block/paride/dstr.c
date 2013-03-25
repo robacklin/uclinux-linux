@@ -16,6 +16,7 @@
 #define DSTR_VERSION      "1.01"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -201,45 +202,32 @@ static void dstr_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void dstr_init_proto( PIA *pi)
+static struct pi_protocol dstr = {
+	.owner		= THIS_MODULE,
+	.name		= "dstr",
+	.max_mode	= 5,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= dstr_write_regr,
+	.read_regr	= dstr_read_regr,
+	.write_block	= dstr_write_block,
+	.read_block	= dstr_read_block,
+	.connect	= dstr_connect,
+	.disconnect	= dstr_disconnect,
+	.log_adapter	= dstr_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init dstr_init(void)
+{
+	return paride_register(&dstr);
 }
 
-static void dstr_release_proto( PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit dstr_exit(void)
+{
+	paride_unregister(&dstr);
 }
 
-struct pi_protocol dstr = {"dstr",0,5,2,1,1,
-                           dstr_write_regr,
-                           dstr_read_regr,
-                           dstr_write_block,
-                           dstr_read_block,
-                           dstr_connect,
-                           dstr_disconnect,
-                           0,
-                           0,
-                           0,
-                           dstr_log_adapter,
-                           dstr_init_proto,
-                           dstr_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &dstr ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &dstr );
-}
-
-#endif
-
-/* end of dstr.c */
 MODULE_LICENSE("GPL");
+module_init(dstr_init)
+module_exit(dstr_exit)

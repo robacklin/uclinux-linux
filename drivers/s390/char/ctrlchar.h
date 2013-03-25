@@ -11,7 +11,6 @@
 
 extern unsigned int
 ctrlchar_handle(const unsigned char *buf, int len, struct tty_struct *tty);
-extern void ctrlchar_init(void);
 
 
 #define CTRLCHAR_NONE  (1 << 8)

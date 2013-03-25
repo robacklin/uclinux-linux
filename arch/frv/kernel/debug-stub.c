@@ -15,8 +15,8 @@
 #include <linux/sched.h>
 #include <linux/init.h>
 #include <linux/serial_reg.h>
+#include <linux/start_kernel.h>
 
-#include <asm/system.h>
 #include <asm/serial-regs.h>
 #include <asm/timer-regs.h>
 #include <asm/irc-regs.h>
@@ -39,10 +39,9 @@ do {						\
 	gdbstub_do_rx();			\
 } while(!FLOWCTL_QUERY(LINE))
 
-static void __init debug_stub_init(void);
+struct frv_debug_status __debug_status;
 
-extern asmlinkage void __break_hijack_kernel_event(void);
-extern asmlinkage void __break_hijack_kernel_event_breaks_here(void);
+static void __init debug_stub_init(void);
 
 /*****************************************************************************/
 /*
@@ -52,6 +51,7 @@ extern asmlinkage void __break_hijack_kernel_event_breaks_here(void);
  */
 asmlinkage void debug_stub(void)
 {
+	unsigned long hsr0;
 	int type = 0;
 
 	static u8 inited = 0;
@@ -61,8 +61,12 @@ asmlinkage void debug_stub(void)
 		inited = 1;
 	}
 
+	hsr0 = __get_HSR(0);
+	if (hsr0 & HSR0_ETMD)
+		__set_HSR(0, hsr0 & ~HSR0_ETMD);
+
 	/* disable single stepping */
-	__debug_regs->dcr &= ~DCR_SE;
+	__debug_status.dcr &= ~DCR_SE;
 
 	/* kernel mode can propose an exception be handled in debug mode by jumping to a special
 	 * location */
@@ -71,18 +75,21 @@ asmlinkage void debug_stub(void)
 		 * the top kernel context */
 		*__debug_frame = *__frame;
 		__frame = __debug_frame->next_frame;
-		__debug_regs->brr = (__debug_frame->tbr & TBR_TT) << 12;
-		__debug_regs->brr |= BRR_EB;
+		__debug_status.brr = (__debug_frame->tbr & TBR_TT) << 12;
+		__debug_status.brr |= BRR_EB;
 	}
 
 	if (__debug_frame->pc == (unsigned long) __debug_bug_trap + 4) {
 		__debug_frame->pc = __debug_frame->lr;
-		type = SIGABRT;
+		type = __debug_frame->gr8;
 	}
 
 #ifdef CONFIG_GDBSTUB
 	gdbstub(type);
 #endif
+
+	if (hsr0 & HSR0_ETMD)
+		__set_HSR(0, __get_HSR(0) | HSR0_ETMD);
 
 } /* end debug_stub() */
 
@@ -114,6 +121,9 @@ static void __init debug_stub_init(void)
 	/* deal with debugging stub initialisation and initial pause */
 	if (__debug_frame->pc == (unsigned long) __debug_stub_init_break)
 		__debug_frame->pc = (unsigned long) start_kernel;
+
+	/* enable the debug events we want to trap */
+	__debug_status.dcr = DCR_EBE;
 
 #ifdef CONFIG_GDBSTUB
 	gdbstub_init();
@@ -217,7 +227,7 @@ void __init console_set_baud(unsigned baud)
 
 /*****************************************************************************/
 /*
- * 
+ *
  */
 int __init console_get_baud(void)
 {
@@ -234,3 +244,15 @@ int __init console_get_baud(void)
 
 	return value;
 } /* end console_get_baud() */
+
+/*****************************************************************************/
+/*
+ * display BUG() info
+ */
+#ifndef CONFIG_NO_KERNEL_MSG
+void __debug_bug_printk(const char *file, unsigned line)
+{
+	printk("kernel BUG at %s:%d!\n", file, line);
+
+} /* end __debug_bug_printk() */
+#endif

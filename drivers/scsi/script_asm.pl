@@ -12,7 +12,6 @@
 #
 #   Support for 53c710 (via -ncr7x0_family switch) added by Richard
 #   Hirst <richard@sleepie.demon.co.uk> - 15th March 1997
-#   Renamed to -ncr7x0_family to -ncr710, and added -ncr700 - 5th May 2000.
 #
 #   This program is free software; you can redistribute it and/or modify
 #   it under the terms of the GNU General Public License as published by
@@ -54,7 +53,8 @@ $debug = 0;		# Print general debugging messages
 $debug_external = 0;	# Print external/forward reference messages
 $list_in_array = 1;	# Emit original SCRIPTS assembler in comments in
 			# script.h
-$prefix = '';		# define all arrays having this prefix so we 
+#$prefix;		# (set by perl -s)
+                        # define all arrays having this prefix so we 
 			# don't have name space collisions after 
 			# assembling this file in different ways for
 			# different host adapters
@@ -78,7 +78,7 @@ $prefix = '';		# define all arrays having this prefix so we
 # 	and = 0x04_00_00_00
 # 	add = 0x06_00_00_00
 
-if ($ncr700 || $ncr710) {
+if ($ncr7x0_family) {
   %operators = (
     '|', 0x02_00_00_00, 'OR', 0x02_00_00_00,
     '&', 0x04_00_00_00, 'AND', 0x04_00_00_00,
@@ -100,24 +100,7 @@ else {
 
 # Table of register addresses
 
-if ($ncr700) {
-  %registers = (
-    'SCNTL0', 0, 'SCNTL1', 1, 'SDID', 2, 'SIEN', 3,
-    'SCID', 4, 'SXFER', 5, 'SODL', 6, 'SOCL', 7,
-    'SFBR', 8, 'SIDL', 9, 'SBDL', 10, 'SBCL', 11,
-    'DSTAT', 12, 'SSTAT0', 13, 'SSTAT1', 14, 'SSTAT2', 15,
-    'CTEST0', 20, 'CTEST1', 21, 'CTEST2', 22, 'CTEST3', 23,
-    'CTEST4', 24, 'CTEST5', 25, 'CTEST6', 26, 'CTEST7', 27,
-    'TEMP0', 28, 'TEMP1', 29, 'TEMP2', 30, 'TEMP3', 31,
-    'DFIFO', 32, 'ISTAT', 33, 'CTEST8', 34,
-    'DBC0', 36, 'DBC1', 37, 'DBC2', 38, 'DCMD', 39,
-    'DNAD0', 40, 'DNAD1', 41, 'DNAD2', 42, 'DNAD3', 43,
-    'DSP0', 44, 'DSP1', 45, 'DSP2', 46, 'DSP3', 47,
-    'DSPS0', 48, 'DSPS1', 49, 'DSPS2', 50, 'DSPS3', 51,
-    'DMODE', 52, 'DIEN', 57, 'DWT', 58, 'DCNTL', 59,
-  );
-}
-elsif ($ncr710) {
+if ($ncr7x0_family) {
   %registers = (
     'SCNTL0', 0, 'SCNTL1', 1, 'SDID', 2, 'SIEN', 3,
     'SCID', 4, 'SXFER', 5, 'SODL', 6, 'SOCL', 7,
@@ -189,7 +172,7 @@ $register = join ('|', keys %registers);
 # be escaped, I can't use the join() trick I used for the register
 # regex
 
-if ($ncr700 || $ncr710) {
+if ($ncr7x0_family) {
   $operator = '\||OR|AND|\&|\+';
 }
 else {
@@ -400,12 +383,10 @@ print STDERR "looking for data in $conditional\n" if ($debug);
     }
 }
 
-# Parse command line 
-foreach $arg (@argv) {
-    if ($arg =~ /^-prefix\s*=\s*([_a-zA-Z][_a-zA-Z0-9]*)$/i) {
-	$prefix = $1
-    }
-}
+# Parse command line
+$output = shift;
+$outputu = shift;
+
     
 # Main loop
 while (<STDIN>) {
@@ -486,7 +467,7 @@ print STDERR "defined external $1 to $external\n" if ($debug_external);
 # Process MOVE length, address, WITH|WHEN phase instruction
     } elsif (/^\s*MOVE\s+(.*)/i) {
 	$rest = $1;
-	if (!$ncr700 && ($rest =~ /^FROM\s+($value)\s*,\s*(WITH|WHEN)\s+($phase)\s*$/i)) {
+	if ($rest =~ /^FROM\s+($value)\s*,\s*(WITH|WHEN)\s+($phase)\s*$/i) {
 	    $transfer_addr = $1;
 	    $with_when = $2;
 	    $scsi_phase = $3;
@@ -832,7 +813,7 @@ foreach $i (@absolute) {
 	$address = $2;
 	$length = $3;
 	die 
-"$0 : $symbol $i has illegal relative reference at address $address,
+"$0 : $symbol $i has invalid relative reference at address $address,
     size $length\n"
 	if ($type eq 'REL');
 	    
@@ -850,12 +831,12 @@ print STDERR "checking external $external \n" if ($debug_external);
 	    $length = $3;
 	    
 	    die 
-"$0 : symbol $label is external, has illegal relative reference at $address, 
+"$0 : symbol $label is external, has invalid relative reference at $address,
     size $length\n"
 		if ($type eq 'REL');
 
 	    die 
-"$0 : symbol $label has illegal reference at $address, size $length\n"
+"$0 : symbol $label has invalid reference at $address, size $length\n"
 		if ((($address % 4) !=0) || ($length != 4));
 
 	    $symbol = $symbol_values{$external};
@@ -881,7 +862,7 @@ foreach $label (@label) {
 	    $length = $3;
 
 	    if ((($address % 4) !=0) || ($length != 4)) {
-		die "$0 : symbol $label has illegal reference at $1, size $2\n";
+		die "$0 : symbol $label has invalid reference at $1, size $2\n";
 	    }
 
 	    if ($type eq 'ABS') {
@@ -914,7 +895,8 @@ foreach $label (@label) {
 open (OUTPUT, ">$output") || die "$0 : can't open $output for writing\n";
 open (OUTPUTU, ">$outputu") || die "$0 : can't open $outputu for writing\n";
 
-print OUTPUT "/* DO NOT EDIT - Generated automatically by ".$0." */\n";
+($_ = $0) =~ s:.*/::;
+print OUTPUT "/* DO NOT EDIT - Generated automatically by ".$_." */\n";
 print OUTPUT "static u32 ".$prefix."SCRIPT[] = {\n";
 $instructions = 0;
 for ($i = 0; $i < $#code; ) {

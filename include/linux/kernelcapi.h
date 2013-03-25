@@ -1,19 +1,17 @@
-/* $Id: kernelcapi.h,v 1.1.4.2 2002/01/28 18:25:10 kai Exp $
+/*
+ * $Id: kernelcapi.h,v 1.8.6.2 2001/02/07 11:31:31 kai Exp $
  * 
  * Kernel CAPI 2.0 Interface for Linux
  * 
  * (c) Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
- * This software may be used and distributed according to the terms
- * of the GNU General Public License, incorporated herein by reference.
- *
  */
 
 #ifndef __KERNELCAPI_H__
 #define __KERNELCAPI_H__
 
-#define CAPI_MAXAPPL	128	/* maximum number of applications  */
-#define CAPI_MAXCONTR	16	/* maximum number of controller    */
+#define CAPI_MAXAPPL	240	/* maximum number of applications  */
+#define CAPI_MAXCONTR	32	/* maximum number of controller    */
 #define CAPI_MAXDATAWINDOW	8
 
 
@@ -32,7 +30,7 @@ typedef struct kcapi_carddef {
 
 /* new ioctls >= 10 */
 #define KCAPI_CMD_TRACE		10
-#define KCAPI_CMD_ADDCARD	11	/* add card to named driver */
+#define KCAPI_CMD_ADDCARD	11	/* OBSOLETE */
 
 /* 
  * flag > 2 => trace also data
@@ -47,48 +45,43 @@ typedef struct kcapi_carddef {
 
 #ifdef __KERNEL__
 
-struct capi_interface {
-	__u16 (*capi_isinstalled) (void);
+#include <linux/list.h>
+#include <linux/skbuff.h>
+#include <linux/workqueue.h>
+#include <linux/notifier.h>
 
-	__u16 (*capi_register) (capi_register_params * rparam, __u16 * applidp);
-	__u16 (*capi_release) (__u16 applid);
-	__u16 (*capi_put_message) (__u16 applid, struct sk_buff * msg);
-	__u16 (*capi_get_message) (__u16 applid, struct sk_buff ** msgp);
-	__u16 (*capi_set_signal) (__u16 applid,
-			      void (*signal) (__u16 applid, void *param),
-				  void *param);
-	__u16 (*capi_get_manufacturer) (__u32 contr, __u8 buf[CAPI_MANUFACTURER_LEN]);
-	__u16 (*capi_get_version) (__u32 contr, struct capi_version * verp);
-	 __u16(*capi_get_serial) (__u32 contr, __u8 serial[CAPI_SERIAL_LEN]);
-	 __u16(*capi_get_profile) (__u32 contr, struct capi_profile * profp);
+struct capi20_appl {
+	u16 applid;
+	capi_register_params rparam;
+	void (*recv_message)(struct capi20_appl *ap, struct sk_buff *skb);
+	void *private;
 
-	/*
-	 * to init controllers, data is always in user memory
-	 */
-	int (*capi_manufacturer) (unsigned int cmd, void *data);
-
+	/* internal to kernelcapi.o */
+	unsigned long nrecvctlpkt;
+	unsigned long nrecvdatapkt;
+	unsigned long nsentctlpkt;
+	unsigned long nsentdatapkt;
+	struct mutex recv_mtx;
+	struct sk_buff_head recv_queue;
+	struct work_struct recv_work;
+	int release_in_progress;
 };
 
-struct capi_ncciinfo {
-	__u16 applid;
-	__u32 ncci;
-};
+u16 capi20_isinstalled(void);
+u16 capi20_register(struct capi20_appl *ap);
+u16 capi20_release(struct capi20_appl *ap);
+u16 capi20_put_message(struct capi20_appl *ap, struct sk_buff *skb);
+u16 capi20_get_manufacturer(u32 contr, u8 buf[CAPI_MANUFACTURER_LEN]);
+u16 capi20_get_version(u32 contr, struct capi_version *verp);
+u16 capi20_get_serial(u32 contr, u8 serial[CAPI_SERIAL_LEN]);
+u16 capi20_get_profile(u32 contr, struct capi_profile *profp);
+int capi20_manufacturer(unsigned int cmd, void __user *data);
 
-#define	KCI_CONTRUP	0	/* struct capi_profile */
-#define	KCI_CONTRDOWN	1	/* NULL */
-#define	KCI_NCCIUP	2	/* struct capi_ncciinfo */
-#define	KCI_NCCIDOWN	3	/* struct capi_ncciinfo */
+#define CAPICTR_UP			0
+#define CAPICTR_DOWN			1
 
-struct capi_interface_user {
-	char name[20];
-	void (*callback) (unsigned int cmd, __u32 contr, void *data);
-	/* internal */
-	struct capi_interface_user *next;
-};
-
-struct capi_interface *attach_capi_interface(struct capi_interface_user *);
-int detach_capi_interface(struct capi_interface_user *);
-
+int register_capictr_notifier(struct notifier_block *nb);
+int unregister_capictr_notifier(struct notifier_block *nb);
 
 #define CAPI_NOERROR                      0x0000
 

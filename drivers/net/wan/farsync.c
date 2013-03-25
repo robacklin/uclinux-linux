@@ -1,5 +1,5 @@
 /*
- *      FarSync WAN driver for Linux (2.4.x kernel version)
+ *      FarSync WAN driver for Linux (2.6.x kernel version)
  *
  *      Actually sync driver for X.21, V.35 and V.24 on FarSync T-series cards
  *
@@ -15,17 +15,21 @@
  *      Maintainer:  Kevin Curtis  <kevin.curtis@farsite.co.uk>
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/version.h>
 #include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
-#include <asm/uaccess.h>
+#include <linux/interrupt.h>
 #include <linux/if.h>
 #include <linux/hdlc.h>
-#include <asm/delay.h>
 #include <asm/io.h>
+#include <asm/uaccess.h>
 
 #include "farsync.h"
 
@@ -34,14 +38,7 @@
  */
 MODULE_AUTHOR("R.J.Dunlop <bob.dunlop@farsite.co.uk>");
 MODULE_DESCRIPTION("FarSync T-Series WAN driver. FarSite Communications Ltd.");
-MODULE_PARM(fst_txq_low, "i");
-MODULE_PARM(fst_txq_high, "i");
-MODULE_PARM(fst_max_reads, "i");
-MODULE_PARM(fst_excluded_cards, "i");
-MODULE_PARM(fst_excluded_list, "0-32i");
 MODULE_LICENSE("GPL");
-
-EXPORT_NO_SYMBOLS;
 
 /*      Driver configuration and global parameters
  *      ==========================================
@@ -55,10 +52,7 @@ EXPORT_NO_SYMBOLS;
 /*      Default parameters for the link
  */
 #define FST_TX_QUEUE_LEN        100	/* At 8Mbps a longer queue length is
-					 * useful, the syncppp module forces
-					 * this down assuming a slower line I
-					 * guess.
-					 */
+					 * useful */
 #define FST_TXQ_DEPTH           16	/* This one is for the buffering
 					 * of frames on the way down to the card
 					 * so that we can keep the card busy
@@ -80,13 +74,19 @@ EXPORT_NO_SYMBOLS;
 #endif
 
 /*
- * Modules parameters and associated varaibles
+ * Modules parameters and associated variables
  */
-int fst_txq_low = FST_LOW_WATER_MARK;
-int fst_txq_high = FST_HIGH_WATER_MARK;
-int fst_max_reads = 7;
-int fst_excluded_cards = 0;
-int fst_excluded_list[FST_MAX_CARDS];
+static int fst_txq_low = FST_LOW_WATER_MARK;
+static int fst_txq_high = FST_HIGH_WATER_MARK;
+static int fst_max_reads = 7;
+static int fst_excluded_cards = 0;
+static int fst_excluded_list[FST_MAX_CARDS];
+
+module_param(fst_txq_low, int, 0);
+module_param(fst_txq_high, int, 0);
+module_param(fst_max_reads, int, 0);
+module_param(fst_excluded_cards, int, 0);
+module_param_array(fst_excluded_list, int, NULL, 0);
 
 /*      Card shared memory layout
  *      =========================
@@ -414,7 +414,7 @@ struct buf_window {
 };
 
 /* Calculate offset of a buffer object within the shared memory window */
-#define BUF_OFFSET(X)   ((unsigned int)&(((struct buf_window *)BFM_BASE)->X))
+#define BUF_OFFSET(X)   (BFM_BASE + offsetof(struct buf_window, X))
 
 #pragma pack()
 
@@ -424,7 +424,7 @@ struct buf_window {
 /*      Per port (line or channel) information
  */
 struct fst_port_info {
-	hdlc_device hdlc;	/* HDLC device struct - must be first */
+        struct net_device *dev; /* Device struct - must be first */
 	struct fst_card_info *card;	/* Card we're associated with */
 	int index;		/* Port index on the card */
 	int hwif;		/* Line hardware (lineInterface copy) */
@@ -446,8 +446,8 @@ struct fst_port_info {
 /*      Per card information
  */
 struct fst_card_info {
-	char *mem;		/* Card memory mapped to kernel space */
-	char *ctlmem;		/* Control memory for PCI cards */
+	char __iomem *mem;	/* Card memory mapped to kernel space */
+	char __iomem *ctlmem;	/* Control memory for PCI cards */
 	unsigned int phys_mem;	/* Physical memory window address */
 	unsigned int phys_ctlmem;	/* Physical control memory address */
 	unsigned int irq;	/* Interrupt request line number */
@@ -479,9 +479,9 @@ struct fst_card_info {
 };
 
 /* Convert an HDLC device pointer into a port info pointer and similar */
-#define hdlc_to_port(H) ((struct fst_port_info *)(H))
-#define dev_to_port(D)  hdlc_to_port(dev_to_hdlc(D))
-#define port_to_dev(P)  hdlc_to_dev(&(P)->hdlc)
+#define dev_to_port(D)  (dev_to_hdlc(D)->priv)
+#define port_to_dev(P)  ((P)->dev)
+
 
 /*
  *      Shared memory window access macros
@@ -514,25 +514,23 @@ static int fst_debug_mask = { FST_DEBUG };
  * support variable numbers of macro parameters. The inverted if prevents us
  * eating someone else's else clause.
  */
-#define dbg(F,fmt,A...) if ( ! ( fst_debug_mask & (F))) \
-                                ; \
-                        else \
-                                printk ( KERN_DEBUG FST_NAME ": " fmt, ## A )
-
+#define dbg(F, fmt, args...)					\
+do {								\
+	if (fst_debug_mask & (F))				\
+		printk(KERN_DEBUG pr_fmt(fmt), ##args);		\
+} while (0)
 #else
-#define dbg(X...)		/* NOP */
+#define dbg(F, fmt, args...)					\
+do {								\
+	if (0)							\
+		printk(KERN_DEBUG pr_fmt(fmt), ##args);		\
+} while (0)
 #endif
-
-/*      Printing short cuts
- */
-#define printk_err(fmt,A...)    printk ( KERN_ERR     FST_NAME ": " fmt, ## A )
-#define printk_warn(fmt,A...)   printk ( KERN_WARNING FST_NAME ": " fmt, ## A )
-#define printk_info(fmt,A...)   printk ( KERN_INFO    FST_NAME ": " fmt, ## A )
 
 /*
  *      PCI ID lookup table
  */
-static struct pci_device_id fst_pci_dev_id[] __devinitdata = {
+static DEFINE_PCI_DEVICE_TABLE(fst_pci_dev_id) = {
 	{PCI_VENDOR_ID_FARSITE, PCI_DEVICE_ID_FARSITE_T2P, PCI_ANY_ID, 
 	 PCI_ANY_ID, 0, 0, FST_TYPE_T2P},
 
@@ -564,6 +562,9 @@ MODULE_DEVICE_TABLE(pci, fst_pci_dev_id);
  *      So that we don't spend too much time processing events in the 
  *      Interrupt Service routine, we will declare a work queue per Card 
  *      and make the ISR schedule a task in the queue for later execution.
+ *      In the 2.4 Kernel we used to use the immediate queue for BH's
+ *      Now that they are gone, tasklets seem to be much better than work 
+ *      queues.
  */
 
 static void do_bottom_half_tx(struct fst_card_info *card);
@@ -571,13 +572,13 @@ static void do_bottom_half_rx(struct fst_card_info *card);
 static void fst_process_tx_work_q(unsigned long work_q);
 static void fst_process_int_work_q(unsigned long work_q);
 
-DECLARE_TASKLET(fst_tx_task, fst_process_tx_work_q, 0);
-DECLARE_TASKLET(fst_int_task, fst_process_int_work_q, 0);
+static DECLARE_TASKLET(fst_tx_task, fst_process_tx_work_q, 0);
+static DECLARE_TASKLET(fst_int_task, fst_process_int_work_q, 0);
 
-struct fst_card_info *fst_card_array[FST_MAX_CARDS];
-spinlock_t fst_work_q_lock;
-u64 fst_work_txq;
-u64 fst_work_intq;
+static struct fst_card_info *fst_card_array[FST_MAX_CARDS];
+static spinlock_t fst_work_q_lock;
+static u64 fst_work_txq;
+static u64 fst_work_intq;
 
 static void
 fst_q_work_item(u64 * queue, int card_index)
@@ -602,7 +603,7 @@ fst_q_work_item(u64 * queue, int card_index)
 }
 
 static void
-fst_process_tx_work_q(unsigned long work_q)
+fst_process_tx_work_q(unsigned long /*void **/work_q)
 {
 	unsigned long flags;
 	u64 work_txq;
@@ -632,7 +633,7 @@ fst_process_tx_work_q(unsigned long work_q)
 }
 
 static void
-fst_process_int_work_q(unsigned long work_q)
+fst_process_int_work_q(unsigned long /*void **/work_q)
 {
 	unsigned long flags;
 	u64 work_intq;
@@ -781,7 +782,7 @@ fst_disable_intr(struct fst_card_info *card)
 	}
 }
 
-/*      Process the result of trying to pass a recieved frame up the stack
+/*      Process the result of trying to pass a received frame up the stack
  */
 static void
 fst_process_rx_status(int rx_status, char *name)
@@ -794,25 +795,6 @@ fst_process_rx_status(int rx_status, char *name)
 			 */
 			break;
 		}
-
-	case NET_RX_CN_LOW:
-		{
-			dbg(DBG_ASS, "%s: Receive Low Congestion\n", name);
-			break;
-		}
-
-	case NET_RX_CN_MOD:
-		{
-			dbg(DBG_ASS, "%s: Receive Moderate Congestion\n", name);
-			break;
-		}
-
-	case NET_RX_CN_HIGH:
-		{
-			dbg(DBG_ASS, "%s: Receive High Congestion\n", name);
-			break;
-		}
-
 	case NET_RX_DROP:
 		{
 			dbg(DBG_ASS, "%s: Received packet dropped\n", name);
@@ -843,15 +825,28 @@ static void
 fst_tx_dma_complete(struct fst_card_info *card, struct fst_port_info *port,
 		    int len, int txpos)
 {
+	struct net_device *dev = port_to_dev(port);
+
 	/*
 	 * Everything is now set, just tell the card to go
 	 */
 	dbg(DBG_TX, "fst_tx_dma_complete\n");
 	FST_WRB(card, txDescrRing[port->index][txpos].bits,
 		DMA_OWN | TX_STP | TX_ENP);
-	port->hdlc.stats.tx_packets++;
-	port->hdlc.stats.tx_bytes += len;
-	port_to_dev(port)->trans_start = jiffies;
+	dev->stats.tx_packets++;
+	dev->stats.tx_bytes += len;
+	dev->trans_start = jiffies;
+}
+
+/*
+ * Mark it for our own raw sockets interface
+ */
+static __be16 farsync_type_trans(struct sk_buff *skb, struct net_device *dev)
+{
+	skb->dev = dev;
+	skb_reset_mac_header(skb);
+	skb->pkt_type = PACKET_HOST;
+	return htons(ETH_P_CUST);
 }
 
 /*      Rx dma complete interrupt
@@ -860,7 +855,7 @@ static void
 fst_rx_dma_complete(struct fst_card_info *card, struct fst_port_info *port,
 		    int len, struct sk_buff *skb, int rxp)
 {
-
+	struct net_device *dev = port_to_dev(port);
 	int pi;
 	int rx_status;
 
@@ -872,47 +867,40 @@ fst_rx_dma_complete(struct fst_card_info *card, struct fst_port_info *port,
 	FST_WRB(card, rxDescrRing[pi][rxp].bits, DMA_OWN);
 
 	/* Update stats */
-	port->hdlc.stats.rx_packets++;
-	port->hdlc.stats.rx_bytes += len;
+	dev->stats.rx_packets++;
+	dev->stats.rx_bytes += len;
 
 	/* Push upstream */
 	dbg(DBG_RX, "Pushing the frame up the stack\n");
-	skb->mac.raw = skb->data;
-	skb->dev = hdlc_to_dev(&port->hdlc);
-	if (port->mode == FST_RAW) {
-		/*
-		 * Mark it for our own raw sockets interface
-		 */
-		skb->protocol = htons(ETH_P_CUST);
-		skb->pkt_type = PACKET_HOST;
-	} else {
-		skb->protocol = hdlc_type_trans(skb, skb->dev);
-	}
+	if (port->mode == FST_RAW)
+		skb->protocol = farsync_type_trans(skb, dev);
+	else
+		skb->protocol = hdlc_type_trans(skb, dev);
 	rx_status = netif_rx(skb);
 	fst_process_rx_status(rx_status, port_to_dev(port)->name);
 	if (rx_status == NET_RX_DROP)
-		port->hdlc.stats.rx_dropped++;
-	port_to_dev(port)->last_rx = jiffies;
+		dev->stats.rx_dropped++;
 }
 
 /*
  *      Receive a frame through the DMA
  */
 static inline void
-fst_rx_dma(struct fst_card_info *card, unsigned char *skb,
-	   unsigned char *mem, int len)
+fst_rx_dma(struct fst_card_info *card, dma_addr_t skb,
+	   dma_addr_t mem, int len)
 {
 	/*
 	 * This routine will setup the DMA and start it
 	 */
 
-	dbg(DBG_RX, "In fst_rx_dma %p %p %d\n", skb, mem, len);
+	dbg(DBG_RX, "In fst_rx_dma %lx %lx %d\n",
+	    (unsigned long) skb, (unsigned long) mem, len);
 	if (card->dmarx_in_progress) {
 		dbg(DBG_ASS, "In fst_rx_dma while dma in progress\n");
 	}
 
-	outl((unsigned long) skb, card->pci_conf + DMAPADR0);	/* Copy to here */
-	outl((unsigned long) mem, card->pci_conf + DMALADR0);	/* from here */
+	outl(skb, card->pci_conf + DMAPADR0);	/* Copy to here */
+	outl(mem, card->pci_conf + DMALADR0);	/* from here */
 	outl(len, card->pci_conf + DMASIZ0);	/* for this length */
 	outl(0x00000000c, card->pci_conf + DMADPR0);	/* In this direction */
 
@@ -971,11 +959,11 @@ fst_issue_cmd(struct fst_port_info *port, unsigned short cmd)
 	/* Wait for any previous command to complete */
 	while (mbval > NAK) {
 		spin_unlock_irqrestore(&card->card_lock, flags);
-		schedule_timeout(1);
+		schedule_timeout_uninterruptible(1);
 		spin_lock_irqsave(&card->card_lock, flags);
 
 		if (++safety > 2000) {
-			printk_err("Mailbox safety timeout\n");
+			pr_err("Mailbox safety timeout\n");
 			break;
 		}
 
@@ -1153,27 +1141,29 @@ static void
 fst_log_rx_error(struct fst_card_info *card, struct fst_port_info *port,
 		 unsigned char dmabits, int rxp, unsigned short len)
 {
-	/* 
+	struct net_device *dev = port_to_dev(port);
+
+	/*
 	 * Increment the appropriate error counter
 	 */
-	port->hdlc.stats.rx_errors++;
+	dev->stats.rx_errors++;
 	if (dmabits & RX_OFLO) {
-		port->hdlc.stats.rx_fifo_errors++;
+		dev->stats.rx_fifo_errors++;
 		dbg(DBG_ASS, "Rx fifo error on card %d port %d buffer %d\n",
 		    card->card_no, port->index, rxp);
 	}
 	if (dmabits & RX_CRC) {
-		port->hdlc.stats.rx_crc_errors++;
+		dev->stats.rx_crc_errors++;
 		dbg(DBG_ASS, "Rx crc error on card %d port %d\n",
 		    card->card_no, port->index);
 	}
 	if (dmabits & RX_FRAM) {
-		port->hdlc.stats.rx_frame_errors++;
+		dev->stats.rx_frame_errors++;
 		dbg(DBG_ASS, "Rx frame error on card %d port %d\n",
 		    card->card_no, port->index);
 	}
 	if (dmabits == (RX_STP | RX_ENP)) {
-		port->hdlc.stats.rx_length_errors++;
+		dev->stats.rx_length_errors++;
 		dbg(DBG_ASS, "Rx length error (%d) on card %d port %d\n",
 		    len, card->card_no, port->index);
 	}
@@ -1229,6 +1219,7 @@ fst_intr_rx(struct fst_card_info *card, struct fst_port_info *port)
 	int rx_status;
 	unsigned short len;
 	struct sk_buff *skb;
+	struct net_device *dev = port_to_dev(port);
 
 	/* Check we have a buffer to process */
 	pi = port->index;
@@ -1252,8 +1243,8 @@ fst_intr_rx(struct fst_card_info *card, struct fst_port_info *port)
 		 * This seems to happen on the TE1 interface sometimes
 		 * so throw the frame away and log the event.
 		 */
-		printk_err("Frame received with 0 length. Card %d Port %d\n",
-			   card->card_no, port->index);
+		pr_err("Frame received with 0 length. Card %d Port %d\n",
+		       card->card_no, port->index);
 		/* Return descriptor to card */
 		FST_WRB(card, rxDescrRing[pi][rxp].bits, DMA_OWN);
 
@@ -1277,7 +1268,7 @@ fst_intr_rx(struct fst_card_info *card, struct fst_port_info *port)
 	if ((skb = dev_alloc_skb(len)) == NULL) {
 		dbg(DBG_RX, "intr_rx: can't allocate buffer\n");
 
-		port->hdlc.stats.rx_dropped++;
+		dev->stats.rx_dropped++;
 
 		/* Return descriptor to card */
 		FST_WRB(card, rxDescrRing[pi][rxp].bits, DMA_OWN);
@@ -1302,35 +1293,26 @@ fst_intr_rx(struct fst_card_info *card, struct fst_port_info *port)
 		FST_WRB(card, rxDescrRing[pi][rxp].bits, DMA_OWN);
 
 		/* Update stats */
-		port->hdlc.stats.rx_packets++;
-		port->hdlc.stats.rx_bytes += len;
+		dev->stats.rx_packets++;
+		dev->stats.rx_bytes += len;
 
 		/* Push upstream */
 		dbg(DBG_RX, "Pushing frame up the stack\n");
-		skb->mac.raw = skb->data;
-		skb->dev = hdlc_to_dev(&port->hdlc);
-		if (port->mode == FST_RAW) {
-			/*
-			 * Mark it for our own raw sockets interface
-			 */
-			skb->protocol = htons(ETH_P_CUST);
-			skb->pkt_type = PACKET_HOST;
-		} else {
-			skb->protocol = hdlc_type_trans(skb, skb->dev);
-		}
+		if (port->mode == FST_RAW)
+			skb->protocol = farsync_type_trans(skb, dev);
+		else
+			skb->protocol = hdlc_type_trans(skb, dev);
 		rx_status = netif_rx(skb);
 		fst_process_rx_status(rx_status, port_to_dev(port)->name);
-		if (rx_status == NET_RX_DROP) {
-			port->hdlc.stats.rx_dropped++;
-		}
-		port_to_dev(port)->last_rx = jiffies;
+		if (rx_status == NET_RX_DROP)
+			dev->stats.rx_dropped++;
 	} else {
 		card->dma_skb_rx = skb;
 		card->dma_port_rx = port;
 		card->dma_len_rx = len;
 		card->dma_rxpos = rxp;
-		fst_rx_dma(card, (char *) card->rx_dma_handle_card,
-			   (char *) BUF_OFFSET(rxBuffer[pi][rxp][0]), len);
+		fst_rx_dma(card, card->rx_dma_handle_card,
+			   BUF_OFFSET(rxBuffer[pi][rxp][0]), len);
 	}
 	if (rxp != port->rxpos) {
 		dbg(DBG_ASS, "About to increment rxpos by more than 1\n");
@@ -1353,6 +1335,7 @@ do_bottom_half_tx(struct fst_card_info *card)
 	int txq_length;
 	struct sk_buff *skb;
 	unsigned long flags;
+	struct net_device *dev;
 
 	/*
 	 *  Find a free buffer for the transmit
@@ -1364,10 +1347,10 @@ do_bottom_half_tx(struct fst_card_info *card)
 		if (!port->run)
 			continue;
 
-		while (!
-		       (FST_RDB(card, txDescrRing[pi][port->txpos].bits) &
-			DMA_OWN)
-&& !(card->dmatx_in_progress)) {
+		dev = port_to_dev(port);
+		while (!(FST_RDB(card, txDescrRing[pi][port->txpos].bits) &
+			 DMA_OWN) &&
+		       !(card->dmatx_in_progress)) {
 			/*
 			 * There doesn't seem to be a txdone event per-se
 			 * We seem to have to deduce it, by checking the DMA_OWN
@@ -1399,8 +1382,8 @@ do_bottom_half_tx(struct fst_card_info *card)
 				 */
 				FST_WRW(card, txDescrRing[pi][port->txpos].bcnt,
 					cnv_bcnt(skb->len));
-				if ((skb->len < FST_MIN_DMA_LEN)
-				    || (card->family == FST_FAMILY_TXP)) {
+				if ((skb->len < FST_MIN_DMA_LEN) ||
+				    (card->family == FST_FAMILY_TXP)) {
 					/* Enqueue the packet with normal io */
 					memcpy_toio(card->mem +
 						    BUF_OFFSET(txBuffer[pi]
@@ -1411,10 +1394,9 @@ do_bottom_half_tx(struct fst_card_info *card)
 						txDescrRing[pi][port->txpos].
 						bits,
 						DMA_OWN | TX_STP | TX_ENP);
-					port->hdlc.stats.tx_packets++;
-					port->hdlc.stats.tx_bytes += skb->len;
-					port_to_dev(port)->trans_start =
-					    jiffies;
+					dev->stats.tx_packets++;
+					dev->stats.tx_bytes += skb->len;
+					dev->trans_start = jiffies;
 				} else {
 					/* Or do it through dma */
 					memcpy(card->tx_dma_handle_host,
@@ -1465,6 +1447,7 @@ do_bottom_half_rx(struct fst_card_info *card)
 	for (pi = 0, port = card->ports; pi < card->nports; pi++, port++) {
 		if (!port->run)
 			continue;
+
 		while (!(FST_RDB(card, rxDescrRing[pi][port->rxpos].bits)
 			 & DMA_OWN) && !(card->dmarx_in_progress)) {
 			if (rx_count > fst_max_reads) {
@@ -1486,10 +1469,10 @@ do_bottom_half_rx(struct fst_card_info *card)
  *      The interrupt service routine
  *      Dev_id is our fst_card_info pointer
  */
-static void
-fst_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+fst_intr(int dummy, void *dev_id)
 {
-	struct fst_card_info *card;
+	struct fst_card_info *card = dev_id;
 	struct fst_port_info *port;
 	int rdidx;		/* Event buffer indices */
 	int wridx;
@@ -1498,21 +1481,15 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 	unsigned int do_card_interrupt;
 	unsigned int int_retry_count;
 
-	if ((card = dev_id) == NULL) {
-		dbg(DBG_INTR, "intr: spurious %d\n", irq);
-		return;
-	}
-
 	/*
 	 * Check to see if the interrupt was for this card
 	 * return if not
 	 * Note that the call to clear the interrupt is important
 	 */
-	dbg(DBG_INTR, "intr: %d %p\n", irq, card);
+	dbg(DBG_INTR, "intr: %d %p\n", card->irq, card);
 	if (card->state != FST_RUNNING) {
-		printk_err
-		    ("Interrupt received for card %d in a non running state (%d)\n",
-		     card->card_no, card->state);
+		pr_err("Interrupt received for card %d in a non running state (%d)\n",
+		       card->card_no, card->state);
 
 		/* 
 		 * It is possible to really be running, i.e. we have re-loaded
@@ -1520,7 +1497,7 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 		 * Clear and reprime the interrupt source 
 		 */
 		fst_clear_intr(card);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	/* Clear and reprime the interrupt source */
@@ -1576,7 +1553,7 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	if (!do_card_interrupt) {
-		return;
+		return IRQ_HANDLED;
 	}
 
 	/* Scehdule the bottom half of the ISR */
@@ -1622,9 +1599,8 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 			 * always load up the entire packet for DMA.
 			 */
 			dbg(DBG_TX, "Tx underflow port %d\n", port->index);
-
-			port->hdlc.stats.tx_errors++;
-			port->hdlc.stats.tx_fifo_errors++;
+			port_to_dev(port)->stats.tx_errors++;
+			port_to_dev(port)->stats.tx_fifo_errors++;
 			dbg(DBG_ASS, "Tx underflow on card %d port %d\n",
 			    card->card_no, port->index);
 			break;
@@ -1639,8 +1615,7 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 			break;
 
 		default:
-			printk_err("intr: unknown card event %d. ignored\n",
-				   event);
+			pr_err("intr: unknown card event %d. ignored\n", event);
 			break;
 		}
 
@@ -1649,6 +1624,7 @@ fst_intr(int irq, void *dev_id, struct pt_regs *regs)
 			rdidx = 0;
 	}
 	FST_WRB(card, interruptEvent.rdindex, rdidx);
+        return IRQ_HANDLED;
 }
 
 /*      Check that the shared memory configuration is one that we can handle
@@ -1661,13 +1637,13 @@ check_started_ok(struct fst_card_info *card)
 
 	/* Check structure version and end marker */
 	if (FST_RDW(card, smcVersion) != SMC_VERSION) {
-		printk_err("Bad shared memory version %d expected %d\n",
-			   FST_RDW(card, smcVersion), SMC_VERSION);
+		pr_err("Bad shared memory version %d expected %d\n",
+		       FST_RDW(card, smcVersion), SMC_VERSION);
 		card->state = FST_BADVERSION;
 		return;
 	}
 	if (FST_RDL(card, endOfSmcSignature) != END_SIG) {
-		printk_err("Missing shared memory signature\n");
+		pr_err("Missing shared memory signature\n");
 		card->state = FST_BADVERSION;
 		return;
 	}
@@ -1675,11 +1651,11 @@ check_started_ok(struct fst_card_info *card)
 	if ((i = FST_RDB(card, taskStatus)) == 0x01) {
 		card->state = FST_RUNNING;
 	} else if (i == 0xFF) {
-		printk_err("Firmware initialisation failed. Card halted\n");
+		pr_err("Firmware initialisation failed. Card halted\n");
 		card->state = FST_HALTED;
 		return;
 	} else if (i != 0x00) {
-		printk_err("Unknown firmware status 0x%x\n", i);
+		pr_err("Unknown firmware status 0x%x\n", i);
 		card->state = FST_HALTED;
 		return;
 	}
@@ -1689,9 +1665,9 @@ check_started_ok(struct fst_card_info *card)
 	 * existing firmware etc so we just report it for the moment.
 	 */
 	if (FST_RDL(card, numberOfPorts) != card->nports) {
-		printk_warn("Port count mismatch on card %d."
-			    " Firmware thinks %d we say %d\n", card->card_no,
-			    FST_RDL(card, numberOfPorts), card->nports);
+		pr_warn("Port count mismatch on card %d.  Firmware thinks %d we say %d\n",
+			card->card_no,
+			FST_RDL(card, numberOfPorts), card->nports);
 	}
 }
 
@@ -2018,6 +1994,7 @@ fst_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	struct fstioc_write wrthdr;
 	struct fstioc_info info;
 	unsigned long flags;
+	void *buf;
 
 	dbg(DBG_IOCTL, "ioctl: %x, %p\n", cmd, ifr->ifr_data);
 
@@ -2054,20 +2031,20 @@ fst_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		/* Sanity check the parameters. We don't support partial writes
 		 * when going over the top
 		 */
-		if (wrthdr.size > FST_MEMSIZE || wrthdr.offset > FST_MEMSIZE
-		    || wrthdr.size + wrthdr.offset > FST_MEMSIZE) {
+		if (wrthdr.size > FST_MEMSIZE || wrthdr.offset > FST_MEMSIZE ||
+		    wrthdr.size + wrthdr.offset > FST_MEMSIZE) {
 			return -ENXIO;
 		}
 
-		/* Now copy the data to the card.
-		 * This will probably break on some architectures.
-		 * I'll fix it when I have something to test on.
-		 */
-		if (copy_from_user(card->mem + wrthdr.offset,
-				   ifr->ifr_data + sizeof (struct fstioc_write),
-				   wrthdr.size)) {
-			return -EFAULT;
-		}
+		/* Now copy the data to the card. */
+
+		buf = memdup_user(ifr->ifr_data + sizeof(struct fstioc_write),
+				  wrthdr.size);
+		if (IS_ERR(buf))
+			return PTR_ERR(buf);
+
+		memcpy_toio(card->mem + wrthdr.offset, buf, wrthdr.size);
+		kfree(buf);
 
 		/* Writes to the memory of a card in the reset state constitute
 		 * a download
@@ -2113,9 +2090,8 @@ fst_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		 */
 
 		if (card->state != FST_RUNNING) {
-			printk_err
-			    ("Attempt to configure card %d in non-running state (%d)\n",
-			     card->card_no, card->state);
+			pr_err("Attempt to configure card %d in non-running state (%d)\n",
+			       card->card_no, card->state);
 			return -EIO;
 		}
 		if (copy_from_user(&info, ifr->ifr_data, sizeof (info))) {
@@ -2222,11 +2198,15 @@ fst_open(struct net_device *dev)
 	struct fst_port_info *port;
 
 	port = dev_to_port(dev);
-	MOD_INC_USE_COUNT;
+	if (!try_module_get(THIS_MODULE))
+          return -EBUSY;
+
 	if (port->mode != FST_RAW) {
-		err = hdlc_open(dev_to_hdlc(dev));
-		if (err)
+		err = hdlc_open(dev);
+		if (err) {
+			module_put(THIS_MODULE);
 			return err;
+		}
 	}
 
 	fst_openport(port);
@@ -2255,14 +2235,14 @@ fst_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	fst_closeport(dev_to_port(dev));
 	if (port->mode != FST_RAW) {
-		hdlc_close(dev_to_hdlc(dev));
+		hdlc_close(dev);
 	}
-	MOD_DEC_USE_COUNT;
+	module_put(THIS_MODULE);
 	return 0;
 }
 
 static int
-fst_attach(hdlc_device * hdlc, unsigned short encoding, unsigned short parity)
+fst_attach(struct net_device *dev, unsigned short encoding, unsigned short parity)
 {
 	/*
 	 * Setting currently fixed in FarSync card so we check and forget
@@ -2280,9 +2260,8 @@ fst_tx_timeout(struct net_device *dev)
 
 	port = dev_to_port(dev);
 	card = port->card;
-
-	port->hdlc.stats.tx_errors++;
-	port->hdlc.stats.tx_aborted_errors++;
+	dev->stats.tx_errors++;
+	dev->stats.tx_aborted_errors++;
 	dbg(DBG_ASS, "Tx timeout card %d port %d\n",
 	    card->card_no, port->index);
 	fst_issue_cmd(port, ABORTTX);
@@ -2292,7 +2271,7 @@ fst_tx_timeout(struct net_device *dev)
 	port->start = 0;
 }
 
-static int
+static netdev_tx_t
 fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct fst_card_info *card;
@@ -2307,12 +2286,12 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	/* Drop packet with error if we don't have carrier */
 	if (!netif_carrier_ok(dev)) {
 		dev_kfree_skb(skb);
-		port->hdlc.stats.tx_errors++;
-		port->hdlc.stats.tx_carrier_errors++;
+		dev->stats.tx_errors++;
+		dev->stats.tx_carrier_errors++;
 		dbg(DBG_ASS,
 		    "Tried to transmit but no carrier on card %d port %d\n",
 		    card->card_no, port->index);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/* Drop it if it's too big! MTU failure ? */
@@ -2320,8 +2299,8 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		dbg(DBG_ASS, "Packet too large %d vs %d\n", skb->len,
 		    LEN_TX_BUFFER);
 		dev_kfree_skb(skb);
-		port->hdlc.stats.tx_errors++;
-		return 0;
+		dev->stats.tx_errors++;
+		return NETDEV_TX_OK;
 	}
 
 	/*
@@ -2352,10 +2331,10 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		 * This shouldn't have happened but such is life
 		 */
 		dev_kfree_skb(skb);
-		port->hdlc.stats.tx_errors++;
+		dev->stats.tx_errors++;
 		dbg(DBG_ASS, "Tx queue overflow card %d port %d\n",
 		    card->card_no, port->index);
-		return 0;
+		return NETDEV_TX_OK;
 	}
 
 	/*
@@ -2372,7 +2351,7 @@ fst_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	fst_q_work_item(&fst_work_txq, card->card_no);
 	tasklet_schedule(&fst_tx_task);
 
-	return 0;
+	return NETDEV_TX_OK;
 }
 
 /*
@@ -2397,55 +2376,40 @@ fst_init_card(struct fst_card_info *card)
 {
 	int i;
 	int err;
-	struct net_device *dev;
 
 	/* We're working on a number of ports based on the card ID. If the
 	 * firmware detects something different later (should never happen)
 	 * we'll have to revise it in some way then.
 	 */
 	for (i = 0; i < card->nports; i++) {
-		card->ports[i].card = card;
-		card->ports[i].index = i;
-		card->ports[i].run = 0;
-		card->ports[i].mode = FST_GEN_HDLC;
-
-		dev = hdlc_to_dev(&card->ports[i].hdlc);
-
-		/* Fill in the net device info 
-		 * Since this is a PCI setup this is purely
-		 * informational. Give them the buffer addresses
-		 * and basic card I/O.
-		 */
-		dev->mem_start = card->phys_mem + BUF_OFFSET(txBuffer[i][0][0]);
-		dev->mem_end = card->phys_mem
-		    + BUF_OFFSET(txBuffer[i][NUM_TX_BUFFER][0]);
-		dev->base_addr = card->pci_conf;
-		dev->irq = card->irq;
-
-		dev->tx_queue_len = FST_TX_QUEUE_LEN;
-		dev->open = fst_open;
-		dev->stop = fst_close;
-		dev->do_ioctl = fst_ioctl;
-		dev->watchdog_timeo = FST_TX_TIMEOUT;
-		dev->tx_timeout = fst_tx_timeout;
-		card->ports[i].hdlc.attach = fst_attach;
-		card->ports[i].hdlc.xmit = fst_start_xmit;
-
-		if ((err = register_hdlc_device(&card->ports[i].hdlc)) < 0) {
-			printk_err("Cannot register HDLC device for port %d"
-				   " (errno %d)\n", i, -err);
-			card->nports = i;
-			break;
-		}
+                err = register_hdlc_device(card->ports[i].dev);
+                if (err < 0) {
+			int j;
+			pr_err("Cannot register HDLC device for port %d (errno %d)\n",
+			       i, -err);
+			for (j = i; j < card->nports; j++) {
+				free_netdev(card->ports[j].dev);
+				card->ports[j].dev = NULL;
+			}
+                        card->nports = i;
+                        break;
+                }
 	}
 
-	spin_lock_init(&card->card_lock);
-
-	printk_info("%s-%s: %s IRQ%d, %d ports\n",
-	       hdlc_to_dev(&card->ports[0].hdlc)->name,
-	       hdlc_to_dev(&card->ports[card->nports - 1].hdlc)->name,
-	       type_strings[card->type], card->irq, card->nports);
+	pr_info("%s-%s: %s IRQ%d, %d ports\n",
+		port_to_dev(&card->ports[0])->name,
+		port_to_dev(&card->ports[card->nports - 1])->name,
+		type_strings[card->type], card->irq, card->nports);
 }
+
+static const struct net_device_ops fst_ops = {
+	.ndo_open       = fst_open,
+	.ndo_stop       = fst_close,
+	.ndo_change_mtu = hdlc_change_mtu,
+	.ndo_start_xmit = hdlc_start_xmit,
+	.ndo_do_ioctl   = fst_ioctl,
+	.ndo_tx_timeout = fst_tx_timeout,
+};
 
 /*
  *      Initialise card when detected.
@@ -2454,19 +2418,17 @@ fst_init_card(struct fst_card_info *card)
 static int __devinit
 fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
-	static int firsttime_done = 0;
 	static int no_of_cards_added = 0;
 	struct fst_card_info *card;
 	int err = 0;
 	int i;
 
-	if (!firsttime_done) {
-		printk_info("FarSync WAN driver " FST_USER_VERSION
-		       " (c) 2001-2004 FarSite Communications Ltd.\n");
-		firsttime_done = 1;
-		dbg(DBG_ASS, "The value of debug mask is %x\n", fst_debug_mask);
-	}
-
+	printk_once(KERN_INFO
+		    pr_fmt("FarSync WAN driver " FST_USER_VERSION
+			   " (c) 2001-2004 FarSite Communications Ltd.\n"));
+#if FST_DEBUG
+	dbg(DBG_ASS, "The value of debug mask is %x\n", fst_debug_mask);
+#endif
 	/*
 	 * We are going to be clever and allow certain cards not to be
 	 * configured.  An exclude list can be provided in /etc/modules.conf
@@ -2478,31 +2440,29 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		 */
 		for (i = 0; i < fst_excluded_cards; i++) {
 			if ((pdev->devfn) >> 3 == fst_excluded_list[i]) {
-				printk_info("FarSync PCI device %d not assigned\n",
-				       (pdev->devfn) >> 3);
+				pr_info("FarSync PCI device %d not assigned\n",
+					(pdev->devfn) >> 3);
 				return -EBUSY;
 			}
 		}
 	}
 
 	/* Allocate driver private data */
-	card = kmalloc(sizeof (struct fst_card_info), GFP_KERNEL);
+	card = kzalloc(sizeof (struct fst_card_info), GFP_KERNEL);
 	if (card == NULL) {
-		printk_err("FarSync card found but insufficient memory for"
-			   " driver storage\n");
+		pr_err("FarSync card found but insufficient memory for driver storage\n");
 		return -ENOMEM;
 	}
-	memset(card, 0, sizeof (struct fst_card_info));
 
 	/* Try to enable the device */
 	if ((err = pci_enable_device(pdev)) != 0) {
-		printk_err("Failed to enable card. Err %d\n", -err);
+		pr_err("Failed to enable card. Err %d\n", -err);
 		kfree(card);
 		return err;
 	}
 
 	if ((err = pci_request_regions(pdev, "FarSync")) !=0) {
-	        printk_err("Failed to allocate regions. Err %d\n", -err);
+		pr_err("Failed to allocate regions. Err %d\n", -err);
 		pci_disable_device(pdev);
 		kfree(card);
 	        return err;
@@ -2513,24 +2473,25 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	card->phys_mem = pci_resource_start(pdev, 2);
 	card->phys_ctlmem = pci_resource_start(pdev, 3);
 	if ((card->mem = ioremap(card->phys_mem, FST_MEMSIZE)) == NULL) {
-		printk_err("Physical memory remap failed\n");
+		pr_err("Physical memory remap failed\n");
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		kfree(card);
 		return -ENODEV;
 	}
 	if ((card->ctlmem = ioremap(card->phys_ctlmem, 0x10)) == NULL) {
-		printk_err("Control memory remap failed\n");
+		pr_err("Control memory remap failed\n");
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
+		iounmap(card->mem);
 		kfree(card);
 		return -ENODEV;
 	}
 	dbg(DBG_PCI, "kernel mem %p, ctlmem %p\n", card->mem, card->ctlmem);
 
 	/* Register the interrupt handler */
-	if (request_irq(pdev->irq, fst_intr, SA_SHIRQ, FST_DEV_NAME, card)) {
-		printk_err("Unable to register interrupt %d\n", card->irq);
+	if (request_irq(pdev->irq, fst_intr, IRQF_SHARED, FST_DEV_NAME, card)) {
+		pr_err("Unable to register interrupt %d\n", card->irq);
 		pci_release_regions(pdev);
 		pci_disable_device(pdev);
 		iounmap(card->ctlmem);
@@ -2553,6 +2514,49 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 				(ent->driver_data == FST_TYPE_T2U)) ? 2 : 4;
 
 	card->state = FST_UNINIT;
+        spin_lock_init ( &card->card_lock );
+
+        for ( i = 0 ; i < card->nports ; i++ ) {
+		struct net_device *dev = alloc_hdlcdev(&card->ports[i]);
+		hdlc_device *hdlc;
+		if (!dev) {
+			while (i--)
+				free_netdev(card->ports[i].dev);
+			pr_err("FarSync: out of memory\n");
+                        free_irq(card->irq, card);
+                        pci_release_regions(pdev);
+                        pci_disable_device(pdev);
+                        iounmap(card->ctlmem);
+                        iounmap(card->mem);
+                        kfree(card);
+                        return -ENODEV;
+		}
+		card->ports[i].dev    = dev;
+                card->ports[i].card   = card;
+                card->ports[i].index  = i;
+                card->ports[i].run    = 0;
+
+		hdlc = dev_to_hdlc(dev);
+
+                /* Fill in the net device info */
+		/* Since this is a PCI setup this is purely
+		 * informational. Give them the buffer addresses
+		 * and basic card I/O.
+		 */
+                dev->mem_start   = card->phys_mem
+                                 + BUF_OFFSET ( txBuffer[i][0][0]);
+                dev->mem_end     = card->phys_mem
+                                 + BUF_OFFSET ( txBuffer[i][NUM_TX_BUFFER][0]);
+                dev->base_addr   = card->pci_conf;
+                dev->irq         = card->irq;
+
+		dev->netdev_ops = &fst_ops;
+		dev->tx_queue_len = FST_TX_QUEUE_LEN;
+		dev->watchdog_timeo = FST_TX_TIMEOUT;
+                hdlc->attach = fst_attach;
+                hdlc->xmit   = fst_start_xmit;
+	}
+
 	card->device = pdev;
 
 	dbg(DBG_PCI, "type %d nports %d irq %d\n", card->type,
@@ -2582,7 +2586,7 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		    pci_alloc_consistent(card->device, FST_MAX_MTU,
 					 &card->rx_dma_handle_card);
 		if (card->rx_dma_handle_host == NULL) {
-			printk_err("Could not allocate rx dma buffer\n");
+			pr_err("Could not allocate rx dma buffer\n");
 			fst_disable_intr(card);
 			pci_release_regions(pdev);
 			pci_disable_device(pdev);
@@ -2595,7 +2599,7 @@ fst_add_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 		    pci_alloc_consistent(card->device, FST_MAX_MTU,
 					 &card->tx_dma_handle_card);
 		if (card->tx_dma_handle_host == NULL) {
-			printk_err("Could not allocate tx dma buffer\n");
+			pr_err("Could not allocate tx dma buffer\n");
 			fst_disable_intr(card);
 			pci_release_regions(pdev);
 			pci_disable_device(pdev);
@@ -2620,7 +2624,8 @@ fst_remove_one(struct pci_dev *pdev)
 	card = pci_get_drvdata(pdev);
 
 	for (i = 0; i < card->nports; i++) {
-		unregister_hdlc_device(&card->ports[i].hdlc);
+		struct net_device *dev = port_to_dev(&card->ports[i]);
+		unregister_hdlc_device(dev);
 	}
 
 	fst_disable_intr(card);
@@ -2628,17 +2633,7 @@ fst_remove_one(struct pci_dev *pdev)
 
 	iounmap(card->ctlmem);
 	iounmap(card->mem);
-
 	pci_release_regions(pdev);
-#if 0
-	release_mem_region(card->phys_ctlmem, 0x10);
-	release_mem_region(card->phys_mem, FST_MEMSIZE);
-	if (card->family == FST_FAMILY_TXU) {
-		release_region(card->pci_conf, 0x100);
-	} else {
-		release_region(card->pci_conf, 0x80);
-	}
-#endif
 	if (card->family == FST_FAMILY_TXU) {
 		/*
 		 * Free dma buffers
@@ -2654,12 +2649,12 @@ fst_remove_one(struct pci_dev *pdev)
 }
 
 static struct pci_driver fst_driver = {
-	name:FST_NAME,
-	id_table:fst_pci_dev_id,
-	probe:fst_add_one,
-	remove:__devexit_p(fst_remove_one),
-	suspend:NULL,
-	resume:NULL,
+        .name		= FST_NAME,
+        .id_table	= fst_pci_dev_id,
+        .probe		= fst_add_one,
+        .remove	= __devexit_p(fst_remove_one),
+        .suspend	= NULL,
+        .resume	= NULL,
 };
 
 static int __init
@@ -2670,13 +2665,13 @@ fst_init(void)
 	for (i = 0; i < FST_MAX_CARDS; i++)
 		fst_card_array[i] = NULL;
 	spin_lock_init(&fst_work_q_lock);
-	return pci_module_init(&fst_driver);
+	return pci_register_driver(&fst_driver);
 }
 
 static void __exit
 fst_cleanup_module(void)
 {
-	printk_info("FarSync WAN driver unloading\n");
+	pr_info("FarSync WAN driver unloading\n");
 	pci_unregister_driver(&fst_driver);
 }
 

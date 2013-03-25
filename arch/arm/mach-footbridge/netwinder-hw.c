@@ -5,17 +5,23 @@
  *
  * Copyright (C) 1998, 1999 Russell King, Phil Blundell
  */
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/io.h>
+#include <linux/spinlock.h>
 
-#include <asm/io.h>
+#include <asm/hardware/dec21285.h>
 #include <asm/leds.h>
 #include <asm/mach-types.h>
+#include <asm/setup.h>
+#include <asm/system_misc.h>
+
+#include <asm/mach/arch.h>
+
+#include "common.h"
 
 #define IRDA_IO_BASE		0x180
 #define GP1_IO_BASE		0x338
@@ -53,7 +59,7 @@ static inline void wb977_ww(int reg, int val)
 	outb(reg, 0x370);
 	outb(val >> 8, 0x371);
 	outb(reg + 1, 0x370);
-	outb(val, 0x371);
+	outb(val & 255, 0x371);
 }
 
 #define wb977_device_select(dev)	wb977_wb(0x07, dev)
@@ -63,13 +69,14 @@ static inline void wb977_ww(int reg, int val)
 /*
  * This is a lock for accessing ports GP1_IO_BASE and GP2_IO_BASE
  */
-spinlock_t gpio_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_RAW_SPINLOCK(nw_gpio_lock);
+EXPORT_SYMBOL(nw_gpio_lock);
 
 static unsigned int current_gpio_op;
 static unsigned int current_gpio_io;
 static unsigned int current_cpld;
 
-void gpio_modify_op(int mask, int set)
+void nw_gpio_modify_op(unsigned int mask, unsigned int set)
 {
 	unsigned int new_gpio, changed;
 
@@ -82,6 +89,7 @@ void gpio_modify_op(int mask, int set)
 	if (changed & 0xff00)
 		outb(new_gpio >> 8, GP2_IO_BASE);
 }
+EXPORT_SYMBOL(nw_gpio_modify_op);
 
 static inline void __gpio_modify_io(int mask, int in)
 {
@@ -114,7 +122,7 @@ static inline void __gpio_modify_io(int mask, int in)
 	}
 }
 
-void gpio_modify_io(int mask, int in)
+void nw_gpio_modify_io(unsigned int mask, unsigned int in)
 {
 	/* Open up the SuperIO chip */
 	wb977_open();
@@ -124,11 +132,13 @@ void gpio_modify_io(int mask, int in)
 	/* Close up the EFER gate */
 	wb977_close();
 }
+EXPORT_SYMBOL(nw_gpio_modify_io);
 
-int gpio_read(void)
+unsigned int nw_gpio_read(void)
 {
 	return inb(GP1_IO_BASE) | inb(GP2_IO_BASE) << 8;
 }
+EXPORT_SYMBOL(nw_gpio_read);
 
 /*
  * Initialise the Winbond W83977F global registers
@@ -318,9 +328,9 @@ static inline void wb977_init_gpio(void)
 	/*
 	 * Set Group1/Group2 outputs
 	 */
-	spin_lock_irqsave(&gpio_lock, flags);
-	gpio_modify_op(-1, GPIO_RED_LED | GPIO_FAN);
-	spin_unlock_irqrestore(&gpio_loc, flags);
+	raw_spin_lock_irqsave(&nw_gpio_lock, flags);
+	nw_gpio_modify_op(-1, GPIO_RED_LED | GPIO_FAN);
+	raw_spin_unlock_irqrestore(&nw_gpio_lock, flags);
 }
 
 /*
@@ -355,34 +365,35 @@ static void __init wb977_init(void)
 	wb977_close();
 }
 
-void cpld_modify(int mask, int set)
+void nw_cpld_modify(unsigned int mask, unsigned int set)
 {
 	int msk;
 
 	current_cpld = (current_cpld & ~mask) | set;
 
-	gpio_modify_io(GPIO_DATA | GPIO_IOCLK | GPIO_IOLOAD, 0);
-	gpio_modify_op(GPIO_IOLOAD, 0);
+	nw_gpio_modify_io(GPIO_DATA | GPIO_IOCLK | GPIO_IOLOAD, 0);
+	nw_gpio_modify_op(GPIO_IOLOAD, 0);
 
 	for (msk = 8; msk; msk >>= 1) {
 		int bit = current_cpld & msk;
 
-		gpio_modify_op(GPIO_DATA | GPIO_IOCLK, bit ? GPIO_DATA : 0);
-		gpio_modify_op(GPIO_IOCLK, GPIO_IOCLK);
+		nw_gpio_modify_op(GPIO_DATA | GPIO_IOCLK, bit ? GPIO_DATA : 0);
+		nw_gpio_modify_op(GPIO_IOCLK, GPIO_IOCLK);
 	}
 
-	gpio_modify_op(GPIO_IOCLK|GPIO_DATA, 0);
-	gpio_modify_op(GPIO_IOLOAD|GPIO_DSCLK, GPIO_IOLOAD|GPIO_DSCLK);
-	gpio_modify_op(GPIO_IOLOAD, 0);
+	nw_gpio_modify_op(GPIO_IOCLK|GPIO_DATA, 0);
+	nw_gpio_modify_op(GPIO_IOLOAD|GPIO_DSCLK, GPIO_IOLOAD|GPIO_DSCLK);
+	nw_gpio_modify_op(GPIO_IOLOAD, 0);
 }
+EXPORT_SYMBOL(nw_cpld_modify);
 
 static void __init cpld_init(void)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&gpio_lock, flags);
-	cpld_modify(-1, CPLD_UNMUTE | CPLD_7111_DISABLE);
-	spin_unlock_irqrestore(&gpio_lock, flags);
+	raw_spin_lock_irqsave(&nw_gpio_lock, flags);
+	nw_cpld_modify(-1, CPLD_UNMUTE | CPLD_7111_DISABLE);
+	raw_spin_unlock_irqrestore(&nw_gpio_lock, flags);
 }
 
 static unsigned char rwa_unlock[] __initdata =
@@ -483,7 +494,7 @@ static inline void rwa010_waveartist_init(int base, int irq, int dma)
 	WRITE_RWA(7, 0);
 
 	dprintk("WaveArtist base: ");
-	WRITE_RWA(0x61, base);
+	WRITE_RWA(0x61, base & 255);
 	i = inb(0x203);
 
 	WRITE_RWA(0x60, base >> 8);
@@ -505,7 +516,7 @@ static inline void rwa010_soundblaster_init(int sb_base, int al_base, int irq, i
 	WRITE_RWA(7, 1);
 
 	dprintk("SoundBlaster base: ");
-	WRITE_RWA(0x61, sb_base);
+	WRITE_RWA(0x61, sb_base & 255);
 	i = inb(0x203);
 
 	WRITE_RWA(0x60, sb_base >> 8);
@@ -520,7 +531,7 @@ static inline void rwa010_soundblaster_init(int sb_base, int al_base, int irq, i
 	dprintk("%d (%d)\n", inb(0x203), dma);
 
 	dprintk("AdLib base: ");
-	WRITE_RWA(0x63, al_base);
+	WRITE_RWA(0x63, al_base & 255);
 	i = inb(0x203);
 
 	WRITE_RWA(0x62, al_base >> 8);
@@ -592,11 +603,6 @@ static void __init rwa010_init(void)
 	rwa010_soundblaster_reset();
 }
 
-EXPORT_SYMBOL(gpio_lock);
-EXPORT_SYMBOL(gpio_modify_op);
-EXPORT_SYMBOL(gpio_modify_io);
-EXPORT_SYMBOL(cpld_modify);
-
 /*
  * Initialise any other hardware after we've got the PCI bus
  * initialised.  We may need the PCI bus to talk to this other
@@ -611,11 +617,71 @@ static int __init nw_hw_init(void)
 		cpld_init();
 		rwa010_init();
 
-		spin_lock_irqsave(&gpio_lock, flags);
-		gpio_modify_op(GPIO_RED_LED|GPIO_GREEN_LED, DEFAULT_LEDS);
-		spin_unlock_irqrestore(&gpio_lock, flags);
+		raw_spin_lock_irqsave(&nw_gpio_lock, flags);
+		nw_gpio_modify_op(GPIO_RED_LED|GPIO_GREEN_LED, DEFAULT_LEDS);
+		raw_spin_unlock_irqrestore(&nw_gpio_lock, flags);
 	}
 	return 0;
 }
 
 __initcall(nw_hw_init);
+
+/*
+ * Older NeTTroms either do not provide a parameters
+ * page, or they don't supply correct information in
+ * the parameter page.
+ */
+static void __init
+fixup_netwinder(struct tag *tags, char **cmdline, struct meminfo *mi)
+{
+#ifdef CONFIG_ISAPNP
+	extern int isapnp_disable;
+
+	/*
+	 * We must not use the kernels ISAPnP code
+	 * on the NetWinder - it will reset the settings
+	 * for the WaveArtist chip and render it inoperable.
+	 */
+	isapnp_disable = 1;
+#endif
+}
+
+static void netwinder_restart(char mode, const char *cmd)
+{
+	if (mode == 's') {
+		/* Jump into the ROM */
+		soft_restart(0x41000000);
+	} else {
+		local_irq_disable();
+		local_fiq_disable();
+
+		/* open up the SuperIO chip */
+		outb(0x87, 0x370);
+		outb(0x87, 0x370);
+
+		/* aux function group 1 (logical device 7) */
+		outb(0x07, 0x370);
+		outb(0x07, 0x371);
+
+		/* set GP16 for WD-TIMER output */
+		outb(0xe6, 0x370);
+		outb(0x00, 0x371);
+
+		/* set a RED LED and toggle WD_TIMER for rebooting */
+		outb(0xc4, 0x338);
+	}
+}
+
+MACHINE_START(NETWINDER, "Rebel-NetWinder")
+	/* Maintainer: Russell King/Rebel.com */
+	.atag_offset	= 0x100,
+	.video_start	= 0x000a0000,
+	.video_end	= 0x000bffff,
+	.reserve_lp0	= 1,
+	.reserve_lp2	= 1,
+	.fixup		= fixup_netwinder,
+	.map_io		= footbridge_map_io,
+	.init_irq	= footbridge_init_irq,
+	.timer		= &isa_timer,
+	.restart	= netwinder_restart,
+MACHINE_END

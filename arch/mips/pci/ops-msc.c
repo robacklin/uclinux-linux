@@ -1,6 +1,9 @@
 /*
- * Carsten Langgaard, carstenl@mips.com
- * Copyright (C) 1999, 2000 MIPS Technologies, Inc.  All rights reserved.
+ * Copyright (C) 1999, 2000, 2004, 2005  MIPS Technologies, Inc.
+ *    All rights reserved.
+ *    Authors: Carsten Langgaard <carstenl@mips.com>
+ *             Maciej W. Rozycki <macro@mips.com>
+ * Copyright (C) 2005 Ralf Baechle (ralf@linux-mips.org)
  *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
@@ -14,6 +17,9 @@
  *  You should have received a copy of the GNU General Public License along
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
+ *
+ * MIPS boards specific PCI support.
+ *
  */
 #include <linux/types.h>
 #include <linux/pci.h>
@@ -38,52 +44,36 @@
 #define PCI_CFG_TYPE1_DEV_SHF           11
 #define PCI_CFG_TYPE1_BUS_SHF           16
 
-static int msc_config_access(unsigned char access_type,
-	struct pci_dev *dev, unsigned char where, u32 *data)
+static int msc_pcibios_config_access(unsigned char access_type,
+	struct pci_bus *bus, unsigned int devfn, int where, u32 * data)
 {
-	unsigned char bus = dev->bus->number;
-	unsigned char dev_fn = dev->devfn;
-	unsigned char type;
-	u32 intr, dummy;
-	u64 pci_addr;
-
-	if ((bus == 0) && (PCI_SLOT(dev_fn) == 0))
-	        return -1;
+	unsigned char busnum = bus->number;
+	u32 intr;
 
 	/* Clear status register bits. */
 	MSC_WRITE(MSC01_PCI_INTSTAT,
 		  (MSC01_PCI_INTCFG_MA_BIT | MSC01_PCI_INTCFG_TA_BIT));
 
-	/* Setup address */
-	if (bus == 0)
-		type = 0;  /* Type 0 */
-	else
-		type = 1;  /* Type 1 */
-
 	MSC_WRITE(MSC01_PCI_CFGADDR,
-		  ((bus              << MSC01_PCI_CFGADDR_BNUM_SHF) |
-		   (PCI_SLOT(dev_fn) << MSC01_PCI_CFGADDR_DNUM_SHF) |
-		   (PCI_FUNC(dev_fn) << MSC01_PCI_CFGADDR_FNUM_SHF) |
-		   ((where /4 )      << MSC01_PCI_CFGADDR_RNUM_SHF) |
-		   (type)));
+		  ((busnum << MSC01_PCI_CFGADDR_BNUM_SHF) |
+		   (PCI_SLOT(devfn) << MSC01_PCI_CFGADDR_DNUM_SHF) |
+		   (PCI_FUNC(devfn) << MSC01_PCI_CFGADDR_FNUM_SHF) |
+		   ((where / 4) << MSC01_PCI_CFGADDR_RNUM_SHF)));
 
 	/* Perform access */
-	if (access_type == PCI_ACCESS_WRITE) {
-	        MSC_WRITE(MSC01_PCI_CFGDATA, *data);
-	} else {
+	if (access_type == PCI_ACCESS_WRITE)
+		MSC_WRITE(MSC01_PCI_CFGDATA, *data);
+	else
 		MSC_READ(MSC01_PCI_CFGDATA, *data);
-	}
 
 	/* Detect Master/Target abort */
 	MSC_READ(MSC01_PCI_INTSTAT, intr);
 	if (intr & (MSC01_PCI_INTCFG_MA_BIT | MSC01_PCI_INTCFG_TA_BIT)) {
-	        /* Error occurred */
+		/* Error occurred */
 
-	        /* Clear bits */
-		MSC_READ(MSC01_PCI_INTSTAT, intr);
+		/* Clear bits */
 		MSC_WRITE(MSC01_PCI_INTSTAT,
-			  (MSC01_PCI_INTCFG_MA_BIT |
-			   MSC01_PCI_INTCFG_TA_BIT));
+			  (MSC01_PCI_INTCFG_MA_BIT | MSC01_PCI_INTCFG_TA_BIT));
 
 		return -1;
 	}
@@ -96,106 +86,63 @@ static int msc_config_access(unsigned char access_type,
  * We can't address 8 and 16 bit words directly.  Instead we have to
  * read/write a 32bit word and mask/modify the data we actually want.
  */
-static int msc_read_config_byte (struct pci_dev *dev, int where,
-	u8 *val)
+static int msc_pcibios_read(struct pci_bus *bus, unsigned int devfn,
+			     int where, int size, u32 * val)
 {
 	u32 data = 0;
 
-	if (msc_config_access(PCI_ACCESS_READ, dev, where, &data))
+	if ((size == 2) && (where & 1))
+		return PCIBIOS_BAD_REGISTER_NUMBER;
+	else if ((size == 4) && (where & 3))
+		return PCIBIOS_BAD_REGISTER_NUMBER;
+
+	if (msc_pcibios_config_access(PCI_ACCESS_READ, bus, devfn, where,
+	                              &data))
 		return -1;
 
-	*val = (data >> ((where & 3) << 3)) & 0xff;
+	if (size == 1)
+		*val = (data >> ((where & 3) << 3)) & 0xff;
+	else if (size == 2)
+		*val = (data >> ((where & 3) << 3)) & 0xffff;
+	else
+		*val = data;
 
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int msc_read_config_word (struct pci_dev *dev, int where,
-	u16 *val)
+static int msc_pcibios_write(struct pci_bus *bus, unsigned int devfn,
+			      int where, int size, u32 val)
 {
 	u32 data = 0;
 
-	if (where & 1)
+	if ((size == 2) && (where & 1))
+		return PCIBIOS_BAD_REGISTER_NUMBER;
+	else if ((size == 4) && (where & 3))
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
-	if (msc_config_access(PCI_ACCESS_READ, dev, where, &data))
-	       return -1;
+	if (size == 4)
+		data = val;
+	else {
+		if (msc_pcibios_config_access(PCI_ACCESS_READ, bus, devfn,
+		                              where, &data))
+			return -1;
 
-	*val = (data >> ((where & 3) << 3)) & 0xffff;
+		if (size == 1)
+			data = (data & ~(0xff << ((where & 3) << 3))) |
+				(val << ((where & 3) << 3));
+		else if (size == 2)
+			data = (data & ~(0xffff << ((where & 3) << 3))) |
+				(val << ((where & 3) << 3));
+	}
 
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int msc_read_config_dword (struct pci_dev *dev, int where,
-	u32 *val)
-{
-	u32 data = 0;
-
-	if (where & 3)
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-
-	if (msc_config_access(PCI_ACCESS_READ, dev, where, &data))
+	if (msc_pcibios_config_access(PCI_ACCESS_WRITE, bus, devfn, where,
+				       &data))
 		return -1;
-
-	*val = data;
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int msc_write_config_byte (struct pci_dev *dev, int where,
-	u8 val)
-{
-	u32 data = 0;
-
-	if (msc_config_access(PCI_ACCESS_READ, dev, where, &data))
-		return -1;
-
-	data = (data & ~(0xff << ((where & 3) << 3))) |
-	       (val << ((where & 3) << 3));
-
-	if (msc_config_access(PCI_ACCESS_WRITE, dev, where, &data))
-		return -1;
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int msc_write_config_word (struct pci_dev *dev, int where,
-	u16 val)
-{
-        u32 data = 0;
-
-	if (where & 1)
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-
-        if (msc_config_access(PCI_ACCESS_READ, dev, where, &data))
-	       return -1;
-
-	data = (data & ~(0xffff << ((where & 3) << 3))) |
-	       (val << ((where & 3) << 3));
-
-	if (msc_config_access(PCI_ACCESS_WRITE, dev, where, &data))
-	       return -1;
-
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int msc_write_config_dword(struct pci_dev *dev, int where,
-	u32 val)
-{
-	if (where & 3)
-		return PCIBIOS_BAD_REGISTER_NUMBER;
-
-	if (msc_config_access(PCI_ACCESS_WRITE, dev, where, &val))
-	       return -1;
 
 	return PCIBIOS_SUCCESSFUL;
 }
 
 struct pci_ops msc_pci_ops = {
-	msc_read_config_byte,
-        msc_read_config_word,
-	msc_read_config_dword,
-	msc_write_config_byte,
-	msc_write_config_word,
-	msc_write_config_dword
+	.read = msc_pcibios_read,
+	.write = msc_pcibios_write
 };

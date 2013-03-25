@@ -2,13 +2,8 @@
 # Makefile for s390-specific library files..
 #
 
-.S.o:
-	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
-
-L_TARGET = lib.a
-
-obj-y = checksum.o delay.o memset.o misaligned.o strcmp.o strncpy.o uaccess.o
-export-objs += misaligned.o
-
-include $(TOPDIR)/Rules.make
-
+lib-y += delay.o string.o uaccess_std.o uaccess_pt.o
+obj-y += usercopy.o
+obj-$(CONFIG_32BIT) += div64.o qrnnd.o ucmpdi2.o
+lib-$(CONFIG_64BIT) += uaccess_mvcos.o
+lib-$(CONFIG_SMP) += spinlock.o

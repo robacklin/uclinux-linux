@@ -1,7 +1,7 @@
-/* entry.S: FR-V entry
+/* cmode.S: clock mode management
  *
  * Copyright (C) 2004 Red Hat, Inc. All Rights Reserved.
- * Written by David Woodhouse (dwmw2@redhat.com)
+ * Written by David Woodhouse (dwmw2@infradead.org)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -11,7 +11,6 @@
  */
 
 #include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/setup.h>
 #include <asm/segment.h>
@@ -19,7 +18,7 @@
 #include <asm/errno.h>
 #include <asm/cache.h>
 #include <asm/spr-regs.h>
-	
+
 #define __addr_MASK	0xfeff9820	/* interrupt controller mask */
 
 #define __addr_SDRAMC	0xfe000400	/* SDRAM controller regs */
@@ -29,8 +28,7 @@
 #define SDRAMC_DRCN_SR	0x00000001	/* transition SDRAM into self-refresh mode */
 #define __addr_CLKC	0xfeff9a00
 #define CLKC_SWCMODE	0x00000008
-#define __addr_LEDS	0xe1200004	
-        .file		"cmode.S"
+#define __addr_LEDS	0xe1200004
 
 .macro li v r
 	sethi.p		%hi(\v),\r
@@ -40,7 +38,7 @@
 	.text
 	.balign		4
 
-	
+
 ###############################################################################
 #
 # Change CMODE
@@ -57,8 +55,8 @@
 	membar
 #endif
 .endm
-		
-frv_change_cmode:	
+
+frv_change_cmode:
 	movsg		lr,gr9
 #ifdef DEBUG_CMODE
 	li		__addr_LEDS,gr11
@@ -68,27 +66,27 @@ frv_change_cmode:
 	# Shift argument left by 24 bits to fit in SWCMODE register later.
 	slli		gr8,#24,gr8
 
-	# (1) Set '0' in the PSR.ET bit, and prohibit interrupts. 
+	# (1) Set '0' in the PSR.ET bit, and prohibit interrupts.
 	movsg		psr,gr14
 	andi		gr14,#~PSR_ET,gr3
 	movgs		gr3,psr
 
 #if 0 // Fujitsu recommend to skip this and will update docs.
-	# (2) Set '0' to all bits of the MASK register of the interrupt 
-	#     controller, and mask interrupts. 
+	# (2) Set '0' to all bits of the MASK register of the interrupt
+	#     controller, and mask interrupts.
 	li		__addr_MASK,gr12
 	ldi		@(gr12,#0),gr13
 	li		0xffff0000,gr4
 	sti		gr4,@(gr12,#0)
 #endif
-	
-	# (3) Stop the transfer function of DMAC. Stop all the bus masters 
+
+	# (3) Stop the transfer function of DMAC. Stop all the bus masters
 	#     to access SDRAM and the internal resources.
 
 	# (already done by caller)
-	
+
 	# (4) Preload a series of following instructions to the instruction
-	#     cache. 
+	#     cache.
 	li		#__cmode_icache_lock_start,gr3
 	li		#__cmode_icache_lock_end,gr4
 
@@ -104,19 +102,19 @@ frv_change_cmode:
 	ldi		@(gr5,#0),gr6
 	li		#0x80000000,gr7
 	or		gr6,gr7,gr6
-	
+
 	bra		__cmode_icache_lock_start
 
 	.balign	L1_CACHE_BYTES
-__cmode_icache_lock_start:		
+__cmode_icache_lock_start:
 
-	# (5) Flush the content of all caches by the DCEF instruction. 
+	# (5) Flush the content of all caches by the DCEF instruction.
 	dcef		@(gr0,gr0),#1
 
 	# (6) Execute loading the dummy for SDRAM.
 	ldi		@(gr9,#0),gr0
 
-	# (7) Set '1' to the DRCN.SR bit, and change SDRAM to the 
+	# (7) Set '1' to the DRCN.SR bit, and change SDRAM to the
 	#     self-refresh mode. Execute the dummy load to all memory
 	#     devices set to cacheable on the external bus side in parallel
 	#     with this.
@@ -124,8 +122,8 @@ __cmode_icache_lock_start:
 
 	# (8) Execute memory barrier instruction (MEMBAR).
 	membar
-	
-	# (9) Read the DSTS register repeatedly until '1' stands in the 
+
+	# (9) Read the DSTS register repeatedly until '1' stands in the
 	#     DSTS.SSI field.
 1:	ldi		@(gr4,#SDRAMC_DSTS),gr3
 	andicc		gr3,#SDRAMC_DSTS_SSI,gr3,icc0
@@ -133,25 +131,25 @@ __cmode_icache_lock_start:
 
 	# (10) Execute memory barrier instruction (MEMBAR).
 	membar
-	
+
 #if 1
-	# (11) Set the value of CMODE that you want to change to 
+	# (11) Set the value of CMODE that you want to change to
 	#      SWCMODE.SWCM[3:0].
 	sti		gr8,@(gr5,#CLKC_SWCMODE)
 
-	# (12) Set '1' to the CLKC.SWEN bit. In that case, do not change 
+	# (12) Set '1' to the CLKC.SWEN bit. In that case, do not change
 	#      fields other than SWEN of the CLKC register.
 	sti		gr6,@(gr5,#0)
 #endif
-	# (13) Execute the instruction just after the memory barrier 
+	# (13) Execute the instruction just after the memory barrier
 	# instruction that executes the self-loop 256 times. (Meanwhile,
-	# the CMODE switch is done.) 
+	# the CMODE switch is done.)
 	membar
 	setlos		#256,gr7
 2:	subicc		gr7,#1,gr7,icc0
 	bne		icc0,#2,2b
 
-	LEDS	0x36	
+	LEDS	0x36
 
 	# (14) Release the self-refresh of SDRAM.
 	sti		gr0,@(gr4,#SDRAMC_DRCN)
@@ -168,7 +166,7 @@ __cmode_icache_lock_start:
 	bne		icc0,#0,4b
 #endif
 
-__cmode_icache_lock_end:		
+__cmode_icache_lock_end:
 
 	li		#__cmode_icache_lock_start,gr3
 	li		#__cmode_icache_lock_end,gr4
@@ -179,13 +177,13 @@ __cmode_icache_lock_end:
 	bhi		icc0,#0,4b
 
 #if 0 // Fujitsu recommend to skip this and will update docs.
-	# (15) Release the interrupt mask setting of the MASK register of 
+	# (15) Release the interrupt mask setting of the MASK register of
 	# the interrupt controller if necessary.
 	sti		gr13,@(gr12,#0)
-#endif	
+#endif
 	# (16) Set  1' in the PSR.ET bit, and permit interrupt.
 	movgs		gr14,psr
 
 	bralr
-	
+
 	.size		frv_change_cmode, .-frv_change_cmode

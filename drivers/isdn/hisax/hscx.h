@@ -1,10 +1,10 @@
-/* $Id: hscx.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: hscx.h,v 1.8.2.2 2004/01/12 22:52:26 keil Exp $
  *
  * HSCX specific defines
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -35,7 +35,6 @@
 #define HSCX_MASK 0x20
 
 extern int HscxVersion(struct IsdnCardState *cs, char *s);
-extern void hscx_sched_event(struct BCState *bcs, int event);
 extern void modehscx(struct BCState *bcs, int mode, int bc);
 extern void clear_pending_hscx_ints(struct IsdnCardState *cs);
 extern void inithscx(struct IsdnCardState *cs);

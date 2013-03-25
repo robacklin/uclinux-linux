@@ -1,4 +1,4 @@
-/* $Id: memmove.S,v 1.2 2001/07/27 11:51:09 gniibe Exp $
+/* $Id: memmove.S,v 1.3 2003/05/04 19:29:54 lethal Exp $
  *
  * "memmove" implementation of SuperH
  *
@@ -20,7 +20,7 @@ ENTRY(memmove)
 	jmp	@r0
 	 nop
 	.balign 4
-2:	.long	SYMBOL_NAME(memcpy)
+2:	.long	memcpy
 1:
 	sub	r5,r4		! From here, r4 has the distance to r0
 	tst	r6,r6

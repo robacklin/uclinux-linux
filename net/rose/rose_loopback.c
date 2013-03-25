@@ -1,20 +1,13 @@
 /*
- *	ROSE release 003
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	ROSE 003	Jonathan(G4KLX)	Created this file from nr_loopback.c.
- *
+ * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/types.h>
+#include <linux/slab.h>
 #include <linux/socket.h>
 #include <linux/timer.h>
 #include <net/ax25.h>
@@ -80,14 +73,26 @@ static void rose_loopback_timer(unsigned long param)
 	unsigned int lci_i, lci_o;
 
 	while ((skb = skb_dequeue(&loopback_queue)) != NULL) {
+		if (skb->len < ROSE_MIN_LEN) {
+			kfree_skb(skb);
+			continue;
+		}
 		lci_i     = ((skb->data[0] << 8) & 0xF00) + ((skb->data[1] << 0) & 0x0FF);
 		frametype = skb->data[2];
-		dest      = (rose_address *)(skb->data + 4);
-		lci_o     = 0xFFF - lci_i;
+		if (frametype == ROSE_CALL_REQUEST &&
+		    (skb->len <= ROSE_CALL_REQ_FACILITIES_OFF ||
+		     skb->data[ROSE_CALL_REQ_ADDR_LEN_OFF] !=
+		     ROSE_CALL_REQ_ADDR_LEN_VAL)) {
+			kfree_skb(skb);
+			continue;
+		}
+		dest      = (rose_address *)(skb->data + ROSE_CALL_REQ_DEST_ADDR_OFF);
+		lci_o     = ROSE_DEFAULT_MAXVC + 1 - lci_i;
 
-		skb->h.raw = skb->data;
+		skb_reset_transport_header(skb);
 
-		if ((sk = rose_find_socket(lci_o, rose_loopback_neigh)) != NULL) {
+		sk = rose_find_socket(lci_o, rose_loopback_neigh);
+		if (sk) {
 			if (rose_process_rx_frame(sk, skb) == 0)
 				kfree_skb(skb);
 			continue;

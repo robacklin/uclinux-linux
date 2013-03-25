@@ -60,18 +60,6 @@
  *
  */
 
-#if STREAMER_IOCTL && (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
-#include <asm/ioctl.h>
-#define IOCTL_PRINT_RX_BUFS   SIOCDEVPRIVATE
-#define IOCTL_PRINT_TX_BUFS   SIOCDEVPRIVATE+1
-#define IOCTL_RX_CMD          SIOCDEVPRIVATE+2
-#define IOCTL_TX_CMD          SIOCDEVPRIVATE+3
-#define IOCTL_PRINT_REGISTERS SIOCDEVPRIVATE+4
-#define IOCTL_PRINT_BDAS      SIOCDEVPRIVATE+5
-#define IOCTL_SPIN_LOCK_TEST  SIOCDEVPRIVATE+6
-#define IOCTL_SISR_MASK       SIOCDEVPRIVATE+7
-#endif
-
 /* MAX_INTR - the maximum number of times we can loop
  * inside the interrupt function before returning
  * control to the OS (maximum value is 256)
@@ -291,7 +279,7 @@ struct streamer_private {
 
         struct streamer_private *next;
         struct pci_dev *pci_dev;
-	__u8 *streamer_mmio;
+	__u8 __iomem *streamer_mmio;
         char *streamer_card_name;
  
         spinlock_t streamer_lock;
@@ -311,7 +299,6 @@ struct streamer_private {
 	int tx_ring_free, tx_ring_last_status, rx_ring_last_received,
 	    free_tx_ring_entries;
 
-	struct net_device_stats streamer_stats;
 	__u16 streamer_lan_status;
 	__u8 streamer_ring_speed;
 	__u16 pkt_buf_sz;

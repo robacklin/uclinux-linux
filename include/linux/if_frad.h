@@ -24,10 +24,7 @@
 #ifndef _FRAD_H_
 #define _FRAD_H_
 
-#include <linux/config.h>
 #include <linux/if.h>
-
-#if defined(CONFIG_DLCI) || defined(CONFIG_DLCI_MODULE)
 
 /* Structures and constants associated with the DLCI device driver */
 
@@ -71,11 +68,6 @@ struct dlci_conf {
 #define DLCI_BUFFER_IF		0x0008
 
 #define DLCI_VALID_FLAGS	0x000B
-
-/* FRAD driver uses these to indicate what it did with packet */
-#define DLCI_RET_OK		0x00
-#define DLCI_RET_ERR		0x01
-#define DLCI_RET_DROP		0x02
 
 /* defines for the actual Frame Relay hardware */
 #define FRAD_GET_CONF	(SIOCDEVPRIVATE)
@@ -128,20 +120,22 @@ struct frad_conf
 
 #ifdef __KERNEL__
 
+#if defined(CONFIG_DLCI) || defined(CONFIG_DLCI_MODULE)
+
 /* these are the fields of an RFC 1490 header */
 struct frhdr
 {
    unsigned char  control;
 
    /* for IP packets, this can be the NLPID */
-   unsigned char  pad	; 
+   unsigned char  pad;
 
-   unsigned char  NLPID	;
+   unsigned char  NLPID;
    unsigned char  OUI[3];
-   unsigned short PID		__attribute__((packed));
+   __be16 PID;
 
 #define IP_NLPID pad 
-};
+} __packed;
 
 /* see RFC 1490 for the definition of the following */
 #define FRAD_I_UI		0x03
@@ -154,10 +148,11 @@ struct frhdr
 
 struct dlci_local
 {
-   struct net_device_stats stats;
-   struct net_device          *slave;
+   struct net_device      *master;
+   struct net_device      *slave;
    struct dlci_conf       config;
    int                    configured;
+   struct list_head	  list;
 
    /* callback function */
    void              (*receive)(struct sk_buff *skb, struct net_device *);
@@ -189,13 +184,10 @@ struct frad_local
    int               buffer;		/* current buffer for S508 firmware */
 };
 
-int register_frad(const char *name);
-int unregister_frad(const char *name);
+#endif /* CONFIG_DLCI || CONFIG_DLCI_MODULE */
 
-extern int (*dlci_ioctl_hook)(unsigned int, void *);
+extern void dlci_ioctl_set(int (*hook)(unsigned int, void __user *));
 
 #endif /* __KERNEL__ */
-
-#endif /* CONFIG_DLCI || CONFIG_DLCI_MODULE */
 
 #endif

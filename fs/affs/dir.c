@@ -13,43 +13,36 @@
  *
  */
 
-#include <asm/uaccess.h>
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/kernel.h>
-#include <linux/affs_fs.h>
-#include <linux/stat.h>
-#include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/amigaffs.h>
+#include "affs.h"
 
 static int affs_readdir(struct file *, void *, filldir_t);
 
-struct file_operations affs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	affs_readdir,
-	fsync:		file_fsync,
+const struct file_operations affs_dir_operations = {
+	.read		= generic_read_dir,
+	.llseek		= generic_file_llseek,
+	.readdir	= affs_readdir,
+	.fsync		= affs_file_fsync,
 };
 
 /*
  * directories can handle most operations...
  */
-struct inode_operations affs_dir_inode_operations = {
-	create:		affs_create,
-	lookup:		affs_lookup,
-	link:		affs_link,
-	unlink:		affs_unlink,
-	symlink:	affs_symlink,
-	mkdir:		affs_mkdir,
-	rmdir:		affs_rmdir,
-	rename:		affs_rename,
-	setattr:	affs_notify_change,
+const struct inode_operations affs_dir_inode_operations = {
+	.create		= affs_create,
+	.lookup		= affs_lookup,
+	.link		= affs_link,
+	.unlink		= affs_unlink,
+	.symlink	= affs_symlink,
+	.mkdir		= affs_mkdir,
+	.rmdir		= affs_rmdir,
+	.rename		= affs_rename,
+	.setattr	= affs_notify_change,
 };
 
 static int
 affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct inode		*inode = filp->f_dentry->d_inode;
+	struct inode		*inode = filp->f_path.dentry->d_inode;
 	struct super_block	*sb = inode->i_sb;
 	struct buffer_head	*dir_bh;
 	struct buffer_head	*fh_bh;
@@ -79,7 +72,7 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		stored++;
 	}
 	if (f_pos == 1) {
-		if (filldir(dirent, "..", 2, f_pos, filp->f_dentry->d_parent->d_inode->i_ino, DT_DIR) < 0)
+		if (filldir(dirent, "..", 2, f_pos, parent_ino(filp->f_path.dentry), DT_DIR) < 0)
 			return stored;
 		filp->f_pos = f_pos = 2;
 		stored++;
@@ -122,7 +115,7 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		goto inside;
 	hash_pos++;
 
-	for (; hash_pos < AFFS_SB->s_hashsize; hash_pos++) {
+	for (; hash_pos < AFFS_SB(sb)->s_hashsize; hash_pos++) {
 		ino = be32_to_cpu(AFFS_HEAD(dir_bh)->table[hash_pos]);
 		if (!ino)
 			continue;

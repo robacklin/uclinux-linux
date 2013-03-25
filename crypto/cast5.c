@@ -21,11 +21,13 @@
 */
 
 
+#include <asm/byteorder.h>
 #include <linux/init.h>
 #include <linux/crypto.h>
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/types.h>
 
 #define CAST5_BLOCK_SIZE 8
 #define CAST5_MIN_KEY_SIZE 5
@@ -567,20 +569,19 @@ static const u32 sb8[256] = {
 	0xeaee6801, 0x8db2a283, 0xea8bf59e
 };
 
-
-#define rol(n,x) ( ((x) << (n)) | ((x) >> (32-(n))) )
-
-#define F1(D,m,r)  (  (I = ((m) + (D))), (I=rol((r),I)),   \
-    (((s1[I >> 24] ^ s2[(I>>16)&0xff]) - s3[(I>>8)&0xff]) + s4[I&0xff]) )
-#define F2(D,m,r)  (  (I = ((m) ^ (D))), (I=rol((r),I)),   \
-    (((s1[I >> 24] - s2[(I>>16)&0xff]) + s3[(I>>8)&0xff]) ^ s4[I&0xff]) )
-#define F3(D,m,r)  (  (I = ((m) - (D))), (I=rol((r),I)),   \
-    (((s1[I >> 24] + s2[(I>>16)&0xff]) ^ s3[(I>>8)&0xff]) - s4[I&0xff]) )
+#define F1(D, m, r)  ((I = ((m) + (D))), (I = rol32(I, (r))),   \
+    (((s1[I >> 24] ^ s2[(I>>16)&0xff]) - s3[(I>>8)&0xff]) + s4[I&0xff]))
+#define F2(D, m, r)  ((I = ((m) ^ (D))), (I = rol32(I, (r))),   \
+    (((s1[I >> 24] - s2[(I>>16)&0xff]) + s3[(I>>8)&0xff]) ^ s4[I&0xff]))
+#define F3(D, m, r)  ((I = ((m) - (D))), (I = rol32(I, (r))),   \
+    (((s1[I >> 24] + s2[(I>>16)&0xff]) ^ s3[(I>>8)&0xff]) - s4[I&0xff]))
 
 
-static void cast5_encrypt(void *ctx, u8 * outbuf, const u8 * inbuf)
+static void cast5_encrypt(struct crypto_tfm *tfm, u8 *outbuf, const u8 *inbuf)
 {
-	struct cast5_ctx *c = (struct cast5_ctx *) ctx;
+	struct cast5_ctx *c = crypto_tfm_ctx(tfm);
+	const __be32 *src = (const __be32 *)inbuf;
+	__be32 *dst = (__be32 *)outbuf;
 	u32 l, r, t;
 	u32 I;			/* used by the Fx macros */
 	u32 *Km;
@@ -592,8 +593,8 @@ static void cast5_encrypt(void *ctx, u8 * outbuf, const u8 * inbuf)
 	/* (L0,R0) <-- (m1...m64).  (Split the plaintext into left and
 	 * right 32-bit halves L0 = m1...m32 and R0 = m33...m64.)
 	 */
-	l = inbuf[0] << 24 | inbuf[1] << 16 | inbuf[2] << 8 | inbuf[3];
-	r = inbuf[4] << 24 | inbuf[5] << 16 | inbuf[6] << 8 | inbuf[7];
+	l = be32_to_cpu(src[0]);
+	r = be32_to_cpu(src[1]);
 
 	/* (16 rounds) for i from 1 to 16, compute Li and Ri as follows:
 	 *  Li = Ri-1;
@@ -603,53 +604,36 @@ static void cast5_encrypt(void *ctx, u8 * outbuf, const u8 * inbuf)
 	 * Rounds 3, 6, 9, 12, and 15 use f function Type 3.
 	 */
 
+	t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
+	t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
+	t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
+	t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
+	t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
+	t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
+	t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
+	t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
+	t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
+	t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
+	t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
+	t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
 	if (!(c->rr)) {
-		t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
-		t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
-		t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
-		t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
-		t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
-		t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
-		t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
-		t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
-		t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
-		t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
-		t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
-		t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
 		t = l; l = r; r = t ^ F1(r, Km[12], Kr[12]);
 		t = l; l = r; r = t ^ F2(r, Km[13], Kr[13]);
 		t = l; l = r; r = t ^ F3(r, Km[14], Kr[14]);
 		t = l; l = r; r = t ^ F1(r, Km[15], Kr[15]);
-	} else {
-		t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
-		t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
-		t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
-		t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
-		t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
-		t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
-		t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
-		t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
-		t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
-		t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
-		t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
-		t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
 	}
 
 	/* c1...c64 <-- (R16,L16).  (Exchange final blocks L16, R16 and
 	 *  concatenate to form the ciphertext.) */
-	outbuf[0] = (r >> 24) & 0xff;
-	outbuf[1] = (r >> 16) & 0xff;
-	outbuf[2] = (r >> 8) & 0xff;
-	outbuf[3] = r & 0xff;
-	outbuf[4] = (l >> 24) & 0xff;
-	outbuf[5] = (l >> 16) & 0xff;
-	outbuf[6] = (l >> 8) & 0xff;
-	outbuf[7] = l & 0xff;
+	dst[0] = cpu_to_be32(r);
+	dst[1] = cpu_to_be32(l);
 }
 
-static void cast5_decrypt(void *ctx, u8 * outbuf, const u8 * inbuf)
+static void cast5_decrypt(struct crypto_tfm *tfm, u8 *outbuf, const u8 *inbuf)
 {
-	struct cast5_ctx *c = (struct cast5_ctx *) ctx;
+	struct cast5_ctx *c = crypto_tfm_ctx(tfm);
+	const __be32 *src = (const __be32 *)inbuf;
+	__be32 *dst = (__be32 *)outbuf;
 	u32 l, r, t;
 	u32 I;
 	u32 *Km;
@@ -658,52 +642,33 @@ static void cast5_decrypt(void *ctx, u8 * outbuf, const u8 * inbuf)
 	Km = c->Km;
 	Kr = c->Kr;
 
-	l = inbuf[0] << 24 | inbuf[1] << 16 | inbuf[2] << 8 | inbuf[3];
-	r = inbuf[4] << 24 | inbuf[5] << 16 | inbuf[6] << 8 | inbuf[7];
+	l = be32_to_cpu(src[0]);
+	r = be32_to_cpu(src[1]);
 
 	if (!(c->rr)) {
 		t = l; l = r; r = t ^ F1(r, Km[15], Kr[15]);
 		t = l; l = r; r = t ^ F3(r, Km[14], Kr[14]);
 		t = l; l = r; r = t ^ F2(r, Km[13], Kr[13]);
 		t = l; l = r; r = t ^ F1(r, Km[12], Kr[12]);
-		t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
-		t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
-		t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
-		t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
-		t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
-		t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
-		t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
-		t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
-		t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
-		t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
-		t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
-		t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
-	} else {
-		t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
-		t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
-		t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
-		t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
-		t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
-		t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
-		t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
-		t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
-		t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
-		t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
-		t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
-		t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
 	}
+	t = l; l = r; r = t ^ F3(r, Km[11], Kr[11]);
+	t = l; l = r; r = t ^ F2(r, Km[10], Kr[10]);
+	t = l; l = r; r = t ^ F1(r, Km[9], Kr[9]);
+	t = l; l = r; r = t ^ F3(r, Km[8], Kr[8]);
+	t = l; l = r; r = t ^ F2(r, Km[7], Kr[7]);
+	t = l; l = r; r = t ^ F1(r, Km[6], Kr[6]);
+	t = l; l = r; r = t ^ F3(r, Km[5], Kr[5]);
+	t = l; l = r; r = t ^ F2(r, Km[4], Kr[4]);
+	t = l; l = r; r = t ^ F1(r, Km[3], Kr[3]);
+	t = l; l = r; r = t ^ F3(r, Km[2], Kr[2]);
+	t = l; l = r; r = t ^ F2(r, Km[1], Kr[1]);
+	t = l; l = r; r = t ^ F1(r, Km[0], Kr[0]);
 
-	outbuf[0] = (r >> 24) & 0xff;
-	outbuf[1] = (r >> 16) & 0xff;
-	outbuf[2] = (r >> 8) & 0xff;
-	outbuf[3] = r & 0xff;
-	outbuf[4] = (l >> 24) & 0xff;
-	outbuf[5] = (l >> 16) & 0xff;
-	outbuf[6] = (l >> 8) & 0xff;
-	outbuf[7] = l & 0xff;
+	dst[0] = cpu_to_be32(r);
+	dst[1] = cpu_to_be32(l);
 }
 
-static void key_schedule(u32 * x, u32 * z, u32 * k)
+static void key_schedule(u32 *x, u32 *z, u32 *k)
 {
 
 #define xi(i)   ((x[(i)/4] >> (8*(3-((i)%4)))) & 0xff)
@@ -778,20 +743,14 @@ static void key_schedule(u32 * x, u32 * z, u32 * k)
 }
 
 
-static int
-cast5_setkey(void *ctx, const u8 * key, unsigned key_len, u32 * flags)
+static int cast5_setkey(struct crypto_tfm *tfm, const u8 *key, unsigned key_len)
 {
+	struct cast5_ctx *c = crypto_tfm_ctx(tfm);
 	int i;
 	u32 x[4];
 	u32 z[4];
 	u32 k[16];
-	u8 p_key[16];
-	struct cast5_ctx *c = (struct cast5_ctx *) ctx;
-	
-	if (key_len < 5 || key_len > 16) {
-		*flags |= CRYPTO_TFM_RES_BAD_KEY_LEN;
-		return -EINVAL;
-	}
+	__be32 p_key[4];
 
 	c->rr = key_len <= 10 ? 1 : 0;
 
@@ -799,12 +758,10 @@ cast5_setkey(void *ctx, const u8 * key, unsigned key_len, u32 * flags)
 	memcpy(p_key, key, key_len);
 
 
-	x[0] = p_key[0] << 24 | p_key[1] << 16 | p_key[2] << 8 | p_key[3];
-	x[1] = p_key[4] << 24 | p_key[5] << 16 | p_key[6] << 8 | p_key[7];
-	x[2] =
-	    p_key[8] << 24 | p_key[9] << 16 | p_key[10] << 8 | p_key[11];
-	x[3] =
-	    p_key[12] << 24 | p_key[13] << 16 | p_key[14] << 8 | p_key[15];
+	x[0] = be32_to_cpu(p_key[0]);
+	x[1] = be32_to_cpu(p_key[1]);
+	x[2] = be32_to_cpu(p_key[2]);
+	x[3] = be32_to_cpu(p_key[3]);
 
 	key_schedule(x, z, k);
 	for (i = 0; i < 16; i++)
@@ -820,6 +777,7 @@ static struct crypto_alg alg = {
 	.cra_flags 	= CRYPTO_ALG_TYPE_CIPHER,
 	.cra_blocksize 	= CAST5_BLOCK_SIZE,
 	.cra_ctxsize 	= sizeof(struct cast5_ctx),
+	.cra_alignmask	= 3,
 	.cra_module 	= THIS_MODULE,
 	.cra_list 	= LIST_HEAD_INIT(alg.cra_list),
 	.cra_u 		= {
@@ -833,18 +791,18 @@ static struct crypto_alg alg = {
 	}
 };
 
-static int __init init(void)
+static int __init cast5_mod_init(void)
 {
 	return crypto_register_alg(&alg);
 }
 
-static void __exit fini(void)
+static void __exit cast5_mod_fini(void)
 {
 	crypto_unregister_alg(&alg);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(cast5_mod_init);
+module_exit(cast5_mod_fini);
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Cast5 Cipher Algorithm");

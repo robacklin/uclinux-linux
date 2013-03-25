@@ -1,42 +1,18 @@
 /*
- * Copyright (C) 1999,2001-2003 Silicon Graphics, Inc. All rights reserved.
- * 
- * This program is free software; you can redistribute it and/or modify it 
- * under the terms of version 2 of the GNU General Public License 
- * as published by the Free Software Foundation.
- * 
- * This program is distributed in the hope that it would be useful, but 
- * WITHOUT ANY WARRANTY; without even the implied warranty of 
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. 
- * 
- * Further, this software is distributed without any warranty that it is 
- * free of the rightful claim of any third person regarding infringement 
- * or the like.  Any license provided herein, whether implied or 
- * otherwise, applies only to this software file.  Patent licenses, if 
- * any, provided herein do not apply to combinations of this program with 
- * other software, or any other product whatsoever.
- * 
- * You should have received a copy of the GNU General Public 
- * License along with this program; if not, write the Free Software 
- * Foundation, Inc., 59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
- * 
- * Contact information:  Silicon Graphics, Inc., 1600 Amphitheatre Pkwy, 
- * Mountain View, CA  94043, or:
- * 
- * http://www.sgi.com 
- * 
- * For further information regarding this notice, see: 
- * 
- * http://oss.sgi.com/projects/GenInfo/NoticeExplan
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1999,2001-2006 Silicon Graphics, Inc. All rights reserved.
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/string.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/console.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
@@ -49,71 +25,85 @@
 #include <linux/interrupt.h>
 #include <linux/acpi.h>
 #include <linux/compiler.h>
-#include <linux/sched.h>
+#include <linux/root_dev.h>
+#include <linux/nodemask.h>
+#include <linux/pm.h>
+#include <linux/efi.h>
 
 #include <asm/io.h>
 #include <asm/sal.h>
 #include <asm/machvec.h>
-#include <asm/system.h>
 #include <asm/processor.h>
-#include <asm/pgalloc.h>
-#include <asm/sn/sgi.h>
-#include <asm/sn/io.h>
-#include <asm/sn/pci/pciio.h>
+#include <asm/vga.h>
+#include <asm/setup.h>
 #include <asm/sn/arch.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/pda.h>
 #include <asm/sn/nodepda.h>
 #include <asm/sn/sn_cpuid.h>
-#include <asm/sn/sn_private.h>
 #include <asm/sn/simulator.h>
 #include <asm/sn/leds.h>
 #include <asm/sn/bte.h>
+#include <asm/sn/shub_mmr.h>
 #include <asm/sn/clksupport.h>
 #include <asm/sn/sn_sal.h>
-#include <asm/sn/sn2/shub.h>
+#include <asm/sn/geo.h>
+#include <asm/sn/sn_feature_sets.h>
+#include "xtalk/xwidgetdev.h"
+#include "xtalk/hubdev.h"
+#include <asm/sn/klconfig.h>
 
-#define pxm_to_nasid(pxm) (((pxm)<<1) | (get_nasid() & ~0x1ff))
 
-#define MAX_PHYS_MEMORY		(1UL << 49)	/* 1 TB */
+DEFINE_PER_CPU(struct pda_s, pda_percpu);
 
-extern void bte_init_node (nodepda_t *, cnodeid_t);
-extern void bte_init_cpu (void);
+#define MAX_PHYS_MEMORY		(1UL << IA64_MAX_PHYS_BITS)	/* Max physical address supported */
+
+extern void bte_init_node(nodepda_t *, cnodeid_t);
+
 extern void sn_timer_init(void);
 extern unsigned long last_time_offset;
-extern void init_platform_hubinfo(nodepda_t **nodepdaindr);
-extern void (*ia64_mark_idle)(int);
-extern void (*ia64_platform_timer_extras)(void);
-extern void sn_timer_interrupt_extras(void);
+extern void (*ia64_mark_idle) (int);
 extern void snidle(int);
-extern unsigned char acpi_kbd_controller_present;
 
-unsigned long sn_rtc_cycles_per_second;   
+unsigned long sn_rtc_cycles_per_second;
+EXPORT_SYMBOL(sn_rtc_cycles_per_second);
 
-partid_t sn_partid = -1;
+DEFINE_PER_CPU(struct sn_hub_info_s, __sn_hub_info);
+EXPORT_PER_CPU_SYMBOL(__sn_hub_info);
+
+DEFINE_PER_CPU(short, __sn_cnodeid_to_nasid[MAX_COMPACT_NODES]);
+EXPORT_PER_CPU_SYMBOL(__sn_cnodeid_to_nasid);
+
+DEFINE_PER_CPU(struct nodepda_s *, __sn_nodepda);
+EXPORT_PER_CPU_SYMBOL(__sn_nodepda);
+
 char sn_system_serial_number_string[128];
+EXPORT_SYMBOL(sn_system_serial_number_string);
 u64 sn_partition_serial_number;
+EXPORT_SYMBOL(sn_partition_serial_number);
+u8 sn_partition_id;
+EXPORT_SYMBOL(sn_partition_id);
+u8 sn_system_size;
+EXPORT_SYMBOL(sn_system_size);
+u8 sn_sharing_domain_size;
+EXPORT_SYMBOL(sn_sharing_domain_size);
+u8 sn_coherency_id;
+EXPORT_SYMBOL(sn_coherency_id);
+u8 sn_region_size;
+EXPORT_SYMBOL(sn_region_size);
+int sn_prom_type;	/* 0=hardware, 1=medusa/realprom, 2=medusa/fakeprom */
 
-short	physical_node_map[MAX_PHYSNODE_ID];
+short physical_node_map[MAX_NUMALINK_NODES];
+static unsigned long sn_prom_features[MAX_PROM_FEATURE_SETS];
 
-int	numionodes;
-/*
- * This is the address of the RRegs in the HSpace of the global
- * master.  It is used by a hack in serial.c (serial_[in|out],
- * printk.c (early_printk), and kdb_io.c to put console output on that
- * node's Bedrock UART.  It is initialized here to 0, so that
- * early_printk won't try to access the UART before
- * master_node_bedrock_address is properly calculated.
- */
-u64 master_node_bedrock_address;
+EXPORT_SYMBOL(physical_node_map);
+
+int num_cnodes;
 
 static void sn_init_pdas(char **);
+static void build_cnode_tables(void);
 
-
-static nodepda_t	*nodepdaindr[MAX_COMPACT_NODES];
-
-irqpda_t		*irqpdaindr;
-
+static nodepda_t *nodepdaindr[MAX_COMPACT_NODES];
 
 /*
  * The format of "screen_info" is strange, and due to early i386-setup
@@ -121,29 +111,38 @@ irqpda_t		*irqpdaindr;
  * VGA color display.
  */
 struct screen_info sn_screen_info = {
-	orig_x:			 0,
-	orig_y:			 0,
-	orig_video_mode:	 3,
-	orig_video_cols:	80,
-	orig_video_ega_bx:	 3,
-	orig_video_lines:	25,
-	orig_video_isVGA:	 1,
-	orig_video_points:	16
+	.orig_x = 0,
+	.orig_y = 0,
+	.orig_video_mode = 3,
+	.orig_video_cols = 80,
+	.orig_video_ega_bx = 3,
+	.orig_video_lines = 25,
+	.orig_video_isVGA = 1,
+	.orig_video_points = 16
 };
 
 /*
- * This is here so we can use the CMOS detection in ide-probe.c to
- * determine what drives are present.  In theory, we don't need this
- * as the auto-detection could be done via ide-probe.c:do_probe() but
- * in practice that would be much slower, which is painful when
- * running in the simulator.  Note that passing zeroes in DRIVE_INFO
- * is sufficient (the IDE driver will autodetect the drive geometry).
+ * This routine can only be used during init, since
+ * smp_boot_data is an init data structure.
+ * We have to use smp_boot_data.cpu_phys_id to find
+ * the physical id of the processor because the normal
+ * cpu_physical_id() relies on data structures that
+ * may not be initialized yet.
  */
-#ifdef CONFIG_IA64_GENERIC
-extern char drive_info[4*16];
-#else
-char drive_info[4*16];
-#endif
+
+static int __init pxm_to_nasid(int pxm)
+{
+	int i;
+	int nid;
+
+	nid = pxm_to_node(pxm);
+	for (i = 0; i < num_node_memblks; i++) {
+		if (node_memblk[i].nid == nid) {
+			return NASID_GET(node_memblk[i].start_paddr);
+		}
+	}
+	return -1;
+}
 
 /**
  * early_sn_setup - early setup routine for SN platforms
@@ -151,57 +150,49 @@ char drive_info[4*16];
  * Sets up an initial console to aid debugging.  Intended primarily
  * for bringup.  See start_kernel() in init/main.c.
  */
-#if defined(CONFIG_IA64_EARLY_PRINTK_SGI_SN) || defined(CONFIG_IA64_SGI_SN_SIM)
 
-void __init
-early_sn_setup(void)
+void __init early_sn_setup(void)
 {
-	void ia64_sal_handler_init (void *entry_point, void *gpval);
-	efi_system_table_t			*efi_systab;
-	efi_config_table_t 			*config_tables;
-	struct ia64_sal_systab			*sal_systab;
-	struct ia64_sal_desc_entry_point	*ep;
-	char					*p;
-	int					i;
+	efi_system_table_t *efi_systab;
+	efi_config_table_t *config_tables;
+	struct ia64_sal_systab *sal_systab;
+	struct ia64_sal_desc_entry_point *ep;
+	char *p;
+	int i, j;
 
 	/*
 	 * Parse enough of the SAL tables to locate the SAL entry point. Since, console
 	 * IO on SN2 is done via SAL calls, early_printk won't work without this.
 	 *
 	 * This code duplicates some of the ACPI table parsing that is in efi.c & sal.c.
-	 * Any changes to those file may have to be made hereas well.
+	 * Any changes to those file may have to be made here as well.
 	 */
-	efi_systab = (efi_system_table_t*)__va(ia64_boot_param->efi_systab);
+	efi_systab = (efi_system_table_t *) __va(ia64_boot_param->efi_systab);
 	config_tables = __va(efi_systab->tables);
 	for (i = 0; i < efi_systab->nr_tables; i++) {
-		if (efi_guidcmp(config_tables[i].guid, SAL_SYSTEM_TABLE_GUID) == 0) {
+		if (efi_guidcmp(config_tables[i].guid, SAL_SYSTEM_TABLE_GUID) ==
+		    0) {
 			sal_systab = __va(config_tables[i].table);
-			p = (char*)(sal_systab+1);
-			for (i = 0; i < sal_systab->entry_count; i++) {
+			p = (char *)(sal_systab + 1);
+			for (j = 0; j < sal_systab->entry_count; j++) {
 				if (*p == SAL_DESC_ENTRY_POINT) {
-					ep = (struct ia64_sal_desc_entry_point *) p;
-					ia64_sal_handler_init(__va(ep->sal_proc), __va(ep->gp));
-					break;
+					ep = (struct ia64_sal_desc_entry_point
+					      *)p;
+					ia64_sal_handler_init(__va
+							      (ep->sal_proc),
+							      __va(ep->gp));
+					return;
 				}
 				p += SAL_DESC_SIZE(*p);
 			}
 		}
 	}
-
-	if ( IS_RUNNING_ON_SIMULATOR() ) {
-		master_node_bedrock_address = (u64)REMOTE_HUB(get_nasid(), SH_JUNK_BUS_UART0);
-		printk(KERN_DEBUG "early_sn_setup: setting master_node_bedrock_address to 0x%lx\n", master_node_bedrock_address);
-	}
+	/* Uh-oh, SAL not available?? */
+	printk(KERN_ERR "failed to find SAL entry point\n");
 }
-#endif /* CONFIG_IA64_EARLY_PRINTK_SGI_SN */
 
-#ifdef CONFIG_IA64_MCA
 extern int platform_intr_list[];
-#endif
-
-extern nasid_t master_nasid;
-static int shub_1_1_found __initdata;
-
+static int __cpuinitdata shub_1_1_found;
 
 /*
  * sn_check_for_wars
@@ -209,98 +200,164 @@ static int shub_1_1_found __initdata;
  * Set flag for enabling shub specific wars
  */
 
-static inline int __init
-is_shub_1_1(int nasid)
+static inline int __cpuinit is_shub_1_1(int nasid)
 {
 	unsigned long id;
-	int	rev;
+	int rev;
 
-	id = REMOTE_HUB_L(nasid, SH_SHUB_ID);
-	rev =  (id & SH_SHUB_ID_REVISION_MASK) >> SH_SHUB_ID_REVISION_SHFT;
+	if (is_shub2())
+		return 0;
+	id = REMOTE_HUB_L(nasid, SH1_SHUB_ID);
+	rev = (id & SH1_SHUB_ID_REVISION_MASK) >> SH1_SHUB_ID_REVISION_SHFT;
 	return rev <= 2;
 }
 
-static void __init
-sn_check_for_wars(void)
+static void __cpuinit sn_check_for_wars(void)
 {
-	int	cnode;
+	int cnode;
 
-	for (cnode=0; cnode< numnodes; cnode++)
-		if (is_shub_1_1(cnodeid_to_nasid(cnode)))
-			shub_1_1_found = 1;
+	if (is_shub2()) {
+		/* none yet */
+	} else {
+		for_each_online_node(cnode) {
+			if (is_shub_1_1(cnodeid_to_nasid(cnode)))
+				shub_1_1_found = 1;
+		}
+	}
 }
 
 /*
- * SN2 requires very slightly different alternate data-TLB miss handle than what
- * the mainline linux kernel provides.  At some point this approach could be used
- * to allow the use of the low-memory thrown away on other platforms when VGA is
- * present.
+ * Scan the EFI PCDP table (if it exists) for an acceptable VGA console
+ * output device.  If one exists, pick it and set sn_legacy_{io,mem} to
+ * reflect the bus offsets needed to address it.
  *
- * On SN2 we want to load small TCs for granule-0 (and aliases of) faulting
- * addresses.  The details of this are more sublte than at which they first
- * appear.
+ * Since pcdp support in SN is not supported in the 2.4 kernel (or at least
+ * the one lbs is based on) just declare the needed structs here.
+ *
+ * Reference spec http://www.dig64.org/specifications/DIG64_PCDPv20.pdf
+ *
+ * Returns 0 if no acceptable vga is found, !0 otherwise.
+ *
+ * Note:  This stuff is duped here because Altix requires the PCDP to
+ * locate a usable VGA device due to lack of proper ACPI support.  Structures
+ * could be used from drivers/firmware/pcdp.h, but it was decided that moving
+ * this file to a more public location just for Altix use was undesirable.
  */
-static void __init
-sn2_replace_ivt(void)
+
+struct hcdp_uart_desc {
+	u8	pad[45];
+};
+
+struct pcdp {
+	u8	signature[4];	/* should be 'HCDP' */
+	u32	length;
+	u8	rev;		/* should be >=3 for pcdp, <3 for hcdp */
+	u8	sum;
+	u8	oem_id[6];
+	u64	oem_tableid;
+	u32	oem_rev;
+	u32	creator_id;
+	u32	creator_rev;
+	u32	num_type0;
+	struct hcdp_uart_desc uart[0];	/* num_type0 of these */
+	/* pcdp descriptors follow */
+}  __attribute__((packed));
+
+struct pcdp_device_desc {
+	u8	type;
+	u8	primary;
+	u16	length;
+	u16	index;
+	/* interconnect specific structure follows */
+	/* device specific structure follows that */
+}  __attribute__((packed));
+
+struct pcdp_interface_pci {
+	u8	type;		/* 1 == pci */
+	u8	reserved;
+	u16	length;
+	u8	segment;
+	u8	bus;
+	u8 	dev;
+	u8	fun;
+	u16	devid;
+	u16	vendid;
+	u32	acpi_interrupt;
+	u64	mmio_tra;
+	u64	ioport_tra;
+	u8	flags;
+	u8	translation;
+}  __attribute__((packed));
+
+struct pcdp_vga_device {
+	u8	num_eas_desc;
+	/* ACPI Extended Address Space Desc follows */
+}  __attribute__((packed));
+
+/* from pcdp_device_desc.primary */
+#define PCDP_PRIMARY_CONSOLE	0x01
+
+/* from pcdp_device_desc.type */
+#define PCDP_CONSOLE_INOUT	0x0
+#define PCDP_CONSOLE_DEBUG	0x1
+#define PCDP_CONSOLE_OUT	0x2
+#define PCDP_CONSOLE_IN		0x3
+#define PCDP_CONSOLE_TYPE_VGA	0x8
+
+#define PCDP_CONSOLE_VGA	(PCDP_CONSOLE_TYPE_VGA | PCDP_CONSOLE_OUT)
+
+/* from pcdp_interface_pci.type */
+#define PCDP_IF_PCI		1
+
+/* from pcdp_interface_pci.translation */
+#define PCDP_PCI_TRANS_IOPORT	0x02
+#define PCDP_PCI_TRANS_MMIO	0x01
+
+#if defined(CONFIG_VT) && defined(CONFIG_VGA_CONSOLE)
+static void
+sn_scan_pcdp(void)
 {
-	extern unsigned char alt_dtlb_miss[], ia64_ivt_page_fault[];
-	extern unsigned char sn2_alt_dtlb_miss[], sn2_alt_dtlb_miss_end[];
-	extern unsigned char sn2_alt_dtlb_miss_patch1[];
+	u8 *bp;
+	struct pcdp *pcdp;
+	struct pcdp_device_desc device;
+	struct pcdp_interface_pci if_pci;
+	extern struct efi efi;
 
-	unsigned char *s, *d;
-	u64 *p;
-	u64 len = (u64)sn2_alt_dtlb_miss_end - (u64)sn2_alt_dtlb_miss;
-	u64 broffs = (ia64_ivt_page_fault - alt_dtlb_miss) - (sn2_alt_dtlb_miss_patch1 - sn2_alt_dtlb_miss);
-	u64 psr;
-	int i;
+	if (efi.hcdp == EFI_INVALID_TABLE_ADDR)
+		return;		/* no hcdp/pcdp table */
 
-	/* printk(KERN_DEBUG "Replacing alternate data-TLB miss handler.\n"); */
+	pcdp = __va(efi.hcdp);
 
-	/* Check the code isn't too large */
-	if (len > 1024) {
-		printk(KERN_ERR "SGI: Specific alt_dtlb_misse too large!  Not replacing\n");
-		return;
+	if (pcdp->rev < 3)
+		return;		/* only support PCDP (rev >= 3) */
+
+	for (bp = (u8 *)&pcdp->uart[pcdp->num_type0];
+	     bp < (u8 *)pcdp + pcdp->length;
+	     bp += device.length) {
+		memcpy(&device, bp, sizeof(device));
+		if (! (device.primary & PCDP_PRIMARY_CONSOLE))
+			continue;	/* not primary console */
+
+		if (device.type != PCDP_CONSOLE_VGA)
+			continue;	/* not VGA descriptor */
+
+		memcpy(&if_pci, bp+sizeof(device), sizeof(if_pci));
+		if (if_pci.type != PCDP_IF_PCI)
+			continue;	/* not PCI interconnect */
+
+		if (if_pci.translation & PCDP_PCI_TRANS_IOPORT)
+			vga_console_iobase = if_pci.ioport_tra;
+
+		if (if_pci.translation & PCDP_PCI_TRANS_MMIO)
+			vga_console_membase =
+				if_pci.mmio_tra | __IA64_UNCACHED_OFFSET;
+
+		break; /* once we find the primary, we're done */
 	}
-
-	/* check the offset is sane (should always be) */
-	if ((broffs>>4) + (1<<20) >= (1<<21)) {
-		printk(KERN_ERR "SGI: IVT patch ivt offset %ld invalid!   Not replacing!\n", broffs);
-		return;
-	}
-
-	/* 2nd half of bundle to patch (has slot 2) */
-	p = (u64*)sn2_alt_dtlb_miss_patch1 + 1;
-	/* patch the offset into slot 2 (imm20b + s) */
-	*p = (*p & ~(0x8fffff000000000)) | ((broffs & 0x1000000) << 35) | ((broffs & 0x0fffff0) << 32);
-
-	/* don't want any interrupts when doing this */
-	psr = ia64_clear_ic();
-
-	/* copy over the existing code, flush i-cache as required */
-	d = alt_dtlb_miss;
-	s = sn2_alt_dtlb_miss;
-	for (i=0; i<len; ++i, ++s) {
-		*d++ = *s;
-		if ((((u64)s) & 63) == 63) {
-			ia64_insn_group_barrier();
-			ia64_fc((void*)s);
-		}
-	}
-	ia64_insn_group_barrier();
-	ia64_fc((void*)s);
-
-	/* sync & serialize instruction stream */
-	ia64_sync_i();
-	ia64_srlz_i();
-
-	/* restore interrupt status */
-	ia64_set_psr(psr);
-
-	/* flush any TC's we have had previously loaded that could cause problems here */
-	local_flush_tlb_all();
-
-	printk(KERN_DEBUG "SGI: Replaced alt_dtlb_miss handler.\n");
 }
+#endif
+
+static unsigned long sn2_rtc_initial;
 
 /**
  * sn_setup - SN platform setup routine
@@ -310,94 +367,105 @@ sn2_replace_ivt(void)
  * the RTC frequency (via a SAL call), initializing secondary CPUs, and
  * setting up per-node data areas.  The console is also initialized here.
  */
-void __init
-sn_setup(char **cmdline_p)
+void __init sn_setup(char **cmdline_p)
 {
 	long status, ticks_per_sec, drift;
-	int pxm;
-	int major = sn_sal_rev_major(), minor = sn_sal_rev_minor();
+	u32 version = sn_sal_rev();
 	extern void sn_cpu_init(void);
 
+	sn2_rtc_initial = rtc_time();
+	ia64_sn_plat_set_error_handling_features();	// obsolete
+	ia64_sn_set_os_feature(OSF_MCA_SLV_TO_OS_INIT_SLV);
+	ia64_sn_set_os_feature(OSF_FEAT_LOG_SBES);
 	/*
-	 * If the generic code has enabled vga console support - lets
-	 * get rid of it again. This is a kludge for the fact that ACPI
-	 * currtently has no way of informing us if legacy VGA is available
-	 * or not.
+	 * Note: The calls to notify the PROM of ACPI and PCI Segment
+	 *	 support must be done prior to acpi_load_tables(), as
+	 *	 an ACPI capable PROM will rebuild the DSDT as result
+	 *	 of the call.
 	 */
+	ia64_sn_set_os_feature(OSF_PCISEGMENT_ENABLE);
+	ia64_sn_set_os_feature(OSF_ACPI_ENABLE);
+
+	/* Load the new DSDT and SSDT tables into the global table list. */
+	acpi_table_init();
+
 #if defined(CONFIG_VT) && defined(CONFIG_VGA_CONSOLE)
-	if (conswitchp == &vga_con) {
+	/*
+	 * Handle SN vga console.
+	 *
+	 * SN systems do not have enough ACPI table information
+	 * being passed from prom to identify VGA adapters and the legacy
+	 * addresses to access them.  Until that is done, SN systems rely
+	 * on the PCDP table to identify the primary VGA console if one
+	 * exists.
+	 *
+	 * However, kernel PCDP support is optional, and even if it is built
+	 * into the kernel, it will not be used if the boot cmdline contains
+	 * console= directives.
+	 *
+	 * So, to work around this mess, we duplicate some of the PCDP code
+	 * here so that the primary VGA console (as defined by PCDP) will
+	 * work on SN systems even if a different console (e.g. serial) is
+	 * selected on the boot line (or CONFIG_EFI_PCDP is off).
+	 */
+
+	if (! vga_console_membase)
+		sn_scan_pcdp();
+
+	/*
+	 *	Setup legacy IO space.
+	 *	vga_console_iobase maps to PCI IO Space address 0 on the
+	 * 	bus containing the VGA console.
+	 */
+	if (vga_console_iobase) {
+		io_space[0].mmio_base =
+			(unsigned long) ioremap(vga_console_iobase, 0);
+		io_space[0].sparse = 0;
+	}
+
+	if (vga_console_membase) {
+		/* usable vga ... make tty0 the preferred default console */
+		if (!strstr(*cmdline_p, "console="))
+			add_preferred_console("tty", 0, NULL);
+	} else {
 		printk(KERN_DEBUG "SGI: Disabling VGA console\n");
+		if (!strstr(*cmdline_p, "console="))
+			add_preferred_console("ttySG", 0, NULL);
 #ifdef CONFIG_DUMMY_CONSOLE
 		conswitchp = &dummy_con;
 #else
 		conswitchp = NULL;
-#endif /* CONFIG_DUMMY_CONSOLE */
+#endif				/* CONFIG_DUMMY_CONSOLE */
 	}
-#endif /* def(CONFIG_VT) && def(CONFIG_VGA_CONSOLE) */
+#endif				/* def(CONFIG_VT) && def(CONFIG_VGA_CONSOLE) */
 
 	MAX_DMA_ADDRESS = PAGE_OFFSET + MAX_PHYS_MEMORY;
 
-	memset(physical_node_map, -1, sizeof(physical_node_map));
-	for (pxm=0; pxm<MAX_PXM_DOMAINS; pxm++)
-		if (pxm_to_nid_map[pxm] != -1)
-			physical_node_map[pxm_to_nasid(pxm)] = pxm_to_nid_map[pxm];
-
-
 	/*
-	 * Old PROMs do not provide an ACPI FADT. Disable legacy keyboard
-	 * support here so we don't have to listen to failed keyboard probe
-	 * messages.
+	 * Build the tables for managing cnodes.
 	 */
-	if ((major < 2 || (major == 2 && minor <= 9)) &&
-	    acpi_kbd_controller_present) {
-		printk(KERN_INFO "Disabling legacy keyboard support as prom "
-		       "is too old and doesn't provide FADT\n");
-		acpi_kbd_controller_present = 0;
-	}
+	build_cnode_tables();
 
-	printk("SGI SAL version %x.%02x\n", major, minor);
-
-	/*
-	 * Confirm the SAL we're running on is recent enough...
-	 */
-	if ((major < SN_SAL_MIN_MAJOR) || (major == SN_SAL_MIN_MAJOR &&
-					   minor < SN_SAL_MIN_MINOR)) {
-		printk(KERN_ERR "This kernel needs SGI SAL version >= "
-		       "%x.%02x\n", SN_SAL_MIN_MAJOR, SN_SAL_MIN_MINOR);
-		panic("PROM version too old\n");
-	}
-
-	/* Patch the ivt */
-	sn2_replace_ivt();
-
-	master_nasid = get_nasid();
-	(void)snia_get_console_nasid();
-	(void)snia_get_master_baseio_nasid();
-
-	status = ia64_sal_freq_base(SAL_FREQ_BASE_REALTIME_CLOCK, &ticks_per_sec, &drift);
+	status =
+	    ia64_sal_freq_base(SAL_FREQ_BASE_REALTIME_CLOCK, &ticks_per_sec,
+			       &drift);
 	if (status != 0 || ticks_per_sec < 100000) {
-		printk(KERN_WARNING "unable to determine platform RTC clock frequency, guessing.\n");
+		printk(KERN_WARNING
+		       "unable to determine platform RTC clock frequency, guessing.\n");
 		/* PROM gives wrong value for clock freq. so guess */
-		sn_rtc_cycles_per_second = 1000000000000UL/30000UL;
-	}
-	else
+		sn_rtc_cycles_per_second = 1000000000000UL / 30000UL;
+	} else
 		sn_rtc_cycles_per_second = ticks_per_sec;
 
 	platform_intr_list[ACPI_INTERRUPT_CPEI] = IA64_CPE_VECTOR;
 
-
-	if ( IS_RUNNING_ON_SIMULATOR() )
-	{
-		master_node_bedrock_address = (u64)REMOTE_HUB(get_nasid(), SH_JUNK_BUS_UART0);
-		printk(KERN_DEBUG "sn_setup: setting master_node_bedrock_address to 0x%lx\n",
-		       master_node_bedrock_address);
-	}
+	printk("SGI SAL version %x.%02x\n", version >> 8, version & 0x00FF);
 
 	/*
 	 * we set the default root device to /dev/hda
 	 * to make simulation easy
 	 */
-	ROOT_DEV = to_kdev_t(0x0301);
+	ROOT_DEV = Root_HDA1;
 
 	/*
 	 * Create the PDAs and NODEPDAs for all the cpus.
@@ -406,25 +474,27 @@ sn_setup(char **cmdline_p)
 
 	ia64_mark_idle = &snidle;
 
-	/* 
+	/*
 	 * For the bootcpu, we do this here. All other cpus will make the
 	 * call as part of cpu_init in slave cpu initialization.
 	 */
 	sn_cpu_init();
 
-	/*
-	 * Setup hubinfo stuff. Has to happen AFTER sn_cpu_init(),
-	 * because it uses the cnode to nasid tables.
-	 */
-	init_platform_hubinfo(nodepdaindr);
 #ifdef CONFIG_SMP
 	init_smp_config();
 #endif
 	screen_info = sn_screen_info;
 
-	ia64_platform_timer_extras = &sn_timer_interrupt_extras;
-
 	sn_timer_init();
+
+	/*
+	 * set pm_power_off to a SAL call to allow
+	 * sn machines to power off. The SAL call can be replaced
+	 * by an ACPI interface call when ACPI is fully implemented
+	 * for sn.
+	 */
+	pm_power_off = ia64_sn_power_down;
+	current->thread.flags |= IA64_THREAD_MIGRATION;
 }
 
 /**
@@ -432,65 +502,50 @@ sn_setup(char **cmdline_p)
  *
  * One time setup for Node Data Area.  Called by sn_setup().
  */
-void
-sn_init_pdas(char **cmdline_p)
+static void __init sn_init_pdas(char **cmdline_p)
 {
-	cnodeid_t	cnode;
-	void scan_for_ionodes(void);
+	cnodeid_t cnode;
 
 	/*
-	 * Make sure that the PDA fits entirely in the same page as the 
-	 * cpu_data area.
+	 * Allocate & initialize the nodepda for each node.
 	 */
-	if ((PDAADDR&~PAGE_MASK)+sizeof(pda_t) > PAGE_SIZE)
-		panic("overflow of cpu_data page");
+	for_each_online_node(cnode) {
+		nodepdaindr[cnode] =
+		    alloc_bootmem_node(NODE_DATA(cnode), sizeof(nodepda_t));
+		memset(nodepdaindr[cnode]->phys_cpuid, -1,
+		    sizeof(nodepdaindr[cnode]->phys_cpuid));
+		spin_lock_init(&nodepdaindr[cnode]->ptc_lock);
+	}
 
-	memset(pda.cnodeid_to_nasid_table, -1, sizeof(pda.cnodeid_to_nasid_table));
-	for (cnode=0; cnode<numnodes; cnode++)
-		pda.cnodeid_to_nasid_table[cnode] = pxm_to_nasid(nid_to_pxm_map[cnode]);
-
-	numionodes = numnodes;
-	scan_for_ionodes();
-
-        /*
-         * Allocate & initalize the nodepda for each node.
-         */
-        for (cnode=0; cnode < numnodes; cnode++) {
-		nodepdaindr[cnode] = alloc_bootmem_node(NODE_DATA(cnode), sizeof(nodepda_t));
-		memset(nodepdaindr[cnode], 0, sizeof(nodepda_t));
-        }
-
-	/* 
+	/*
 	 * Allocate & initialize nodepda for TIOs.  For now, put them on node 0.
 	 */
-	for (cnode = numnodes; cnode < numionodes; cnode ++) {
-		nodepdaindr[cnode] = alloc_bootmem_node(NODE_DATA(0), sizeof(nodepda_t));
-		memset(nodepdaindr[cnode], 0, sizeof(nodepda_t));
-	}
+	for (cnode = num_online_nodes(); cnode < num_cnodes; cnode++)
+		nodepdaindr[cnode] =
+		    alloc_bootmem_node(NODE_DATA(0), sizeof(nodepda_t));
 
 	/*
 	 * Now copy the array of nodepda pointers to each nodepda.
 	 */
-        for (cnode=0; cnode < numionodes; cnode++)
-		memcpy(nodepdaindr[cnode]->pernode_pdaindr, nodepdaindr, sizeof(nodepdaindr));
-
+	for (cnode = 0; cnode < num_cnodes; cnode++)
+		memcpy(nodepdaindr[cnode]->pernode_pdaindr, nodepdaindr,
+		       sizeof(nodepdaindr));
 
 	/*
 	 * Set up IO related platform-dependent nodepda fields.
 	 * The following routine actually sets up the hubinfo struct
 	 * in nodepda.
 	 */
-	for (cnode = 0; cnode < numnodes; cnode++) {
-		init_platform_nodepda(nodepdaindr[cnode], cnode);
-		spin_lock_init(&nodepdaindr[cnode]->bist_lock);
-		bte_init_node (nodepdaindr[cnode], cnode);
+	for_each_online_node(cnode) {
+		bte_init_node(nodepdaindr[cnode], cnode);
 	}
 
 	/*
-	 * Handle TIO differently .. we do not do BTE init ..
+	 * Initialize the per node hubdev.  This includes IO Nodes and
+	 * headless/memless nodes.
 	 */
-	for (cnode = numnodes; cnode < numionodes; cnode++) {
-		init_platform_nodepda(nodepdaindr[cnode], cnode);
+	for (cnode = 0; cnode < num_cnodes; cnode++) {
+		hubdev_init_node(nodepdaindr[cnode], cnode);
 	}
 }
 
@@ -503,15 +558,50 @@ sn_init_pdas(char **cmdline_p)
  * Also sets up a few fields in the nodepda.  Also known as
  * platform_cpu_init() by the ia64 machvec code.
  */
-void __init
-sn_cpu_init(void)
+void __cpuinit sn_cpu_init(void)
 {
-	int	cpuid;
-	int	cpuphyid;
-	int	nasid;
-	int	slice;
-	int	cnode, i;
-	static int	wars_have_been_checked = 0;
+	int cpuid;
+	int cpuphyid;
+	int nasid;
+	int subnode;
+	int slice;
+	int cnode;
+	int i;
+	static int wars_have_been_checked, set_cpu0_number;
+
+	cpuid = smp_processor_id();
+	if (cpuid == 0 && IS_MEDUSA()) {
+		if (ia64_sn_is_fake_prom())
+			sn_prom_type = 2;
+		else
+			sn_prom_type = 1;
+		printk(KERN_INFO "Running on medusa with %s PROM\n",
+		       (sn_prom_type == 1) ? "real" : "fake");
+	}
+
+	memset(pda, 0, sizeof(pda));
+	if (ia64_sn_get_sn_info(0, &sn_hub_info->shub2,
+				&sn_hub_info->nasid_bitmask,
+				&sn_hub_info->nasid_shift,
+				&sn_system_size, &sn_sharing_domain_size,
+				&sn_partition_id, &sn_coherency_id,
+				&sn_region_size))
+		BUG();
+	sn_hub_info->as_shift = sn_hub_info->nasid_shift - 2;
+
+	/*
+	 * Don't check status. The SAL call is not supported on all PROMs
+	 * but a failure is harmless.
+	 * Architecturally, cpu_init is always called twice on cpu 0. We
+	 * should set cpu_number on cpu 0 once.
+	 */
+	if (cpuid == 0) {
+		if (!set_cpu0_number) {
+			(void) ia64_sn_set_cpu_number(cpuid);
+			set_cpu0_number = 1;
+		}
+	} else
+		(void) ia64_sn_set_cpu_number(cpuid);
 
 	/*
 	 * The boot cpu makes this call again after platform initialization is
@@ -520,91 +610,166 @@ sn_cpu_init(void)
 	if (nodepdaindr[0] == NULL)
 		return;
 
-	cpuid = smp_processor_id();
-	cpuphyid = ((ia64_get_lid() >> 16) & 0xffff);
-	nasid = cpu_physical_id_to_nasid(cpuphyid);
+	for (i = 0; i < MAX_PROM_FEATURE_SETS; i++)
+		if (ia64_sn_get_prom_feature_set(i, &sn_prom_features[i]) != 0)
+			break;
+
+	cpuphyid = get_sapicid();
+
+	if (ia64_sn_get_sapic_info(cpuphyid, &nasid, &subnode, &slice))
+		BUG();
+
+	for (i=0; i < MAX_NUMNODES; i++) {
+		if (nodepdaindr[i]) {
+			nodepdaindr[i]->phys_cpuid[cpuid].nasid = nasid;
+			nodepdaindr[i]->phys_cpuid[cpuid].slice = slice;
+			nodepdaindr[i]->phys_cpuid[cpuid].subnode = subnode;
+		}
+	}
+
 	cnode = nasid_to_cnodeid(nasid);
-	slice = cpu_physical_id_to_slice(cpuphyid);
 
-	printk("CPU %d: nasid %d, slice %d, cnode %d\n",
-			smp_processor_id(), nasid, slice, cnode);
+	sn_nodepda = nodepdaindr[cnode];
 
-	memset(&pda, 0, sizeof(pda));
-	pda.p_nodepda = nodepdaindr[cnode];
-	pda.led_address = (typeof(pda.led_address)) (LED0 + (slice<<LED_CPU_SHIFT));
-	pda.led_state = LED_ALWAYS_SET;
-	pda.hb_count = HZ/2;
-	pda.hb_state = 0;
-	pda.idle_flag = 0;
-	
-	memset(pda.cnodeid_to_nasid_table, -1, sizeof(pda.cnodeid_to_nasid_table));
-	for (i=0; i<numnodes; i++)
-		pda.cnodeid_to_nasid_table[i] = pxm_to_nasid(nid_to_pxm_map[i]);
+	pda->led_address =
+	    (typeof(pda->led_address)) (LED0 + (slice << LED_CPU_SHIFT));
+	pda->led_state = LED_ALWAYS_SET;
+	pda->hb_count = HZ / 2;
+	pda->hb_state = 0;
+	pda->idle_flag = 0;
+
+	if (cpuid != 0) {
+		/* copy cpu 0's sn_cnodeid_to_nasid table to this cpu's */
+		memcpy(sn_cnodeid_to_nasid,
+		       (&per_cpu(__sn_cnodeid_to_nasid, 0)),
+		       sizeof(__ia64_per_cpu_var(__sn_cnodeid_to_nasid)));
+	}
+
 	/*
 	 * Check for WARs.
 	 * Only needs to be done once, on BSP.
-	 * Has to be done after loop above, because it uses pda.cnodeid_to_nasid_table[i].
+	 * Has to be done after loop above, because it uses this cpu's
+	 * sn_cnodeid_to_nasid table which was just initialized if this
+	 * isn't cpu 0.
 	 * Has to be done before assignment below.
 	 */
 	if (!wars_have_been_checked) {
 		sn_check_for_wars();
 		wars_have_been_checked = 1;
 	}
-
-	pda.shub_1_1_found = shub_1_1_found;
-
-	if (local_node_data->active_cpu_count == 1)
-		nodepda->node_first_cpu = cpuid;
-
-
+	sn_hub_info->shub_1_1_found = shub_1_1_found;
 
 	/*
-	 * We must use different memory allocators for first cpu (bootmem 
-	 * allocator) than for the other cpus (regular allocator).
+	 * Set up addresses of PIO/MEM write status registers.
 	 */
-	if (cpuid == 0)
-		irqpdaindr = alloc_bootmem_node(NODE_DATA(cpuid_to_cnodeid(cpuid)),sizeof(irqpda_t));
-
-	memset(irqpdaindr, 0, sizeof(irqpda_t));
-	irqpdaindr->irq_flags[SGI_PCIBR_ERROR] = SN2_IRQ_SHARED;
-	irqpdaindr->irq_flags[SGI_PCIBR_ERROR] |= SN2_IRQ_RESERVED;
-	irqpdaindr->irq_flags[SGI_II_ERROR] = SN2_IRQ_SHARED;
-	irqpdaindr->irq_flags[SGI_II_ERROR] |= SN2_IRQ_RESERVED;
-
-	pda.pio_write_status_addr = (volatile unsigned long *)
-			LOCAL_MMR_ADDR((slice < 2 ? SH_PIO_WRITE_STATUS_0 : SH_PIO_WRITE_STATUS_1 ) );
-	pda.mem_write_status_addr = (volatile u64 *)
-			LOCAL_MMR_ADDR((slice < 2 ? SH_MEMORY_WRITE_STATUS_0 : SH_MEMORY_WRITE_STATUS_1 ) );
-
-	if (nodepda->node_first_cpu == cpuid) {
-		int	buddy_nasid;
-		buddy_nasid = cnodeid_to_nasid(numa_node_id() == numnodes-1 ? 0 : numa_node_id()+ 1);
-		pda.pio_shub_war_cam_addr = (volatile unsigned long*)GLOBAL_MMR_ADDR(nasid, SH_PI_CAM_CONTROL);
+	{
+		u64 pio1[] = {SH1_PIO_WRITE_STATUS_0, 0, SH1_PIO_WRITE_STATUS_1, 0};
+		u64 pio2[] = {SH2_PIO_WRITE_STATUS_0, SH2_PIO_WRITE_STATUS_2,
+			SH2_PIO_WRITE_STATUS_1, SH2_PIO_WRITE_STATUS_3};
+		u64 *pio;
+		pio = is_shub1() ? pio1 : pio2;
+		pda->pio_write_status_addr =
+		   (volatile unsigned long *)GLOBAL_MMR_ADDR(nasid, pio[slice]);
+		pda->pio_write_status_val = is_shub1() ? SH_PIO_WRITE_STATUS_PENDING_WRITE_COUNT_MASK : 0;
 	}
 
-	bte_init_cpu();
+	/*
+	 * WAR addresses for SHUB 1.x.
+	 */
+	if (local_node_data->active_cpu_count++ == 0 && is_shub1()) {
+		int buddy_nasid;
+		buddy_nasid =
+		    cnodeid_to_nasid(numa_node_id() ==
+				     num_online_nodes() - 1 ? 0 : numa_node_id() + 1);
+		pda->pio_shub_war_cam_addr =
+		    (volatile unsigned long *)GLOBAL_MMR_ADDR(nasid,
+							      SH1_PI_CAM_CONTROL);
+	}
 }
 
 /*
- * Scan klconfig for TIO's.  Add the TIO nasids to the
- * physical_node_map and the pda and increment numionodes.
+ * Build tables for converting between NASIDs and cnodes.
  */
+static inline int __init board_needs_cnode(int type)
+{
+	return (type == KLTYPE_SNIA || type == KLTYPE_TIO);
+}
 
-void
-scan_for_ionodes() {
-	int nasid = 0;
+void __init build_cnode_tables(void)
+{
+	int nasid;
+	int node;
 	lboard_t *brd;
 
-	/* Scan all compute nodes. */
-	for (nasid = 0; nasid < MAX_PHYSNODE_ID; nasid +=2) {
-		/* if there's no nasid, don't try to read the klconfig on the node */
-		if (physical_node_map[nasid] == -1) continue;
-		brd = find_lboard((lboard_t *)KL_CONFIG_INFO(nasid), KLTYPE_TIO);
+	memset(physical_node_map, -1, sizeof(physical_node_map));
+	memset(sn_cnodeid_to_nasid, -1,
+			sizeof(__ia64_per_cpu_var(__sn_cnodeid_to_nasid)));
+
+	/*
+	 * First populate the tables with C/M bricks. This ensures that
+	 * cnode == node for all C & M bricks.
+	 */
+	for_each_online_node(node) {
+		nasid = pxm_to_nasid(node_to_pxm(node));
+		sn_cnodeid_to_nasid[node] = nasid;
+		physical_node_map[nasid] = node;
+	}
+
+	/*
+	 * num_cnodes is total number of C/M/TIO bricks. Because of the 256 node
+	 * limit on the number of nodes, we can't use the generic node numbers 
+	 * for this. Note that num_cnodes is incremented below as TIOs or
+	 * headless/memoryless nodes are discovered.
+	 */
+	num_cnodes = num_online_nodes();
+
+	/* fakeprom does not support klgraph */
+	if (IS_RUNNING_ON_FAKE_PROM())
+		return;
+
+	/* Find TIOs & headless/memoryless nodes and add them to the tables */
+	for_each_online_node(node) {
+		kl_config_hdr_t *klgraph_header;
+		nasid = cnodeid_to_nasid(node);
+		klgraph_header = ia64_sn_get_klconfig_addr(nasid);
+		BUG_ON(klgraph_header == NULL);
+		brd = NODE_OFFSET_TO_LBOARD(nasid, klgraph_header->ch_board_info);
 		while (brd) {
-			pda.cnodeid_to_nasid_table[numionodes] = brd->brd_nasid;
-			physical_node_map[brd->brd_nasid] = numionodes++;
-			brd = KLCF_NEXT(brd);
-			brd = find_lboard(brd, KLTYPE_TIO);
+			if (board_needs_cnode(brd->brd_type) && physical_node_map[brd->brd_nasid] < 0) {
+				sn_cnodeid_to_nasid[num_cnodes] = brd->brd_nasid;
+				physical_node_map[brd->brd_nasid] = num_cnodes++;
+			}
+			brd = find_lboard_next(brd);
 		}
 	}
 }
+
+int
+nasid_slice_to_cpuid(int nasid, int slice)
+{
+	long cpu;
+
+	for (cpu = 0; cpu < nr_cpu_ids; cpu++)
+		if (cpuid_to_nasid(cpu) == nasid &&
+					cpuid_to_slice(cpu) == slice)
+			return cpu;
+
+	return -1;
+}
+
+int sn_prom_feature_available(int id)
+{
+	if (id >= BITS_PER_LONG * MAX_PROM_FEATURE_SETS)
+		return 0;
+	return test_bit(id, sn_prom_features);
+}
+
+void
+sn_kernel_launch_event(void)
+{
+	/* ignore status until we understand possible failure, if any*/
+	if (ia64_sn_kernel_launch_event())
+		printk(KERN_ERR "KEXEC is not supported in this PROM, Please update the PROM.\n");
+}
+EXPORT_SYMBOL(sn_prom_feature_available);
+

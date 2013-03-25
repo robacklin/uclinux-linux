@@ -18,11 +18,11 @@
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
+#include <linux/hardirq.h>
 
-#include <asm/system.h>
 #include <asm/pgtable.h>
-#include <asm/hardirq.h>
 #include <asm/uaccess.h>
+#include <asm/gdb-stub.h>
 
 /*****************************************************************************/
 /*
@@ -31,13 +31,15 @@
  */
 asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear0)
 {
+	struct vm_area_struct *vma;
 	struct mm_struct *mm;
-	struct vm_area_struct * vma;
 	unsigned long _pme, lrai, lrad, fixup;
-	int write;
 	siginfo_t info;
 	pgd_t *pge;
+	pud_t *pue;
 	pte_t *pte;
+	int write;
+	int fault;
 
 #if 0
 	const char *atxc[16] = {
@@ -76,7 +78,7 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -117,6 +119,7 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 			goto bad_area;
 		}
 	}
+
 	if (expand_stack(vma, ear0))
 		goto bad_area;
 
@@ -159,18 +162,18 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	switch (handle_mm_fault(mm, vma, ear0, write)) {
-	case 1:
-		current->min_flt++;
-		break;
-	case 2:
-		current->maj_flt++;
-		break;
-	case 0:
-		goto do_sigbus;
-	default:
-		goto out_of_memory;
+	fault = handle_mm_fault(mm, vma, ear0, write ? FAULT_FLAG_WRITE : 0);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto do_sigbus;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 
 	up_read(&mm->mmap_sem);
 	return;
@@ -220,8 +223,11 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 	printk(KERN_ALERT "  LRAI: %08lx\n", lrai);
 	printk(KERN_ALERT "  LRAD: %08lx\n", lrad);
 
-	pge = mm->pgd + pgd_index(ear0);
-	_pme = pge->pge[0].ste[0];
+	__break_hijack_kernel_event();
+
+	pge = pgd_offset(current->mm, ear0);
+	pue = pud_offset(pge, ear0);
+	_pme = pue->pue[0].ste[0];
 
 	printk(KERN_ALERT "  PGE : %8p { PME %08lx }\n", pge, _pme);
 
@@ -250,10 +256,10 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
  */
  out_of_memory:
 	up_read(&mm->mmap_sem);
-	printk("VM: killing process %s\n", current->comm);
-	if (user_mode(__frame))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(__frame))
+		goto no_context;
+	pagefault_out_of_memory();
+	return;
 
  do_sigbus:
 	up_read(&mm->mmap_sem);
@@ -285,26 +291,33 @@ asmlinkage void do_page_fault(int datammu, unsigned long esr0, unsigned long ear
 		 * Do _not_ use "tsk" here. We might be inside
 		 * an interrupt in the middle of a task switch..
 		 */
-		int offset = __pgd_offset(ear0);
+		int index = pgd_index(ear0);
 		pgd_t *pgd, *pgd_k;
+		pud_t *pud, *pud_k;
 		pmd_t *pmd, *pmd_k;
 		pte_t *pte_k;
 
 		pgd = (pgd_t *) __get_TTBR();
-		pgd = offset + (pgd_t *) __va(pgd);
-		pgd_k = init_mm.pgd + offset;
+		pgd = (pgd_t *)__va(pgd) + index;
+		pgd_k = ((pgd_t *)(init_mm.pgd)) + index;
 
 		if (!pgd_present(*pgd_k))
 			goto no_context;
-		set_pgd(pgd, *pgd_k);
+		//set_pgd(pgd, *pgd_k); /////// gcc ICE's on this line
 
-		pmd = pmd_offset(pgd, ear0);
-		pmd_k = pmd_offset(pgd_k, ear0);
+		pud_k = pud_offset(pgd_k, ear0);
+		if (!pud_present(*pud_k))
+			goto no_context;
+
+		pmd_k = pmd_offset(pud_k, ear0);
 		if (!pmd_present(*pmd_k))
 			goto no_context;
+
+		pud = pud_offset(pgd, ear0);
+		pmd = pmd_offset(pud, ear0);
 		set_pmd(pmd, *pmd_k);
 
-		pte_k = pte_offset(pmd_k, ear0);
+		pte_k = pte_offset_kernel(pmd_k, ear0);
 		if (!pte_present(*pte_k))
 			goto no_context;
 		return;

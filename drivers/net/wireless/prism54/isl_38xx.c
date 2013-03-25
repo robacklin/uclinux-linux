@@ -1,5 +1,4 @@
 /*
- *  
  *  Copyright (C) 2002 Intersil Americas Inc.
  *  Copyright (C) 2003-2004 Luis R. Rodriguez <mcgrof@ruslug.rutgers.edu>_
  *
@@ -18,7 +17,6 @@
  *
  */
 
-#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/delay.h>
@@ -39,7 +37,7 @@
  * isl38xx_disable_interrupts - disable all interrupts
  * @device: pci memory base address
  *
- *  Instructs the device to disable all interrupt reporting by asserting 
+ *  Instructs the device to disable all interrupt reporting by asserting
  *  the IRQ line. New events may still show up in the interrupt identification
  *  register located at offset %ISL38XX_INT_IDENT_REG.
  */
@@ -112,10 +110,11 @@ isl38xx_handle_wakeup(isl38xx_control_block *control_block,
 void
 isl38xx_trigger_device(int asleep, void __iomem *device_base)
 {
-	struct timeval current_time;
-	u32 reg, counter = 0;
+	u32 reg;
 
 #if VERBOSE > SHOW_ERROR_MESSAGES
+	u32 counter = 0;
+	struct timeval current_time;
 	DEBUG(SHOW_FUNCTION_CALLS, "isl38xx trigger device\n");
 #endif
 
@@ -125,13 +124,12 @@ isl38xx_trigger_device(int asleep, void __iomem *device_base)
 #if VERBOSE > SHOW_ERROR_MESSAGES
 		do_gettimeofday(&current_time);
 		DEBUG(SHOW_TRACING, "%08li.%08li Device wakeup triggered\n",
-		      current_time.tv_sec, current_time.tv_usec);
-#endif
+		      current_time.tv_sec, (long)current_time.tv_usec);
 
 		DEBUG(SHOW_TRACING, "%08li.%08li Device register read %08x\n",
-		      current_time.tv_sec, current_time.tv_usec,
+		      current_time.tv_sec, (long)current_time.tv_usec,
 		      readl(device_base + ISL38XX_CTRL_STAT_REG));
-		udelay(ISL38XX_WRITEIO_DELAY);
+#endif
 
 		reg = readl(device_base + ISL38XX_INT_IDENT_REG);
 		if (reg == 0xabadface) {
@@ -139,42 +137,41 @@ isl38xx_trigger_device(int asleep, void __iomem *device_base)
 			do_gettimeofday(&current_time);
 			DEBUG(SHOW_TRACING,
 			      "%08li.%08li Device register abadface\n",
-			      current_time.tv_sec, current_time.tv_usec);
+			      current_time.tv_sec, (long)current_time.tv_usec);
 #endif
 			/* read the Device Status Register until Sleepmode bit is set */
 			while (reg = readl(device_base + ISL38XX_CTRL_STAT_REG),
 			       (reg & ISL38XX_CTRL_STAT_SLEEPMODE) == 0) {
 				udelay(ISL38XX_WRITEIO_DELAY);
+#if VERBOSE > SHOW_ERROR_MESSAGES
 				counter++;
+#endif
 			}
 
+#if VERBOSE > SHOW_ERROR_MESSAGES
 			DEBUG(SHOW_TRACING,
 			      "%08li.%08li Device register read %08x\n",
-			      current_time.tv_sec, current_time.tv_usec,
+			      current_time.tv_sec, (long)current_time.tv_usec,
 			      readl(device_base + ISL38XX_CTRL_STAT_REG));
-			udelay(ISL38XX_WRITEIO_DELAY);
-
-#if VERBOSE > SHOW_ERROR_MESSAGES
 			do_gettimeofday(&current_time);
 			DEBUG(SHOW_TRACING,
 			      "%08li.%08li Device asleep counter %i\n",
-			      current_time.tv_sec, current_time.tv_usec,
+			      current_time.tv_sec, (long)current_time.tv_usec,
 			      counter);
 #endif
 		}
 		/* assert the Wakeup interrupt in the Device Interrupt Register */
 		isl38xx_w32_flush(device_base, ISL38XX_DEV_INT_WAKEUP,
 				  ISL38XX_DEV_INT_REG);
+
+#if VERBOSE > SHOW_ERROR_MESSAGES
 		udelay(ISL38XX_WRITEIO_DELAY);
 
 		/* perform another read on the Device Status Register */
 		reg = readl(device_base + ISL38XX_CTRL_STAT_REG);
-		udelay(ISL38XX_WRITEIO_DELAY);
-
-#if VERBOSE > SHOW_ERROR_MESSAGES
 		do_gettimeofday(&current_time);
 		DEBUG(SHOW_TRACING, "%08li.%08li Device register read %08x\n",
-		      current_time.tv_sec, current_time.tv_usec, reg);
+		      current_time.tv_sec, (long)current_time.tv_usec, reg);
 #endif
 	} else {
 		/* device is (still) awake  */
@@ -185,7 +182,6 @@ isl38xx_trigger_device(int asleep, void __iomem *device_base)
 
 		isl38xx_w32_flush(device_base, ISL38XX_DEV_INT_UPDATE,
 				  ISL38XX_DEV_INT_REG);
-		udelay(ISL38XX_WRITEIO_DELAY);
 	}
 }
 
@@ -207,17 +203,19 @@ isl38xx_interface_reset(void __iomem *device_base, dma_addr_t host_address)
 	/* enable the interrupt for detecting initialization */
 
 	/* Note: Do not enable other interrupts here. We want the
-	 * device to have come up first 100% before allowing any other 
+	 * device to have come up first 100% before allowing any other
 	 * interrupts. */
 	isl38xx_w32_flush(device_base, ISL38XX_INT_IDENT_INIT, ISL38XX_INT_EN_REG);
 	udelay(ISL38XX_WRITEIO_DELAY);  /* allow complete full reset */
 }
 
 void
-isl38xx_enable_common_interrupts(void __iomem *device_base) {
+isl38xx_enable_common_interrupts(void __iomem *device_base)
+{
 	u32 reg;
-	reg = ( ISL38XX_INT_IDENT_UPDATE | 
-			ISL38XX_INT_IDENT_SLEEP | ISL38XX_INT_IDENT_WAKEUP);
+
+	reg = ISL38XX_INT_IDENT_UPDATE | ISL38XX_INT_IDENT_SLEEP |
+	      ISL38XX_INT_IDENT_WAKEUP;
 	isl38xx_w32_flush(device_base, reg, ISL38XX_INT_EN_REG);
 	udelay(ISL38XX_WRITEIO_DELAY);
 }
@@ -237,23 +235,21 @@ isl38xx_in_queue(isl38xx_control_block *cb, int queue)
 		/* send queues */
 	case ISL38XX_CB_TX_MGMTQ:
 		BUG_ON(delta > ISL38XX_CB_MGMT_QSIZE);
+
 	case ISL38XX_CB_TX_DATA_LQ:
 	case ISL38XX_CB_TX_DATA_HQ:
 		BUG_ON(delta > ISL38XX_CB_TX_QSIZE);
 		return delta;
-		break;
 
 		/* receive queues */
 	case ISL38XX_CB_RX_MGMTQ:
 		BUG_ON(delta > ISL38XX_CB_MGMT_QSIZE);
 		return ISL38XX_CB_MGMT_QSIZE - delta;
-		break;
 
 	case ISL38XX_CB_RX_DATA_LQ:
 	case ISL38XX_CB_RX_DATA_HQ:
 		BUG_ON(delta > ISL38XX_CB_RX_QSIZE);
 		return ISL38XX_CB_RX_QSIZE - delta;
-		break;
 	}
 	BUG();
 	return 0;

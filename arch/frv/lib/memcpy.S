@@ -10,7 +10,6 @@
  */
 
 
-        .file		"memcpy.S"
         .text
         .p2align	4
 
@@ -31,18 +30,16 @@ memcpy:
 	beqlr		icc3,#0
 
 	# optimise based on best common alignment for to, from & count
-	andicc.p	gr4,#0x1f,gr0,icc0
+	andicc.p	gr4,#0x0f,gr0,icc0
 	setlos		#8,gr11
-	andicc.p	gr4,#0x0f,gr0,icc1
-	beq		icc0,#0,memcpy_32
-	andicc.p	gr4,#0x07,gr0,icc0
-	beq		icc1,#0,memcpy_16
-	andicc.p	gr4,#0x03,gr0,icc1
-	beq		icc0,#0,memcpy_8
-	andicc.p	gr4,#0x01,gr0,icc0
-	beq		icc1,#0,memcpy_4
+	andicc.p	gr4,#0x07,gr0,icc1
+	beq		icc0,#0,memcpy_16
+	andicc.p	gr4,#0x03,gr0,icc0
+	beq		icc1,#0,memcpy_8
+	andicc.p	gr4,#0x01,gr0,icc1
+	beq		icc0,#0,memcpy_4
 	setlos.p	#1,gr11
-	beq		icc0,#0,memcpy_2
+	beq		icc1,#0,memcpy_2
 
 	# do byte by byte copy
 	sub.p		gr8,gr11,gr3
@@ -94,22 +91,6 @@ memcpy_16:
 	subicc		gr10,#16,gr10,icc0
 	stdu		gr4,@(gr3,gr11)
 	stdu.p		gr6,@(gr3,gr11)
-	bne		icc0,#2,0b
-	bralr
-
-	# do eight-word by eight-word copy
-memcpy_32:
-	sub.p		gr8,gr11,gr3
-	sub		gr9,gr11,gr9
-0:	lddu		@(gr9,gr11),gr4
-	lddu		@(gr9,gr11),gr6
-	lddu		@(gr9,gr11),gr12
-	lddu.p		@(gr9,gr11),gr14
-	subicc		gr10,#32,gr10,icc0
-	stdu		gr4,@(gr3,gr11)
-	stdu		gr6,@(gr3,gr11)
-	stdu		gr12,@(gr3,gr11)
-	stdu.p		gr14,@(gr3,gr11)
 	bne		icc0,#2,0b
 	bralr
 __memcpy_end:

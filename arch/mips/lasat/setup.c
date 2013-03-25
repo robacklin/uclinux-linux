@@ -1,6 +1,4 @@
 /*
- * setup.c
- *
  * Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 1999 MIPS Technologies, Inc.  All rights reserved.
  *
@@ -8,8 +6,6 @@
  * Copyright (C) 2000 LASAT Networks A/S.
  *
  * Brian Murphy <brian@murphy.dk>
- *
- * ########################################################################
  *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
@@ -24,49 +20,34 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  *
- * ########################################################################
- *
  * Lasat specific setup.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
-#include <linux/ide.h>
-
 #include <linux/interrupt.h>
-#include <asm/time.h>
+#include <linux/tty.h>
 
+#include <asm/time.h>
 #include <asm/cpu.h>
 #include <asm/bootinfo.h>
 #include <asm/irq.h>
 #include <asm/lasat/lasat.h>
-
-#include <linux/serial.h>
-#include <asm/serial.h>
 #include <asm/lasat/serial.h>
 
-#if CONFIG_PICVUE
+#ifdef CONFIG_PICVUE
 #include <linux/notifier.h>
 #endif
 
 #include "ds1603.h"
-#include "at93c.h"
 #include <asm/lasat/ds1603.h>
 #include <asm/lasat/picvue.h>
 #include <asm/lasat/eeprom.h>
 
 #include "prom.h"
 
-int lasat_command_line = 0;
+int lasat_command_line;
 void lasatint_init(void);
-
-#ifdef CONFIG_BLK_DEV_IDE
-extern struct ide_ops std_ide_ops;
-extern struct ide_ops *ide_ops;
-#endif
-
-extern char arcs_cmdline[CL_SIZE];
 
 extern void lasat_reboot_setup(void);
 extern void pcisetup(void);
@@ -74,11 +55,16 @@ extern void edhac_init(void *, void *, void *);
 extern void addrflt_init(void);
 
 struct lasat_misc lasat_misc_info[N_MACHTYPES] = {
-	{(void *)KSEG1ADDR(0x1c840000), (void *)KSEG1ADDR(0x1c800000), 2},
-	{(void *)KSEG1ADDR(0x11080000), (void *)KSEG1ADDR(0x11000000), 6}
+	{
+		.reset_reg	= (void *)KSEG1ADDR(0x1c840000),
+		.flash_wp_reg	= (void *)KSEG1ADDR(0x1c800000), 2
+	}, {
+		.reset_reg	= (void *)KSEG1ADDR(0x11080000),
+		.flash_wp_reg	= (void *)KSEG1ADDR(0x11000000), 6
+	}
 };
 
-struct lasat_misc *lasat_misc = NULL;
+struct lasat_misc *lasat_misc;
 
 #ifdef CONFIG_DS1603
 static struct ds_defs ds_defs[N_MACHTYPES] = {
@@ -120,104 +106,48 @@ static int lasat_panic_prom_monitor(struct notifier_block *this,
 	return NOTIFY_DONE;
 }
 
-static struct notifier_block lasat_panic_block[] = 
+static struct notifier_block lasat_panic_block[] =
 {
-	{ lasat_panic_display, NULL, INT_MAX },
-	{ lasat_panic_prom_monitor, NULL, INT_MIN }
+	{
+		.notifier_call	= lasat_panic_display,
+		.priority	= INT_MAX
+	}, {
+		.notifier_call	= lasat_panic_prom_monitor,
+		.priority	= INT_MIN
+	}
 };
 
-#ifdef CONFIG_BLK_DEV_IDE
-static int lasat_ide_default_irq(ide_ioreg_t base) {
-	return 0;
-}
-
-static ide_ioreg_t lasat_ide_default_io_base(int index) {
-	return 0;
-}
-#endif
-
-static void lasat_time_init(void)
+void __init plat_time_init(void)
 {
 	mips_hpt_frequency = lasat_board_info.li_cpu_hz / 2;
+
+	change_c0_status(ST0_IM, IE_IRQ0);
 }
 
-static void lasat_timer_setup(struct irqaction *irq)
-{
-
-	write_c0_compare(
-		read_c0_count() + 
-		mips_hpt_frequency / HZ);
-	change_c0_status(ST0_IM, IE_IRQ0 | IE_IRQ5);
-}
-
-#define MIPS_CPU_TIMER_IRQ 7
-asmlinkage void lasat_timer_interrupt(struct pt_regs *regs)
-{
-	ll_timer_interrupt(MIPS_CPU_TIMER_IRQ, regs);
-}
-
-void __init serial_init(void)
-{
-#ifdef CONFIG_SERIAL
-	struct serial_struct s;
-
-	memset(&s, 0, sizeof(s));
-
-	s.flags = STD_COM_FLAGS;
-	s.io_type = SERIAL_IO_MEM;
-
-	if (mips_machtype == MACH_LASAT_100) {
-		s.baud_base = LASAT_BASE_BAUD_100;
-		s.irq = LASATINT_UART_100;
-		s.iomem_reg_shift = LASAT_UART_REGS_SHIFT_100;
-		s.iomem_base = (u8 *)KSEG1ADDR(LASAT_UART_REGS_BASE_100);
-	} else {
-		s.baud_base = LASAT_BASE_BAUD_200;
-		s.irq = LASATINT_UART_200;
-		s.iomem_reg_shift = LASAT_UART_REGS_SHIFT_200;
-		s.iomem_base = (u8 *)KSEG1ADDR(LASAT_UART_REGS_BASE_200);
-	}
-
-	if (early_serial_setup(&s) != 0)
-		printk(KERN_ERR "Serial setup failed!\n");
-#endif
-}
-
-void __init lasat_setup(void)
+void __init plat_mem_setup(void)
 {
 	int i;
-	lasat_misc  = &lasat_misc_info[mips_machtype];
+	int lasat_type = IS_LASAT_200() ? 1 : 0;
+
+	lasat_misc  = &lasat_misc_info[lasat_type];
 #ifdef CONFIG_PICVUE
-	picvue = &pvc_defs[mips_machtype];
+	picvue = &pvc_defs[lasat_type];
 #endif
 
 	/* Set up panic notifier */
-	for (i = 0; i < sizeof(lasat_panic_block) / sizeof(struct notifier_block); i++)
-		notifier_chain_register(&panic_notifier_list, &lasat_panic_block[i]);
-
-#ifdef CONFIG_BLK_DEV_IDE
-	ide_ops = &std_ide_ops;
-	ide_ops->ide_default_irq = &lasat_ide_default_irq;
-	ide_ops->ide_default_io_base = &lasat_ide_default_io_base;
-#endif
+	for (i = 0; i < ARRAY_SIZE(lasat_panic_block); i++)
+		atomic_notifier_chain_register(&panic_notifier_list,
+				&lasat_panic_block[i]);
 
 	lasat_reboot_setup();
 
-	board_time_init = lasat_time_init;
-	board_timer_setup = lasat_timer_setup;
-
 #ifdef CONFIG_DS1603
-	ds1603 = &ds_defs[mips_machtype];
-	rtc_get_time = ds1603_read;
-	rtc_set_time = ds1603_set;
+	ds1603 = &ds_defs[lasat_type];
 #endif
 
+#ifdef DYNAMIC_SERIAL_INIT
 	serial_init();
+#endif
 
-	/* Switch from prom exception handler to normal mode */
-	change_c0_status(ST0_BEV,0);
-
-	prom_printf("Lasat specific initialization complete\n");
+	pr_info("Lasat specific initialization complete\n");
 }
-
-

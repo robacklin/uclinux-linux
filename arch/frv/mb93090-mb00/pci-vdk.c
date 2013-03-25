@@ -9,7 +9,6 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -17,7 +16,6 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/slab.h>
 
 #include <asm/segment.h>
 #include <asm/io.h>
@@ -32,32 +30,57 @@ struct pci_bus *__nongpreldata pci_root_bus;
 struct pci_ops *__nongpreldata pci_root_ops;
 
 /*
+ * The accessible PCI window does not cover the entire CPU address space, but
+ * there are devices we want to access outside of that window, so we need to
+ * insert specific PCI bus resources instead of using the platform-level bus
+ * resources directly for the PCI root bus.
+ *
+ * These are configured and inserted by pcibios_init() and are attached to the
+ * root bus by pcibios_fixup_bus().
+ */
+static struct resource pci_ioport_resource = {
+	.name	= "PCI IO",
+	.start	= 0,
+	.end	= IO_SPACE_LIMIT,
+	.flags	= IORESOURCE_IO,
+};
+
+static struct resource pci_iomem_resource = {
+	.name	= "PCI mem",
+	.start	= 0,
+	.end	= -1,
+	.flags	= IORESOURCE_MEM,
+};
+
+/*
  * Functions for accessing PCI configuration space
  */
 
-#define CONFIG_CMD(dev, where) \
-	(0x80000000 | (dev->bus->number << 16) | (dev->devfn << 8) | (where & ~3))
+#define CONFIG_CMD(bus, dev, where) \
+	(0x80000000 | (bus->number << 16) | (devfn << 8) | (where & ~3))
 
-#define __set_PciCfgAddr(A) writel((A), (volatile void *) __region_CS1 + 0x80)
+#define __set_PciCfgAddr(A) writel((A), (volatile void __iomem *) __region_CS1 + 0x80)
 
-#define __get_PciCfgDataB(A) readb((volatile void *) __region_CS1 + 0x88 + ((A) & 3))
-#define __get_PciCfgDataW(A) readw((volatile void *) __region_CS1 + 0x88 + ((A) & 2))
-#define __get_PciCfgDataL(A) readl((volatile void *) __region_CS1 + 0x88)
+#define __get_PciCfgDataB(A) readb((volatile void __iomem *) __region_CS1 + 0x88 + ((A) & 3))
+#define __get_PciCfgDataW(A) readw((volatile void __iomem *) __region_CS1 + 0x88 + ((A) & 2))
+#define __get_PciCfgDataL(A) readl((volatile void __iomem *) __region_CS1 + 0x88)
 
 #define __set_PciCfgDataB(A,V) \
-	writeb((V), (volatile void *) __region_CS1 + 0x88 + (3 - ((A) & 3)))
+	writeb((V), (volatile void __iomem *) __region_CS1 + 0x88 + (3 - ((A) & 3)))
+
 #define __set_PciCfgDataW(A,V) \
-	writew((V), (volatile void *) __region_CS1 + 0x88 + (2 - ((A) & 2)))
+	writew((V), (volatile void __iomem *) __region_CS1 + 0x88 + (2 - ((A) & 2)))
+
 #define __set_PciCfgDataL(A,V) \
-	writel((V), (volatile void *) __region_CS1 + 0x88)
+	writel((V), (volatile void __iomem *) __region_CS1 + 0x88)
 
-#define __get_PciBridgeDataB(A) readb((volatile void *) __region_CS1 + 0x800 + (A))
-#define __get_PciBridgeDataW(A) readw((volatile void *) __region_CS1 + 0x800 + (A))
-#define __get_PciBridgeDataL(A) readl((volatile void *) __region_CS1 + 0x800 + (A))
+#define __get_PciBridgeDataB(A) readb((volatile void __iomem *) __region_CS1 + 0x800 + (A))
+#define __get_PciBridgeDataW(A) readw((volatile void __iomem *) __region_CS1 + 0x800 + (A))
+#define __get_PciBridgeDataL(A) readl((volatile void __iomem *) __region_CS1 + 0x800 + (A))
 
-#define __set_PciBridgeDataB(A,V) writeb((V), (volatile void *) __region_CS1 + 0x800 + (A))
-#define __set_PciBridgeDataW(A,V) writew((V), (volatile void *) __region_CS1 + 0x800 + (A))
-#define __set_PciBridgeDataL(A,V) writel((V), (volatile void *) __region_CS1 + 0x800 + (A))
+#define __set_PciBridgeDataB(A,V) writeb((V), (volatile void __iomem *) __region_CS1 + 0x800 + (A))
+#define __set_PciBridgeDataW(A,V) writew((V), (volatile void __iomem *) __region_CS1 + 0x800 + (A))
+#define __set_PciBridgeDataL(A,V) writel((V), (volatile void __iomem *) __region_CS1 + 0x800 + (A))
 
 static inline int __query(const struct pci_dev *dev)
 {
@@ -68,109 +91,87 @@ static inline int __query(const struct pci_dev *dev)
 	return 0;
 }
 
-static int pci_frv_read_transmogrify_value(struct pci_dev *dev, int where, u32 *value)
-{
-	uint32_t rawval;
-
-	if (dev->bus->number == 0 && dev->devfn == PCI_DEVFN(0, 0)) {
-		rawval = __get_PciBridgeDataL(where);
-	}
-	else {
-		__set_PciCfgAddr(CONFIG_CMD(dev, where));
-		rawval = __get_PciCfgDataL(where);
-	}
-
-	*value = rawval;
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int pci_frv_write_transmogrify_value(struct pci_dev *dev, int where, u32 value)
-{
-	uint32_t rawval;
-
-	rawval = value;
-
-	if (dev->bus->number == 0 && dev->devfn == PCI_DEVFN(0, 0)) {
-		__set_PciBridgeDataL(where, rawval);
-	}
-	else {
-		__set_PciCfgAddr(CONFIG_CMD(dev, where));
-		__set_PciCfgDataL(where, rawval);
-	}
-
-	return PCIBIOS_SUCCESSFUL;
-}
-
 /*****************************************************************************/
 /*
- * 
+ *
  */
-static int pci_frv_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+static int pci_frv_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+			       u32 *val)
 {
 	u32 _value;
-	int ret;
 
-	ret = pci_frv_read_transmogrify_value(dev, where & ~3, &_value);
-
-	*value = _value >> ((where & 3) * 8);
-	return ret;
-}
-
-static int pci_frv_read_config_word(struct pci_dev *dev, int where, u16 *value)
-{
-	u32 _value;
-	int ret;
-
-	ret = pci_frv_read_transmogrify_value(dev, where & ~3, &_value);
-
-	*value = _value >> ((where & 2) * 8);
-	return ret;
-}
-
-static int pci_frv_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	int ret;
-
-	ret = pci_frv_read_transmogrify_value(dev, where & ~3, value);
-	return ret;
-}
-
-static int pci_frv_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	if (dev->bus->number == 0 && dev->devfn == PCI_DEVFN(0, 0)) {
-		__set_PciBridgeDataB(where, value);
+	if (bus->number == 0 && devfn == PCI_DEVFN(0, 0)) {
+		_value = __get_PciBridgeDataL(where & ~3);
 	}
 	else {
-		__set_PciCfgAddr(CONFIG_CMD(dev, where));
-		__set_PciCfgDataB(where, value);
+		__set_PciCfgAddr(CONFIG_CMD(bus, devfn, where));
+		_value = __get_PciCfgDataL(where & ~3);
 	}
+
+	switch (size) {
+	case 1:
+		_value = _value >> ((where & 3) * 8);
+		break;
+
+	case 2:
+		_value = _value >> ((where & 2) * 8);
+		break;
+
+	case 4:
+		break;
+
+	default:
+		BUG();
+	}
+
+	*val = _value;
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int pci_frv_write_config_word(struct pci_dev *dev, int where, u16 value)
+static int pci_frv_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+				u32 value)
 {
-	if (dev->bus->number == 0 && dev->devfn == PCI_DEVFN(0, 0)) {
-		__set_PciBridgeDataW(where, value);
-	}
-	else {
-		__set_PciCfgAddr(CONFIG_CMD(dev, where));
-		__set_PciCfgDataW(where, value);
-	}
-	return PCIBIOS_SUCCESSFUL;
-}
+	switch (size) {
+	case 1:
+		if (bus->number == 0 && devfn == PCI_DEVFN(0, 0)) {
+			__set_PciBridgeDataB(where, value);
+		}
+		else {
+			__set_PciCfgAddr(CONFIG_CMD(bus, devfn, where));
+			__set_PciCfgDataB(where, value);
+		}
+		break;
 
-static int pci_frv_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return pci_frv_write_transmogrify_value(dev, where & ~3, value);
+	case 2:
+		if (bus->number == 0 && devfn == PCI_DEVFN(0, 0)) {
+			__set_PciBridgeDataW(where, value);
+		}
+		else {
+			__set_PciCfgAddr(CONFIG_CMD(bus, devfn, where));
+			__set_PciCfgDataW(where, value);
+		}
+		break;
+
+	case 4:
+		if (bus->number == 0 && devfn == PCI_DEVFN(0, 0)) {
+			__set_PciBridgeDataL(where, value);
+		}
+		else {
+			__set_PciCfgAddr(CONFIG_CMD(bus, devfn, where));
+			__set_PciCfgDataL(where, value);
+		}
+		break;
+
+	default:
+		BUG();
+	}
+
+	return PCIBIOS_SUCCESSFUL;
 }
 
 static struct pci_ops pci_direct_frv = {
-	pci_frv_read_config_byte,
-	pci_frv_read_config_word,
-	pci_frv_read_config_dword,
-	pci_frv_write_config_byte,
-	pci_frv_write_config_word,
-	pci_frv_write_config_dword
+	pci_frv_read_config,
+	pci_frv_write_config,
 };
 
 /*
@@ -186,16 +187,11 @@ static struct pci_ops pci_direct_frv = {
 static int __init pci_sanity_check(struct pci_ops *o)
 {
 	struct pci_bus bus;		/* Fake bus and device */
-	struct pci_dev dev;
 	u32 id;
 
 	bus.number	= 0;
-	dev.bus		= &bus;
-	dev.devfn	= 0;
-	dev.hdr_type	= 1;
-	strcpy(dev.slot_name,"00:00.0");
 
-	if (o->read_dword(&dev, PCI_VENDOR_ID, &id) == PCIBIOS_SUCCESSFUL) {
+	if (o->read(&bus, 0, PCI_VENDOR_ID, 4, &id) == PCIBIOS_SUCCESSFUL) {
 		printk("PCI: VDK Bridge device:vendor: %08x\n", id);
 		if (id == 0x200e10cf)
 			return 1;
@@ -213,7 +209,7 @@ static struct pci_ops * __init pci_check_direct(void)
 
 	/* check if access works */
 	if (pci_sanity_check(&pci_direct_frv)) {
-		__restore_flags(flags);
+		local_irq_restore(flags);
 		printk("PCI: Using configuration frv\n");
 //		request_mem_region(0xBE040000, 256, "FRV bridge");
 //		request_mem_region(0xBFFFFFF4, 12, "PCI frv");
@@ -222,58 +218,6 @@ static struct pci_ops * __init pci_check_direct(void)
 
 	local_irq_restore(flags);
 	return NULL;
-}
-
-/*
- * Several buggy motherboards address only 16 devices and mirror
- * them to next 16 IDs. We try to detect this `feature' on all
- * primary buses (those containing host bridges as they are
- * expected to be unique) and remove the ghost devices.
- */
-
-static void __init pcibios_fixup_ghosts(struct pci_bus *b)
-{
-	struct list_head *ln, *mn;
-	struct pci_dev *d, *e;
-	int mirror = PCI_DEVFN(16,0);
-	int seen_host_bridge = 0;
-	int i;
-
-	for (ln=b->devices.next; ln != &b->devices; ln=ln->next) {
-		d = pci_dev_b(ln);
-		if ((d->class >> 8) == PCI_CLASS_BRIDGE_HOST)
-			seen_host_bridge++;
-		for (mn=ln->next; mn != &b->devices; mn=mn->next) {
-			e = pci_dev_b(mn);
-			if (e->devfn != d->devfn + mirror ||
-			    e->vendor != d->vendor ||
-			    e->device != d->device ||
-			    e->class != d->class)
-				continue;
-			for(i=0; i<PCI_NUM_RESOURCES; i++)
-				if (e->resource[i].start != d->resource[i].start ||
-				    e->resource[i].end != d->resource[i].end ||
-				    e->resource[i].flags != d->resource[i].flags)
-					continue;
-			break;
-		}
-		if (mn == &b->devices)
-			return;
-	}
-	if (!seen_host_bridge)
-		return;
-	printk("PCI: Ignoring ghost devices on bus %02x\n", b->number);
-
-	ln = &b->devices;
-	while (ln->next != &b->devices) {
-		d = pci_dev_b(ln->next);
-		if (d->devfn >= mirror) {
-			list_del(&d->global_list);
-			list_del(&d->bus_list);
-			kfree(d);
-		} else
-			ln = ln->next;
-	}
 }
 
 /*
@@ -291,7 +235,7 @@ static void __init pcibios_fixup_peer_bridges(void)
 		return;
 	printk("PCI: Peer bridge fixup\n");
 	for (n=0; n <= pcibios_last_bus; n++) {
-		if (pci_bus_exists(&pci_root_buses, n))
+		if (pci_find_bus(0, n))
 			continue;
 		bus.number = n;
 		bus.ops = pci_root_ops;
@@ -319,7 +263,7 @@ static void __init pci_fixup_umc_ide(struct pci_dev *d)
 	 */
 	int i;
 
-	printk("PCI: Fixing base address flags for device %s\n", d->slot_name);
+	printk("PCI: Fixing base address flags for device %s\n", pci_name(d));
 	for(i=0; i<4; i++)
 		d->resource[i].flags |= PCI_BASE_ADDRESS_SPACE_IO;
 }
@@ -333,7 +277,7 @@ static void __init pci_fixup_ide_bases(struct pci_dev *d)
 	 */
 	if ((d->class >> 8) != PCI_CLASS_STORAGE_IDE)
 		return;
-	printk("PCI: IDE base address fixup for %s\n", d->slot_name);
+	printk("PCI: IDE base address fixup for %s\n", pci_name(d));
 	for(i=0; i<4; i++) {
 		struct resource *r = &d->resource[i];
 		if ((r->start & ~0x80) == 0x374) {
@@ -351,17 +295,26 @@ static void __init pci_fixup_ide_trash(struct pci_dev *d)
 	 * There exist PCI IDE controllers which have utter garbage
 	 * in first four base registers. Ignore that.
 	 */
-	printk("PCI: IDE base address trash cleared for %s\n", d->slot_name);
+	printk("PCI: IDE base address trash cleared for %s\n", pci_name(d));
 	for(i=0; i<4; i++)
 		d->resource[i].start = d->resource[i].end = d->resource[i].flags = 0;
 }
 
-struct pci_fixup pcibios_fixups[] = {
-	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_UMC,	PCI_DEVICE_ID_UMC_UM8886BF,	pci_fixup_umc_ide },
-	{ PCI_FIXUP_HEADER,	PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_5513,		pci_fixup_ide_trash },
-	{ PCI_FIXUP_HEADER,	PCI_ANY_ID,		PCI_ANY_ID,			pci_fixup_ide_bases },
-	{ 0 }
-};
+static void __devinit  pci_fixup_latency(struct pci_dev *d)
+{
+	/*
+	 *  SiS 5597 and 5598 chipsets require latency timer set to
+	 *  at most 32 to avoid lockups.
+	 */
+	DBG("PCI: Setting max latency to 32\n");
+	pcibios_max_latency = 32;
+}
+
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_UMC, PCI_DEVICE_ID_UMC_UM8886BF, pci_fixup_umc_ide);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5513, pci_fixup_ide_trash);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5597, pci_fixup_latency);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI, PCI_DEVICE_ID_SI_5598, pci_fixup_latency);
+DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, pci_fixup_ide_bases);
 
 /*
  *  Called after each bus is probed, but before its children
@@ -373,7 +326,7 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
 #if 0
 	printk("### PCIBIOS_FIXUP_BUS(%d)\n",bus->number);
 #endif
-	pcibios_fixup_ghosts(bus);
+
 	pci_read_bridge_bases(bus);
 
 	if (bus->number == 0) {
@@ -396,12 +349,13 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
  * compatible with 2.0.X. This should go away some day.
  */
 
-void __init pcibios_init(void)
+int __init pcibios_init(void)
 {
 	struct pci_ops *dir = NULL;
+	LIST_HEAD(resources);
 
 	if (!mb93090_mb00_detected)
-		return;
+		return -ENXIO;
 
 	__reg_MB86943_sl_ctl |= MB86943_SL_CTL_DRCT_MASTER_SWAP | MB86943_SL_CTL_DRCT_SLAVE_SWAP;
 
@@ -417,44 +371,65 @@ void __init pcibios_init(void)
 	__reg_MB86943_pci_sl_mem_base	= __region_CS2 + 0x08000000;
 	mb();
 
-	*(volatile unsigned long *)(__region_CS2+0x01300014) == 1;
+	/* enable PCI arbitration */
+	__reg_MB86943_pci_arbiter	= MB86943_PCIARB_EN;
 
-	ioport_resource.start	= (__reg_MB86943_sl_pci_io_base << 9) & 0xfffffc00;
-	ioport_resource.end	= (__reg_MB86943_sl_pci_io_range << 9) | 0x3ff;
-	ioport_resource.end	+= ioport_resource.start;
+	pci_ioport_resource.start	= (__reg_MB86943_sl_pci_io_base << 9) & 0xfffffc00;
+	pci_ioport_resource.end		= (__reg_MB86943_sl_pci_io_range << 9) | 0x3ff;
+	pci_ioport_resource.end		+= pci_ioport_resource.start;
 
-	printk("PCI IO window:  %08lx-%08lx\n", ioport_resource.start, ioport_resource.end);
+	printk("PCI IO window:  %08llx-%08llx\n",
+	       (unsigned long long) pci_ioport_resource.start,
+	       (unsigned long long) pci_ioport_resource.end);
 
-	iomem_resource.start	= (__reg_MB86943_sl_pci_mem_base << 9) & 0xfffffc00;
+	pci_iomem_resource.start	= (__reg_MB86943_sl_pci_mem_base << 9) & 0xfffffc00;
+	pci_iomem_resource.end		= (__reg_MB86943_sl_pci_mem_range << 9) | 0x3ff;
+	pci_iomem_resource.end		+= pci_iomem_resource.start;
 
-	/* Reserve somewhere to write to flush posted writes. */
-	iomem_resource.start += 0x400;
+	/* Reserve somewhere to write to flush posted writes.  This is used by
+	 * __flush_PCI_writes() from asm/io.h to force the write FIFO in the
+	 * CPU-PCI bridge to flush as this doesn't happen automatically when a
+	 * read is performed on the MB93090 development kit motherboard.
+	 */
+	pci_iomem_resource.start	+= 0x400;
 
-	iomem_resource.end	= (__reg_MB86943_sl_pci_mem_range << 9) | 0x3ff;
-	iomem_resource.end	+= iomem_resource.start;
+	printk("PCI MEM window: %08llx-%08llx\n",
+	       (unsigned long long) pci_iomem_resource.start,
+	       (unsigned long long) pci_iomem_resource.end);
+	printk("PCI DMA memory: %08lx-%08lx\n",
+	       dma_coherent_mem_start, dma_coherent_mem_end);
 
-	printk("PCI MEM window: %08lx-%08lx\n", iomem_resource.start, iomem_resource.end);
-	printk("PCI DMA memory: %08lx-%08lx\n", dma_consistent_mem_start, dma_consistent_mem_end);
+	if (insert_resource(&iomem_resource, &pci_iomem_resource) < 0)
+		panic("Unable to insert PCI IOMEM resource\n");
+	if (insert_resource(&ioport_resource, &pci_ioport_resource) < 0)
+		panic("Unable to insert PCI IOPORT resource\n");
 
 	if (!pci_probe)
-		return;
+		return -ENXIO;
 
 	dir = pci_check_direct();
 	if (dir)
 		pci_root_ops = dir;
 	else {
 		printk("PCI: No PCI bus detected\n");
-		return;
+		return -ENXIO;
 	}
 
 	printk("PCI: Probing PCI hardware\n");
-	pci_root_bus = pci_scan_bus(0, pci_root_ops, NULL);
+	pci_add_resource(&resources, &pci_ioport_resource);
+	pci_add_resource(&resources, &pci_iomem_resource);
+	pci_root_bus = pci_scan_root_bus(NULL, 0, pci_root_ops, NULL,
+					 &resources);
 
 	pcibios_irq_init();
 	pcibios_fixup_peer_bridges();
 	pcibios_fixup_irqs();
 	pcibios_resource_survey();
+
+	return 0;
 }
+
+arch_initcall(pcibios_init);
 
 char * __init pcibios_setup(char *str)
 {
@@ -472,9 +447,9 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 {
 	int err;
 
-	if ((err = pcibios_enable_resources(dev, mask)) < 0)
+	if ((err = pci_enable_resources(dev, mask)) < 0)
 		return err;
-	pcibios_enable_irq(dev);
+	if (!dev->msi_enabled)
+		pcibios_enable_irq(dev);
 	return 0;
 }
-

@@ -18,15 +18,6 @@
  * The full GNU General Public License is included in this distribution in the
  * file called LICENSE.
  *
- *
- * Changes:
- *
- * 2003/08/06 - Amir Noam <amir.noam at intel dot com>
- *	- Add support for setting bond's MAC address with special
- *	  handling required for ALB/TLB.
- *
- * 2003/12/01 - Shmulik Hen <shmulik.hen at intel dot com>
- *	- Code cleanup and style changes
  */
 
 #ifndef __BOND_ALB_H__
@@ -40,14 +31,52 @@ struct slave;
 #define BOND_ALB_INFO(bond)   ((bond)->alb_info)
 #define SLAVE_TLB_INFO(slave) ((slave)->tlb_info)
 
+#define ALB_TIMER_TICKS_PER_SEC	    10	/* should be a divisor of HZ */
+#define BOND_TLB_REBALANCE_INTERVAL 10	/* In seconds, periodic re-balancing.
+					 * Used for division - never set
+					 * to zero !!!
+					 */
+#define BOND_ALB_LP_INTERVAL	    1	/* In seconds, periodic send of
+					 * learning packets to the switch
+					 */
+
+#define BOND_TLB_REBALANCE_TICKS (BOND_TLB_REBALANCE_INTERVAL \
+				  * ALB_TIMER_TICKS_PER_SEC)
+
+#define BOND_ALB_LP_TICKS (BOND_ALB_LP_INTERVAL \
+			   * ALB_TIMER_TICKS_PER_SEC)
+
+#define TLB_HASH_TABLE_SIZE 256	/* The size of the clients hash table.
+				 * Note that this value MUST NOT be smaller
+				 * because the key hash table is BYTE wide !
+				 */
+
+
+#define TLB_NULL_INDEX		0xffffffff
+#define MAX_LP_BURST		3
+
+/* rlb defs */
+#define RLB_HASH_TABLE_SIZE	256
+#define RLB_NULL_INDEX		0xffffffff
+#define RLB_UPDATE_DELAY	(2*ALB_TIMER_TICKS_PER_SEC) /* 2 seconds */
+#define RLB_ARP_BURST_SIZE	2
+#define RLB_UPDATE_RETRY	3 /* 3-ticks - must be smaller than the rlb
+				   * rebalance interval (5 min).
+				   */
+/* RLB_PROMISC_TIMEOUT = 10 sec equals the time that the current slave is
+ * promiscuous after failover
+ */
+#define RLB_PROMISC_TIMEOUT	(10*ALB_TIMER_TICKS_PER_SEC)
+
+
 struct tlb_client_info {
 	struct slave *tx_slave;	/* A pointer to slave used for transmiting
 				 * packets to a Client that the Hash function
 				 * gave this entry index.
 				 */
-	u32 tx_bytes;		/* Each Client acumulates the BytesTx that
-				 * were tranmitted to it, and after each
-				 * CallBack the LoadHistory is devided
+	u32 tx_bytes;		/* Each Client accumulates the BytesTx that
+				 * were transmitted to it, and after each
+				 * CallBack the LoadHistory is divided
 				 * by the balance interval
 				 */
 	u32 load_history;	/* This field contains the amount of Bytes
@@ -69,8 +98,8 @@ struct tlb_client_info {
  * -------------------------------------------------------------------------
  */
 struct rlb_client_info {
-	u32 ip_src;		/* the server IP address */
-	u32 ip_dst;		/* the client IP address */
+	__be32 ip_src;		/* the server IP address */
+	__be32 ip_dst;		/* the client IP address */
 	u8  mac_dst[ETH_ALEN];	/* the client MAC address */
 	u32 next;		/* The next Hash table entry index */
 	u32 prev;		/* The previous Hash table entry index */
@@ -93,7 +122,6 @@ struct tlb_slave_info {
 };
 
 struct alb_bond_info {
-	struct timer_list	alb_timer;
 	struct tlb_client_info	*tx_hashtbl; /* Dynamically allocated */
 	spinlock_t		tx_hashtbl_lock;
 	u32			unbalanced_load;
@@ -101,7 +129,6 @@ struct alb_bond_info {
 	int			lp_counter;
 	/* -------- rlb parameters -------- */
 	int rlb_enabled;
-	struct packet_type	rlb_pkt_type;
 	struct rlb_client_info	*rx_hashtbl;	/* Receive hash table */
 	spinlock_t		rx_hashtbl_lock;
 	u32			rx_hashtbl_head;
@@ -111,7 +138,6 @@ struct alb_bond_info {
 	struct slave		*next_rx_slave;/* next slave to be assigned
 						* to a new rx client for
 						*/
-	u32			rlb_interval_counter;
 	u8			primary_is_promisc;	   /* boolean */
 	u32			rlb_promisc_timeout_counter;/* counts primary
 							     * promiscuity time
@@ -134,7 +160,7 @@ void bond_alb_deinit_slave(struct bonding *bond, struct slave *slave);
 void bond_alb_handle_link_change(struct bonding *bond, struct slave *slave, char link);
 void bond_alb_handle_active_change(struct bonding *bond, struct slave *new_slave);
 int bond_alb_xmit(struct sk_buff *skb, struct net_device *bond_dev);
-void bond_alb_monitor(struct bonding *bond);
+void bond_alb_monitor(struct work_struct *);
 int bond_alb_set_mac_address(struct net_device *bond_dev, void *addr);
 void bond_alb_clear_vlan(struct bonding *bond, unsigned short vlan_id);
 #endif /* __BOND_ALB_H__ */

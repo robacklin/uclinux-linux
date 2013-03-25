@@ -1,16 +1,16 @@
-/* $Id: isdnl1.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: isdnl1.c,v 2.46.2.5 2004/02/11 13:21:34 keil Exp $
  *
  * common low level stuff for Siemens Chipsetbased isdn cards
  *
  * Author       Karsten Keil
  *              based on the teles driver from Jan den Ouden
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  * For changes and modifications please read
- * ../../../Documentation/isdn/HiSax.cert
+ * Documentation/isdn/HiSax.cert
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
@@ -18,12 +18,12 @@
  *
  */
 
-const char *l1_revision = "$Revision: 1.1.4.1 $";
-
-#define __NO_VERSION__
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include "hisax.h"
 #include "isdnl1.h"
+
+const char *l1_revision = "$Revision: 2.46.2.5 $";
 
 #define TIMER3_VALUE 7000
 
@@ -40,7 +40,7 @@ enum {
 	ST_L1_F8,
 };
 
-#define L1S_STATE_COUNT (ST_L1_F8+1)
+#define L1S_STATE_COUNT (ST_L1_F8 + 1)
 
 static char *strL1SState[] =
 {
@@ -65,7 +65,7 @@ enum {
 	ST_L1_TRANS,
 };
 
-#define L1U_STATE_COUNT (ST_L1_TRANS+1)
+#define L1U_STATE_COUNT (ST_L1_TRANS + 1)
 
 static char *strL1UState[] =
 {
@@ -83,7 +83,7 @@ enum {
 	ST_L1_ACTIV,
 };
 
-#define L1B_STATE_COUNT (ST_L1_ACTIV+1)
+#define L1B_STATE_COUNT (ST_L1_ACTIV + 1)
 
 static char *strL1BState[] =
 {
@@ -100,7 +100,7 @@ enum {
 	EV_DEACT_CNF,
 	EV_DEACT_IND,
 	EV_POWER_UP,
-	EV_RSYNC_IND, 
+	EV_RSYNC_IND,
 	EV_INFO2_IND,
 	EV_INFO4_IND,
 	EV_TIMER_DEACT,
@@ -118,7 +118,7 @@ static char *strL1Event[] =
 	"EV_DEACT_CNF",
 	"EV_DEACT_IND",
 	"EV_POWER_UP",
-	"EV_RSYNC_IND", 
+	"EV_RSYNC_IND",
 	"EV_INFO2_IND",
 	"EV_INFO4_IND",
 	"EV_TIMER_DEACT",
@@ -131,7 +131,7 @@ debugl1(struct IsdnCardState *cs, char *fmt, ...)
 {
 	va_list args;
 	char tmp[8];
-	
+
 	va_start(args, fmt);
 	sprintf(tmp, "Card%d ", cs->cardnr + 1);
 	VHiSax_putstatus(cs, tmp, fmt, args);
@@ -145,14 +145,14 @@ l1m_debug(struct FsmInst *fi, char *fmt, ...)
 	struct PStack *st = fi->userdata;
 	struct IsdnCardState *cs = st->l1.hardware;
 	char tmp[8];
-	
+
 	va_start(args, fmt);
 	sprintf(tmp, "Card%d ", cs->cardnr + 1);
 	VHiSax_putstatus(cs, tmp, fmt, args);
 	va_end(args);
 }
 
-void
+static void
 L1activated(struct IsdnCardState *cs)
 {
 	struct PStack *st;
@@ -167,7 +167,7 @@ L1activated(struct IsdnCardState *cs)
 	}
 }
 
-void
+static void
 L1deactivated(struct IsdnCardState *cs)
 {
 	struct PStack *st;
@@ -191,12 +191,13 @@ DChannel_proc_xmt(struct IsdnCardState *cs)
 		return;
 
 	stptr = cs->stlist;
-	while (stptr != NULL)
+	while (stptr != NULL) {
 		if (test_and_clear_bit(FLG_L1_PULL_REQ, &stptr->l1.Flags)) {
 			stptr->l1.l1l2(stptr, PH_PULL | CONFIRM, NULL);
 			break;
 		} else
 			stptr = stptr->next;
+	}
 }
 
 void
@@ -208,19 +209,19 @@ DChannel_proc_rcv(struct IsdnCardState *cs)
 
 	if (stptr)
 		if (test_bit(FLG_L1_ACTTIMER, &stptr->l1.Flags))
-			FsmEvent(&stptr->l1.l1m, EV_TIMER_ACT, NULL);	
+			FsmEvent(&stptr->l1.l1m, EV_TIMER_ACT, NULL);
 	while ((skb = skb_dequeue(&cs->rq))) {
 #ifdef L2FRAME_DEBUG		/* psa */
 		if (cs->debug & L1_DEB_LAPD)
 			Logl2Frame(cs, skb, "PH_DATA", 1);
 #endif
 		stptr = cs->stlist;
-		if (skb->len<3) {
-			debugl1(cs, "D-channel frame too short(%d)",skb->len);
+		if (skb->len < 3) {
+			debugl1(cs, "D-channel frame too short(%d)", skb->len);
 			dev_kfree_skb(skb);
 			return;
 		}
-		if ((skb->data[0] & 1) || !(skb->data[1] &1)) {
+		if ((skb->data[0] & 1) || !(skb->data[1] & 1)) {
 			debugl1(cs, "D-channel frame wrong EA0/EA1");
 			dev_kfree_skb(skb);
 			return;
@@ -279,7 +280,8 @@ BChannel_proc_xmt(struct BCState *bcs)
 	if (test_and_clear_bit(FLG_L1_PULL_REQ, &st->l1.Flags))
 		st->l1.l1l2(st, PH_PULL | CONFIRM, NULL);
 	if (!test_bit(BC_FLG_ACTIV, &bcs->Flag)) {
-		if (!test_bit(BC_FLG_BUSY, &bcs->Flag) && (!skb_queue_len(&bcs->squeue))) {
+		if (!test_bit(BC_FLG_BUSY, &bcs->Flag) &&
+		    skb_queue_empty(&bcs->squeue)) {
 			st->l2.l2l1(st, PH_DEACTIVATE | CONFIRM, NULL);
 		}
 	}
@@ -299,15 +301,33 @@ BChannel_proc_rcv(struct BCState *bcs)
 	}
 }
 
-void
-BChannel_bh(struct BCState *bcs)
+static void
+BChannel_proc_ack(struct BCState *bcs)
 {
+	u_long	flags;
+	int	ack;
+
+	spin_lock_irqsave(&bcs->aclock, flags);
+	ack = bcs->ackcnt;
+	bcs->ackcnt = 0;
+	spin_unlock_irqrestore(&bcs->aclock, flags);
+	if (ack)
+		lli_writewakeup(bcs->st, ack);
+}
+
+void
+BChannel_bh(struct work_struct *work)
+{
+	struct BCState *bcs = container_of(work, struct BCState, tqueue);
+
 	if (!bcs)
 		return;
 	if (test_and_clear_bit(B_RCVBUFREADY, &bcs->event))
 		BChannel_proc_rcv(bcs);
 	if (test_and_clear_bit(B_XMTBUFREADY, &bcs->event))
 		BChannel_proc_xmt(bcs);
+	if (test_and_clear_bit(B_ACKPENDING, &bcs->event))
+		BChannel_proc_ack(bcs);
 }
 
 void
@@ -339,16 +359,14 @@ HiSax_rmlist(struct IsdnCardState *cs,
 }
 
 void
-init_bcstate(struct IsdnCardState *cs,
-	     int bc)
+init_bcstate(struct IsdnCardState *cs, int bc)
 {
 	struct BCState *bcs = cs->bcs + bc;
 
 	bcs->cs = cs;
 	bcs->channel = bc;
-	bcs->tqueue.sync = 0;
-	bcs->tqueue.routine = (void *) (void *) BChannel_bh;
-	bcs->tqueue.data = bcs;
+	INIT_WORK(&bcs->tqueue, BChannel_bh);
+	spin_lock_init(&bcs->aclock);
 	bcs->BC_SetStack = NULL;
 	bcs->BC_Close = NULL;
 	bcs->Flag = 0;
@@ -356,64 +374,64 @@ init_bcstate(struct IsdnCardState *cs,
 
 #ifdef L2FRAME_DEBUG		/* psa */
 
-char *
+static char *
 l2cmd(u_char cmd)
 {
 	switch (cmd & ~0x10) {
-		case 1:
-			return "RR";
-		case 5:
-			return "RNR";
-		case 9:
-			return "REJ";
-		case 0x6f:
-			return "SABME";
-		case 0x0f:
-			return "DM";
-		case 3:
-			return "UI";
-		case 0x43:
-			return "DISC";
-		case 0x63:
-			return "UA";
-		case 0x87:
-			return "FRMR";
-		case 0xaf:
-			return "XID";
-		default:
-			if (!(cmd & 1))
-				return "I";
-			else
-				return "invalid command";
+	case 1:
+		return "RR";
+	case 5:
+		return "RNR";
+	case 9:
+		return "REJ";
+	case 0x6f:
+		return "SABME";
+	case 0x0f:
+		return "DM";
+	case 3:
+		return "UI";
+	case 0x43:
+		return "DISC";
+	case 0x63:
+		return "UA";
+	case 0x87:
+		return "FRMR";
+	case 0xaf:
+		return "XID";
+	default:
+		if (!(cmd & 1))
+			return "I";
+		else
+			return "invalid command";
 	}
 }
 
 static char tmpdeb[32];
 
-char *
-l2frames(u_char * ptr)
+static char *
+l2frames(u_char *ptr)
 {
 	switch (ptr[2] & ~0x10) {
-		case 1:
-		case 5:
-		case 9:
-			sprintf(tmpdeb, "%s[%d](nr %d)", l2cmd(ptr[2]), ptr[3] & 1, ptr[3] >> 1);
+	case 1:
+	case 5:
+	case 9:
+		sprintf(tmpdeb, "%s[%d](nr %d)", l2cmd(ptr[2]), ptr[3] & 1, ptr[3] >> 1);
+		break;
+	case 0x6f:
+	case 0x0f:
+	case 3:
+	case 0x43:
+	case 0x63:
+	case 0x87:
+	case 0xaf:
+		sprintf(tmpdeb, "%s[%d]", l2cmd(ptr[2]), (ptr[2] & 0x10) >> 4);
+		break;
+	default:
+		if (!(ptr[2] & 1)) {
+			sprintf(tmpdeb, "I[%d](ns %d, nr %d)", ptr[3] & 1, ptr[2] >> 1, ptr[3] >> 1);
 			break;
-		case 0x6f:
-		case 0x0f:
-		case 3:
-		case 0x43:
-		case 0x63:
-		case 0x87:
-		case 0xaf:
-			sprintf(tmpdeb, "%s[%d]", l2cmd(ptr[2]), (ptr[2] & 0x10) >> 4);
-			break;
-		default:
-			if (!(ptr[2] & 1)) {
-				sprintf(tmpdeb, "I[%d](ns %d, nr %d)", ptr[3] & 1, ptr[2] >> 1, ptr[3] >> 1);
-				break;
-			} else
-				return "invalid command";
+		} else
+			return "invalid command";
 	}
 
 
@@ -529,24 +547,24 @@ l1_timer3(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
 
-	test_and_clear_bit(FLG_L1_T3RUN, &st->l1.Flags);	
+	test_and_clear_bit(FLG_L1_T3RUN, &st->l1.Flags);
 	if (test_and_clear_bit(FLG_L1_ACTIVATING, &st->l1.Flags))
 		L1deactivated(st->l1.hardware);
 
 #ifdef HISAX_UINTERFACE
 	if (!test_bit(FLG_L1_UINT, &st->l1.Flags))
 #endif
-	if (st->l1.l1m.state != ST_L1_F6) {
-		FsmChangeState(fi, ST_L1_F3);
-		st->l1.l1hw(st, HW_ENABLE | REQUEST, NULL);
-	}
+		if (st->l1.l1m.state != ST_L1_F6) {
+			FsmChangeState(fi, ST_L1_F3);
+			st->l1.l1hw(st, HW_ENABLE | REQUEST, NULL);
+		}
 }
 
 static void
 l1_timer_act(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
-	
+
 	test_and_clear_bit(FLG_L1_ACTTIMER, &st->l1.Flags);
 	test_and_set_bit(FLG_L1_ACTIVATED, &st->l1.Flags);
 	L1activated(st->l1.hardware);
@@ -556,7 +574,7 @@ static void
 l1_timer_deact(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
-	
+
 	test_and_clear_bit(FLG_L1_DEACTTIMER, &st->l1.Flags);
 	test_and_clear_bit(FLG_L1_ACTIVATED, &st->l1.Flags);
 	L1deactivated(st->l1.hardware);
@@ -567,7 +585,7 @@ static void
 l1_activate_s(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
-                
+
 	st->l1.l1hw(st, HW_RESET | REQUEST, NULL);
 }
 
@@ -630,8 +648,6 @@ static struct FsmNode L1SFnList[] __initdata =
 	{ST_L1_F8, EV_TIMER_DEACT, l1_timer_deact},
 };
 
-#define L1S_FN_COUNT (sizeof(L1SFnList)/sizeof(struct FsmNode))
-
 #ifdef HISAX_UINTERFACE
 static void
 l1_deact_req_u(struct FsmInst *fi, int event, void *arg)
@@ -663,7 +679,7 @@ static void
 l1_activate_u(struct FsmInst *fi, int event, void *arg)
 {
 	struct PStack *st = fi->userdata;
-                
+
 	st->l1.l1hw(st, HW_INFO1 | REQUEST, NULL);
 }
 
@@ -688,8 +704,6 @@ static struct FsmNode L1UFnList[] __initdata =
 	{ST_L1_SYNC2, EV_TIMER_DEACT, l1_timer_deact},
 	{ST_L1_RESET, EV_TIMER_DEACT, l1_timer_deact},
 };
-
-#define L1U_FN_COUNT (sizeof(L1UFnList)/sizeof(struct FsmNode))
 
 #endif
 
@@ -737,9 +751,7 @@ static struct FsmNode L1BFnList[] __initdata =
 	{ST_L1_WAIT_DEACT, EV_TIMER_DEACT, l1b_timer_deact},
 };
 
-#define L1B_FN_COUNT (sizeof(L1BFnList)/sizeof(struct FsmNode))
-
-int __init 
+int __init
 Isdnl1New(void)
 {
 	int retval;
@@ -748,7 +760,7 @@ Isdnl1New(void)
 	l1fsm_s.event_count = L1_EVENT_COUNT;
 	l1fsm_s.strEvent = strL1Event;
 	l1fsm_s.strState = strL1SState;
-	retval = FsmNew(&l1fsm_s, L1SFnList, L1S_FN_COUNT);
+	retval = FsmNew(&l1fsm_s, L1SFnList, ARRAY_SIZE(L1SFnList));
 	if (retval)
 		return retval;
 
@@ -756,7 +768,7 @@ Isdnl1New(void)
 	l1fsm_b.event_count = L1_EVENT_COUNT;
 	l1fsm_b.strEvent = strL1Event;
 	l1fsm_b.strState = strL1BState;
-	retval = FsmNew(&l1fsm_b, L1BFnList, L1B_FN_COUNT);
+	retval = FsmNew(&l1fsm_b, L1BFnList, ARRAY_SIZE(L1BFnList));
 	if (retval) {
 		FsmFree(&l1fsm_s);
 		return retval;
@@ -766,7 +778,7 @@ Isdnl1New(void)
 	l1fsm_u.event_count = L1_EVENT_COUNT;
 	l1fsm_u.strEvent = strL1Event;
 	l1fsm_u.strState = strL1UState;
-	retval = FsmNew(&l1fsm_u, L1UFnList, L1U_FN_COUNT);
+	retval = FsmNew(&l1fsm_u, L1UFnList, ARRAY_SIZE(L1UFnList));
 	if (retval) {
 		FsmFree(&l1fsm_s);
 		FsmFree(&l1fsm_b);
@@ -791,35 +803,35 @@ dch_l2l1(struct PStack *st, int pr, void *arg)
 	struct IsdnCardState *cs = (struct IsdnCardState *) st->l1.hardware;
 
 	switch (pr) {
-		case (PH_DATA | REQUEST):
-		case (PH_PULL | REQUEST):
-		case (PH_PULL |INDICATION):
-			st->l1.l1hw(st, pr, arg);
-			break;
-		case (PH_ACTIVATE | REQUEST):
-			if (cs->debug)
-				debugl1(cs, "PH_ACTIVATE_REQ %s",
-					st->l1.l1m.fsm->strState[st->l1.l1m.state]);
-			if (test_bit(FLG_L1_ACTIVATED, &st->l1.Flags))
-				st->l1.l1l2(st, PH_ACTIVATE | CONFIRM, NULL);
-			else {
-				test_and_set_bit(FLG_L1_ACTIVATING, &st->l1.Flags);
-				FsmEvent(&st->l1.l1m, EV_PH_ACTIVATE, arg);
-			}
-			break;
-		case (PH_TESTLOOP | REQUEST):
-			if (1 & (long) arg)
-				debugl1(cs, "PH_TEST_LOOP B1");
-			if (2 & (long) arg)
-				debugl1(cs, "PH_TEST_LOOP B2");
-			if (!(3 & (long) arg))
-				debugl1(cs, "PH_TEST_LOOP DISABLED");
-			st->l1.l1hw(st, HW_TESTLOOP | REQUEST, arg);
-			break;
-		default:
-			if (cs->debug)
-				debugl1(cs, "dch_l2l1 msg %04X unhandled", pr);
-			break;
+	case (PH_DATA | REQUEST):
+	case (PH_PULL | REQUEST):
+	case (PH_PULL | INDICATION):
+		st->l1.l1hw(st, pr, arg);
+		break;
+	case (PH_ACTIVATE | REQUEST):
+		if (cs->debug)
+			debugl1(cs, "PH_ACTIVATE_REQ %s",
+				st->l1.l1m.fsm->strState[st->l1.l1m.state]);
+		if (test_bit(FLG_L1_ACTIVATED, &st->l1.Flags))
+			st->l1.l1l2(st, PH_ACTIVATE | CONFIRM, NULL);
+		else {
+			test_and_set_bit(FLG_L1_ACTIVATING, &st->l1.Flags);
+			FsmEvent(&st->l1.l1m, EV_PH_ACTIVATE, arg);
+		}
+		break;
+	case (PH_TESTLOOP | REQUEST):
+		if (1 & (long) arg)
+			debugl1(cs, "PH_TEST_LOOP B1");
+		if (2 & (long) arg)
+			debugl1(cs, "PH_TEST_LOOP B2");
+		if (!(3 & (long) arg))
+			debugl1(cs, "PH_TEST_LOOP DISABLED");
+		st->l1.l1hw(st, HW_TESTLOOP | REQUEST, arg);
+		break;
+	default:
+		if (cs->debug)
+			debugl1(cs, "dch_l2l1 msg %04X unhandled", pr);
+		break;
 	}
 }
 
@@ -828,35 +840,35 @@ l1_msg(struct IsdnCardState *cs, int pr, void *arg) {
 	struct PStack *st;
 
 	st = cs->stlist;
-	
+
 	while (st) {
-		switch(pr) {
-			case (HW_RESET | INDICATION):
-				FsmEvent(&st->l1.l1m, EV_RESET_IND, arg);
-				break;
-			case (HW_DEACTIVATE | CONFIRM):
-				FsmEvent(&st->l1.l1m, EV_DEACT_CNF, arg);
-				break;
-			case (HW_DEACTIVATE | INDICATION):
-				FsmEvent(&st->l1.l1m, EV_DEACT_IND, arg);
-				break;
-			case (HW_POWERUP | CONFIRM):
-				FsmEvent(&st->l1.l1m, EV_POWER_UP, arg);
-				break;
-			case (HW_RSYNC | INDICATION):
-				FsmEvent(&st->l1.l1m, EV_RSYNC_IND, arg);
-				break;
-			case (HW_INFO2 | INDICATION):
-				FsmEvent(&st->l1.l1m, EV_INFO2_IND, arg);
-				break;
-			case (HW_INFO4_P8 | INDICATION):
-			case (HW_INFO4_P10 | INDICATION):
-				FsmEvent(&st->l1.l1m, EV_INFO4_IND, arg);
-				break;
-			default:
-				if (cs->debug)
-					debugl1(cs, "l1msg %04X unhandled", pr);
-				break;
+		switch (pr) {
+		case (HW_RESET | INDICATION):
+			FsmEvent(&st->l1.l1m, EV_RESET_IND, arg);
+			break;
+		case (HW_DEACTIVATE | CONFIRM):
+			FsmEvent(&st->l1.l1m, EV_DEACT_CNF, arg);
+			break;
+		case (HW_DEACTIVATE | INDICATION):
+			FsmEvent(&st->l1.l1m, EV_DEACT_IND, arg);
+			break;
+		case (HW_POWERUP | CONFIRM):
+			FsmEvent(&st->l1.l1m, EV_POWER_UP, arg);
+			break;
+		case (HW_RSYNC | INDICATION):
+			FsmEvent(&st->l1.l1m, EV_RSYNC_IND, arg);
+			break;
+		case (HW_INFO2 | INDICATION):
+			FsmEvent(&st->l1.l1m, EV_INFO2_IND, arg);
+			break;
+		case (HW_INFO4_P8 | INDICATION):
+		case (HW_INFO4_P10 | INDICATION):
+			FsmEvent(&st->l1.l1m, EV_INFO4_IND, arg);
+			break;
+		default:
+			if (cs->debug)
+				debugl1(cs, "l1msg %04X unhandled", pr);
+			break;
 		}
 		st = st->next;
 	}
@@ -864,13 +876,13 @@ l1_msg(struct IsdnCardState *cs, int pr, void *arg) {
 
 void
 l1_msg_b(struct PStack *st, int pr, void *arg) {
-	switch(pr) {
-		case (PH_ACTIVATE | REQUEST):
-			FsmEvent(&st->l1.l1m, EV_PH_ACTIVATE, NULL);
-			break;
-		case (PH_DEACTIVATE | REQUEST):
-			FsmEvent(&st->l1.l1m, EV_PH_DEACTIVATE, NULL);
-			break;
+	switch (pr) {
+	case (PH_ACTIVATE | REQUEST):
+		FsmEvent(&st->l1.l1m, EV_PH_ACTIVATE, NULL);
+		break;
+	case (PH_DEACTIVATE | REQUEST):
+		FsmEvent(&st->l1.l1m, EV_PH_DEACTIVATE, NULL);
+		break;
 	}
 }
 

@@ -4,40 +4,120 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/config.h>
+#include <linux/export.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/file.h>
-#include <linux/smp_lock.h>
 #include <linux/highuid.h>
+#include <linux/fs.h>
+#include <linux/namei.h>
+#include <linux/security.h>
+#include <linux/syscalls.h>
+#include <linux/pagemap.h>
 
 #include <asm/uaccess.h>
+#include <asm/unistd.h>
 
-/*
- * Revalidate the inode. This is required for proper NFS attribute caching.
- */
-static __inline__ int
-do_revalidate(struct dentry *dentry)
+void generic_fillattr(struct inode *inode, struct kstat *stat)
 {
-	struct inode * inode = dentry->d_inode;
-	if (inode->i_op && inode->i_op->revalidate)
-		return inode->i_op->revalidate(dentry);
+	stat->dev = inode->i_sb->s_dev;
+	stat->ino = inode->i_ino;
+	stat->mode = inode->i_mode;
+	stat->nlink = inode->i_nlink;
+	stat->uid = inode->i_uid;
+	stat->gid = inode->i_gid;
+	stat->rdev = inode->i_rdev;
+	stat->size = i_size_read(inode);
+	stat->atime = inode->i_atime;
+	stat->mtime = inode->i_mtime;
+	stat->ctime = inode->i_ctime;
+	stat->blksize = (1 << inode->i_blkbits);
+	stat->blocks = inode->i_blocks;
+}
+
+EXPORT_SYMBOL(generic_fillattr);
+
+int vfs_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+{
+	struct inode *inode = dentry->d_inode;
+	int retval;
+
+	retval = security_inode_getattr(mnt, dentry);
+	if (retval)
+		return retval;
+
+	if (inode->i_op->getattr)
+		return inode->i_op->getattr(mnt, dentry, stat);
+
+	generic_fillattr(inode, stat);
 	return 0;
 }
 
+EXPORT_SYMBOL(vfs_getattr);
 
-#if !defined(__alpha__) && !defined(__sparc__) && !defined(__ia64__) && !defined(CONFIG_ARCH_S390) && !defined(__hppa__) && !defined(__x86_64__) && !defined(__arm__) && !defined(__mips__) && !defined(CONFIG_V850) && !defined(CONFIG_MICROBLAZE) 
+int vfs_fstat(unsigned int fd, struct kstat *stat)
+{
+	struct file *f = fget(fd);
+	int error = -EBADF;
+
+	if (f) {
+		error = vfs_getattr(f->f_path.mnt, f->f_path.dentry, stat);
+		fput(f);
+	}
+	return error;
+}
+EXPORT_SYMBOL(vfs_fstat);
+
+int vfs_fstatat(int dfd, const char __user *filename, struct kstat *stat,
+		int flag)
+{
+	struct path path;
+	int error = -EINVAL;
+	int lookup_flags = 0;
+
+	if ((flag & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
+		      AT_EMPTY_PATH)) != 0)
+		goto out;
+
+	if (!(flag & AT_SYMLINK_NOFOLLOW))
+		lookup_flags |= LOOKUP_FOLLOW;
+	if (flag & AT_EMPTY_PATH)
+		lookup_flags |= LOOKUP_EMPTY;
+
+	error = user_path_at(dfd, filename, lookup_flags, &path);
+	if (error)
+		goto out;
+
+	error = vfs_getattr(path.mnt, path.dentry, stat);
+	path_put(&path);
+out:
+	return error;
+}
+EXPORT_SYMBOL(vfs_fstatat);
+
+int vfs_stat(const char __user *name, struct kstat *stat)
+{
+	return vfs_fstatat(AT_FDCWD, name, stat, 0);
+}
+EXPORT_SYMBOL(vfs_stat);
+
+int vfs_lstat(const char __user *name, struct kstat *stat)
+{
+	return vfs_fstatat(AT_FDCWD, name, stat, AT_SYMLINK_NOFOLLOW);
+}
+EXPORT_SYMBOL(vfs_lstat);
+
+
+#ifdef __ARCH_WANT_OLD_STAT
 
 /*
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-static int cp_old_stat(struct inode * inode, struct __old_kernel_stat * statbuf)
+static int cp_old_stat(struct kstat *stat, struct __old_kernel_stat __user * statbuf)
 {
 	static int warncount = 5;
 	struct __old_kernel_stat tmp;
-
-	memset(&tmp, 0, sizeof(struct __old_kernel_stat));
 	
 	if (warncount > 0) {
 		warncount--;
@@ -48,338 +128,344 @@ static int cp_old_stat(struct inode * inode, struct __old_kernel_stat * statbuf)
 		warncount = 0;
 	}
 
-	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
-	tmp.st_ino = inode->i_ino;
-	tmp.st_mode = inode->i_mode;
-	tmp.st_nlink = inode->i_nlink;
-	if (tmp.st_nlink != inode->i_nlink)
+	memset(&tmp, 0, sizeof(struct __old_kernel_stat));
+	tmp.st_dev = old_encode_dev(stat->dev);
+	tmp.st_ino = stat->ino;
+	if (sizeof(tmp.st_ino) < sizeof(stat->ino) && tmp.st_ino != stat->ino)
 		return -EOVERFLOW;
-	SET_OLDSTAT_UID(tmp, inode->i_uid);
-	SET_OLDSTAT_GID(tmp, inode->i_gid);
-	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
+	tmp.st_mode = stat->mode;
+	tmp.st_nlink = stat->nlink;
+	if (tmp.st_nlink != stat->nlink)
+		return -EOVERFLOW;
+	SET_UID(tmp.st_uid, stat->uid);
+	SET_GID(tmp.st_gid, stat->gid);
+	tmp.st_rdev = old_encode_dev(stat->rdev);
 #if BITS_PER_LONG == 32
-	if (inode->i_size > MAX_NON_LFS)
+	if (stat->size > MAX_NON_LFS)
 		return -EOVERFLOW;
 #endif	
-	tmp.st_size = inode->i_size;
-	tmp.st_atime = inode->i_atime;
-	tmp.st_mtime = inode->i_mtime;
-	tmp.st_ctime = inode->i_ctime;
+	tmp.st_size = stat->size;
+	tmp.st_atime = stat->atime.tv_sec;
+	tmp.st_mtime = stat->mtime.tv_sec;
+	tmp.st_ctime = stat->ctime.tv_sec;
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-#endif
+SYSCALL_DEFINE2(stat, const char __user *, filename,
+		struct __old_kernel_stat __user *, statbuf)
+{
+	struct kstat stat;
+	int error;
 
-static int cp_new_stat(struct inode * inode, struct stat * statbuf)
+	error = vfs_stat(filename, &stat);
+	if (error)
+		return error;
+
+	return cp_old_stat(&stat, statbuf);
+}
+
+SYSCALL_DEFINE2(lstat, const char __user *, filename,
+		struct __old_kernel_stat __user *, statbuf)
+{
+	struct kstat stat;
+	int error;
+
+	error = vfs_lstat(filename, &stat);
+	if (error)
+		return error;
+
+	return cp_old_stat(&stat, statbuf);
+}
+
+SYSCALL_DEFINE2(fstat, unsigned int, fd, struct __old_kernel_stat __user *, statbuf)
+{
+	struct kstat stat;
+	int error = vfs_fstat(fd, &stat);
+
+	if (!error)
+		error = cp_old_stat(&stat, statbuf);
+
+	return error;
+}
+
+#endif /* __ARCH_WANT_OLD_STAT */
+
+static int cp_new_stat(struct kstat *stat, struct stat __user *statbuf)
 {
 	struct stat tmp;
-	unsigned int blocks, indirect;
+
+#if BITS_PER_LONG == 32
+	if (!old_valid_dev(stat->dev) || !old_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+#else
+	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+#endif
 
 	memset(&tmp, 0, sizeof(tmp));
-	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
-	tmp.st_ino = inode->i_ino;
-	tmp.st_mode = inode->i_mode;
-	tmp.st_nlink = inode->i_nlink;
-	if (tmp.st_nlink != inode->i_nlink)
-		return -EOVERFLOW;
-	SET_STAT_UID(tmp, inode->i_uid);
-	SET_STAT_GID(tmp, inode->i_gid);
-	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
 #if BITS_PER_LONG == 32
-	if (inode->i_size > MAX_NON_LFS)
+	tmp.st_dev = old_encode_dev(stat->dev);
+#else
+	tmp.st_dev = new_encode_dev(stat->dev);
+#endif
+	tmp.st_ino = stat->ino;
+	if (sizeof(tmp.st_ino) < sizeof(stat->ino) && tmp.st_ino != stat->ino)
+		return -EOVERFLOW;
+	tmp.st_mode = stat->mode;
+	tmp.st_nlink = stat->nlink;
+	if (tmp.st_nlink != stat->nlink)
+		return -EOVERFLOW;
+	SET_UID(tmp.st_uid, stat->uid);
+	SET_GID(tmp.st_gid, stat->gid);
+#if BITS_PER_LONG == 32
+	tmp.st_rdev = old_encode_dev(stat->rdev);
+#else
+	tmp.st_rdev = new_encode_dev(stat->rdev);
+#endif
+#if BITS_PER_LONG == 32
+	if (stat->size > MAX_NON_LFS)
 		return -EOVERFLOW;
 #endif	
-	tmp.st_size = inode->i_size;
-	tmp.st_atime = inode->i_atime;
-	tmp.st_mtime = inode->i_mtime;
-	tmp.st_ctime = inode->i_ctime;
-/*
- * st_blocks and st_blksize are approximated with a simple algorithm if
- * they aren't supported directly by the filesystem. The minix and msdos
- * filesystems don't keep track of blocks, so they would either have to
- * be counted explicitly (by delving into the file itself), or by using
- * this simple algorithm to get a reasonable (although not 100% accurate)
- * value.
- */
-
-/*
- * Use minix fs values for the number of direct and indirect blocks.  The
- * count is now exact for the minix fs except that it counts zero blocks.
- * Everything is in units of BLOCK_SIZE until the assignment to
- * tmp.st_blksize.
- */
-#define D_B   7
-#define I_B   (BLOCK_SIZE / sizeof(unsigned short))
-
-	if (!inode->i_blksize) {
-		blocks = (tmp.st_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-		if (blocks > D_B) {
-			indirect = (blocks - D_B + I_B - 1) / I_B;
-			blocks += indirect;
-			if (indirect > 1) {
-				indirect = (indirect - 1 + I_B - 1) / I_B;
-				blocks += indirect;
-				if (indirect > 1)
-					blocks++;
-			}
-		}
-		tmp.st_blocks = (BLOCK_SIZE / 512) * blocks;
-		tmp.st_blksize = BLOCK_SIZE;
-	} else {
-		tmp.st_blocks = inode->i_blocks;
-		tmp.st_blksize = inode->i_blksize;
-	}
+	tmp.st_size = stat->size;
+	tmp.st_atime = stat->atime.tv_sec;
+	tmp.st_mtime = stat->mtime.tv_sec;
+	tmp.st_ctime = stat->ctime.tv_sec;
+#ifdef STAT_HAVE_NSEC
+	tmp.st_atime_nsec = stat->atime.tv_nsec;
+	tmp.st_mtime_nsec = stat->mtime.tv_nsec;
+	tmp.st_ctime_nsec = stat->ctime.tv_nsec;
+#endif
+	tmp.st_blocks = stat->blocks;
+	tmp.st_blksize = stat->blksize;
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-
-#if !defined(__alpha__) && !defined(__sparc__) && !defined(__ia64__) && !defined(CONFIG_ARCH_S390) && !defined(__hppa__) && !defined(__x86_64__) && !defined(__arm__) && !defined(__mips__) && !defined(CONFIG_V850) && !defined(CONFIG_MICROBLAZE)
-/*
- * For backward compatibility?  Maybe this should be moved
- * into arch/i386 instead?
- */
-asmlinkage long sys_stat(char * filename, struct __old_kernel_stat * statbuf)
+SYSCALL_DEFINE2(newstat, const char __user *, filename,
+		struct stat __user *, statbuf)
 {
-	struct nameidata nd;
+	struct kstat stat;
+	int error = vfs_stat(filename, &stat);
+
+	if (error)
+		return error;
+	return cp_new_stat(&stat, statbuf);
+}
+
+SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+		struct stat __user *, statbuf)
+{
+	struct kstat stat;
 	int error;
 
-	error = user_path_walk(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_old_stat(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
-	return error;
+	error = vfs_lstat(filename, &stat);
+	if (error)
+		return error;
+
+	return cp_new_stat(&stat, statbuf);
+}
+
+#if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+		struct stat __user *, statbuf, int, flag)
+{
+	struct kstat stat;
+	int error;
+
+	error = vfs_fstatat(dfd, filename, &stat, flag);
+	if (error)
+		return error;
+	return cp_new_stat(&stat, statbuf);
 }
 #endif
 
-asmlinkage long sys_newstat(char * filename, struct stat * statbuf)
+SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
 {
-	struct nameidata nd;
-	int error;
+	struct kstat stat;
+	int error = vfs_fstat(fd, &stat);
 
-	error = user_path_walk(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_new_stat(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
+	if (!error)
+		error = cp_new_stat(&stat, statbuf);
+
 	return error;
 }
 
-#if !defined(__alpha__) && !defined(__sparc__) && !defined(__ia64__) && !defined(CONFIG_ARCH_S390) && !defined(__hppa__) && !defined(__x86_64__) && !defined(__arm__) && !defined(__mips__) && !defined(CONFIG_V850) && !defined(CONFIG_MICROBLAZE)
-
-/*
- * For backward compatibility?  Maybe this should be moved
- * into arch/i386 instead?
- */
-asmlinkage long sys_lstat(char * filename, struct __old_kernel_stat * statbuf)
+SYSCALL_DEFINE4(readlinkat, int, dfd, const char __user *, pathname,
+		char __user *, buf, int, bufsiz)
 {
-	struct nameidata nd;
+	struct path path;
 	int error;
-
-	error = user_path_walk_link(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_old_stat(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
-	return error;
-}
-
-#endif
-
-asmlinkage long sys_newlstat(char * filename, struct stat * statbuf)
-{
-	struct nameidata nd;
-	int error;
-
-	error = user_path_walk_link(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_new_stat(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
-	return error;
-}
-
-#if !defined(__alpha__) && !defined(__sparc__) && !defined(__ia64__) && !defined(CONFIG_ARCH_S390) && !defined(__hppa__) && !defined(__x86_64__) && !defined(__arm__) && !defined(__mips__) && !defined(CONFIG_V850) && !defined(CONFIG_MICROBLAZE)
-
-/*
- * For backward compatibility?  Maybe this should be moved
- * into arch/i386 instead?
- */
-asmlinkage long sys_fstat(unsigned int fd, struct __old_kernel_stat * statbuf)
-{
-	struct file * f;
-	int err = -EBADF;
-
-	f = fget(fd);
-	if (f) {
-		struct dentry * dentry = f->f_dentry;
-
-		err = do_revalidate(dentry);
-		if (!err)
-			err = cp_old_stat(dentry->d_inode, statbuf);
-		fput(f);
-	}
-	return err;
-}
-
-#endif
-
-asmlinkage long sys_newfstat(unsigned int fd, struct stat * statbuf)
-{
-	struct file * f;
-	int err = -EBADF;
-
-	f = fget(fd);
-	if (f) {
-		struct dentry * dentry = f->f_dentry;
-
-		err = do_revalidate(dentry);
-		if (!err)
-			err = cp_new_stat(dentry->d_inode, statbuf);
-		fput(f);
-	}
-	return err;
-}
-
-asmlinkage long sys_readlink(const char * path, char * buf, int bufsiz)
-{
-	struct nameidata nd;
-	int error;
+	int empty = 0;
 
 	if (bufsiz <= 0)
 		return -EINVAL;
 
-	error = user_path_walk_link(path, &nd);
+	error = user_path_at_empty(dfd, pathname, LOOKUP_EMPTY, &path, &empty);
 	if (!error) {
-		struct inode * inode = nd.dentry->d_inode;
+		struct inode *inode = path.dentry->d_inode;
 
-		error = -EINVAL;
-		if (inode->i_op && inode->i_op->readlink &&
-		    !(error = do_revalidate(nd.dentry))) {
-			UPDATE_ATIME(inode);
-			error = inode->i_op->readlink(nd.dentry, buf, bufsiz);
+		error = empty ? -ENOENT : -EINVAL;
+		if (inode->i_op->readlink) {
+			error = security_inode_readlink(path.dentry);
+			if (!error) {
+				touch_atime(&path);
+				error = inode->i_op->readlink(path.dentry,
+							      buf, bufsiz);
+			}
 		}
-		path_release(&nd);
+		path_put(&path);
 	}
 	return error;
+}
+
+SYSCALL_DEFINE3(readlink, const char __user *, path, char __user *, buf,
+		int, bufsiz)
+{
+	return sys_readlinkat(AT_FDCWD, path, buf, bufsiz);
 }
 
 
 /* ---------- LFS-64 ----------- */
-#if !defined(__alpha__) && !defined(__ia64__) && !defined(__mips64) && !defined(__x86_64__) && !defined(CONFIG_ARCH_S390X)
+#ifdef __ARCH_WANT_STAT64
 
-static long cp_new_stat64(struct inode * inode, struct stat64 * statbuf)
+static long cp_new_stat64(struct kstat *stat, struct stat64 __user *statbuf)
 {
 	struct stat64 tmp;
-	unsigned int blocks, indirect;
 
-	memset(&tmp, 0, sizeof(tmp));
-	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
-	tmp.st_ino = inode->i_ino;
-#ifdef STAT64_HAS_BROKEN_ST_INO
-	tmp.__st_ino = inode->i_ino;
+	memset(&tmp, 0, sizeof(struct stat64));
+#ifdef CONFIG_MIPS
+	/* mips has weird padding, so we don't get 64 bits there */
+	if (!new_valid_dev(stat->dev) || !new_valid_dev(stat->rdev))
+		return -EOVERFLOW;
+	tmp.st_dev = new_encode_dev(stat->dev);
+	tmp.st_rdev = new_encode_dev(stat->rdev);
+#else
+	tmp.st_dev = huge_encode_dev(stat->dev);
+	tmp.st_rdev = huge_encode_dev(stat->rdev);
 #endif
-	tmp.st_mode = inode->i_mode;
-	tmp.st_nlink = inode->i_nlink;
-	tmp.st_uid = inode->i_uid;
-	tmp.st_gid = inode->i_gid;
-	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
-	tmp.st_atime = inode->i_atime;
-	tmp.st_mtime = inode->i_mtime;
-	tmp.st_ctime = inode->i_ctime;
-	tmp.st_size = inode->i_size;
-/*
- * st_blocks and st_blksize are approximated with a simple algorithm if
- * they aren't supported directly by the filesystem. The minix and msdos
- * filesystems don't keep track of blocks, so they would either have to
- * be counted explicitly (by delving into the file itself), or by using
- * this simple algorithm to get a reasonable (although not 100% accurate)
- * value.
- */
-
-/*
- * Use minix fs values for the number of direct and indirect blocks.  The
- * count is now exact for the minix fs except that it counts zero blocks.
- * Everything is in units of BLOCK_SIZE until the assignment to
- * tmp.st_blksize.
- */
-#define D_B   7
-#define I_B   (BLOCK_SIZE / sizeof(unsigned short))
-
-	if (!inode->i_blksize) {
-		blocks = (tmp.st_size + BLOCK_SIZE - 1) >> BLOCK_SIZE_BITS;
-		if (blocks > D_B) {
-			indirect = (blocks - D_B + I_B - 1) / I_B;
-			blocks += indirect;
-			if (indirect > 1) {
-				indirect = (indirect - 1 + I_B - 1) / I_B;
-				blocks += indirect;
-				if (indirect > 1)
-					blocks++;
-			}
-		}
-		tmp.st_blocks = (BLOCK_SIZE / 512) * blocks;
-		tmp.st_blksize = BLOCK_SIZE;
-	} else {
-		tmp.st_blocks = inode->i_blocks;
-		tmp.st_blksize = inode->i_blksize;
-	}
+	tmp.st_ino = stat->ino;
+	if (sizeof(tmp.st_ino) < sizeof(stat->ino) && tmp.st_ino != stat->ino)
+		return -EOVERFLOW;
+#ifdef STAT64_HAS_BROKEN_ST_INO
+	tmp.__st_ino = stat->ino;
+#endif
+	tmp.st_mode = stat->mode;
+	tmp.st_nlink = stat->nlink;
+	tmp.st_uid = stat->uid;
+	tmp.st_gid = stat->gid;
+	tmp.st_atime = stat->atime.tv_sec;
+	tmp.st_atime_nsec = stat->atime.tv_nsec;
+	tmp.st_mtime = stat->mtime.tv_sec;
+	tmp.st_mtime_nsec = stat->mtime.tv_nsec;
+	tmp.st_ctime = stat->ctime.tv_sec;
+	tmp.st_ctime_nsec = stat->ctime.tv_nsec;
+	tmp.st_size = stat->size;
+	tmp.st_blocks = stat->blocks;
+	tmp.st_blksize = stat->blksize;
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-asmlinkage long sys_stat64(char * filename, struct stat64 * statbuf, long flags)
+SYSCALL_DEFINE2(stat64, const char __user *, filename,
+		struct stat64 __user *, statbuf)
 {
-	struct nameidata nd;
-	int error;
+	struct kstat stat;
+	int error = vfs_stat(filename, &stat);
 
-	error = user_path_walk(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_new_stat64(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
+	if (!error)
+		error = cp_new_stat64(&stat, statbuf);
+
 	return error;
 }
 
-asmlinkage long sys_lstat64(char * filename, struct stat64 * statbuf, long flags)
+SYSCALL_DEFINE2(lstat64, const char __user *, filename,
+		struct stat64 __user *, statbuf)
 {
-	struct nameidata nd;
-	int error;
+	struct kstat stat;
+	int error = vfs_lstat(filename, &stat);
 
-	error = user_path_walk_link(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_new_stat64(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
+	if (!error)
+		error = cp_new_stat64(&stat, statbuf);
+
 	return error;
 }
 
-asmlinkage long sys_fstat64(unsigned long fd, struct stat64 * statbuf, long flags)
+SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
 {
-	struct file * f;
-	int err = -EBADF;
+	struct kstat stat;
+	int error = vfs_fstat(fd, &stat);
 
-	f = fget(fd);
-	if (f) {
-		struct dentry * dentry = f->f_dentry;
+	if (!error)
+		error = cp_new_stat64(&stat, statbuf);
 
-		err = do_revalidate(dentry);
-		if (!err)
-			err = cp_new_stat64(dentry->d_inode, statbuf);
-		fput(f);
-	}
-	return err;
+	return error;
 }
 
-#endif /* LFS-64 */
+SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+		struct stat64 __user *, statbuf, int, flag)
+{
+	struct kstat stat;
+	int error;
+
+	error = vfs_fstatat(dfd, filename, &stat, flag);
+	if (error)
+		return error;
+	return cp_new_stat64(&stat, statbuf);
+}
+#endif /* __ARCH_WANT_STAT64 */
+
+/* Caller is here responsible for sufficient locking (ie. inode->i_lock) */
+void __inode_add_bytes(struct inode *inode, loff_t bytes)
+{
+	inode->i_blocks += bytes >> 9;
+	bytes &= 511;
+	inode->i_bytes += bytes;
+	if (inode->i_bytes >= 512) {
+		inode->i_blocks++;
+		inode->i_bytes -= 512;
+	}
+}
+
+void inode_add_bytes(struct inode *inode, loff_t bytes)
+{
+	spin_lock(&inode->i_lock);
+	__inode_add_bytes(inode, bytes);
+	spin_unlock(&inode->i_lock);
+}
+
+EXPORT_SYMBOL(inode_add_bytes);
+
+void inode_sub_bytes(struct inode *inode, loff_t bytes)
+{
+	spin_lock(&inode->i_lock);
+	inode->i_blocks -= bytes >> 9;
+	bytes &= 511;
+	if (inode->i_bytes < bytes) {
+		inode->i_blocks--;
+		inode->i_bytes += 512;
+	}
+	inode->i_bytes -= bytes;
+	spin_unlock(&inode->i_lock);
+}
+
+EXPORT_SYMBOL(inode_sub_bytes);
+
+loff_t inode_get_bytes(struct inode *inode)
+{
+	loff_t ret;
+
+	spin_lock(&inode->i_lock);
+	ret = (((loff_t)inode->i_blocks) << 9) + inode->i_bytes;
+	spin_unlock(&inode->i_lock);
+	return ret;
+}
+
+EXPORT_SYMBOL(inode_get_bytes);
+
+void inode_set_bytes(struct inode *inode, loff_t bytes)
+{
+	/* Caller is here responsible for sufficient locking
+	 * (ie. inode->i_lock) */
+	inode->i_blocks = bytes >> 9;
+	inode->i_bytes = bytes & 511;
+}
+
+EXPORT_SYMBOL(inode_set_bytes);

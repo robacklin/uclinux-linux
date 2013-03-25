@@ -1,4 +1,4 @@
-/* $Id: message.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+/* $Id: message.h,v 1.1.10.1 2001/09/23 22:24:59 kai Exp $
  *
  * Copyright (C) 1996  SpellCaster Telecommunications Inc.
  *
@@ -21,7 +21,7 @@
 /*
  * Board message macros, defines and structures
  */
- 
+
 #ifndef MESSAGE_H
 #define MESSAGE_H
 
@@ -36,19 +36,19 @@
  * Macro to determine if a message is a loader message
  */
 #define IS_CM_MESSAGE(mesg, tx, cx, dx)		\
-		((mesg.type == cmRspType##tx)		\
-		&&(mesg.class == cmRspClass##cx)	\
-		&&(mesg.code == cmRsp##dx))
+	((mesg.type == cmRspType##tx)		\
+	 && (mesg.class == cmRspClass##cx)	\
+	 && (mesg.code == cmRsp##dx))
 
 /*
  * Macro to determine if a message is a firmware message
  */
 #define IS_CE_MESSAGE(mesg, tx, cx, dx)		\
-		((mesg.type == ceRspType##tx)		\
-		&&(mesg.class == ceRspClass##cx)	\
-		&&(mesg.code == ceRsp##tx##dx))
+	((mesg.type == ceRspType##tx)		\
+	 && (mesg.class == ceRspClass##cx)	\
+	 && (mesg.code == ceRsp##tx##dx))
 
-/* 
+/*
  * Loader Request and Response Messages
  */
 
@@ -186,7 +186,7 @@ typedef struct {
 } LLData;
 
 
-/* 
+/*
  * Message payload template for an HWConfig message
  */
 typedef struct {

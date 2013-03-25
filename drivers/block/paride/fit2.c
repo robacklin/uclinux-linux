@@ -16,6 +16,7 @@
 #define FIT2_VERSION      "1.0"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -119,45 +120,32 @@ static void fit2_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void fit2_init_proto( PIA *pi)
+static struct pi_protocol fit2 = {
+	.owner		= THIS_MODULE,
+	.name		= "fit2",
+	.max_mode	= 1,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= fit2_write_regr,
+	.read_regr	= fit2_read_regr,
+	.write_block	= fit2_write_block,
+	.read_block	= fit2_read_block,
+	.connect	= fit2_connect,
+	.disconnect	= fit2_disconnect,
+	.log_adapter	= fit2_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init fit2_init(void)
+{
+	return paride_register(&fit2);
 }
 
-static void fit2_release_proto( PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit fit2_exit(void)
+{
+	paride_unregister(&fit2);
 }
 
-struct pi_protocol fit2 = {"fit2",0,1,2,1,1,
-                           fit2_write_regr,
-                           fit2_read_regr,
-                           fit2_write_block,
-                           fit2_read_block,
-                           fit2_connect,
-                           fit2_disconnect,
-                           0,
-                           0,
-                           0,
-                           fit2_log_adapter,
-                           fit2_init_proto,
-                           fit2_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &fit2 ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &fit2 );
-}
-
-#endif
-
-/* end of fit2.c */
 MODULE_LICENSE("GPL");
+module_init(fit2_init)
+module_exit(fit2_exit)

@@ -11,92 +11,121 @@
 
 
 #include <linux/list.h>
-#include <linux/mm.h>
+#include <linux/pagemap.h>
 #include <linux/wait.h>
 #include <linux/sunrpc/auth.h>
 #include <linux/nfs_xdr.h>
 
+#include <linux/kref.h>
+
 /*
  * Valid flags for a dirty buffer
  */
-#define PG_BUSY			0
+enum {
+	PG_BUSY = 0,
+	PG_MAPPED,
+	PG_CLEAN,
+	PG_NEED_COMMIT,
+	PG_NEED_RESCHED,
+	PG_PARTIAL_READ_FAILED,
+	PG_COMMIT_TO_DS,
+};
 
+struct nfs_inode;
 struct nfs_page {
-	struct list_head	wb_hash,	/* Inode */
-				wb_lru,		/* superblock lru list */
-				wb_list,	/* Defines state of page: */
-				*wb_list_head;	/*      read/write/commit */
-	struct file		*wb_file;
-	struct inode		*wb_inode;
-	struct rpc_cred		*wb_cred;
+	struct list_head	wb_list;	/* Defines state of page: */
 	struct page		*wb_page;	/* page to read in/write out */
-	wait_queue_head_t	wb_wait;	/* wait queue */
-	unsigned long		wb_timeout;	/* when to read/write/commit */
-	unsigned int		wb_offset,	/* Offset of read/write */
-				wb_bytes,	/* Length of request */
-				wb_count;	/* reference count */
+	struct nfs_open_context	*wb_context;	/* File state context info */
+	struct nfs_lock_context	*wb_lock_context;	/* lock context info */
+	atomic_t		wb_complete;	/* i/os we're waiting for */
+	pgoff_t			wb_index;	/* Offset >> PAGE_CACHE_SHIFT */
+	unsigned int		wb_offset,	/* Offset & ~PAGE_CACHE_MASK */
+				wb_pgbase,	/* Start of page data */
+				wb_bytes;	/* Length of request */
+	struct kref		wb_kref;	/* reference count */
 	unsigned long		wb_flags;
 	struct nfs_writeverf	wb_verf;	/* Commit cookie */
 };
 
+struct nfs_pageio_descriptor;
+struct nfs_pageio_ops {
+	void	(*pg_init)(struct nfs_pageio_descriptor *, struct nfs_page *);
+	bool	(*pg_test)(struct nfs_pageio_descriptor *, struct nfs_page *, struct nfs_page *);
+	int	(*pg_doio)(struct nfs_pageio_descriptor *);
+};
+
+struct nfs_pageio_descriptor {
+	struct list_head	pg_list;
+	unsigned long		pg_bytes_written;
+	size_t			pg_count;
+	size_t			pg_bsize;
+	unsigned int		pg_base;
+	unsigned char		pg_moreio : 1,
+				pg_recoalesce : 1;
+
+	struct inode		*pg_inode;
+	const struct nfs_pageio_ops *pg_ops;
+	int 			pg_ioflags;
+	int			pg_error;
+	const struct rpc_call_ops *pg_rpc_callops;
+	struct pnfs_layout_segment *pg_lseg;
+};
+
 #define NFS_WBACK_BUSY(req)	(test_bit(PG_BUSY,&(req)->wb_flags))
 
-extern	struct nfs_page *nfs_create_request(struct rpc_cred *, struct inode *,
-					    struct page *,
-					    unsigned int, unsigned int);
-extern	void nfs_clear_request(struct nfs_page *req);
+extern	struct nfs_page *nfs_create_request(struct nfs_open_context *ctx,
+					    struct inode *inode,
+					    struct page *page,
+					    unsigned int offset,
+					    unsigned int count);
 extern	void nfs_release_request(struct nfs_page *req);
 
 
-extern	void nfs_list_add_request(struct nfs_page *, struct list_head *);
-
-extern	int nfs_scan_lru(struct list_head *, struct list_head *, int);
-extern	int nfs_scan_lru_timeout(struct list_head *, struct list_head *, int);
-extern	int nfs_scan_list(struct list_head *, struct list_head *,
-				unsigned long, unsigned int);
-extern	int nfs_coalesce_requests(struct list_head *, struct list_head *,
-				  unsigned int);
+extern	void nfs_pageio_init(struct nfs_pageio_descriptor *desc,
+			     struct inode *inode,
+			     const struct nfs_pageio_ops *pg_ops,
+			     size_t bsize,
+			     int how);
+extern	int nfs_pageio_add_request(struct nfs_pageio_descriptor *,
+				   struct nfs_page *);
+extern	void nfs_pageio_complete(struct nfs_pageio_descriptor *desc);
+extern	void nfs_pageio_cond_complete(struct nfs_pageio_descriptor *, pgoff_t);
+extern bool nfs_generic_pg_test(struct nfs_pageio_descriptor *desc,
+				struct nfs_page *prev,
+				struct nfs_page *req);
 extern  int nfs_wait_on_request(struct nfs_page *);
-
-extern	spinlock_t nfs_wreq_lock;
+extern	void nfs_unlock_request(struct nfs_page *req);
 
 /*
- * Lock the page of an asynchronous request without incrementing the wb_count
+ * Lock the page of an asynchronous request without getting a new reference
  */
 static inline int
 nfs_lock_request_dontget(struct nfs_page *req)
 {
-	if (test_and_set_bit(PG_BUSY, &req->wb_flags))
-		return 0;
-	return 1;
+	return !test_and_set_bit(PG_BUSY, &req->wb_flags);
 }
 
-/*
- * Lock the page of an asynchronous request
- */
 static inline int
 nfs_lock_request(struct nfs_page *req)
 {
 	if (test_and_set_bit(PG_BUSY, &req->wb_flags))
 		return 0;
-	req->wb_count++;
+	kref_get(&req->wb_kref);
 	return 1;
 }
 
+
+/**
+ * nfs_list_add_request - Insert a request into a list
+ * @req: request
+ * @head: head of list into which to insert the request.
+ */
 static inline void
-nfs_unlock_request(struct nfs_page *req)
+nfs_list_add_request(struct nfs_page *req, struct list_head *head)
 {
-	if (!NFS_WBACK_BUSY(req)) {
-		printk(KERN_ERR "NFS: Invalid unlock attempted\n");
-		BUG();
-	}
-	smp_mb__before_clear_bit();
-	clear_bit(PG_BUSY, &req->wb_flags);
-	smp_mb__after_clear_bit();
-	if (waitqueue_active(&req->wb_wait))
-		wake_up_all(&req->wb_wait);
-	nfs_release_request(req);
+	list_add_tail(&req->wb_list, head);
 }
+
 
 /**
  * nfs_list_remove_request - Remove a request from its wb_list
@@ -107,12 +136,7 @@ nfs_list_remove_request(struct nfs_page *req)
 {
 	if (list_empty(&req->wb_list))
 		return;
-	if (!NFS_WBACK_BUSY(req)) {
-		printk(KERN_ERR "NFS: unlocked request attempted removed from list!\n");
-		BUG();
-	}
 	list_del_init(&req->wb_list);
-	req->wb_list_head = NULL;
 }
 
 static inline struct nfs_page *
@@ -121,30 +145,10 @@ nfs_list_entry(struct list_head *head)
 	return list_entry(head, struct nfs_page, wb_list);
 }
 
-static inline struct nfs_page *
-nfs_inode_wb_entry(struct list_head *head)
+static inline
+loff_t req_offset(struct nfs_page *req)
 {
-	return list_entry(head, struct nfs_page, wb_hash);
-}
-
-static inline void
-__nfs_add_lru(struct list_head *head, struct nfs_page *req)
-{
-	list_add_tail(&req->wb_lru, head);
-}
-
-static inline void
-__nfs_del_lru(struct nfs_page *req)
-{
-	if (list_empty(&req->wb_lru))
-		return;
-	list_del_init(&req->wb_lru);
-}
-
-static inline struct nfs_page *
-nfs_lru_entry(struct list_head *head)
-{
-        return list_entry(head, struct nfs_page, wb_lru);
+	return (((loff_t)req->wb_index) << PAGE_CACHE_SHIFT) + req->wb_offset;
 }
 
 #endif /* _LINUX_NFS_PAGE_H */

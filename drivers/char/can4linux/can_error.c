@@ -11,14 +11,26 @@
  * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: Can_error.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.1  2003/07/18 00:11:46  gerg
+ * I followed as much rules as possible (I hope) and generated a patch for the
+ * uClinux distribution. It contains an additional driver, the CAN driver, first
+ * for an SJA1000 CAN controller:
+ *   uClinux-dist/linux-2.4.x/drivers/char/can4linux
+ * In the "user" section two entries
+ *   uClinux-dist/user/can4linux     some very simple test examples
+ *   uClinux-dist/user/horch         more sophisticated CAN analyzer example
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  *
  *
  */

@@ -12,49 +12,43 @@ endif
 
 MKLASATIMG = mklasatimg
 MKLASATIMG_ARCH = mq2,mqpro,sp100,sp200
-ifdef CONFIG_LASAT_SERVICE
-MKLASATIMG_FLAG = -s
-else
-MKLASATIMG_FLAG = -k
-endif
-
-KERNEL_IMAGE = $(TOPDIR)/vmlinux
-KERNEL_START = $(shell $(NM) $(KERNEL_IMAGE) | grep _ftext | cut -f1 -d\ )
+KERNEL_IMAGE = vmlinux
+KERNEL_START = $(shell $(NM) $(KERNEL_IMAGE) | grep " _text" | cut -f1 -d\ )
 KERNEL_ENTRY = $(shell $(NM) $(KERNEL_IMAGE) | grep kernel_entry | cut -f1 -d\ )
 
-LDSCRIPT= -Tromscript.normal
+LDSCRIPT= -L$(srctree)/$(src) -Tromscript.normal
 
-HEAD_DEFINES = -D_kernel_start=0x$(KERNEL_START) \
+HEAD_DEFINES := -D_kernel_start=0x$(KERNEL_START) \
 		-D_kernel_entry=0x$(KERNEL_ENTRY) \
 		-D VERSION="\"$(Version)\"" \
-		-D TIMESTAMP=$(shell date +%s) 
+		-D TIMESTAMP=$(shell date +%s)
 
-head.o: head.S $(KERNEL_IMAGE)
-	$(CC) -fno-pic $(HEAD_DEFINES) -I$(TOPDIR)/include -c -o $@ $<
+$(obj)/head.o: $(obj)/head.S $(KERNEL_IMAGE)
+	$(CC) -fno-pic $(HEAD_DEFINES) $(LINUXINCLUDE) -c -o $@ $<
 
-OBJECTS= head.o kImage.o
+OBJECTS = head.o kImage.o
 
-rom.sw:	rom.bin
-	$(MKLASATIMG) -o rom.sw $(MKLASATIMG_FLAG) rom.bin -m $(MKLASATIMG_ARCH)
+rom.sw:	$(obj)/rom.sw
+rom.bin:	$(obj)/rom.bin
 
-rom.bin: rom
-	$(OBJCOPY) -O binary -S rom rom.bin
+$(obj)/rom.sw:	$(obj)/rom.bin
+	$(MKLASATIMG) -o $@ -k $^ -m $(MKLASATIMG_ARCH)
+
+$(obj)/rom.bin: $(obj)/rom
+	$(OBJCOPY) -O binary -S $^ $@
 
 # Rule to make the bootloader
-rom:	$(OBJECTS)
-	$(LD) $(LDFLAGS) $(LDSCRIPT) -o rom $(OBJECTS) 
+$(obj)/rom: $(addprefix $(obj)/,$(OBJECTS))
+	$(LD) $(LDFLAGS) $(LDSCRIPT) -o $@ $^
 
-%.o: %.gz
-	$(LD) $(LDFLAGS) -r -o $@ -b binary $<
+$(obj)/%.o: $(obj)/%.gz
+	$(LD) -r -o $@ -b binary $<
 
-%.gz: %.bin
+$(obj)/%.gz: $(obj)/%.bin
 	gzip -cf -9 $< > $@
 
-kImage.bin: $(KERNEL_IMAGE)
-	$(OBJCOPY) -O binary -S $(TOPDIR)/vmlinux kImage.bin
+$(obj)/kImage.bin: $(KERNEL_IMAGE)
+	$(OBJCOPY) -O binary -S $^ $@
 
 clean:
-	rm -f rom rom.bin rom.sw kImage.bin
-
-USE_STANDARD_AS_RULE = 1
-include $(TOPDIR)/Rules.make
+	rm -f rom rom.bin rom.sw kImage.bin kImage.o

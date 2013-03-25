@@ -6,7 +6,8 @@
  * Copyright (C) 1998 Paul Mackerras.
  */
 
-#include <linux/config.h>
+#ifndef _LINUX_PMU_H
+#define _LINUX_PMU_H
 
 #define PMU_DRIVER_VERSION	2
 
@@ -122,89 +123,52 @@ enum {
 /* no param */
 #define PMU_IOC_SLEEP		_IO('B', 0)
 /* out param: u32*	backlight value: 0 to 15 */
-#define PMU_IOC_GET_BACKLIGHT	_IOR('B', 1, sizeof(__u32*))
+#define PMU_IOC_GET_BACKLIGHT	_IOR('B', 1, size_t)
 /* in param: u32	backlight value: 0 to 15 */
-#define PMU_IOC_SET_BACKLIGHT	_IOW('B', 2, sizeof(__u32))
+#define PMU_IOC_SET_BACKLIGHT	_IOW('B', 2, size_t)
 /* out param: u32*	PMU model */
-#define PMU_IOC_GET_MODEL	_IOR('B', 3, sizeof(__u32*))
+#define PMU_IOC_GET_MODEL	_IOR('B', 3, size_t)
 /* out param: u32*	has_adb: 0 or 1 */
-#define PMU_IOC_HAS_ADB		_IOR('B', 4, sizeof(__u32*)) 
+#define PMU_IOC_HAS_ADB		_IOR('B', 4, size_t) 
 /* out param: u32*	can_sleep: 0 or 1 */
-#define PMU_IOC_CAN_SLEEP	_IOR('B', 5, sizeof(__u32*)) 
-/* no param */
-#define PMU_IOC_GRAB_BACKLIGHT	_IOR('B', 6, 0) 
+#define PMU_IOC_CAN_SLEEP	_IOR('B', 5, size_t) 
+/* no param, but historically was _IOR('B', 6, 0), meaning 4 bytes */
+#define PMU_IOC_GRAB_BACKLIGHT	_IOR('B', 6, size_t) 
 
 #ifdef __KERNEL__
 
 extern int find_via_pmu(void);
-extern int via_pmu_start(void);
 
 extern int pmu_request(struct adb_request *req,
 		void (*done)(struct adb_request *), int nbytes, ...);
-
+extern int pmu_queue_request(struct adb_request *req);
 extern void pmu_poll(void);
+extern void pmu_poll_adb(void); /* For use by xmon */
+extern void pmu_wait_complete(struct adb_request *req);
 
 /* For use before switching interrupts off for a long time;
  * warning: not stackable
  */
+#if defined(CONFIG_ADB_PMU)
 extern void pmu_suspend(void);
 extern void pmu_resume(void);
+#else
+static inline void pmu_suspend(void)
+{}
+static inline void pmu_resume(void)
+{}
+#endif
 
 extern void pmu_enable_irled(int on);
 
 extern void pmu_restart(void);
 extern void pmu_shutdown(void);
+extern void pmu_unlock(void);
 
 extern int pmu_present(void);
 extern int pmu_get_model(void);
 
-extern int pmu_i2c_combined_read(int bus, int addr, int subaddr,  u8* data, int len);
-extern int pmu_i2c_stdsub_write(int bus, int addr, int subaddr,  u8* data, int len);
-extern int pmu_i2c_simple_read(int bus, int addr,  u8* data, int len);
-extern int pmu_i2c_simple_write(int bus, int addr,  u8* data, int len);
-
-
-#ifdef CONFIG_PMAC_PBOOK
-/*
- * Stuff for putting the powerbook to sleep and waking it again.
- *
- */
-#include <linux/list.h>
-
-struct pmu_sleep_notifier
-{
-	int (*notifier_call)(struct pmu_sleep_notifier *self, int when);
-	int priority;
-	struct list_head list;
-};
-
-/* Code values for calling sleep/wakeup handlers
- *
- * Note: If a sleep request got cancelled, all drivers will get
- * the PBOOK_SLEEP_REJECT, even those who didn't get the PBOOK_SLEEP_REQUEST.
- */
-#define PBOOK_SLEEP_REQUEST	1
-#define PBOOK_SLEEP_NOW		2
-#define PBOOK_SLEEP_REJECT	3
-#define PBOOK_WAKE		4
-
-/* Result codes returned by the notifiers */
-#define PBOOK_SLEEP_OK		0
-#define PBOOK_SLEEP_REFUSE	-1
-
-/* priority levels in notifiers */
-#define SLEEP_LEVEL_VIDEO	100	/* Video driver (first wake) */
-#define SLEEP_LEVEL_MEDIABAY	90	/* Media bay driver */
-#define SLEEP_LEVEL_BLOCK	80	/* IDE, SCSI */
-#define SLEEP_LEVEL_NET		70	/* bmac, gmac */
-#define SLEEP_LEVEL_MISC	60	/* Anything else */
-#define SLEEP_LEVEL_USERLAND	55	/* Reserved for apm_emu */
-#define SLEEP_LEVEL_ADB		50	/* ADB (async) */
-#define SLEEP_LEVEL_SOUND	40	/* Sound driver (blocking) */
-
-/* special register notifier functions */
-int pmu_register_sleep_notifier(struct pmu_sleep_notifier* notifier);
-int pmu_unregister_sleep_notifier(struct pmu_sleep_notifier* notifier);
+extern void pmu_backlight_set_sleep(int sleep);
 
 #define PMU_MAX_BATTERIES	2
 
@@ -224,7 +188,7 @@ struct pmu_battery_info
 	unsigned int	flags;
 	unsigned int	charge;		/* current charge */
 	unsigned int	max_charge;	/* maximum charge */
-	signed int	current;	/* current, positive if charging */
+	signed int	amperage;	/* current, positive if charging */
 	unsigned int	voltage;	/* voltage */
 	unsigned int	time_remaining;	/* remaining time */
 };
@@ -233,6 +197,17 @@ extern int pmu_battery_count;
 extern struct pmu_battery_info pmu_batteries[PMU_MAX_BATTERIES];
 extern unsigned int pmu_power_flags;
 
-#endif /* CONFIG_PMAC_PBOOK */
+/* Backlight */
+extern void pmu_backlight_init(void);
+
+/* some code needs to know if the PMU was suspended for hibernation */
+#if defined(CONFIG_SUSPEND) && defined(CONFIG_PPC32)
+extern int pmu_sys_suspended;
+#else
+/* if power management is not configured it can't be suspended */
+#define pmu_sys_suspended	0
+#endif
 
 #endif	/* __KERNEL__ */
+
+#endif /* _LINUX_PMU_H */

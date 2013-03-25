@@ -2,11 +2,12 @@
  *  linux/drivers/video/fm2fb.c -- BSC FrameMaster II/Rainbow II frame buffer
  *				   device
  *
- *	Copyright (C) 1998 Steffen A. Mork (mork@ls7.cs.uni-dortmund.de)
+ *	Copyright (C) 1998 Steffen A. Mork (linux-dev@morknet.de)
  *	Copyright (C) 1999 Geert Uytterhoeven
  *
  *  Written for 2.0.x by Steffen A. Mork
  *  Ported to 2.1.x by Geert Uytterhoeven
+ *  Ported to new api by James Simmons
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License. See the file COPYING in the main directory of this archive for
@@ -18,12 +19,7 @@
 #include <linux/fb.h>
 #include <linux/init.h>
 #include <linux/zorro.h>
-
 #include <asm/io.h>
-
-#include <video/fbcon.h>
-#include <video/fbcon-cfb32.h>
-
 
 /*
  *	Some technical notes:
@@ -49,11 +45,11 @@
  *	buffer needs an amount of memory of 1.769.472 bytes which
  *	is near to 2 MByte (the allocated address space of Zorro2).
  *	The memory is channel interleaved. That means every channel
- *	owns four VRAMs. Unfortunatly most FrameMasters II are
+ *	owns four VRAMs. Unfortunately most FrameMasters II are
  *	not assembled with memory for the alpha channel. In this
  *	case it could be possible to add the frame buffer into the
  *	normal memory pool.
- *	
+ *
  *	At relative address 0x1ffff8 of the frame buffers base address
  *	there exists a control register with the number of
  *	four control bits. They have the following meaning:
@@ -68,7 +64,7 @@
  *	is not very much information about the FrameMaster II in
  *	the world so I add these information for completeness.
  *
- *	JP1  interlace selection (1-2 non interlaced/2-3 interlaced) 
+ *	JP1  interlace selection (1-2 non interlaced/2-3 interlaced)
  *	JP2  wait state creation (leave as is!)
  *	JP3  wait state creation (leave as is!)
  *	JP4  modulate composite sync on green output (1-2 composite
@@ -117,7 +113,6 @@
  *
  */
 
-
 /*
  *	definitions
  */
@@ -130,37 +125,23 @@
 #define FRAMEMASTER_COMPL	4
 #define FRAMEMASTER_ROM		8
 
-
-struct FrameMaster_fb_par
-{
-	int xres;
-	int yres;
-	int bpp;
-	int pixclock;
-};
-
-static unsigned long fm2fb_mem_phys;
-static void *fm2fb_mem;
-static unsigned long fm2fb_reg_phys;
 static volatile unsigned char *fm2fb_reg;
 
-static int currcon = 0;
-static struct display disp;
-static struct fb_info fb_info;
-static struct { u_char red, green, blue, pad; } palette[16];
-#ifdef FBCON_HAS_CFB32
-static u32 fbcon_cfb32_cmap[16];
-#endif
+static struct fb_fix_screeninfo fb_fix __devinitdata = {
+	.smem_len =	FRAMEMASTER_REG,
+	.type =		FB_TYPE_PACKED_PIXELS,
+	.visual =	FB_VISUAL_TRUECOLOR,
+	.line_length =	(768 << 2),
+	.mmio_len =	(8),
+	.accel =	FB_ACCEL_NONE,
+};
 
-static struct fb_fix_screeninfo fb_fix;
-static struct fb_var_screeninfo fb_var;
-
-static int fm2fb_mode __initdata = -1;
+static int fm2fb_mode __devinitdata = -1;
 
 #define FM2FB_MODE_PAL	0
 #define FM2FB_MODE_NTSC	1
 
-static struct fb_var_screeninfo fb_var_modes[] __initdata = {
+static struct fb_var_screeninfo fb_var_modes[] __devinitdata = {
     {
 	/* 768 x 576, 32 bpp (PAL) */
 	768, 576, 768, 576, 0, 0, 32, 0,
@@ -176,356 +157,169 @@ static struct fb_var_screeninfo fb_var_modes[] __initdata = {
     }
 };
 
-
     /*
      *  Interface used by the world
      */
 
-static int fm2fb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			 struct fb_info *info);
-static int fm2fb_get_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info);
-static int fm2fb_set_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info);
-static int fm2fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info);
-static int fm2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info);
-
-
-    /*
-     *  Interface to the low level console driver
-     */
-
-int fm2fb_init(void);
-static int fm2fbcon_switch(int con, struct fb_info *info);
-static int fm2fbcon_updatevar(int con, struct fb_info *info);
-static void fm2fbcon_blank(int blank, struct fb_info *info);
-
-
-    /*
-     *  Internal routines
-     */
-
-static int fm2fb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
-			   u_int *transp, struct fb_info *info);
 static int fm2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-			   u_int transp, struct fb_info *info);
-static void do_install_cmap(int con, struct fb_info *info);
-
+                           u_int transp, struct fb_info *info);
+static int fm2fb_blank(int blank, struct fb_info *info);
 
 static struct fb_ops fm2fb_ops = {
-	owner:		THIS_MODULE,
-	fb_get_fix:	fm2fb_get_fix,
-	fb_get_var:	fm2fb_get_var,
-	fb_set_var:	fm2fb_set_var,
-	fb_get_cmap:	fm2fb_get_cmap,
-	fb_set_cmap:	fm2fb_set_cmap,
+	.owner		= THIS_MODULE,
+	.fb_setcolreg	= fm2fb_setcolreg,
+	.fb_blank	= fm2fb_blank,
+	.fb_fillrect	= cfb_fillrect,
+	.fb_copyarea	= cfb_copyarea,
+	.fb_imageblit	= cfb_imageblit,
 };
-
-    /*
-     *  Get the Fixed Part of the Display
-     */
-
-static int fm2fb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			 struct fb_info *info)
-{
-    memcpy(fix, &fb_fix, sizeof(fb_fix));
-    return 0;
-}
-
-
-    /*
-     *  Get the User Defined Part of the Display
-     */
-
-static int fm2fb_get_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info)
-{
-    memcpy(var, &fb_var, sizeof(fb_var));
-    return 0;
-}
-
-
-    /*
-     *  Set the User Defined Part of the Display
-     */
-
-static int fm2fb_set_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info)
-{
-    struct display *display;
-    int oldbpp = -1, err;
-
-    if (con >= 0)
-	display = &fb_display[con];
-    else
-	display = &disp;	/* used during initialization */
-
-    if (var->xres > fb_var.xres || var->yres > fb_var.yres ||
-	var->xres_virtual > fb_var.xres_virtual ||
-	var->yres_virtual > fb_var.yres_virtual ||
-	var->bits_per_pixel > fb_var.bits_per_pixel ||
-	var->nonstd ||
-	(var->vmode & FB_VMODE_MASK) != FB_VMODE_NONINTERLACED)
-	return -EINVAL;
-    memcpy(var, &fb_var, sizeof(fb_var));
-
-    if ((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) {
-	oldbpp = display->var.bits_per_pixel;
-	display->var = *var;
-    }
-    if (oldbpp != var->bits_per_pixel) {
-	if ((err = fb_alloc_cmap(&display->cmap, 0, 0)))
-	    return err;
-	do_install_cmap(con, info);
-    }
-    return 0;
-}
-
-
-    /*
-     *  Get the Colormap
-     */
-
-static int fm2fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info)
-{
-    if (con == currcon) /* current console? */
-	return fb_get_cmap(cmap, kspc, fm2fb_getcolreg, info);
-    else if (fb_display[con].cmap.len) /* non default colormap? */
-	fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
-    else
-	fb_copy_cmap(fb_default_cmap(256), cmap, kspc ? 0 : 2);
-    return 0;
-}
-
-    /*
-     *  Set the Colormap
-     */
-
-static int fm2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info)
-{
-    int err;
-
-    if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
-	if ((err = fb_alloc_cmap(&fb_display[con].cmap, 256, 0)))
-	    return err;
-    }
-    if (con == currcon) {		/* current console? */
-	err = fb_set_cmap(cmap, kspc, fm2fb_setcolreg, info);
-	return err;
-    } else
-	fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
-    return 0;
-}
-
-
-    /*
-     *  Initialisation
-     */
-
-int __init fm2fb_init(void)
-{
-    int is_fm;
-    struct zorro_dev *z = NULL;
-    unsigned long *ptr;
-    int x, y;
-
-    while ((z = zorro_find_device(ZORRO_WILDCARD, z))) {
-	if (z->id == ZORRO_PROD_BSC_FRAMEMASTER_II)
-	    is_fm = 1;
-	else if (z->id == ZORRO_PROD_HELFRICH_RAINBOW_II)
-	    is_fm = 0;
-	else
-	    continue;
-	if (!request_mem_region(z->resource.start, FRAMEMASTER_SIZE, "fm2fb"))
-	    continue;
-
-	/* assigning memory to kernel space */
-	fm2fb_mem_phys = z->resource.start;
-	fm2fb_mem  = ioremap(fm2fb_mem_phys, FRAMEMASTER_SIZE);
-	fm2fb_reg_phys = fm2fb_mem_phys+FRAMEMASTER_REG;
-	fm2fb_reg  = (unsigned char *)(fm2fb_mem+FRAMEMASTER_REG);
-
-	/* make EBU color bars on display */
-	ptr = (unsigned long *)fm2fb_mem;
-	for (y = 0; y < 576; y++) {
-	    for (x = 0; x < 96; x++) *ptr++ = 0xffffff;	/* white */
-	    for (x = 0; x < 96; x++) *ptr++ = 0xffff00;	/* yellow */
-	    for (x = 0; x < 96; x++) *ptr++ = 0x00ffff;	/* cyan */
-	    for (x = 0; x < 96; x++) *ptr++ = 0x00ff00;	/* green */
-	    for (x = 0; x < 96; x++) *ptr++ = 0xff00ff;	/* magenta */
-	    for (x = 0; x < 96; x++) *ptr++ = 0xff0000;	/* red */
-	    for (x = 0; x < 96; x++) *ptr++ = 0x0000ff;	/* blue */
-	    for (x = 0; x < 96; x++) *ptr++ = 0x000000;	/* black */
-	}
-	fm2fbcon_blank(0, NULL);
-
-	if (fm2fb_mode == -1)
-	    fm2fb_mode = FM2FB_MODE_PAL;
-
-	fb_var = fb_var_modes[fm2fb_mode];
-
-	strcpy(fb_fix.id, is_fm ? "FrameMaster II" : "Rainbow II");
-	fb_fix.smem_start = fm2fb_mem_phys;
-	fb_fix.smem_len = FRAMEMASTER_REG;
-	fb_fix.type = FB_TYPE_PACKED_PIXELS;
-	fb_fix.type_aux = 0;
-	fb_fix.visual = FB_VISUAL_TRUECOLOR;
-	fb_fix.line_length = 768<<2;
-	fb_fix.mmio_start = fm2fb_reg_phys;
-	fb_fix.mmio_len = 8;
-	fb_fix.accel = FB_ACCEL_NONE;
-
-	disp.var = fb_var;
-	disp.cmap.start = 0;
-	disp.cmap.len = 0;
-	disp.cmap.red = disp.cmap.green = disp.cmap.blue = disp.cmap.transp = NULL;
-	disp.screen_base = (char *)fm2fb_mem;
-	disp.visual = fb_fix.visual;
-	disp.type = fb_fix.type;
-	disp.type_aux = fb_fix.type_aux;
-	disp.ypanstep = 0;
-	disp.ywrapstep = 0;
-	disp.line_length = fb_fix.line_length;
-	disp.can_soft_blank = 1;
-	disp.inverse = 0;
-    #ifdef FBCON_HAS_CFB32
-	disp.dispsw = &fbcon_cfb32;
-	disp.dispsw_data = &fbcon_cfb32_cmap;
-    #else
-	disp.dispsw = &fbcon_dummy;
-    #endif
-	disp.scrollmode = SCROLL_YREDRAW;
-
-	strcpy(fb_info.modename, fb_fix.id);
-	fb_info.node = -1;
-	fb_info.fbops = &fm2fb_ops;
-	fb_info.disp = &disp;
-	fb_info.fontname[0] = '\0';
-	fb_info.changevar = NULL;
-	fb_info.switch_con = &fm2fbcon_switch;
-	fb_info.updatevar = &fm2fbcon_updatevar;
-	fb_info.blank = &fm2fbcon_blank;
-	fb_info.flags = FBINFO_FLAG_DEFAULT;
-
-	fm2fb_set_var(&fb_var, -1, &fb_info);
-
-	if (register_framebuffer(&fb_info) < 0)
-	    return -EINVAL;
-
-	printk("fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.node),
-	       fb_fix.id);
-	return 0;
-    }
-    return -ENXIO;
-}
-
-int __init fm2fb_setup(char *options)
-{
-    char *this_opt;
-
-    if (!options || !*options)
-	return 0;
-
-    while ((this_opt = strsep(&options, ",")) != NULL) {
-	if (!strncmp(this_opt, "pal", 3))
-	    fm2fb_mode = FM2FB_MODE_PAL;
-	else if (!strncmp(this_opt, "ntsc", 4))
-	    fm2fb_mode = FM2FB_MODE_NTSC;
-    }
-    return 0;
-}
-
-
-static int fm2fbcon_switch(int con, struct fb_info *info)
-{
-    /* Do we have to save the colormap? */
-    if (fb_display[currcon].cmap.len)
-	fb_get_cmap(&fb_display[currcon].cmap, 1, fm2fb_getcolreg, info);
-
-    currcon = con;
-    /* Install new colormap */
-    do_install_cmap(con, info);
-    return 0;
-}
-
-    /*
-     *  Update the `var' structure (called by fbcon.c)
-     */
-
-static int fm2fbcon_updatevar(int con, struct fb_info *info)
-{
-    /* Nothing */
-    return 0;
-}
 
     /*
      *  Blank the display.
      */
-
-static void fm2fbcon_blank(int blank, struct fb_info *info)
+static int fm2fb_blank(int blank, struct fb_info *info)
 {
-    unsigned char t = FRAMEMASTER_ROM;
+	unsigned char t = FRAMEMASTER_ROM;
 
-    if (!blank)
-	t |= FRAMEMASTER_ENABLE | FRAMEMASTER_NOLACE;
-    fm2fb_reg[0] = t;
+	if (!blank)
+		t |= FRAMEMASTER_ENABLE | FRAMEMASTER_NOLACE;
+	fm2fb_reg[0] = t;
+	return 0;
 }
-
-    /*
-     *  Read a single color register and split it into
-     *  colors/transparent. Return != 0 for invalid regno.
-     */
-
-static int fm2fb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
-                         u_int *transp, struct fb_info *info)
-{
-    if (regno > 15)
-	return 1;
-    *red = (palette[regno].red<<8) | palette[regno].red;
-    *green = (palette[regno].green<<8) | palette[regno].green;
-    *blue = (palette[regno].blue<<8) | palette[regno].blue;
-    *transp = 0;
-    return 0;
-}
-
 
     /*
      *  Set a single color register. The values supplied are already
      *  rounded down to the hardware's capabilities (according to the
      *  entries in the var structure). Return != 0 for invalid regno.
      */
-
 static int fm2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
                          u_int transp, struct fb_info *info)
 {
-    if (regno > 15)
-	return 1;
-    red >>= 8;
-    green >>= 8;
-    blue >>= 8;
-    palette[regno].red = red;
-    palette[regno].green = green;
-    palette[regno].blue = blue;
+	if (regno < 16) {
+		red >>= 8;
+		green >>= 8;
+		blue >>= 8;
 
-#ifdef FBCON_HAS_CFB32
-    fbcon_cfb32_cmap[regno] = (red << 16) | (green << 8) | blue;
-#endif
-    return 0;
+		((u32*)(info->pseudo_palette))[regno] = (red << 16) |
+			(green << 8) | blue;
+	}
+
+	return 0;
 }
 
+    /*
+     *  Initialisation
+     */
 
-static void do_install_cmap(int con, struct fb_info *info)
+static int __devinit fm2fb_probe(struct zorro_dev *z,
+				 const struct zorro_device_id *id);
+
+static struct zorro_device_id fm2fb_devices[] __devinitdata = {
+	{ ZORRO_PROD_BSC_FRAMEMASTER_II },
+	{ ZORRO_PROD_HELFRICH_RAINBOW_II },
+	{ 0 }
+};
+MODULE_DEVICE_TABLE(zorro, fm2fb_devices);
+
+static struct zorro_driver fm2fb_driver = {
+	.name		= "fm2fb",
+	.id_table	= fm2fb_devices,
+	.probe		= fm2fb_probe,
+};
+
+static int __devinit fm2fb_probe(struct zorro_dev *z,
+				 const struct zorro_device_id *id)
 {
-    if (con != currcon)
-	return;
-    if (fb_display[con].cmap.len)
-	fb_set_cmap(&fb_display[con].cmap, 1, fm2fb_setcolreg, info);
-    else
-	fb_set_cmap(fb_default_cmap(256), 1, fm2fb_setcolreg, info);
+	struct fb_info *info;
+	unsigned long *ptr;
+	int is_fm;
+	int x, y;
+
+	is_fm = z->id == ZORRO_PROD_BSC_FRAMEMASTER_II;
+
+	if (!zorro_request_device(z,"fm2fb"))
+		return -ENXIO;
+
+	info = framebuffer_alloc(16 * sizeof(u32), &z->dev);
+	if (!info) {
+		zorro_release_device(z);
+		return -ENOMEM;
+	}
+
+	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
+		framebuffer_release(info);
+		zorro_release_device(z);
+		return -ENOMEM;
+	}
+
+	/* assigning memory to kernel space */
+	fb_fix.smem_start = zorro_resource_start(z);
+	info->screen_base = ioremap(fb_fix.smem_start, FRAMEMASTER_SIZE);
+	fb_fix.mmio_start = fb_fix.smem_start + FRAMEMASTER_REG;
+	fm2fb_reg  = (unsigned char *)(info->screen_base+FRAMEMASTER_REG);
+
+	strcpy(fb_fix.id, is_fm ? "FrameMaster II" : "Rainbow II");
+
+	/* make EBU color bars on display */
+	ptr = (unsigned long *)fb_fix.smem_start;
+	for (y = 0; y < 576; y++) {
+		for (x = 0; x < 96; x++) *ptr++ = 0xffffff;/* white */
+		for (x = 0; x < 96; x++) *ptr++ = 0xffff00;/* yellow */
+		for (x = 0; x < 96; x++) *ptr++ = 0x00ffff;/* cyan */
+		for (x = 0; x < 96; x++) *ptr++ = 0x00ff00;/* green */
+		for (x = 0; x < 96; x++) *ptr++ = 0xff00ff;/* magenta */
+		for (x = 0; x < 96; x++) *ptr++ = 0xff0000;/* red */
+		for (x = 0; x < 96; x++) *ptr++ = 0x0000ff;/* blue */
+		for (x = 0; x < 96; x++) *ptr++ = 0x000000;/* black */
+	}
+	fm2fb_blank(0, info);
+
+	if (fm2fb_mode == -1)
+		fm2fb_mode = FM2FB_MODE_PAL;
+
+	info->fbops = &fm2fb_ops;
+	info->var = fb_var_modes[fm2fb_mode];
+	info->pseudo_palette = info->par;
+	info->par = NULL;
+	info->fix = fb_fix;
+	info->flags = FBINFO_DEFAULT;
+
+	if (register_framebuffer(info) < 0) {
+		fb_dealloc_cmap(&info->cmap);
+		iounmap(info->screen_base);
+		framebuffer_release(info);
+		zorro_release_device(z);
+		return -EINVAL;
+	}
+	printk("fb%d: %s frame buffer device\n", info->node, fb_fix.id);
+	return 0;
 }
 
+int __init fm2fb_setup(char *options)
+{
+	char *this_opt;
+
+	if (!options || !*options)
+		return 0;
+
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!strncmp(this_opt, "pal", 3))
+			fm2fb_mode = FM2FB_MODE_PAL;
+		else if (!strncmp(this_opt, "ntsc", 4))
+			fm2fb_mode = FM2FB_MODE_NTSC;
+	}
+	return 0;
+}
+
+int __init fm2fb_init(void)
+{
+	char *option = NULL;
+
+	if (fb_get_options("fm2fb", &option))
+		return -ENODEV;
+	fm2fb_setup(option);
+	return zorro_register_driver(&fm2fb_driver);
+}
+
+module_init(fm2fb_init);
 MODULE_LICENSE("GPL");

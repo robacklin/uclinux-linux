@@ -10,11 +10,15 @@
  * could specify a partition. I think this may be too much rope...
  * We may jettison the configurable prefix and suffix.
  *
- * Copyright (C) 2004 Arcturus Networks Inc. <www.ArcturusNetworks.com>
+ * Copyright (c) 2004 Arcturus Networks Inc. <www.ArcturusNetworks.com>
  *                    by Michael Leslie, David Wu, et al 
  * 
  * Based on redboot.c by David Woodhouse
- *
+ * 
+ * Change log:
+ *     - modified for 2.6 kernel (David Wu)
+ *     - search for all possible partitions, even if they
+ *       are not sorted by name (Oleksandr Zhadan)
  */
 
 #include <linux/kernel.h>
@@ -48,7 +52,7 @@ int parse_ucbootstrap_partitions(struct mtd_info *master,
 {
 	struct mtd_partition *partition;
 	int n_partitions = 0;
-	int i, items;
+	int i, j, items;
 	char varname[PART_VAR_LENGTH];
 	char valstr[PART_VAL_LENGTH];
 	char *val;
@@ -66,7 +70,7 @@ int parse_ucbootstrap_partitions(struct mtd_info *master,
 		sprintf(varname, "_%c", PARTITION_LETTER(i));
 		val = getbenv(varname);
 		if (val == NULL)
-			break;
+			continue;
 		n_partitions++;
 	}
 
@@ -88,10 +92,12 @@ int parse_ucbootstrap_partitions(struct mtd_info *master,
 	       (PART_VAL_LENGTH + sizeof(struct mtd_partition)) * n_partitions);
 
 	/* now read and parse partition env vars into mtd_partition structs: */
-	for (i = 0; i < n_partitions; i++) {
+	for (i = 0, j = 0; (i < MAX_UC_PARTITIONS) && (j <= n_partitions); i++) {
 		sprintf(varname, "_%c", PARTITION_LETTER(i));
 		/* cli(); */
 		val = getbenv(varname);
+		if (val == NULL)
+			continue;
 		strncpy(valstr, val, PART_VAL_LENGTH);
 		/* sti(); */
 		items = sscanf(valstr, "%x:%x:%s", &base, &size, perms);
@@ -104,11 +110,15 @@ int parse_ucbootstrap_partitions(struct mtd_info *master,
 #endif
 
 		/* NOTE: CHECK THE SANITY OF PARTITION SPECIFICATIONS */
-		partition[i].size = size;
-		partition[i].offset = base - map->map_priv_1;
-		partition[i].name = namep;
+		/* make sure this partition IS in the map, usefule for multiflashes */
+		if (map->phys > base || base >= (map->phys + master->size))
+			continue;
+		partition[j].size = size;
+		partition[j].offset = base - (unsigned int)map->virt;
+		partition[j].name = namep;
 		sprintf(namep, "%c", PARTITION_LETTER(i));
 		namep += strlen(namep) + 1;
+		j++;
 	}
 
 	*pparts = partition;

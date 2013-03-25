@@ -2,45 +2,27 @@
 #define _GAMEPORT_H
 
 /*
- * $Id: gameport.h,v 1.11 2001/04/26 10:24:46 vojtech Exp $
+ *  Copyright (c) 1999-2002 Vojtech Pavlik
  *
- *  Copyright (c) 1999-2000 Vojtech Pavlik
- *
- *  Sponsored by SuSE
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
- */
-
-#include <linux/sched.h>
-#include <linux/delay.h>
+#ifdef __KERNEL__
 #include <asm/io.h>
-
-struct gameport;
+#include <linux/types.h>
+#include <linux/list.h>
+#include <linux/mutex.h>
+#include <linux/device.h>
+#include <linux/timer.h>
+#include <linux/slab.h>
 
 struct gameport {
 
-	void *private;
-	void *driver;
-
-	int number;
+	void *port_data;	/* Private pointer for gameport drivers */
+	char name[32];
+	char phys[32];
 
 	int io;
 	int speed;
@@ -53,34 +35,125 @@ struct gameport {
 	int (*open)(struct gameport *, int);
 	void (*close)(struct gameport *);
 
-	struct gameport_dev *dev;
-	struct gameport *next;
+	struct timer_list poll_timer;
+	unsigned int poll_interval;	/* in msecs */
+	spinlock_t timer_lock;
+	unsigned int poll_cnt;
+	void (*poll_handler)(struct gameport *);
+
+	struct gameport *parent, *child;
+
+	struct gameport_driver *drv;
+	struct mutex drv_mutex;		/* protects serio->drv so attributes can pin driver */
+
+	struct device dev;
+
+	struct list_head node;
 };
+#define to_gameport_port(d)	container_of(d, struct gameport, dev)
 
-struct gameport_dev {
+struct gameport_driver {
+	const char *description;
 
-	void *private;
-
-	void (*connect)(struct gameport *, struct gameport_dev *dev);
+	int (*connect)(struct gameport *, struct gameport_driver *drv);
+	int (*reconnect)(struct gameport *);
 	void (*disconnect)(struct gameport *);
 
-	struct gameport_dev *next;
+	struct device_driver driver;
+
+	bool ignore;
 };
+#define to_gameport_driver(d)	container_of(d, struct gameport_driver, driver)
 
-int gameport_open(struct gameport *gameport, struct gameport_dev *dev, int mode);
+int gameport_open(struct gameport *gameport, struct gameport_driver *drv, int mode);
 void gameport_close(struct gameport *gameport);
-void gameport_rescan(struct gameport *gameport);
 
-#if defined(CONFIG_INPUT_GAMEPORT) || defined(CONFIG_INPUT_GAMEPORT_MODULE)
-void gameport_register_port(struct gameport *gameport);
+#if defined(CONFIG_GAMEPORT) || (defined(MODULE) && defined(CONFIG_GAMEPORT_MODULE))
+
+void __gameport_register_port(struct gameport *gameport, struct module *owner);
+/* use a define to avoid include chaining to get THIS_MODULE */
+#define gameport_register_port(gameport) \
+	__gameport_register_port(gameport, THIS_MODULE)
+
 void gameport_unregister_port(struct gameport *gameport);
+
+__printf(2, 3)
+void gameport_set_phys(struct gameport *gameport, const char *fmt, ...);
+
 #else
-static void __inline__ gameport_register_port(struct gameport *gameport) { return; }
-static void __inline__ gameport_unregister_port(struct gameport *gameport) { return; }
+
+static inline void gameport_register_port(struct gameport *gameport)
+{
+	return;
+}
+
+static inline void gameport_unregister_port(struct gameport *gameport)
+{
+	return;
+}
+
+static inline __printf(2, 3)
+void gameport_set_phys(struct gameport *gameport, const char *fmt, ...)
+{
+	return;
+}
+
 #endif
 
-void gameport_register_device(struct gameport_dev *dev);
-void gameport_unregister_device(struct gameport_dev *dev);
+static inline struct gameport *gameport_allocate_port(void)
+{
+	struct gameport *gameport = kzalloc(sizeof(struct gameport), GFP_KERNEL);
+
+	return gameport;
+}
+
+static inline void gameport_free_port(struct gameport *gameport)
+{
+	kfree(gameport);
+}
+
+static inline void gameport_set_name(struct gameport *gameport, const char *name)
+{
+	strlcpy(gameport->name, name, sizeof(gameport->name));
+}
+
+/*
+ * Use the following functions to manipulate gameport's per-port
+ * driver-specific data.
+ */
+static inline void *gameport_get_drvdata(struct gameport *gameport)
+{
+	return dev_get_drvdata(&gameport->dev);
+}
+
+static inline void gameport_set_drvdata(struct gameport *gameport, void *data)
+{
+	dev_set_drvdata(&gameport->dev, data);
+}
+
+/*
+ * Use the following functions to pin gameport's driver in process context
+ */
+static inline int gameport_pin_driver(struct gameport *gameport)
+{
+	return mutex_lock_interruptible(&gameport->drv_mutex);
+}
+
+static inline void gameport_unpin_driver(struct gameport *gameport)
+{
+	mutex_unlock(&gameport->drv_mutex);
+}
+
+int __must_check __gameport_register_driver(struct gameport_driver *drv,
+				struct module *owner, const char *mod_name);
+
+/* use a define to avoid include chaining to get THIS_MODULE & friends */
+#define gameport_register_driver(drv) \
+	__gameport_register_driver(drv, THIS_MODULE, KBUILD_MODNAME)
+
+void gameport_unregister_driver(struct gameport_driver *drv);
+
+#endif /* __KERNEL__ */
 
 #define GAMEPORT_MODE_DISABLED		0
 #define GAMEPORT_MODE_RAW		1
@@ -95,8 +168,11 @@ void gameport_unregister_device(struct gameport_dev *dev);
 #define GAMEPORT_ID_VENDOR_MICROSOFT	0x0007
 #define GAMEPORT_ID_VENDOR_THRUSTMASTER	0x0008
 #define GAMEPORT_ID_VENDOR_GRAVIS	0x0009
+#define GAMEPORT_ID_VENDOR_GUILLEMOT	0x000a
 
-static __inline__ void gameport_trigger(struct gameport *gameport)
+#ifdef __KERNEL__
+
+static inline void gameport_trigger(struct gameport *gameport)
 {
 	if (gameport->trigger)
 		gameport->trigger(gameport);
@@ -104,7 +180,7 @@ static __inline__ void gameport_trigger(struct gameport *gameport)
 		outb(0xff, gameport->io);
 }
 
-static __inline__ unsigned char gameport_read(struct gameport *gameport)
+static inline unsigned char gameport_read(struct gameport *gameport)
 {
 	if (gameport->read)
 		return gameport->read(gameport);
@@ -112,7 +188,7 @@ static __inline__ unsigned char gameport_read(struct gameport *gameport)
 		return inb(gameport->io);
 }
 
-static __inline__ int gameport_cooked_read(struct gameport *gameport, int *axes, int *buttons)
+static inline int gameport_cooked_read(struct gameport *gameport, int *axes, int *buttons)
 {
 	if (gameport->cooked_read)
 		return gameport->cooked_read(gameport, axes, buttons);
@@ -120,7 +196,7 @@ static __inline__ int gameport_cooked_read(struct gameport *gameport, int *axes,
 		return -1;
 }
 
-static __inline__ int gameport_calibrate(struct gameport *gameport, int *axes, int *max)
+static inline int gameport_calibrate(struct gameport *gameport, int *axes, int *max)
 {
 	if (gameport->calibrate)
 		return gameport->calibrate(gameport, axes, max);
@@ -128,15 +204,23 @@ static __inline__ int gameport_calibrate(struct gameport *gameport, int *axes, i
 		return -1;
 }
 
-static __inline__ int gameport_time(struct gameport *gameport, int time)
+static inline int gameport_time(struct gameport *gameport, int time)
 {
 	return (time * gameport->speed) / 1000;
 }
 
-static __inline__ void wait_ms(unsigned int ms)
+static inline void gameport_set_poll_handler(struct gameport *gameport, void (*handler)(struct gameport *))
 {
-	current->state = TASK_UNINTERRUPTIBLE;
-	schedule_timeout(1 + ms * HZ / 1000);
+	gameport->poll_handler = handler;
 }
 
+static inline void gameport_set_poll_interval(struct gameport *gameport, unsigned int msecs)
+{
+	gameport->poll_interval = msecs;
+}
+
+void gameport_start_polling(struct gameport *gameport);
+void gameport_stop_polling(struct gameport *gameport);
+
+#endif /* __KERNEL__ */
 #endif

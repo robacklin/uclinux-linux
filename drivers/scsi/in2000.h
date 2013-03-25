@@ -386,44 +386,27 @@ struct IN2000_hostdata {
 #define PR_STOP      1<<7
 
 
-#include <linux/version.h>
-
 # include <linux/init.h>
 # include <linux/spinlock.h>
 # define in2000__INITFUNC(function) __initfunc(function)
 # define in2000__INIT __init
 # define in2000__INITDATA __initdata
-# define CLISPIN_LOCK(flags)   spin_lock_irqsave(&io_request_lock, flags)
-# define CLISPIN_UNLOCK(flags) spin_unlock_irqrestore(&io_request_lock, flags)
+# define CLISPIN_LOCK(host,flags)   spin_lock_irqsave(host->host_lock, flags)
+# define CLISPIN_UNLOCK(host,flags) spin_unlock_irqrestore(host->host_lock, \
+							   flags)
 
-int in2000_detect(Scsi_Host_Template *) in2000__INIT;
-int in2000_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int in2000_abort(Scsi_Cmnd *);
-void in2000_setup(char *, int *) in2000__INIT;
-int in2000_proc_info(char *, char **, off_t, int, int, int);
-int in2000_biosparam(struct scsi_disk *, kdev_t, int *);
-int in2000_reset(Scsi_Cmnd *, unsigned int);
+static int in2000_detect(struct scsi_host_template *) in2000__INIT;
+static int in2000_queuecommand(struct Scsi_Host *, struct scsi_cmnd *);
+static int in2000_abort(Scsi_Cmnd *);
+static void in2000_setup(char *, int *) in2000__INIT;
+static int in2000_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
+static int in2000_bus_reset(Scsi_Cmnd *);
 
 
 #define IN2000_CAN_Q    16
 #define IN2000_SG       SG_ALL
 #define IN2000_CPL      2
 #define IN2000_HOST_ID  7
-
-#define IN2000 {  proc_name:       "in2000",		/* name of /proc/scsi directory entry */ \
-                  proc_info:       in2000_proc_info,    /* pointer to proc info function */ \
-                  name:            "Always IN2000",     /* device name */ \
-                  detect:          in2000_detect,       /* returns number of in2000's found */ \
-                  queuecommand:    in2000_queuecommand, /* queue scsi command, don't wait */ \
-                  abort:           in2000_abort,        /* abort current command */ \
-                  reset:           in2000_reset,        /* reset scsi bus */ \
-                  bios_param:      in2000_biosparam,    /* figures out BIOS parameters for lilo, etc */ \
-                  can_queue:       IN2000_CAN_Q,        /* max commands we can queue up */ \
-                  this_id:         IN2000_HOST_ID,      /* host-adapter scsi id */ \
-                  sg_tablesize:    IN2000_SG,           /* scatter-gather table size */ \
-                  cmd_per_lun:     IN2000_CPL,          /* commands per lun */ \
-                  use_clustering:  DISABLE_CLUSTERING,  /* ENABLE_CLUSTERING may speed things up */ \
-                  use_new_eh_code: 0                    /* new error code - not using it yet */ \
-                }
 
 #endif /* IN2000_H */

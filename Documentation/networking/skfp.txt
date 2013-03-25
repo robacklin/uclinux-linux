@@ -68,7 +68,7 @@ Compaq adapters (not tested):
 =======================
 
 From v2.01 on, the driver is integrated in the linux kernel sources.
-Therefor, the installation is the same as for any other adapter
+Therefore, the installation is the same as for any other adapter
 supported by the kernel.
 Refer to the manual of your distribution about the installation
 of network adapters.
@@ -81,7 +81,7 @@ Makes my life much easier :-)
 
 If you run into problems during installation, check those items:
 
-Problem:  The FDDI adapter can not be found by the driver.
+Problem:  The FDDI adapter cannot be found by the driver.
 Reason:   Look in /proc/pci for the following entry:
              'FDDI network controller: SysKonnect SK-FDDI-PCI ...'
 	  If this entry exists, then the FDDI adapter has been
@@ -99,7 +99,7 @@ Reason:   Look in /proc/pci for the following entry:
 
 Problem:  You want to use your computer as a router between
           multiple IP subnetworks (using multiple adapters), but
-	  you can not reach computers in other subnetworks.
+	  you cannot reach computers in other subnetworks.
 Reason:   Either the router's kernel is not configured for IP
 	  forwarding or there is a problem with the routing table
 	  and gateway configuration in at least one of the
@@ -142,10 +142,6 @@ please ensure that the following information is available:
 
 (6) HISTORY
 ===========
-
-v2.07 (20020506) (In-Kernel version)
-    Fix: Transmit Descriptor struct
-    Fix: Receive Descriptor struct
 
 v2.06 (20000511) (In-Kernel version)
     New features:

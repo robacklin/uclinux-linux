@@ -2,33 +2,34 @@
 # S/390 character devices
 #
 
-O_TARGET := s390-char.o
+obj-y += ctrlchar.o keyboard.o defkeymap.o sclp.o sclp_rw.o sclp_quiesce.o \
+	 sclp_cmd.o sclp_config.o sclp_cpi_sys.o sclp_ocf.o
 
-list-multi	:= tub3270.o tape390.o
-export-objs	:= hwc_rw.o
+obj-$(CONFIG_TN3270) += raw3270.o
+obj-$(CONFIG_TN3270_CONSOLE) += con3270.o
+obj-$(CONFIG_TN3270_TTY) += tty3270.o
+obj-$(CONFIG_TN3270_FS) += fs3270.o
 
-tub3270-objs := tuball.o tubfs.o tubtty.o \
-                     tubttyaid.o tubttybld.o tubttyscl.o \
-                     tubttyrcl.o tubttysiz.o
-
-tape390-$(CONFIG_S390_TAPE_CHAR) += tapechar.o
-tape390-$(CONFIG_S390_TAPE_BLOCK) += tapeblock.o
-tape390-$(CONFIG_S390_TAPE_3480) += tape3480.o tape34xx.o
-tape390-$(CONFIG_S390_TAPE_3490) += tape3490.o tape34xx.o
-tape390-objs := tape.o $(sort $(tape390-y))
-
-obj-y += ctrlchar.o
 obj-$(CONFIG_TN3215) += con3215.o
-obj-$(CONFIG_HWC) += hwc_con.o hwc_rw.o hwc_tty.o
-obj-$(CONFIG_HWC_CPI) += hwc_cpi.o
-obj-$(CONFIG_TN3270) += tub3270.o
-obj-$(CONFIG_S390_TAPE) += tape390.o
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_SCLP_TTY) += sclp_tty.o
+obj-$(CONFIG_SCLP_CONSOLE) += sclp_con.o
+obj-$(CONFIG_SCLP_VT220_TTY) += sclp_vt220.o
+obj-$(CONFIG_SCLP_CPI) += sclp_cpi.o
+obj-$(CONFIG_SCLP_ASYNC) += sclp_async.o
 
-tub3270.o: $(tub3270-objs)
-	$(LD) -r -o $@ $(tub3270-objs)
+obj-$(CONFIG_ZVM_WATCHDOG) += vmwatchdog.o
+obj-$(CONFIG_VMLOGRDR) += vmlogrdr.o
+obj-$(CONFIG_VMCP) += vmcp.o
 
-tape390.o: $(tape390-objs)
-	$(LD) -r -o $@ $(tape390-objs)
+tape-$(CONFIG_PROC_FS) += tape_proc.o
+tape-objs := tape_core.o tape_std.o tape_char.o $(tape-y)
+obj-$(CONFIG_S390_TAPE) += tape.o tape_class.o
+obj-$(CONFIG_S390_TAPE_34XX) += tape_34xx.o
+obj-$(CONFIG_S390_TAPE_3590) += tape_3590.o
+obj-$(CONFIG_MONREADER) += monreader.o
+obj-$(CONFIG_MONWRITER) += monwriter.o
+obj-$(CONFIG_S390_VMUR) += vmur.o
 
+zcore_mod-objs := sclp_sdias.o zcore.o
+obj-$(CONFIG_ZFCPDUMP) += zcore_mod.o

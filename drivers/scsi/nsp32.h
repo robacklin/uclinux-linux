@@ -22,6 +22,7 @@
  * VENDOR/DEVICE ID
  */
 #define PCI_VENDOR_ID_IODATA  0x10fc
+#define PCI_VENDOR_ID_WORKBIT 0x1145
 
 #define PCI_DEVICE_ID_NINJASCSI_32BI_CBSC_II   0x0005
 #define PCI_DEVICE_ID_NINJASCSI_32BI_KME       0xf007
@@ -34,9 +35,7 @@
 #define PCI_DEVICE_ID_NINJASCSI_32UDE_MELCO_II 0x8009
 
 /*
- * MODEL NAME
- *
- * note: Model number and model string must be same order.
+ * MODEL
  */
 enum {
 	MODEL_IODATA        = 0,
@@ -60,24 +59,13 @@ static char * nsp32_model[] = {
 
 
 /*
- * SCSI generic message definitions
+ * SCSI Generic Definitions
  */
 #define EXTENDED_SDTR_LEN	0x03
 
 /* Little Endian */
 typedef u32 u32_le;
 typedef u16 u16_le;
-
-/*
- * MACRO
- */
-/* from X11/Intrinsic.h */
-#define NUMBER(arr)            ((int) (sizeof(arr) / sizeof(arr[0])))
-#define ARRAY_OFFSET(type,num) ((int) (((type *) 0) + (num)))
-#define BIT(x)                 (1UL << (x))
-#ifndef MIN
-# define MIN(a,b)              ((a) > (b) ? (b) : (a))
-#endif
 
 /*
  * BASIC Definitions
@@ -301,7 +289,7 @@ typedef u16 u16_le;
 
 #define SCSI_MSG_OUT		0x44	/* BASE+44, DW, R/W */
 # define MSGOUT_COUNT_MASK (BIT(0)|BIT(1))
-# define MSGOUT_VALID	    BIT(7)
+# define MV_VALID	    BIT(7)
 
 #define SEL_TIME_OUT		0x48	/* BASE+48, W, R/W */
 #define SAVED_SACK_CNT		0x4c	/* BASE+4c, DW, R */
@@ -396,23 +384,23 @@ typedef u16 u16_le;
 #define SREQ_EDGH		0x0e	/* BASE+08, IDX+0e, B, W */
 # define SREQ_EDGH_SELECT BIT(0)
 
-#define UP_CNT			0x0f	/* BASE+08, IDX+0f, B, W */ /* For hardware testing. Don't use it. */
+#define UP_CNT			0x0f	/* BASE+08, IDX+0f, B, W */
 # define REQCNT_UP  BIT(0)
 # define ACKCNT_UP  BIT(1)
 # define BMADR_UP   BIT(4)
 # define BMCNT_UP   BIT(5)
 # define SGT_CNT_UP BIT(7)
 
-#define CFG_CMD_STR		0x10	/* BASE+08, IDX+10, W, R   */
+#define CFG_CMD_STR		0x10	/* BASE+08, IDX+10, W, R */
 #define CFG_LATE_CACHE		0x11	/* BASE+08, IDX+11, W, R/W */
-#define CFG_BASE_ADR_1		0x12	/* BASE+08, IDX+12, W, R   */
-#define CFG_BASE_ADR_2		0x13	/* BASE+08, IDX+13, W, R   */
-#define CFG_INLINE		0x14	/* BASE+08, IDX+14, W, R   */
+#define CFG_BASE_ADR_1		0x12	/* BASE+08, IDX+12, W, R */
+#define CFG_BASE_ADR_2		0x13	/* BASE+08, IDX+13, W, R */
+#define CFG_INLINE		0x14	/* BASE+08, IDX+14, W, R */
 
 #define SERIAL_ROM_CTL		0x15	/* BASE+08, IDX+15, B, R */
-# define SROM_CTL     BIT(0)
-# define SROM_ENABLE  BIT(1)
-# define SROM_DATA    BIT(2)
+# define SCL BIT(0)
+# define ENA BIT(1)
+# define SDA BIT(2)
 
 #define FIFO_HST_POINTER	0x16	/* BASE+08, IDX+16, B, R/W */
 #define SREQ_DELAY		0x17	/* BASE+08, IDX+17, B, R/W */
@@ -457,13 +445,12 @@ typedef u16 u16_le;
  */
 #define NSP32_SG_SIZE		SG_ALL
 
-/* All values must be little endian */
 typedef struct _nsp32_sgtable {
+	/* values must be little endian */
 	u32_le addr; /* transfer address */
-	u32_le len;  /* transfer length. BIT(31) is for SGTEND mark */
+	u32_le len;  /* transfer length. BIT(31) is for SGT_END mark */
 } __attribute__ ((packed)) nsp32_sgtable;
 
-/* All values must be little endian */
 typedef struct _nsp32_sglun {
 	nsp32_sgtable sgt[NSP32_SG_SIZE+1];	/* SG table */
 } __attribute__ ((packed)) nsp32_sglun;
@@ -507,22 +494,22 @@ typedef struct _nsp32_autoparam {
 #define MSGIN03			BIT(1)		/* Auto Msg In 03 Flag  */
 
 typedef struct _nsp32_lunt {
-	Scsi_Cmnd     *SCpnt;	     /* Current Handling Scsi_Cmnd */
-	unsigned long  save_datp;    /* Save Data Pointer - saved position from initial address */
-	int	       msgin03;	     /* auto msg in 03 flag        */
-	unsigned int   sg_num;	     /* Total number of SG entries */
-	int	       cur_entry;    /* Current SG entry number    */
-	nsp32_sglun   *sglun;	     /* sg table per lun           */
-	dma_addr_t     sglun_paddr;  /* sglun physical address     */
+	struct scsi_cmnd	*SCpnt;	    /* Current Handling struct scsi_cmnd */
+	unsigned long	 save_datp;  /* Save Data Pointer - saved position from initial address */
+	int		 msgin03;	/* auto msg in 03 flag     */
+	unsigned int	 sg_num;	/* Total number of SG entries */
+	int		 cur_entry;	/* Current SG entry number */
+	nsp32_sglun     *sglun;		/* sg table per lun        */
+	dma_addr_t       sglun_paddr;   /* sglun physical address  */
 } nsp32_lunt;
 
 
 /*
  * SCSI TARGET/LUN definition
  */
-#define NSP32_HOST_SCSIID    7  /* SCSI initiator is everytime defined as 7 */
+#define NSP32_HOST_SCSIID    7  /* SCSI initiator is every time defined as 7 */
 #define MAX_TARGET	     8
-#define MAX_LUN		     8	/* XXX: In SPI3, max number of LUN is 64.   */
+#define MAX_LUN		     8	/* XXX: In SPI3, max number of LUN is 64. */
 
 
 typedef struct _nsp32_sync_table {
@@ -538,7 +525,6 @@ typedef struct _nsp32_sync_table {
  * structure for target device static data
  */
 /* flag for nsp32_target.sync_flag */
-#define SDTR_NONE         0         /* initial state                      */
 #define SDTR_INITIATOR	  BIT(0)    /* sending SDTR from initiator        */
 #define SDTR_TARGET	  BIT(1)    /* sending SDTR from target           */
 #define SDTR_DONE	  BIT(2)    /* exchanging SDTR has been processed */
@@ -548,9 +534,9 @@ typedef struct _nsp32_sync_table {
 #define FAST10M			0x19
 #define ULTRA20M		0x0c
 
-/* flag for nsp32_target.{sync_offset, period} */
+/* flag for nsp32_target.{sync_offset}, period */
 #define ASYNC_OFFSET		0	/* asynchronous transfer           */
-#define MAX_OFFSET		0xf	/* synchronous transfer max offset */
+#define SYNC_OFFSET		0xf	/* synchronous transfer max offset */
 
 /* syncreg:
   bit:07 06 05 04 03 02 01 00
@@ -572,11 +558,11 @@ typedef struct _nsp32_hw_data {
 	int           IrqNumber;
 	int           BaseAddress;
 	int           NumAddress;
-	unsigned long MmioAddress;
+	void __iomem *MmioAddress;
 #define NSP32_MMIO_OFFSET 0x0800
 	unsigned long MmioLength;
 
-	Scsi_Cmnd *CurrentSC;
+	struct scsi_cmnd *CurrentSC;
 
 	struct pci_dev             *Pci;
 	const struct pci_device_id *pci_devid;
@@ -614,9 +600,6 @@ typedef struct _nsp32_hw_data {
 	unsigned char msginbuf [MSGINBUF_MAX];	/* megin buffer     */
 	char	      msgin_len;		/* msginbuf length  */
 
-#ifdef CONFIG_PM
-	u32           PciState[16];     /* save PCI state to this area */
-#endif
 } nsp32_hw_data;
 
 /*
@@ -629,61 +612,6 @@ typedef struct _nsp32_hw_data {
 #define ARBIT_TIMEOUT_TIME	100	/* 100us */
 #define REQSACK_TIMEOUT_TIME	10000	/* max wait time for REQ/SACK assertion
 					   or negation, 10000us == 10ms */
-
-/**************************************************************************
- * Compatibility functions
- */
-
-/* for Kernel 2.4 */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,6,0))
-# define scsi_register_host(template) 	scsi_register_module(MODULE_SCSI_HA, template)
-# define scsi_unregister_host(template) scsi_unregister_module(MODULE_SCSI_HA, template)
-# define scsi_host_put(host)            scsi_unregister(host)
-# define pci_name(pci_dev)              ((pci_dev)->slot_name)
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,4,23))
-typedef void irqreturn_t;
-# define IRQ_NONE      /* */
-# define IRQ_HANDLED   /* */
-# define IRQ_RETVAL(x) /* */
-#endif
-
-/* This is ad-hoc version of scsi_host_get_next() */
-static inline struct Scsi_Host *scsi_host_get_next(struct Scsi_Host *host)
-{
-	if (host == NULL) {
-		return scsi_hostlist;
-	} else {
-		return host->next;
-	}
-}
-
-/* This is ad-hoc version of scsi_host_hn_get() */
-static inline struct Scsi_Host *scsi_host_hn_get(unsigned short hostno)
-{
-	struct Scsi_Host *host;
-
-	for (host = scsi_host_get_next(NULL); host != NULL;
-	     host = scsi_host_get_next(host)) {
-		if (host->host_no == hostno) {
-			break;
-		}
-	}
-
-	return host;
-}
-
-/* host spin lock */
-# define HOST_LOCK (&io_request_lock)
-#endif
-
-/* for Kernel 2.6 */
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,0))
-# define __devinitdata /* */
-
-/* host spin lock */
-# define HOST_LOCK (data->Host->host_lock)
-#endif
 
 #endif /* _NSP32_H */
 /* end */

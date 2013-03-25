@@ -11,6 +11,9 @@
 #define NFS3_MAXGROUPS		16
 #define NFS3_FHSIZE		64
 #define NFS3_COOKIESIZE		4
+#define NFS3_CREATEVERFSIZE	8
+#define NFS3_COOKIEVERFSIZE	8
+#define NFS3_WRITEVERFSIZE	8
 #define NFS3_FIFO_DEV		(-1)
 #define NFS3MODE_FMT		0170000
 #define NFS3MODE_DIR		0040000
@@ -28,6 +31,7 @@
 #define NFS3_ACCESS_EXTEND	0x0008
 #define NFS3_ACCESS_DELETE	0x0010
 #define NFS3_ACCESS_EXECUTE	0x0020
+#define NFS3_ACCESS_FULL	0x003f
 
 /* Flags for create mode */
 enum nfs3_createmode {
@@ -58,6 +62,11 @@ enum nfs3_ftype {
 	NF3BAD  = 8
 };
 
+struct nfs3_fh {
+	unsigned short size;
+	unsigned char  data[NFS3_FHSIZE];
+};
+
 #define NFS3_VERSION		3
 #define NFS3PROC_NULL		0
 #define NFS3PROC_GETATTR	1
@@ -82,15 +91,10 @@ enum nfs3_ftype {
 #define NFS3PROC_PATHCONF	20
 #define NFS3PROC_COMMIT		21
 
-#define NFS_MNT3_PROGRAM	100005
 #define NFS_MNT3_VERSION	3
-#define MOUNTPROC3_NULL		0
-#define MOUNTPROC3_MNT		1
-#define MOUNTPROC3_UMNT		3
-#define MOUNTPROC3_UMNTALL	4
  
 
-#if defined(__KERNEL__) || defined(NFS_NEED_KERNEL_TYPES)
+#if defined(__KERNEL__)
 
 /* Number of 32bit words in post_op_attr */
 #define NFS3_POST_OP_ATTR_WORDS		22

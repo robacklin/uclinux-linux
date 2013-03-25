@@ -9,12 +9,11 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/threads.h>
 #include <linux/linkage.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/spr-regs.h>
 #include <asm/mb86943a.h>
 #include "head.inc"
@@ -32,7 +31,7 @@
 #define __400_LCR	0xfe000100
 #define __400_LSBR	0xfe000c00
 
-	.section	.text.init,"ax"
+	__INIT
 	.balign		4
 
 ###############################################################################
@@ -275,7 +274,7 @@ __head_fr401_set_protection:
 	setlo		%lo(__region_CS2),gr4
 	ori		gr4,#xAMPRx_SS_1Mb|xAMPRx_S_KERNEL|xAMPRx_C|xAMPRx_V,gr4
 	movgs		gr4,dampr6
-	movgs		gr0,iampr6	
+	movgs		gr0,iampr6
 #else
 	call		__head_split_region
 	movgs		gr4,iampr6

@@ -1,5 +1,3 @@
-/* $Id: fsm.h,v 1.5 2002/08/05 09:07:56 heicarst Exp $
- */
 #ifndef _FSM_H_
 #define _FSM_H_
 
@@ -10,7 +8,7 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 /**
  * Define this to get debugging messages.
@@ -68,6 +66,7 @@ typedef struct fsm_instance_t {
 	char name[16];
 	void *userdata;
 	int userint;
+	wait_queue_head_t wait_q;
 #if FSM_DEBUG_HISTORY
 	int         history_index;
 	int         history_size;
@@ -110,7 +109,7 @@ extern fsm_instance *
 init_fsm(char *name, const char **state_names,
 	 const char **event_names,
 	 int nr_states, int nr_events, const fsm_node *tmpl,
-	 int tmpl_len, int order);
+	 int tmpl_len, gfp_t order);
 
 /**
  * Releases an FSM
@@ -199,6 +198,7 @@ fsm_newstate(fsm_instance *fi, int newstate)
 	printk(KERN_DEBUG "fsm(%s): New state %s\n", fi->name,
 		fi->f->state_names[newstate]);
 #endif
+	wake_up(&fi->wait_q);
 }
 
 /**

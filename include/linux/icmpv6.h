@@ -1,25 +1,24 @@
-/* $USAGI: icmpv6.h,v 1.12 2003/08/08 13:46:35 yoshfuji Exp $ */
-
 #ifndef _LINUX_ICMPV6_H
 #define _LINUX_ICMPV6_H
 
+#include <linux/types.h>
 #include <asm/byteorder.h>
 
 struct icmp6hdr {
 
 	__u8		icmp6_type;
 	__u8		icmp6_code;
-	__u16		icmp6_cksum;
+	__sum16		icmp6_cksum;
 
 
 	union {
-		__u32			un_data32[1];
-		__u16			un_data16[2];
+		__be32			un_data32[1];
+		__be16			un_data16[2];
 		__u8			un_data8[4];
 
 		struct icmpv6_echo {
-			__u16		identifier;
-			__u16		sequence;
+			__be16		identifier;
+			__be16		sequence;
 		} u_echo;
 
                 struct icmpv6_nd_advt {
@@ -44,26 +43,21 @@ struct icmp6hdr {
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 			__u8		reserved:3,
 					router_pref:2,
-				        home_agent:1,
+					home_agent:1,
 					other:1,
 					managed:1;
 
 #elif defined(__BIG_ENDIAN_BITFIELD)
 			__u8		managed:1,
 					other:1,
-				        home_agent:1,
+					home_agent:1,
 					router_pref:2,
 					reserved:3;
 #else
 #error	"Please fix <asm/byteorder.h>"
 #endif
-			__u16		rt_lifetime;
+			__be16		rt_lifetime;
                 } u_nd_ra;
-
-		struct icmpv6_ni {
-			__u16		qtype;
-			__u16		flags;
-		} u_ni;
 
 	} icmp6_dataun;
 
@@ -81,12 +75,22 @@ struct icmp6hdr {
 #define icmp6_addrconf_managed	icmp6_dataun.u_nd_ra.managed
 #define icmp6_addrconf_other	icmp6_dataun.u_nd_ra.other
 #define icmp6_rt_lifetime	icmp6_dataun.u_nd_ra.rt_lifetime
-#define icmp6_qtype		icmp6_dataun.u_ni.qtype
-#define icmp6_flags		icmp6_dataun.u_ni.flags
-#define icmp6_home_agent	icmp6_dataun.u_nd_ra.home_agent
 #define icmp6_router_pref	icmp6_dataun.u_nd_ra.router_pref
 };
 
+#ifdef __KERNEL__
+#include <linux/skbuff.h>
+
+static inline struct icmp6hdr *icmp6_hdr(const struct sk_buff *skb)
+{
+	return (struct icmp6hdr *)skb_transport_header(skb);
+}
+#endif
+
+#define ICMPV6_ROUTER_PREF_LOW		0x3
+#define ICMPV6_ROUTER_PREF_MEDIUM	0x0
+#define ICMPV6_ROUTER_PREF_HIGH		0x1
+#define ICMPV6_ROUTER_PREF_INVALID	0x2
 
 #define ICMPV6_DEST_UNREACH		1
 #define ICMPV6_PKT_TOOBIG		2
@@ -104,17 +108,12 @@ struct icmp6hdr {
 #define ICMPV6_NI_QUERY			139
 #define ICMPV6_NI_REPLY			140
 
-/* definitions for MLDv2 */
-
-#define MLD2_MODE_IS_INCLUDE	1
-#define MLD2_MODE_IS_EXCLUDE	2
-#define MLD2_CHANGE_TO_INCLUDE	3
-#define MLD2_CHANGE_TO_EXCLUDE	4
-#define MLD2_ALLOW_NEW_SOURCES	5
-#define MLD2_BLOCK_OLD_SOURCES	6
-
 #define ICMPV6_MLD2_REPORT		143
-#define MLD2_ALL_MCR_INIT { { { 0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x16 } } }
+
+#define ICMPV6_DHAAD_REQUEST		144
+#define ICMPV6_DHAAD_REPLY		145
+#define ICMPV6_MOBILE_PREFIX_SOL	146
+#define ICMPV6_MOBILE_PREFIX_ADV	147
 
 /*
  *	Codes for Destination Unreachable
@@ -139,57 +138,6 @@ struct icmp6hdr {
 #define ICMPV6_UNK_OPTION		2
 
 /*
- *	Codes for Node Information
- */
-#define ICMPV6_NI_SUBJ_IPV6		0	/* Query Subject is an ipv6 address */
-#define ICMPV6_NI_SUBJ_FQDN		1	/* Query Subject is a Domain name */
-#define ICMPV6_NI_SUBJ_IPV4		2	/* Query Subject is an ipv4 address */
-
-#define ICMPV6_NI_SUCCESS		0	/* NI successful reply */
-#define ICMPV6_NI_REFUSED		1	/* NI request is refused */
-#define ICMPV6_NI_UNKNOWN		2	/* unknown Qtype */
-
-#define ICMPV6_NI_QTYPE_NOOP		0 	/* NOOP  */
-#define ICMPV6_NI_QTYPE_SUPTYPES	1 	/* Supported Qtypes */
-#define ICMPV6_NI_QTYPE_FQDN		2 	/* FQDN */
-#define ICMPV6_NI_QTYPE_NODEADDR	3 	/* Node Addresses */
-#define ICMPV6_NI_QTYPE_IPV4ADDR	4 	/* IPv4 Addresses */
-
-/* Flags */
-#if __BYTE_ORDER == __BIG_ENDIAN || (defined(__BIG_ENDIAN) && !defined(__LITTLE_ENDIAN))
-#define ICMPV6_NI_SUPTYPE_FLAG_COMPRESS		0x1
-#elif __BYTE_ORDER == __LITTLE_ENDIAN || (defined(__LITTLE_ENDIAN) && !defined(__BIG_ENDIAN))
-#define ICMPV6_NI_SUPTYPE_FLAG_COMPRESS		0x0100
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN || (defined(__BIG_ENDIAN) && !defined(__LITTLE_ENDIAN))
-#define ICMPV6_NI_FQDN_FLAG_VALIDTTL		0x1
-#elif __BYTE_ORDER == __LITTLE_ENDIAN || (defined(__LITTLE_ENDIAN) && !defined(__BIG_ENDIAN))
-#define ICMPV6_NI_FQDN_FLAG_VALIDTTL		0x0100
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN || (defined(__BIG_ENDIAN) && !defined(__LITTLE_ENDIAN))
-#define ICMPV6_NI_NODEADDR_FLAG_TRUNCATE	0x1
-#define ICMPV6_NI_NODEADDR_FLAG_ALL		0x2
-#define ICMPV6_NI_NODEADDR_FLAG_COMPAT		0x4
-#define ICMPV6_NI_NODEADDR_FLAG_LINKLOCAL	0x8
-#define ICMPV6_NI_NODEADDR_FLAG_SITELOCAL	0x10
-#define ICMPV6_NI_NODEADDR_FLAG_GLOBAL		0x20
-#define ICMPV6_NI_NODEADDR_FLAG_ANYCAST		0x40 /* just experimental. not in spec */
-#elif __BYTE_ORDER == __LITTLE_ENDIAN || (defined(__LITTLE_ENDIAN) && !defined(__BIG_ENDIAN))
-#define ICMPV6_NI_NODEADDR_FLAG_TRUNCATE	0x0100
-#define ICMPV6_NI_NODEADDR_FLAG_ALL		0x0200
-#define ICMPV6_NI_NODEADDR_FLAG_COMPAT		0x0400
-#define ICMPV6_NI_NODEADDR_FLAG_LINKLOCAL	0x0800
-#define ICMPV6_NI_NODEADDR_FLAG_SITELOCAL	0x1000
-#define ICMPV6_NI_NODEADDR_FLAG_GLOBAL		0x2000
-#define ICMPV6_NI_NODEADDR_FLAG_ANYCAST		0x4000 /* just experimental. not in spec */
-#else
-#error	"Please fix <asm/byteorder.h>"
-#endif
-#define ICMPV6_NI_IPV4ADDR_FLAG_TRUNCATE	ICMPV6_NI_NODEADDR_FLAG_TRUNCATE
-#define ICMPV6_NI_IPV4ADDR_FLAG_ALL		ICMPV6_NI_NODEADDR_FLAG_ALL
-
-
-/*
  *	constants for (set|get)sockopt
  */
 
@@ -208,25 +156,41 @@ struct icmp6_filter {
 	__u32		data[8];
 };
 
+/*
+ *	Definitions for MLDv2
+ */
+#define MLD2_MODE_IS_INCLUDE	1
+#define MLD2_MODE_IS_EXCLUDE	2
+#define MLD2_CHANGE_TO_INCLUDE	3
+#define MLD2_CHANGE_TO_EXCLUDE	4
+#define MLD2_ALLOW_NEW_SOURCES	5
+#define MLD2_BLOCK_OLD_SOURCES	6
+
+#define MLD2_ALL_MCR_INIT { { { 0xff,0x02,0,0,0,0,0,0,0,0,0,0,0,0,0,0x16 } } }
 
 #ifdef __KERNEL__
 
 #include <linux/netdevice.h>
-#include <linux/skbuff.h>
-
-#define IM_ICMPV6_SEND	"icmpv6_send"
 
 extern void				icmpv6_send(struct sk_buff *skb,
-						    int type, int code,
-						    __u32 info, 
-						    struct net_device *dev);
+						    u8 type, u8 code,
+						    __u32 info);
 
-extern int				icmpv6_init(struct net_proto_family *ops);
-extern int				icmpv6_err_convert(int type, int code,
+extern int				icmpv6_init(void);
+extern int				icmpv6_err_convert(u8 type, u8 code,
 							   int *err);
 extern void				icmpv6_cleanup(void);
 extern void				icmpv6_param_prob(struct sk_buff *skb,
-							  int code, int pos);
+							  u8 code, int pos);
+
+struct flowi6;
+struct in6_addr;
+extern void				icmpv6_flow_init(struct sock *sk,
+							 struct flowi6 *fl6,
+							 u8 type,
+							 const struct in6_addr *saddr,
+							 const struct in6_addr *daddr,
+							 int oif);
 #endif
 
 #endif

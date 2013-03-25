@@ -11,7 +11,6 @@
  */
 
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/string.h>
@@ -94,35 +93,43 @@ static void do_fast_timer(void)
 
 #ifdef CONFIG_SYSCTL
 int fast_timer_sysctl(ctl_table *ctl, int write,
-        struct file * filp, void *buffer, size_t *lenp)
+        struct file * filp, void __user *buffer, size_t *lenp, loff_t *ppos)
 {
-        int *valp = ctl->data;
-        int val = *valp;
-        int ret;
+	int *valp = ctl->data;
+	int val = *valp;
+	int ret;
 
-        ret = proc_dointvec(ctl, write, filp, buffer, lenp);
-        if (write && (*valp != val))
+	ret = proc_dointvec(ctl, write, buffer, lenp, ppos);
+	if (write && (*valp != val))
 		fast_timer_set();
-        return ret;
-
+	return ret;
 }
 
 static ctl_table dev_table[] = {
-	{2, "fast_timer",
-	 &fast_timer_rate, sizeof(int), 0644, NULL, &fast_timer_sysctl},
-	{0}
+	{
+		.procname = "fast_timer",
+		.data = &fast_timer_rate,
+		.maxlen = sizeof(int),
+		.mode = 0644, 
+		.proc_handler = &fast_timer_sysctl,
+	},
+	{ }
 };
 
 static ctl_table root_table[] = {
-	{CTL_DEV, "dev", NULL, 0, 0555, dev_table},
-	{0}
+	{
+		.procname = "dev",
+		.mode = 0555,
+		.child = dev_table,
+	},
+	{ }
 };
 
 static struct ctl_table_header *sysctl_header;
 
 static void __init init_sysctl(void)
 {
-	sysctl_header = register_sysctl_table(root_table, 0);
+	sysctl_header = register_sysctl_table(root_table);
 }
 
 static void __exit cleanup_sysctl(void)

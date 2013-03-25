@@ -7,7 +7,7 @@
  *	     used by other architectures		/Roman Zippel
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -20,7 +20,6 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/system.h>
 
 #undef DEBUG
 
@@ -45,33 +44,35 @@ static inline struct vm_struct *get_io_area(unsigned long size)
 
 static inline void free_io_area(void *addr)
 {
-	return vfree((void *)(PAGE_MASK & (unsigned long)addr));
+	vfree((void *)(PAGE_MASK & (unsigned long)addr));
 }
 
 #else
 
 #define IO_SIZE		(256*1024)
 
-static struct vm_struct *iolist = NULL;
+static struct vm_struct *iolist;
 
 static struct vm_struct *get_io_area(unsigned long size)
 {
 	unsigned long addr;
 	struct vm_struct **p, *tmp, *area;
 
-	area = (struct vm_struct *)kmalloc(sizeof(*area), GFP_KERNEL);
+	area = kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
 		return NULL;
 	addr = KMAP_START;
 	for (p = &iolist; (tmp = *p) ; p = &tmp->next) {
 		if (size + addr < (unsigned long)tmp->addr)
 			break;
-		if (addr > KMAP_END-size)
+		if (addr > KMAP_END-size) {
+			kfree(area);
 			return NULL;
+		}
 		addr = tmp->size + (unsigned long)tmp->addr;
 	}
 	area->addr = (void *)addr;
-	area->size = size + IO_SIZE;	/* leave a gap between */
+	area->size = size + IO_SIZE;
 	area->next = *p;
 	*p = area;
 	return area;
@@ -87,10 +88,7 @@ static inline void free_io_area(void *addr)
 	for (p = &iolist ; (tmp = *p) ; p = &tmp->next) {
 		if (tmp->addr == addr) {
 			*p = tmp->next;
-			if ( tmp->size > IO_SIZE )
-				__iounmap(tmp->addr, tmp->size - IO_SIZE);
-			else
-				printk("free_io_area: Invalid I/O area size %lu\n", tmp->size);
+			__iounmap(tmp->addr, tmp->size);
 			kfree(tmp);
 			return;
 		}
@@ -100,12 +98,11 @@ static inline void free_io_area(void *addr)
 #endif
 
 /*
- * Map some physical address range into the kernel address space. The
- * code is copied and adapted from map_chunk().
+ * Map some physical address range into the kernel address space.
  */
 /* Rewritten by Andreas Schwab to remove all races. */
 
-void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
+void __iomem *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 {
 	struct vm_struct *area;
 	unsigned long virtaddr, retaddr;
@@ -117,14 +114,14 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 	/*
 	 * Don't allow mappings that wrap..
 	 */
-	if (!size || size > physaddr + size)
+	if (!size || physaddr > (unsigned long)(-size))
 		return NULL;
 
 #ifdef CONFIG_AMIGA
 	if (MACH_IS_AMIGA) {
 		if ((physaddr >= 0x40000000) && (physaddr + size < 0x60000000)
 		    && (cacheflag == IOMAP_NOCACHE_SER))
-			return (void *)physaddr;
+			return (void __iomem *)physaddr;
 	}
 #endif
 
@@ -173,7 +170,8 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			break;
 		}
 	} else {
-		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_DIRTY);
+		physaddr |= (_PAGE_PRESENT | _PAGE_ACCESSED |
+			     _PAGE_DIRTY | _PAGE_READWRITE);
 		switch (cacheflag) {
 		case IOMAP_NOCACHE_SER:
 		case IOMAP_NOCACHE_NONSER:
@@ -192,7 +190,7 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 			printk ("\npa=%#lx va=%#lx ", physaddr, virtaddr);
 #endif
 		pgd_dir = pgd_offset_k(virtaddr);
-		pmd_dir = pmd_alloc_kernel(pgd_dir, virtaddr);
+		pmd_dir = pmd_alloc(&init_mm, pgd_dir, virtaddr);
 		if (!pmd_dir) {
 			printk("ioremap: no mem for pmd_dir\n");
 			return NULL;
@@ -221,23 +219,25 @@ void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 #endif
 	flush_tlb_all();
 
-	return (void *)retaddr;
+	return (void __iomem *)retaddr;
 }
+EXPORT_SYMBOL(__ioremap);
 
 /*
  * Unmap a ioremap()ed region again
  */
-void iounmap(void *addr)
+void iounmap(void __iomem *addr)
 {
 #ifdef CONFIG_AMIGA
 	if ((!MACH_IS_AMIGA) ||
 	    (((unsigned long)addr < 0x40000000) ||
 	     ((unsigned long)addr > 0x60000000)))
-			free_io_area(addr);
+			free_io_area((__force void *)addr);
 #else
-	free_io_area(addr);
+	free_io_area((__force void *)addr);
 #endif
 }
+EXPORT_SYMBOL(iounmap);
 
 /*
  * __iounmap unmaps nearly everything, so be careful
@@ -262,13 +262,15 @@ void __iounmap(void *addr, unsigned long size)
 
 		if (CPU_IS_020_OR_030) {
 			int pmd_off = (virtaddr/PTRTREESIZE) & 15;
+			int pmd_type = pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK;
 
-			if ((pmd_dir->pmd[pmd_off] & _DESCTYPE_MASK) == _PAGE_PRESENT) {
+			if (pmd_type == _PAGE_PRESENT) {
 				pmd_dir->pmd[pmd_off] = 0;
 				virtaddr += PTRTREESIZE;
 				size -= PTRTREESIZE;
 				continue;
-			}
+			} else if (pmd_type == 0)
+				continue;
 		}
 
 		if (pmd_bad(*pmd_dir)) {
@@ -276,7 +278,7 @@ void __iounmap(void *addr, unsigned long size)
 			pmd_clear(pmd_dir);
 			return;
 		}
-		pte_dir = pte_offset(pmd_dir, virtaddr);
+		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 		pte_val(*pte_dir) = 0;
 		virtaddr += PAGE_SIZE;
@@ -353,7 +355,7 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 			pmd_clear(pmd_dir);
 			return;
 		}
-		pte_dir = pte_offset(pmd_dir, virtaddr);
+		pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 		pte_val(*pte_dir) = (pte_val(*pte_dir) & _CACHEMASK040) | cmode;
 		virtaddr += PAGE_SIZE;
@@ -362,3 +364,4 @@ void kernel_set_cachemode(void *addr, unsigned long size, int cmode)
 
 	flush_tlb_all();
 }
+EXPORT_SYMBOL(kernel_set_cachemode);

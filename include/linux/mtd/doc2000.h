@@ -1,13 +1,32 @@
-
-/* Linux driver for Disk-On-Chip 2000       */
-/* (c) 1999 Machine Vision Holdings, Inc.   */
-/* Author: David Woodhouse <dwmw2@mvhi.com> */
-/* $Id: doc2000.h,v 1.15 2001/09/19 00:22:15 dwmw2 Exp $ */
+/*
+ * Linux driver for Disk-On-Chip devices
+ *
+ * Copyright © 1999 Machine Vision Holdings, Inc.
+ * Copyright © 1999-2010 David Woodhouse <dwmw2@infradead.org>
+ * Copyright © 2002-2003 Greg Ungerer <gerg@snapgear.com>
+ * Copyright © 2002-2003 SnapGear Inc
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ */
 
 #ifndef __MTD_DOC2000_H__
 #define __MTD_DOC2000_H__
 
 #include <linux/mtd/mtd.h>
+#include <linux/mutex.h>
 
 #define DoC_Sig1 0
 #define DoC_Sig2 1
@@ -44,7 +63,7 @@
 #define DoC_Mplus_AccessStatus		0x1008
 #define DoC_Mplus_DeviceSelect		0x1008
 #define DoC_Mplus_Configuration		0x100a
-#define DoC_Mplus_OutputControl		0x1002
+#define DoC_Mplus_OutputControl		0x100c
 #define DoC_Mplus_FlashControl		0x1020
 #define DoC_Mplus_FlashSelect 		0x1022
 #define DoC_Mplus_FlashCmd		0x1024
@@ -67,19 +86,20 @@
 #define DoC_Mplus_CtrlConfirm		0x1076
 #define DoC_Mplus_Power			0x1fff
 
-/* How to access the device? 
- * On ARM, it'll be mmap'd directly with 32-bit wide accesses. 
+/* How to access the device?
+ * On ARM, it'll be mmap'd directly with 32-bit wide accesses.
  * On PPC, it's mmap'd and 16-bit wide.
- * Others use readb/writeb 
+ * Others use readb/writeb
  */
 #if defined(__arm__) && !defined(CONFIG_MACH_ESS710) && !defined(CONFIG_MACH_SE5100)
-#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u32 *)(((unsigned long)adr)+((reg)<<2))))
-#define WriteDOC_(d, adr, reg)  do{ *(__u32 *)(((unsigned long)adr)+((reg)<<2)) = (__u32)d; wmb();} while(0)
+#define ReadDOC_(adr, reg)      ((unsigned char)(*(volatile __u32 *)(((unsigned long)adr)+((reg)<<2))))
+#define WriteDOC_(d, adr, reg)  do{ *(volatile __u32 *)(((unsigned long)adr)+((reg)<<2)) = (__u32)d; wmb();} while(0)
 #define DOC_IOREMAP_LEN 0x8000
 #elif defined(__ppc__)
-#define ReadDOC_(adr, reg)      ((unsigned char)(*(__u16 *)(((unsigned long)adr)+((reg)<<1))))
-#define WriteDOC_(d, adr, reg)  do{ *(__u16 *)(((unsigned long)adr)+((reg)<<1)) = (__u16)d; wmb();} while(0)
+#define ReadDOC_(adr, reg)      ((unsigned char)(*(volatile __u16 *)(((unsigned long)adr)+((reg)<<1))))
+#define WriteDOC_(d, adr, reg)  do{ *(volatile __u16 *)(((unsigned long)adr)+((reg)<<1)) = (__u16)d; wmb();} while(0)
 #define DOC_IOREMAP_LEN 0x4000
+
 #elif defined(CONFIG_SH_SECUREEDGE5410)
 
 static inline unsigned char _ReadDOC_(unsigned long adr, int reg)
@@ -99,8 +119,8 @@ static inline void _WriteDOC_(unsigned char d, unsigned long adr, int reg)
 
 #define DOC_IOREMAP_LEN 0x2000
 #else
-#define ReadDOC_(adr, reg)      readb(((unsigned long)adr) + (reg))
-#define WriteDOC_(d, adr, reg)  writeb(d, ((unsigned long)adr) + (reg))
+#define ReadDOC_(adr, reg)      readb((void __iomem *)(adr) + (reg))
+#define WriteDOC_(d, adr, reg)  writeb(d, (void __iomem *)(adr) + (reg))
 #define DOC_IOREMAP_LEN 0x2000
 
 #endif
@@ -124,6 +144,7 @@ static inline void _WriteDOC_(unsigned char d, unsigned long adr, int reg)
 #define DOC_MODE_MDWREN 	0x04
 
 #define DOC_ChipID_Doc2k 	0x20
+#define DOC_ChipID_Doc2kTSOP 	0x21	/* internal number for MTD */
 #define DOC_ChipID_DocMil 	0x30
 #define DOC_ChipID_DocMilPlus32	0x40
 #define DOC_ChipID_DocMilPlus16	0x41
@@ -165,10 +186,10 @@ struct Nand {
 #define MAX_FLOORS 4
 #define MAX_CHIPS 4
 
-#define MAX_FLOORS_MIL 4
+#define MAX_FLOORS_MIL 1
 #define MAX_CHIPS_MIL 1
 
-#define MAX_FLOORS_MPLUS 1
+#define MAX_FLOORS_MPLUS 2
 #define MAX_CHIPS_MPLUS 1
 
 #define ADDR_COLUMN 1
@@ -177,11 +198,11 @@ struct Nand {
 
 struct DiskOnChip {
 	unsigned long physadr;
-	unsigned long virtadr;
+	void __iomem *virtadr;
 	unsigned long totlen;
-	char ChipID; /* Type of DiskOnChip */
+	unsigned char ChipID; /* Type of DiskOnChip */
 	int ioreg;
-	
+
 	unsigned long mfr; /* Flash IDs - only one type of flash per device */
 	unsigned long id;
 	int chipshift;
@@ -189,14 +210,14 @@ struct DiskOnChip {
 	char pageadrlen;
 	char interleave; /* Internal interleaving - Millennium Plus style */
 	unsigned long erasesize;
-	
+
 	int curfloor;
 	int curchip;
-	
+
 	int numchips;
 	struct Nand *chips;
 	struct mtd_info *nextdoc;
-	struct semaphore lock;
+	struct mutex lock;
 };
 
 int doc_decode_ecc(unsigned char sector[512], unsigned char ecc1[6]);

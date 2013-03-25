@@ -1,166 +1,251 @@
 /*
- * arch/microblaze/kernel/setup.c -- Arch-dependent initialization functions
+ * Copyright (C) 2007-2009 Michal Simek <monstr@monstr.eu>
+ * Copyright (C) 2007-2009 PetaLogix
+ * Copyright (C) 2006 Atmark Techno, Inc.
  *
-
- *  Copyright (C) 2004	     Brett Boren <borenb@eng.uah.edu>
- *  Copyright (C) 2003	     John Williams <jwilliams@itee.uq.edu.au>
- *  Copyright (C) 2001,2002  NEC Corporation
- *  Copyright (C) 2001,2002  Miles Bader <miles@gnu.org>
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file COPYING in the main directory of this
- * archive for more details.
- *
- * Written by Miles Bader <miles@gnu.org>
- * Microblaze port by John Williams <jwilliams@itee.uq.edu.au>
- * Microblaze command line param handling by Brett Boren <borenb@eng.uah.edu>
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License. See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
 
-#include <linux/sched.h>
-#include <linux/mm.h>
-#include <linux/bootmem.h>
-#include <linux/irq.h>
-#include <linux/reboot.h>
-#include <linux/personality.h>
+#include <linux/init.h>
+#include <linux/string.h>
+#include <linux/seq_file.h>
+#include <linux/cpu.h>
+#include <linux/initrd.h>
+#include <linux/console.h>
+#include <linux/debugfs.h>
 
-#include <asm/irq.h>
-#include <asm/exceptions.h>
+#include <asm/setup.h>
+#include <asm/sections.h>
+#include <asm/page.h>
+#include <linux/io.h>
+#include <linux/bug.h>
+#include <linux/param.h>
+#include <linux/pci.h>
+#include <linux/cache.h>
+#include <linux/of_platform.h>
+#include <linux/dma-mapping.h>
+#include <asm/cacheflush.h>
+#include <asm/entry.h>
+#include <asm/cpuinfo.h>
 
-#include "mach.h"
-#include "asm/setup.h"
+#include <asm/prom.h>
+#include <asm/pgtable.h>
 
-static struct meminfo meminfo __initdata= { 0, };
+DEFINE_PER_CPU(unsigned int, KSP);	/* Saved kernel stack pointer */
+DEFINE_PER_CPU(unsigned int, KM);	/* Kernel/user mode */
+DEFINE_PER_CPU(unsigned int, ENTRY_SP);	/* Saved SP on kernel entry */
+DEFINE_PER_CPU(unsigned int, R11_SAVE);	/* Temp variable for entry */
+DEFINE_PER_CPU(unsigned int, CURRENT_SAVE);	/* Saved current pointer */
 
-extern void bootmem_init(struct meminfo *);
-extern void paging_init(struct meminfo *);
-extern unsigned long _ramstart;
+unsigned int boot_cpuid;
+char cmd_line[COMMAND_LINE_SIZE];
 
-#ifndef CONFIG_REGISTER_TASK_PTR
-struct task_struct *current;
-#endif
-
-/* These symbols are all defined in the linker map to delineate various
-   statically allocated regions of memory.  */
-
-// extern char _intv_start, _intv_end;
-/* `kram' is only used if the kernel uses part of normal user RAM.  */
-extern char _kram_start __attribute__ ((__weak__));
-extern char _kram_end __attribute__ ((__weak__));
-
-/* erase following when we port to 2.6, include <asm/sections.h> instead */
-extern char _text[], _stext[], _etext[];
-extern char _data[], _sdata[], _edata[];
-
-char saved_command_line[512];
-#ifdef CONFIG_MBVANILLA_CMDLINE
-/* This pointer gets set with the address of a buffer 
-   allocated (or specified) by the bootloader 
-*/
-/* 
-   BAB 1/8/2004 this initialization is needed to keep bootloader_buf_addr
-   from being placed in bss and getting cleared in mach_early_setup 
-*/
-void *bootloader_buf_addr = 0xFFFFFFFF;
-#else
-char command_line[512];
-#endif
-
-void __init setup_arch (char **cmdline)
+void __init setup_arch(char **cmdline_p)
 {
-#ifdef CONFIG_MBVANILLA_CMDLINE
-	/* 
-	  If a cmdline has come from the bootlaoder, then this variable
-	  will have been initialised with the addr of the cmdline buffer.
-	  Just point the kernel there. 
-	*/
-	*cmdline = bootloader_buf_addr;
+	*cmdline_p = cmd_line;
 
-	/* Keep a copy of command line */
-	memcpy (saved_command_line, *cmdline, sizeof saved_command_line);
-#else
-	*cmdline = command_line;
+	console_verbose();
 
-	/* Keep a copy of command line */
-	memcpy (saved_command_line, command_line, sizeof saved_command_line);
-#endif
-	saved_command_line[sizeof saved_command_line - 1] = '\0';
+	unflatten_device_tree();
 
-	console_verbose ();
+	setup_cpuinfo();
 
-	init_mm.start_code	= (unsigned long) &_stext;
-	init_mm.end_code	= (unsigned long) &_etext;
-	init_mm.end_data	= (unsigned long) _ramstart;
-	init_mm.brk		= (unsigned long) _ramstart;
-#if 0	
-	init_mm.end_data = (unsigned long) &_edata;
-	init_mm.brk = (unsigned long) &_kram_end;
+	microblaze_cache_init();
+
+	setup_memory();
+
+#ifdef CONFIG_EARLY_PRINTK
+	/* remap early console to virtual address */
+	remap_early_printk();
 #endif
 
-	/* Provide default meminfo configuration */
-	/* Any platform using the autoconfig architecture will define
-	   CONFIG_XILINX_ERAM_START... */
-#ifdef CONFIG_XILINX_ERAM_START
-	if(meminfo.nr_banks == 0)
-	{
-		meminfo.nr_banks 	= 1;
-		meminfo.bank[0].start 	= CONFIG_XILINX_ERAM_START;
-		meminfo.bank[0].size	= CONFIG_XILINX_ERAM_SIZE;
-	}
-#else
-	if(meminfo.nr_banks == 0)
-	{
-		meminfo.nr_banks 	= 1;
-		meminfo.bank[0].start 	= PAGE_OFFSET;
-		meminfo.bank[0].size	= ERAM_SIZE;
-	}
+	xilinx_pci_init();
+
+#if defined(CONFIG_SELFMOD_INTC) || defined(CONFIG_SELFMOD_TIMER)
+	printk(KERN_NOTICE "Self modified code enable\n");
 #endif
 
-	/* ... and tell the kernel about it.  */
-	bootmem_init(&meminfo);
-	paging_init (&meminfo);
-
-	/* do machine-specific setups.  */
-	mach_setup (cmdline);
-
-#ifdef CONFIG_PCI
-    /* do PCI setup */
-    microblaze_pci_find_bridges();
+#ifdef CONFIG_VT
+#if defined(CONFIG_XILINX_CONSOLE)
+	conswitchp = &xil_con;
+#elif defined(CONFIG_DUMMY_CONSOLE)
+	conswitchp = &dummy_con;
 #endif
-
+#endif
 }
 
-void __init trap_init (void)
+#ifdef CONFIG_MTD_UCLINUX
+/* Handle both romfs and cramfs types, without generating unnecessary
+ code (ie no point checking for CRAMFS if it's not even enabled) */
+inline unsigned get_romfs_len(unsigned *addr)
 {
-	initialize_exception_handlers();
-	__enable_hw_exceptions();
+#ifdef CONFIG_ROMFS_FS
+	if (memcmp(&addr[0], "-rom1fs-", 8) == 0) /* romfs */
+		return be32_to_cpu(addr[2]);
+#endif
+
+#ifdef CONFIG_CRAMFS
+	if (addr[0] == le32_to_cpu(0x28cd3d45)) /* cramfs */
+		return le32_to_cpu(addr[1]);
+#endif
+	return 0;
 }
+#endif	/* CONFIG_MTD_UCLINUX_EBSS */
 
-
-static void irq_nop (unsigned irq) { }
-static unsigned irq_zero (unsigned irq) { return 0; }
+unsigned long kernel_tlb;
 
-static void nmi_end (unsigned irq)
+void __init machine_early_init(const char *cmdline, unsigned int ram,
+		unsigned int fdt, unsigned int msr, unsigned int tlb0,
+		unsigned int tlb1)
 {
-	if (irq != IRQ_NMI (0)) {
-		printk (KERN_CRIT "NMI %d is unrecoverable; restarting...",
-			irq - IRQ_NMI (0));
-		machine_restart (0);
+	unsigned long *src, *dst;
+	unsigned int offset = 0;
+
+	/* If CONFIG_MTD_UCLINUX is defined, assume ROMFS is at the
+	 * end of kernel. There are two position which we want to check.
+	 * The first is __init_end and the second __bss_start.
+	 */
+#ifdef CONFIG_MTD_UCLINUX
+	int romfs_size;
+	unsigned int romfs_base;
+	char *old_klimit = klimit;
+
+	romfs_base = (ram ? ram : (unsigned int)&__init_end);
+	romfs_size = PAGE_ALIGN(get_romfs_len((unsigned *)romfs_base));
+	if (!romfs_size) {
+		romfs_base = (unsigned int)&__bss_start;
+		romfs_size = PAGE_ALIGN(get_romfs_len((unsigned *)romfs_base));
 	}
+
+	/* Move ROMFS out of BSS before clearing it */
+	if (romfs_size > 0) {
+		memmove(&_ebss, (int *)romfs_base, romfs_size);
+		klimit += romfs_size;
+	}
+#endif
+
+/* clearing bss section */
+	memset(__bss_start, 0, __bss_stop-__bss_start);
+	memset(_ssbss, 0, _esbss-_ssbss);
+
+	/* Copy command line passed from bootloader */
+#ifndef CONFIG_CMDLINE_BOOL
+	if (cmdline && cmdline[0] != '\0')
+		strlcpy(cmd_line, cmdline, COMMAND_LINE_SIZE);
+#endif
+
+	lockdep_init();
+
+/* initialize device tree for usage in early_printk */
+	early_init_devtree((void *)_fdt_start);
+
+#ifdef CONFIG_EARLY_PRINTK
+	setup_early_printk(NULL);
+#endif
+
+	/* setup kernel_tlb after BSS cleaning
+	 * Maybe worth to move to asm code */
+	kernel_tlb = tlb0 + tlb1;
+	/* printk("TLB1 0x%08x, TLB0 0x%08x, tlb 0x%x\n", tlb0,
+							tlb1, kernel_tlb); */
+
+	printk("Ramdisk addr 0x%08x, ", ram);
+	if (fdt)
+		printk("FDT at 0x%08x\n", fdt);
+	else
+		printk("Compiled-in FDT at 0x%08x\n",
+					(unsigned int)_fdt_start);
+
+#ifdef CONFIG_MTD_UCLINUX
+	printk("Found romfs @ 0x%08x (0x%08x)\n",
+			romfs_base, romfs_size);
+	printk("#### klimit %p ####\n", old_klimit);
+	BUG_ON(romfs_size < 0); /* What else can we do? */
+
+	printk("Moved 0x%08x bytes from 0x%08x to 0x%08x\n",
+			romfs_size, romfs_base, (unsigned)&_ebss);
+
+	printk("New klimit: 0x%08x\n", (unsigned)klimit);
+#endif
+
+#if CONFIG_XILINX_MICROBLAZE0_USE_MSR_INSTR
+	if (msr)
+		printk("!!!Your kernel has setup MSR instruction but "
+				"CPU don't have it %x\n", msr);
+#else
+	if (!msr)
+		printk("!!!Your kernel not setup MSR instruction but "
+				"CPU have it %x\n", msr);
+#endif
+
+	/* Do not copy reset vectors. offset = 0x2 means skip the first
+	 * two instructions. dst is pointer to MB vectors which are placed
+	 * in block ram. If you want to copy reset vector setup offset to 0x0 */
+#if !CONFIG_MANUAL_RESET_VECTOR
+	offset = 0x2;
+#endif
+	dst = (unsigned long *) (offset * sizeof(u32));
+	for (src = __ivt_start + offset; src < __ivt_end; src++, dst++)
+		*dst = *src;
+
+	/* Initialize global data */
+	per_cpu(KM, 0) = 0x1;	/* We start in kernel mode */
+	per_cpu(CURRENT_SAVE, 0) = (unsigned long)current;
 }
 
-static struct hw_interrupt_type nmi_irq_type = {
-	"NMI",
-	irq_zero,		/* startup */
-	irq_nop,		/* shutdown */
-	irq_nop,		/* enable */
-	irq_nop,		/* disable */
-	irq_nop,		/* ack */
-	nmi_end,		/* end */
+#ifdef CONFIG_DEBUG_FS
+struct dentry *of_debugfs_root;
+
+static int microblaze_debugfs_init(void)
+{
+	of_debugfs_root = debugfs_create_dir("microblaze", NULL);
+
+	return of_debugfs_root == NULL;
+}
+arch_initcall(microblaze_debugfs_init);
+
+# ifdef CONFIG_MMU
+static int __init debugfs_tlb(void)
+{
+	struct dentry *d;
+
+	if (!of_debugfs_root)
+		return -ENODEV;
+
+	d = debugfs_create_u32("tlb_skip", S_IRUGO, of_debugfs_root, &tlb_skip);
+	if (!d)
+		return -ENOMEM;
+}
+device_initcall(debugfs_tlb);
+# endif
+#endif
+
+static int dflt_bus_notify(struct notifier_block *nb,
+				unsigned long action, void *data)
+{
+	struct device *dev = data;
+
+	/* We are only intereted in device addition */
+	if (action != BUS_NOTIFY_ADD_DEVICE)
+		return 0;
+
+	set_dma_ops(dev, &dma_direct_ops);
+
+	return NOTIFY_DONE;
+}
+
+static struct notifier_block dflt_plat_bus_notifier = {
+	.notifier_call = dflt_bus_notify,
+	.priority = INT_MAX,
 };
 
-void __init init_IRQ (void)
+static int __init setup_bus_notifier(void)
 {
-	init_irq_handlers (0, NUM_MACH_IRQS, 0);
-	//init_irq_handlers (IRQ_NMI (0), NUM_NMIS, &nmi_irq_type);
-	mach_init_irqs ();
+	bus_register_notifier(&platform_bus_type, &dflt_plat_bus_notifier);
+
+	return 0;
 }
+
+arch_initcall(setup_bus_notifier);

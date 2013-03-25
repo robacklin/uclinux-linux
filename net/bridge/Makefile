@@ -1,23 +1,17 @@
 #
 # Makefile for the IEEE 802.1d ethernet bridging layer.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-export-objs := br.o
+obj-$(CONFIG_BRIDGE) += bridge.o
 
-O_TARGET	:= bridge.o
-obj-y		:= br.o br_device.o br_fdb.o br_forward.o br_if.o br_input.o \
+bridge-y	:= br.o br_device.o br_fdb.o br_forward.o br_if.o br_input.o \
 			br_ioctl.o br_notify.o br_stp.o br_stp_bpdu.o \
-			br_stp_if.o br_stp_timer.o br_sysctl.o
+			br_stp_if.o br_stp_timer.o br_netlink.o
 
-ifeq ($(CONFIG_NETFILTER),y)
-obj-y		+= br_netfilter.o
-endif
+bridge-$(CONFIG_SYSFS) += br_sysfs_if.o br_sysfs_br.o
 
-obj-m		:= $(O_TARGET)
+bridge-$(CONFIG_BRIDGE_NETFILTER) += br_netfilter.o
 
-include $(TOPDIR)/Rules.make
+bridge-$(CONFIG_BRIDGE_IGMP_SNOOPING) += br_multicast.o
+
+obj-$(CONFIG_BRIDGE_NF_EBTABLES) += netfilter/

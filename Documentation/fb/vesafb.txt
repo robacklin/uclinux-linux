@@ -95,7 +95,7 @@ There is no way to change the vesafb video mode and/or timings after
 booting linux.  If you are not happy with the 60 Hz refresh rate, you
 have these options:
 
- * configure and load the DOS-Tools for your the graphics board (if
+ * configure and load the DOS-Tools for the graphics board (if
    available) and boot linux with loadlin.
  * use a native driver (matroxfb/atyfb) instead if vesafb.  If none
    is available, write a new one!
@@ -112,9 +112,9 @@ to pan the display.  It is turned off by default because it
 seems not to work with some BIOS versions, but there are options
 to turn it on.
 
-You can pass options to vesafb using "video=vesa:option" on
+You can pass options to vesafb using "video=vesafb:option" on
 the kernel command line.  Multiple options should be separated
-by comma, like this: "video=vesa:ypan,invers"
+by comma, like this: "video=vesafb:ypan,invers"
 
 Accepted options:
 
@@ -139,17 +139,36 @@ ywrap	Same as ypan, but assumes your gfx board can wrap-around
 redraw	scroll by redrawing the affected part of the screen, this
 	is the safe (and slow) default.
 
+
 vgapal	Use the standard vga registers for palette changes.
 	This is the default.
 pmipal	Use the protected mode interface for palette changes.
 
-mtrr	setup memory type range registers for the vesafb framebuffer.
+mtrr:n	setup memory type range registers for the vesafb framebuffer
+	where n:
+	      0 - disabled (equivalent to nomtrr) (default)
+	      1 - uncachable
+	      2 - write-back
+	      3 - write-combining
+	      4 - write-through
 
-vram:n  remap 'n' MiB of video RAM. If 0 or not specified, remap memory
-        according to video mode. (2.5.66 patch/idea by Antonino Daplas
+	If you see the following in dmesg, choose the type that matches the
+	old one. In this example, use "mtrr:2".
+...
+mtrr: type mismatch for e0000000,8000000 old: write-back new: write-combining
+...
+
+nomtrr  disable mtrr
+
+vremap:n
+        remap 'n' MiB of video RAM. If 0 or not specified, remap memory
+	according to video mode. (2.5.66 patch/idea by Antonino Daplas
 	reversed to give override possibility (allocate more fb memory
 	than the kernel would) to 2.4 by tmb@iki.fi)
-  
+
+vtotal:n
+        if the video BIOS of your card incorrectly determines the total
+        amount of video RAM, use this option to override the BIOS (in MiB).
 
 Have fun!
 

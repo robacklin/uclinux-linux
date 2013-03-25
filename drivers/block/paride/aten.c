@@ -18,6 +18,7 @@
 #define ATEN_VERSION      "1.01"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/wait.h>
@@ -130,45 +131,32 @@ static void aten_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void aten_init_proto( PIA *pi )
+static struct pi_protocol aten = {
+	.owner		= THIS_MODULE,
+	.name		= "aten",
+	.max_mode	= 2,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= aten_write_regr,
+	.read_regr	= aten_read_regr,
+	.write_block	= aten_write_block,
+	.read_block	= aten_read_block,
+	.connect	= aten_connect,
+	.disconnect	= aten_disconnect,
+	.log_adapter	= aten_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init aten_init(void)
+{
+	return paride_register(&aten);
 }
 
-static void aten_release_proto( PIA *pi )
-
-{       MOD_DEC_USE_COUNT;
+static void __exit aten_exit(void)
+{
+	paride_unregister( &aten );
 }
 
-struct pi_protocol aten = {"aten",0,2,2,1,1,
-                           aten_write_regr,
-                           aten_read_regr,
-                           aten_write_block,
-                           aten_read_block,
-                           aten_connect,
-                           aten_disconnect,
-                           0,
-                           0,
-                           0,
-                           aten_log_adapter,
-                           aten_init_proto,
-                           aten_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &aten ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &aten );
-}
-
-#endif
-
-/* end of aten.c */
 MODULE_LICENSE("GPL");
+module_init(aten_init)
+module_exit(aten_exit)

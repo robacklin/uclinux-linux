@@ -29,23 +29,30 @@
 
 int com20020_check(struct net_device *dev);
 int com20020_found(struct net_device *dev, int shared);
-void com20020_remove(struct net_device *dev);
+extern const struct net_device_ops com20020_netdev_ops;
 
 /* The number of low I/O ports used by the card. */
 #define ARCNET_TOTAL_SIZE 8
 
 /* various register addresses */
-#define _INTMASK  (ioaddr+0)	/* writable */
-#define _STATUS   (ioaddr+0)	/* readable */
-#define _COMMAND  (ioaddr+1)	/* standard arcnet commands */
-#define _DIAGSTAT (ioaddr+1)	/* diagnostic status register */
-#define _ADDR_HI  (ioaddr+2)	/* control registers for IO-mapped memory */
-#define _ADDR_LO  (ioaddr+3)
-#define _MEMDATA  (ioaddr+4)	/* data port for IO-mapped memory */
-#define _SUBADR   (ioaddr+5)	/* the extended port _XREG refers to */
-#define _CONFIG   (ioaddr+6)	/* configuration register */
-#define _XREG     (ioaddr+7)	/* extra registers (indexed by _CONFIG 
-					or _SUBADR) */
+#ifdef CONFIG_SA1100_CT6001
+#define BUS_ALIGN  2  /* 8 bit device on a 16 bit bus - needs padding */
+#else
+#define BUS_ALIGN  1
+#endif
+
+
+#define _INTMASK  (ioaddr+BUS_ALIGN*0)	/* writable */
+#define _STATUS   (ioaddr+BUS_ALIGN*0)	/* readable */
+#define _COMMAND  (ioaddr+BUS_ALIGN*1)	/* standard arcnet commands */
+#define _DIAGSTAT (ioaddr+BUS_ALIGN*1)	/* diagnostic status register */
+#define _ADDR_HI  (ioaddr+BUS_ALIGN*2)	/* control registers for IO-mapped memory */
+#define _ADDR_LO  (ioaddr+BUS_ALIGN*3)
+#define _MEMDATA  (ioaddr+BUS_ALIGN*4)	/* data port for IO-mapped memory */
+#define _SUBADR   (ioaddr+BUS_ALIGN*5)	/* the extended port _XREG refers to */
+#define _CONFIG   (ioaddr+BUS_ALIGN*6)	/* configuration register */
+#define _XREG     (ioaddr+BUS_ALIGN*7)	/* extra registers (indexed by _CONFIG
+  					or _SUBADR) */
 
 /* in the ADDR_HI register */
 #define RDDATAflag	0x80	/* next access is a read (not a write) */
@@ -59,8 +66,8 @@ void com20020_remove(struct net_device *dev);
 
 /* in SETUP register */
 #define PROMISCset	0x10	/* enable RCV_ALL */
-#define P1MODE          0x80    /* enable P1-MODE for Backplane */
-#define SLOWARB         0x01    /* enable Slow Arbitration for >=5Mbps */
+#define P1MODE		0x80    /* enable P1-MODE for Backplane */
+#define SLOWARB		0x01    /* enable Slow Arbitration for >=5Mbps */
 
 /* COM2002x */
 #define SUB_TENTATIVE	0	/* tentative node ID */
@@ -100,6 +107,7 @@ void com20020_remove(struct net_device *dev);
                   }
 
 #define ASTATUS()	inb(_STATUS)
+#define ADIAGSTATUS()	inb(_DIAGSTAT)
 #define ACOMMAND(cmd)	outb((cmd),_COMMAND)
 #define AINTMASK(msk)	outb((msk),_INTMASK)
 

@@ -30,6 +30,7 @@ struct ncp_request_header {
 } __attribute__((packed));
 
 #define NCP_REPLY                (0x3333)
+#define NCP_WATCHDOG		 (0x3E3E)
 #define NCP_POSITIVE_ACK         (0x9999)
 
 struct ncp_reply_header {
@@ -56,9 +57,9 @@ struct ncp_volume_info {
 	char volume_name[NCP_VOLNAME_LEN + 1];
 };
 
-#define AR_READ      (ntohs(0x0100))
-#define AR_WRITE     (ntohs(0x0200))
-#define AR_EXCLUSIVE (ntohs(0x2000))
+#define AR_READ      (cpu_to_le16(1))
+#define AR_WRITE     (cpu_to_le16(2))
+#define AR_EXCLUSIVE (cpu_to_le16(0x20))
 
 #define NCP_FILE_ID_LEN 6
 
@@ -70,20 +71,32 @@ struct ncp_volume_info {
 #define NW_NS_OS2     4
 
 /*  Defines for ReturnInformationMask */
-#define RIM_NAME	      (ntohl(0x01000000L))
-#define RIM_SPACE_ALLOCATED   (ntohl(0x02000000L))
-#define RIM_ATTRIBUTES	      (ntohl(0x04000000L))
-#define RIM_DATA_SIZE	      (ntohl(0x08000000L))
-#define RIM_TOTAL_SIZE	      (ntohl(0x10000000L))
-#define RIM_EXT_ATTR_INFO     (ntohl(0x20000000L))
-#define RIM_ARCHIVE	      (ntohl(0x40000000L))
-#define RIM_MODIFY	      (ntohl(0x80000000L))
-#define RIM_CREATION	      (ntohl(0x00010000L))
-#define RIM_OWNING_NAMESPACE  (ntohl(0x00020000L))
-#define RIM_DIRECTORY	      (ntohl(0x00040000L))
-#define RIM_RIGHTS	      (ntohl(0x00080000L))
-#define RIM_ALL 	      (ntohl(0xFF0F0000L))
-#define RIM_COMPRESSED_INFO   (ntohl(0x00000080L))
+#define RIM_NAME	      (cpu_to_le32(1))
+#define RIM_SPACE_ALLOCATED   (cpu_to_le32(2))
+#define RIM_ATTRIBUTES	      (cpu_to_le32(4))
+#define RIM_DATA_SIZE	      (cpu_to_le32(8))
+#define RIM_TOTAL_SIZE	      (cpu_to_le32(0x10))
+#define RIM_EXT_ATTR_INFO     (cpu_to_le32(0x20))
+#define RIM_ARCHIVE	      (cpu_to_le32(0x40))
+#define RIM_MODIFY	      (cpu_to_le32(0x80))
+#define RIM_CREATION	      (cpu_to_le32(0x100))
+#define RIM_OWNING_NAMESPACE  (cpu_to_le32(0x200))
+#define RIM_DIRECTORY	      (cpu_to_le32(0x400))
+#define RIM_RIGHTS	      (cpu_to_le32(0x800))
+#define RIM_ALL 	      (cpu_to_le32(0xFFF))
+#define RIM_COMPRESSED_INFO   (cpu_to_le32(0x80000000))
+
+/* Defines for NSInfoBitMask */
+#define NSIBM_NFS_NAME		0x0001
+#define NSIBM_NFS_MODE		0x0002
+#define NSIBM_NFS_GID		0x0004
+#define NSIBM_NFS_NLINKS	0x0008
+#define NSIBM_NFS_RDEV		0x0010
+#define NSIBM_NFS_LINK		0x0020
+#define NSIBM_NFS_CREATED	0x0040
+#define NSIBM_NFS_UID		0x0080
+#define NSIBM_NFS_ACSFLAG	0x0100
+#define NSIBM_NFS_MYFLAG	0x0200
 
 /* open/create modes */
 #define OC_MODE_OPEN	  0x01
@@ -109,26 +122,31 @@ struct ncp_volume_info {
 #define AR_OPEN_COMPRESSED 0x0100
 #endif
 
+struct nw_nfs_info {
+	__u32 mode;
+	__u32 rdev;
+};
+
 struct nw_info_struct {
 	__u32 spaceAlloc;
-	__u32 attributes;
+	__le32 attributes;
 	__u16 flags;
-	__u32 dataStreamSize;
-	__u32 totalStreamSize;
+	__le32 dataStreamSize;
+	__le32 totalStreamSize;
 	__u16 numberOfStreams;
-	__u16 creationTime;
-	__u16 creationDate;
+	__le16 creationTime;
+	__le16 creationDate;
 	__u32 creatorID;
-	__u16 modifyTime;
-	__u16 modifyDate;
+	__le16 modifyTime;
+	__le16 modifyDate;
 	__u32 modifierID;
-	__u16 lastAccessDate;
+	__le16 lastAccessDate;
 	__u16 archiveTime;
 	__u16 archiveDate;
 	__u32 archiverID;
 	__u16 inheritedRightsMask;
-	__u32 dirEntNum;
-	__u32 DosDirNum;
+	__le32 dirEntNum;
+	__le32 DosDirNum;
 	__u32 volNumber;
 	__u32 EADataSize;
 	__u32 EAKeyCount;
@@ -136,35 +154,39 @@ struct nw_info_struct {
 	__u32 NSCreator;
 	__u8 nameLen;
 	__u8 entryName[256];
+	/* libncp may depend on there being nothing after entryName */
+#ifdef __KERNEL__
+	struct nw_nfs_info nfs;
+#endif
 } __attribute__((packed));
 
 /* modify mask - use with MODIFY_DOS_INFO structure */
-#define DM_ATTRIBUTES		  (ntohl(0x02000000L))
-#define DM_CREATE_DATE		  (ntohl(0x04000000L))
-#define DM_CREATE_TIME		  (ntohl(0x08000000L))
-#define DM_CREATOR_ID		  (ntohl(0x10000000L))
-#define DM_ARCHIVE_DATE 	  (ntohl(0x20000000L))
-#define DM_ARCHIVE_TIME 	  (ntohl(0x40000000L))
-#define DM_ARCHIVER_ID		  (ntohl(0x80000000L))
-#define DM_MODIFY_DATE		  (ntohl(0x00010000L))
-#define DM_MODIFY_TIME		  (ntohl(0x00020000L))
-#define DM_MODIFIER_ID		  (ntohl(0x00040000L))
-#define DM_LAST_ACCESS_DATE	  (ntohl(0x00080000L))
-#define DM_INHERITED_RIGHTS_MASK  (ntohl(0x00100000L))
-#define DM_MAXIMUM_SPACE	  (ntohl(0x00200000L))
+#define DM_ATTRIBUTES		  (cpu_to_le32(0x02))
+#define DM_CREATE_DATE		  (cpu_to_le32(0x04))
+#define DM_CREATE_TIME		  (cpu_to_le32(0x08))
+#define DM_CREATOR_ID		  (cpu_to_le32(0x10))
+#define DM_ARCHIVE_DATE 	  (cpu_to_le32(0x20))
+#define DM_ARCHIVE_TIME 	  (cpu_to_le32(0x40))
+#define DM_ARCHIVER_ID		  (cpu_to_le32(0x80))
+#define DM_MODIFY_DATE		  (cpu_to_le32(0x0100))
+#define DM_MODIFY_TIME		  (cpu_to_le32(0x0200))
+#define DM_MODIFIER_ID		  (cpu_to_le32(0x0400))
+#define DM_LAST_ACCESS_DATE	  (cpu_to_le32(0x0800))
+#define DM_INHERITED_RIGHTS_MASK  (cpu_to_le32(0x1000))
+#define DM_MAXIMUM_SPACE	  (cpu_to_le32(0x2000))
 
 struct nw_modify_dos_info {
-	__u32 attributes;
-	__u16 creationDate;
-	__u16 creationTime;
+	__le32 attributes;
+	__le16 creationDate;
+	__le16 creationTime;
 	__u32 creatorID;
-	__u16 modifyDate;
-	__u16 modifyTime;
+	__le16 modifyDate;
+	__le16 modifyTime;
 	__u32 modifierID;
 	__u16 archiveDate;
 	__u16 archiveTime;
 	__u32 archiverID;
-	__u16 lastAccessDate;
+	__le16 lastAccessDate;
 	__u16 inheritanceGrantMask;
 	__u16 inheritanceRevokeMask;
 	__u32 maximumSpace;

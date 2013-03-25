@@ -21,7 +21,7 @@
    specially (see get_reg/put_reg below). */
 static const int h8300_register_offset[] = {
 	PT_REG(er1), PT_REG(er2), PT_REG(er3), PT_REG(er4),
-	PT_REG(er5), SW_REG(er6), PT_REG(er0), PT_REG(orig_er0),
+	PT_REG(er5), PT_REG(er6), PT_REG(er0), PT_REG(orig_er0),
 	PT_REG(ccr), PT_REG(pc)
 };
 
@@ -60,7 +60,7 @@ int h8300_put_reg(struct task_struct *task, int regno, unsigned long data)
 }
 
 /* disable singlestep */
-void h8300_disable_trace(struct task_struct *child)
+void user_disable_single_step(struct task_struct *child)
 {
 	if((long)child->thread.breakinfo.addr != -1L) {
 		*child->thread.breakinfo.addr = child->thread.breakinfo.inst;
@@ -98,7 +98,7 @@ struct optable {
 		.type       = jmp, \
 	}
 
-const static struct optable optable_0[] = {
+static const struct optable optable_0[] = {
 	OPTABLE(0x00,0xff, 1,none), /* 0x00 */
 	OPTABLE(0x01,0xff,-1,none), /* 0x01 */
 	OPTABLE(0x02,0xfe, 1,none), /* 0x02-0x03 */
@@ -131,31 +131,31 @@ const static struct optable optable_0[] = {
 	OPTABLE(0x80,0x80, 1,none), /* 0x80-0xff */
 };
 
-const static struct optable optable_1[] = {
+static const struct optable optable_1[] = {
 	OPTABLE(0x00,0xff,-3,none), /* 0x0100 */
 	OPTABLE(0x40,0xf0,-3,none), /* 0x0140-0x14f */
 	OPTABLE(0x80,0xf0, 1,none), /* 0x0180-0x018f */
 	OPTABLE(0xc0,0xc0, 2,none), /* 0x01c0-0x01ff */
 };
 
-const static struct optable optable_2[] = {
+static const struct optable optable_2[] = {
 	OPTABLE(0x00,0x20, 2,none), /* 0x6a0?/0x6a8?/0x6b0?/0x6b8? */
 	OPTABLE(0x20,0x20, 3,none), /* 0x6a2?/0x6aa?/0x6b2?/0x6ba? */
 };
 
-const static struct optable optable_3[] = {
+static const struct optable optable_3[] = {
 	OPTABLE(0x69,0xfb, 2,none), /* 0x010069/0x01006d/014069/0x01406d */
 	OPTABLE(0x6b,0xff,-4,none), /* 0x01006b/0x01406b */
 	OPTABLE(0x6f,0xff, 3,none), /* 0x01006f/0x01406f */
 	OPTABLE(0x78,0xff, 5,none), /* 0x010078/0x014078 */
 };
 
-const static struct optable optable_4[] = {
+static const struct optable optable_4[] = {
 	OPTABLE(0x00,0x78, 3,none), /* 0x0100690?/0x01006d0?/0140690/0x01406d0?/0x0100698?/0x01006d8?/0140698?/0x01406d8? */
 	OPTABLE(0x20,0x78, 4,none), /* 0x0100692?/0x01006d2?/0140692/0x01406d2?/0x010069a?/0x01006da?/014069a?/0x01406da? */
 };
 
-const static struct optables_list {
+static const struct optables_list {
 	const struct optable *ptr;
 	int size;
 } optables[] = {
@@ -235,7 +235,7 @@ static unsigned short *getnextpc(struct task_struct *child, unsigned short *pc)
 					   |   exp  | exception stack frames
 					   +--------+
 					   | ret pc | userspace return address
-					*/ 
+					*/
 					return (unsigned short *)(*(sp+2) & 0x00ffffff);
 				case reg:
 					regno = (*pc >> 4) & 0x07;
@@ -245,12 +245,14 @@ static unsigned short *getnextpc(struct task_struct *child, unsigned short *pc)
 						addr = h8300_get_reg(child, regno-1+PT_ER1);
 					return (unsigned short *)addr;
 				case relb:
-					if ((inst = 0x55) || isbranch(child,inst & 0x0f))
-						(unsigned char *)pc += (signed char)(*fetch_p);
+					if (inst == 0x55 || isbranch(child,inst & 0x0f))
+						pc = (unsigned short *)((unsigned long)pc +
+								       ((signed char)(*fetch_p)));
 					return pc+1; /* skip myself */
 				case relw:
-					if ((inst = 0x5c) || isbranch(child,(*fetch_p & 0xf0) >> 4))
-						(unsigned char *)pc += (signed short)(*(pc+1));
+					if (inst == 0x5c || isbranch(child,(*fetch_p & 0xf0) >> 4))
+						pc = (unsigned short *)((unsigned long)pc +
+								       ((signed short)(*(pc+1))));
 					return pc+2; /* skip myself */
 				}
 			}
@@ -262,7 +264,7 @@ static unsigned short *getnextpc(struct task_struct *child, unsigned short *pc)
 
 /* Set breakpoint(s) to simulate a single step from the current PC.  */
 
-void h8300_enable_trace(struct task_struct *child)
+void user_enable_single_step(struct task_struct *child)
 {
 	unsigned short *nextpc;
 	nextpc = getnextpc(child,(unsigned short *)h8300_get_reg(child, PT_PC));
@@ -274,7 +276,7 @@ void h8300_enable_trace(struct task_struct *child)
 asmlinkage void trace_trap(unsigned long bp)
 {
 	if ((unsigned long)current->thread.breakinfo.addr == bp) {
-		h8300_disable_trace(current);
+		user_disable_single_step(current);
 		force_sig(SIGTRAP,current);
 	} else
 	        force_sig(SIGILL,current);

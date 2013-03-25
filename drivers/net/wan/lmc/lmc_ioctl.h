@@ -61,7 +61,7 @@
 /*
  * IFTYPE defines
  */
-#define LMC_PPP         1               /* use sppp interface */
+#define LMC_PPP         1               /* use generic HDLC interface */
 #define LMC_NET         2               /* use direct net interface */
 #define LMC_RAW         3               /* use direct net interface */
 
@@ -173,7 +173,7 @@
 
 /*
  * Some of the MII16 bits are mirrored in the MII17 register as well,
- * but let's keep thing seperate for now, and get only the cable from
+ * but let's keep thing separate for now, and get only the cable from
  * the MII17.
  */
 #define LMC_MII17_SSI_CABLE_MASK	0x0038	/* mask to extract the cable type */
@@ -234,7 +234,7 @@ typedef struct lmc_st1f_control {
   int command;
   int address;
   int value;
-  char *data;
+  char __user *data;
 } lmc_t1f_control;
 
 enum lmc_xilinx_c {
@@ -246,7 +246,7 @@ enum lmc_xilinx_c {
 struct lmc_xilinx_control {
     enum lmc_xilinx_c command;
     int len;
-    char *data;
+    char __user *data;
 };
 
 /* ------------------ end T1 defs ------------------- */

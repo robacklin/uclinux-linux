@@ -36,11 +36,6 @@
 #ifndef SUN3_NCR5380_H
 #define SUN3_NCR5380_H
 
-#ifndef NULL
-#define NULL 0
-#endif
-
-
 #define SUN3SCSI_PUBLIC_RELEASE 1
 
 /*
@@ -52,18 +47,12 @@
 
 #define IOBASE_SUN3_VMESCSI 0xff200000
 
-static int sun3scsi_abort (Scsi_Cmnd *);
-static int sun3scsi_detect (Scsi_Host_Template *);
+static int sun3scsi_abort(struct scsi_cmnd *);
+static int sun3scsi_detect (struct scsi_host_template *);
 static const char *sun3scsi_info (struct Scsi_Host *);
-static int sun3scsi_reset(Scsi_Cmnd *, unsigned int);
-static int sun3scsi_queue_command (Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-static int sun3scsi_proc_info (char *buffer, char **start, off_t offset,
-			int length, int hostno, int inout);
-#ifdef MODULE
+static int sun3scsi_bus_reset(struct scsi_cmnd *);
+static int sun3scsi_queue_command(struct Scsi_Host *, struct scsi_cmnd *);
 static int sun3scsi_release (struct Scsi_Host *);
-#else
-#define sun3scsi_release NULL
-#endif
 
 #ifndef CMD_PER_LUN
 #define CMD_PER_LUN 2
@@ -93,22 +82,6 @@ static int sun3scsi_release (struct Scsi_Host *);
 #define SUN3_SCSI_NAME "Sun3 NCR5380 SCSI"
 #endif
 
-#define SUN3_NCR5380 {							\
-.name =			SUN3_SCSI_NAME,					\
-.detect =		sun3scsi_detect,				\
-.release =		sun3scsi_release,	/* Release */		\
-.info =			sun3scsi_info,					\
-.queuecommand =		sun3scsi_queue_command,				\
-.abort =		sun3scsi_abort,					\
-.reset =		sun3scsi_reset,					\
-.can_queue =		CAN_QUEUE,		/* can queue */		\
-.this_id =		7,			/* id */		\
-.sg_tablesize =		SG_TABLESIZE,		/* sg_tablesize */	\
-.cmd_per_lun =		CMD_PER_LUN,		/* cmd per lun */	\
-.unchecked_isa_dma =	0,			/* unchecked_isa_dma */	\
-.use_clustering =	DISABLE_CLUSTERING				\
-	}
-
 #ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
@@ -125,7 +98,7 @@ static int sun3scsi_release (struct Scsi_Host *);
 
 #define NCR5380_intr sun3scsi_intr
 #define NCR5380_queue_command sun3scsi_queue_command
-#define NCR5380_reset sun3scsi_reset
+#define NCR5380_bus_reset sun3scsi_bus_reset
 #define NCR5380_abort sun3scsi_abort
 #define NCR5380_proc_info sun3scsi_proc_info
 #define NCR5380_dma_xfer_len(i, cmd, phase) \
@@ -247,7 +220,7 @@ struct sun3_udc_regs {
  *
  */
 
-
+#include "NCR5380.h"
 
 #if NDEBUG & NDEBUG_ARBITRATION
 #define ARB_PRINTK(format, args...) \

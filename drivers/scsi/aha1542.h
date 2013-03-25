@@ -32,7 +32,6 @@
  */
 
 #include <linux/types.h>
-#include <linux/kdev_t.h>
 
 /* I/O Port interface 4.2 */
 /* READ */
@@ -92,10 +91,12 @@ struct chain {
 };
 
 /* These belong in scsi.h also */
-#define any2scsi(up, p)				\
-(up)[0] = (((unsigned long)(p)) >> 16)  ;	\
-(up)[1] = (((unsigned long)(p)) >> 8);		\
-(up)[2] = ((unsigned long)(p));
+static inline void any2scsi(u8 *p, u32 v)
+{
+	p[0] = v >> 16;
+	p[1] = v >> 8;
+	p[2] = v;
+}
 
 #define scsi2int(up) ( (((long)*(up)) << 16) + (((long)(up)[1]) << 8) + ((long)(up)[2]) )
 
@@ -130,43 +131,20 @@ struct ccb {			/* Command Control Block 5.3 */
 				/* REQUEST SENSE */
 };
 
-static int aha1542_detect(Scsi_Host_Template *);
-static int aha1542_command(Scsi_Cmnd *);
-static int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-static int aha1542_abort(Scsi_Cmnd * SCpnt);
+static int aha1542_detect(struct scsi_host_template *);
+static int aha1542_queuecommand(struct Scsi_Host *, struct scsi_cmnd *);
 static int aha1542_bus_reset(Scsi_Cmnd * SCpnt);
 static int aha1542_dev_reset(Scsi_Cmnd * SCpnt);
 static int aha1542_host_reset(Scsi_Cmnd * SCpnt);
+#if 0
 static int aha1542_old_abort(Scsi_Cmnd * SCpnt);
 static int aha1542_old_reset(Scsi_Cmnd *, unsigned int);
-static int aha1542_biosparam(Disk *, kdev_t, int*);
+#endif
+static int aha1542_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
 
 #define AHA1542_MAILBOXES 8
 #define AHA1542_SCATTER 16
 #define AHA1542_CMDLUN 1
-
-#ifndef NULL
-	#define NULL 0
-#endif
-
-#define AHA1542 {    proc_name:			"aha1542",		\
-		     name:			"Adaptec 1542", 	\
-		     detect:			aha1542_detect,		\
-		     command:			aha1542_command,	\
-		     queuecommand:		aha1542_queuecommand,	\
-                     abort:		        aha1542_old_abort,	\
-                     reset:			aha1542_old_reset,	\
-		     eh_abort_handler:		aha1542_abort,		\
-		     eh_device_reset_handler:	aha1542_dev_reset,	\
-		     eh_bus_reset_handler:	aha1542_bus_reset,	\
-		     eh_host_reset_handler:	aha1542_host_reset,	\
-		     bios_param:		aha1542_biosparam,      \
-		     can_queue:			AHA1542_MAILBOXES, 	\
-		     this_id:			7, 			\
-		     sg_tablesize:		AHA1542_SCATTER, 	\
-		     cmd_per_lun:		AHA1542_CMDLUN, 	\
-		     unchecked_isa_dma:		1, 			\
-		     use_clustering:		ENABLE_CLUSTERING,	\
-		     use_new_eh_code:		1}
 
 #endif

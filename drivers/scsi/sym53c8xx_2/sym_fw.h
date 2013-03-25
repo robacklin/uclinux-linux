@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifndef	SYM_FW_H
@@ -105,18 +92,11 @@ struct sym_fwa_ofs {
 };
 struct sym_fwb_ofs {
 	SYM_GEN_FW_B(u_short)
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-	SYM_GEN_B(u_short, data_io)
-#endif
 	SYM_GEN_B(u_short, start64)
 	SYM_GEN_B(u_short, pm_handle)
 };
 struct sym_fwz_ofs {
 	SYM_GEN_FW_Z(u_short)
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	SYM_GEN_Z(u_short, start_ram)
-	SYM_GEN_Z(u_short, start_ram64)
-#endif
 };
 
 /*
@@ -128,18 +108,11 @@ struct sym_fwa_ba {
 };
 struct sym_fwb_ba {
 	SYM_GEN_FW_B(u32)
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-	SYM_GEN_B(u32, data_io)
-#endif
 	SYM_GEN_B(u32, start64);
 	SYM_GEN_B(u32, pm_handle);
 };
 struct sym_fwz_ba {
 	SYM_GEN_FW_Z(u32)
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	SYM_GEN_Z(u32, start_ram)
-	SYM_GEN_Z(u32, start_ram64)
-#endif
 };
 #undef	SYM_GEN_A
 #undef	SYM_GEN_B
@@ -170,7 +143,7 @@ struct sym_fw {
 		*z_ofs;		/* Useful offsets in script Z	*/
 	/* Setup and patch methods for this firmware */
 	void	(*setup)(struct sym_hcb *, struct sym_fw *);
-	void	(*patch)(struct sym_hcb *);
+	void	(*patch)(struct Scsi_Host *);
 };
 
 /*

@@ -10,106 +10,89 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 
-LD_SCRIPT=$(TOPDIR)/arch/cris/cris.ld
+KBUILD_DEFCONFIG := etrax-100lx_v2_defconfig
 
-# A bug in ld prevents us from having a (constant-value) symbol in a
-# "ORIGIN =" or "LENGTH =" expression.  We fix that by generating a
-# linker file with the symbolic part of those expressions evaluated.
-#  Unfortunately, there is trouble making vmlinux depend on anything we
-# generate here, so we *always* regenerate the final linker script and
-# replace the LD macro to get what we want.  Thankfully(?) vmlinux is
-# always rebuilt (due to calling make recursively and not knowing if
-# anything was rebuilt).
-#  The shell script to build in some kind of dependency is really not
-# necessary for reasons of speed.  It's there because always
-# regenerating stuff (even for incremental linking of subsystems!) is
-# even more nauseating.
-LD = if [ ! -e $(LD_SCRIPT).tmp -o $(LD_SCRIPT) -nt $(LD_SCRIPT).tmp ]; then \
-          sed -e s/@CONFIG_ETRAX_DRAM_VIRTUAL_BASE@/0x$(CONFIG_ETRAX_DRAM_VIRTUAL_BASE)/ \
-              -e s/@CONFIG_ETRAX_DRAM_SIZE_M@/$(CONFIG_ETRAX_DRAM_SIZE)/ \
-              < $(LD_SCRIPT) > $(LD_SCRIPT).tmp; \
-     else true; \
-     fi && $(CROSS_COMPILE)ld -mcrislinux
+arch-y := v10
+arch-$(CONFIG_ETRAX_ARCH_V10) := v10
+arch-$(CONFIG_ETRAX_ARCH_V32) := v32
 
-LINKFLAGS = -T $(LD_SCRIPT).tmp
+# No config available for make clean etc
+mach-y := fs
+mach-$(CONFIG_CRIS_MACH_ARTPEC3) := a3
+mach-$(CONFIG_ETRAXFS) := fs
 
-# objcopy is used to make binary images from the resulting linked file
-
-OBJCOPY := $(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
-
-# -mlinux enables -march=v10, -fno-underscores, -D__linux__ among others
-
-CFLAGS := $(CFLAGS) -mlinux -pipe
-
-ifdef CONFIG_ETRAX_KGDB
-CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS)) -g
-CFLAGS += -fno-omit-frame-pointer
+ifneq ($(arch-y),)
+SARCH := arch-$(arch-y)
+inc := -Iarch/cris/include/$(SARCH)
+inc += -Iarch/cris/include/$(SARCH)/arch
+else
+SARCH :=
+inc :=
 endif
 
-AFLAGS += -mlinux
-
-HEAD := arch/cris/kernel/head.o
-
-SUBDIRS += arch/cris/kernel arch/cris/mm arch/cris/lib arch/cris/drivers
-ifdef CONFIG_ETRAX_AXISFLASHMAP
-# only build this if axis flash map is used, because they depend on
-# each others config options
-SUBDIRS += arch/cris/boot/rescue
+ifneq ($(mach-y),)
+MACH := mach-$(mach-y)
+inc += -Iarch/cris/include/$(SARCH)/$(MACH)/
+inc += -Iarch/cris/include/$(SARCH)/$(MACH)/mach
+else
+MACH :=
 endif
 
-# Note that the order of .o files below is important is some cases
-# (because initcalls are executed in the order they are linked)
-# Never add any driver before mm.o!
-CORE_FILES += arch/cris/kernel/kernel.o arch/cris/mm/mm.o
-DRIVERS += arch/cris/drivers/drivers.o
-LIBGCC = $(shell $(CC) $(CFLAGS) -print-file-name=libgcc.a)
-LIBS := $(TOPDIR)/arch/cris/lib/lib.a $(LIBS) $(TOPDIR)/arch/cris/lib/lib.a $(LIBGCC)
+LD = $(CROSS_COMPILE)ld -mcrislinux
 
-arch/cris/kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/cris/kernel
+OBJCOPYFLAGS := -O binary -R .note -R .comment -S
 
-arch/cris/mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/cris/mm
+KBUILD_AFLAGS += -mlinux -march=$(arch-y) $(inc)
+KBUILD_CFLAGS += -mlinux -march=$(arch-y) -pipe $(inc)
+KBUILD_CPPFLAGS += $(inc)
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+ifdef CONFIG_FRAME_POINTER
+KBUILD_CFLAGS := $(subst -fomit-frame-pointer,,$(KBUILD_CFLAGS)) -g
+KBUILD_CFLAGS += -fno-omit-frame-pointer
+endif
 
-vmlinux.bin: vmlinux
-	$(OBJCOPY) vmlinux vmlinux.bin
+head-y := arch/cris/$(SARCH)/kernel/head.o
 
-timage: vmlinux.bin
-	cat vmlinux.bin cramfs.img >timage
+LIBGCC = $(shell $(CC) $(KBUILD_CFLAGS) -print-file-name=libgcc.a)
 
-simimage: timage
-	cp vmlinux.bin simvmlinux.bin
+core-y		+= arch/cris/kernel/ arch/cris/mm/
+core-y		+= arch/cris/$(SARCH)/kernel/ arch/cris/$(SARCH)/mm/
+ifdef CONFIG_ETRAX_ARCH_V32
+core-y		+= arch/cris/$(SARCH)/$(MACH)/
+endif
+drivers-y	+= arch/cris/$(SARCH)/drivers/
+libs-y		+= arch/cris/$(SARCH)/lib/ $(LIBGCC)
 
-# the following will remake timage without compiling the kernel
-# it does of course require that all object files exist...
+# cris source path
+SRC_ARCH              = $(srctree)/arch/cris
+# cris object files path
+OBJ_ARCH              = $(objtree)/arch/cris
 
-cramfs:
-## cramfs      - Creates a cramfs image
-	mkcramfs -b 8192 -m romfs_meta.txt root cramfs.img
-	cat vmlinux.bin cramfs.img >timage
+boot := arch/cris/boot
+MACHINE := arch/cris/$(SARCH)
 
-clinux: vmlinux.bin decompress.bin rescue.bin
+all: zImage
 
-decompress.bin: dummy
-	@make -C arch/cris/boot/compressed decompress.bin
+zImage Image: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) MACHINE=$(MACHINE) $(boot)/$@
 
-rescue.bin: dummy
-	@make -C arch/cris/boot/rescue rescue.bin
-
-zImage: vmlinux.bin
-## zImage     - Compressed kernel (gzip)
-	@$(MAKEBOOT) zImage
-
-compressed: zImage
+archprepare:
 
 archclean:
-	@$(MAKEBOOT) clean
-	rm -f timage vmlinux.bin cramfs.img
-	rm -rf $(LD_SCRIPT).tmp
+	$(Q)if [ -e arch/cris/boot ]; then \
+		$(MAKE) $(clean)=arch/cris/boot; \
+	fi
 
-archmrproper:
+CLEAN_FILES += \
+	$(boot)/zImage \
+	$(boot)/compressed/decompress.bin \
+	$(boot)/compressed/piggy.gz \
+	$(boot)/rescue/rescue.bin
 
-archdep:
-	@$(MAKEBOOT) dep
+
+# MRPROPER_FILES +=
+
+define archhelp
+  echo  '* zImage        - Compressed kernel image (arch/cris/boot/zImage)'
+  echo  '* Image         - Uncompressed kernel image (arch/cris/boot/Image)'
+endef

@@ -1,7 +1,7 @@
 /*
  *  linux/arch/h8300/kernel/ptrace.c
  *
- *  Yoshinori Sato <qzb04471@nifty.ne.jp>
+ *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
  *  Based on:
  *  linux/arch/m68k/kernel/ptrace.c
@@ -19,117 +19,59 @@
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
-#include <linux/config.h>
+#include <linux/signal.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/processor.h>
 #include <asm/signal.h>
 
 /* cpu depend functions */
 extern long h8300_get_reg(struct task_struct *task, int regno);
 extern int  h8300_put_reg(struct task_struct *task, int regno, unsigned long data);
-extern void h8300_disable_trace(struct task_struct *child);
-extern void h8300_enable_trace(struct task_struct *child);
+
+
+void user_disable_single_step(struct task_struct *child)
+{
+}
 
 /*
  * does not yet catch signals sent when the child dies.
  * in exit.c or in signal.c.
  */
 
-inline
-static int read_long(struct task_struct * tsk, unsigned long addr,
-	unsigned long * result)
-{
-	*result = *(unsigned long *)addr;
-	return 0;
-}
-
 void ptrace_disable(struct task_struct *child)
 {
-	h8300_disable_trace(child);
+	user_disable_single_step(child);
 }
 
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
+long arch_ptrace(struct task_struct *child, long request,
+		 unsigned long addr, unsigned long data)
 {
-	struct task_struct *child;
 	int ret;
-
-	lock_kernel();
-	ret = -EPERM;
-	if (request == PTRACE_TRACEME) {
-		/* are we already being traced? */
-		if (current->ptrace & PT_PTRACED)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->ptrace |= PT_PTRACED;
-		ret = 0;
-		goto out;
-	}
-	ret = -ESRCH;
-	read_lock(&tasklist_lock);
-	child = find_task_by_pid(pid);
-	if (child)
-		get_task_struct(child);
-	read_unlock(&tasklist_lock);
-	if (!child)
-		goto out;
-
-	ret = -EPERM;
-	if (pid == 1)		/* you may not mess with init */
-		goto out_tsk;
-
-	if (request == PTRACE_ATTACH) {
-		ret = ptrace_attach(child);
-		goto out_tsk;
-	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED))
-		goto out_tsk;
-	if (child->state != TASK_STOPPED) {
-		if (request != PTRACE_KILL)
-			goto out_tsk;
-	}
-	if (child->p_pptr != current)
-		goto out_tsk;
+	int regno = addr >> 2;
+	unsigned long __user *datap = (unsigned long __user *) data;
 
 	switch (request) {
-		case PTRACE_PEEKTEXT: /* read word at location addr. */ 
-		case PTRACE_PEEKDATA: {
-			unsigned long tmp;
-
-			ret = -EIO;
-			if (access_process_vm(child, addr, &tmp, sizeof(tmp), 0) != sizeof(tmp))
-				break;
-			ret = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
-			if (!ret)
-				put_user(tmp, (unsigned long *) data);
-			break ;
-		}
-
 	/* read the word at location addr in the USER area. */
 		case PTRACE_PEEKUSR: {
-			unsigned long tmp;
+			unsigned long tmp = 0;
 			
-			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
+			if ((addr & 3) || addr >= sizeof(struct user)) {
 				ret = -EIO;
-			
-			ret = verify_area(VERIFY_WRITE, (void *) data,
-					  sizeof(long));
-			if (ret)
 				break ;
-			tmp = 0;  /* Default return condition */
-			addr = addr >> 2; /* temporary hack. */
-			if (addr < H8300_REGS_NO)
-				tmp = h8300_get_reg(child, addr);
+			}
+			
+		        ret = 0;  /* Default return condition */
+
+			if (regno < H8300_REGS_NO)
+				tmp = h8300_get_reg(child, regno);
 			else {
-				switch(addr) {
+				switch (regno) {
 				case 49:
 					tmp = child->mm->start_code;
 					break ;
@@ -147,94 +89,38 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				}
 			}
 			if (!ret)
-				put_user(tmp,(unsigned long *) data);
+				ret = put_user(tmp, datap);
 			break ;
 		}
 
       /* when I and D space are separate, this will have to be fixed. */
-		case PTRACE_POKETEXT: /* write the word at location addr. */
-		case PTRACE_POKEDATA:
-			ret = 0;
-			if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
-				break;
-			ret = -EIO;
-			break;
-
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
-			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user)) {
+			if ((addr & 3) || addr >= sizeof(struct user)) {
 				ret = -EIO;
 				break ;
 			}
-			addr = addr >> 2; /* temporary hack. */
 			    
-			if (addr == PT_ORIG_ER0) {
+			if (regno == PT_ORIG_ER0) {
 				ret = -EIO;
 				break ;
 			}
-			if (addr < H8300_REGS_NO) {
-				ret = h8300_put_reg(child, addr, data);
+			if (regno < H8300_REGS_NO) {
+				ret = h8300_put_reg(child, regno, data);
 				break ;
 			}
 			ret = -EIO;
 			break ;
-		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
-		case PTRACE_CONT: { /* restart after signal. */
-			ret = -EIO;
-			if ((unsigned long) data >= _NSIG)
-				break ;
-			if (request == PTRACE_SYSCALL)
-				child->flags |= PT_TRACESYS;
-			else
-				child->flags &= ~PT_TRACESYS;
-			child->exit_code = data;
-			wake_up_process(child);
-			/* make sure the single step bit is not set. */
-			h8300_disable_trace(child);
-			ret = 0;
-		}
-
-/*
- * make the child exit.  Best I can do is send it a sigkill. 
- * perhaps it should be put in the status that it wants to 
- * exit.
- */
-		case PTRACE_KILL: {
-
-			ret = 0;
-			if (child->state == TASK_ZOMBIE) /* already dead */
-				break;
-			child->exit_code = SIGKILL;
-			h8300_disable_trace(child);
-			wake_up_process(child);
-			break;
-		}
-
-		case PTRACE_SINGLESTEP: {  /* set the trap flag. */
-			ret = -EIO;
-			if ((unsigned long) data > _NSIG)
-				break;
-			child->ptrace &= ~PT_TRACESYS;
-			child->exit_code = data;
-			h8300_enable_trace(child);
-			wake_up_process(child);
-			ret = 0;
-			break;
-		}
-
-		case PTRACE_DETACH:	/* detach a process that was attached. */
-			ret = ptrace_detach(child, data);
-			break;
 
 		case PTRACE_GETREGS: { /* Get all gp regs from the child. */
 		  	int i;
 			unsigned long tmp;
 			for (i = 0; i < H8300_REGS_NO; i++) {
 			    tmp = h8300_get_reg(child, i);
-			    if (put_user(tmp, (unsigned long *) data)) {
+			    if (put_user(tmp, datap)) {
 				ret = -EFAULT;
 				break;
 			    }
-			    data += sizeof(long);
+			    datap++;
 			}
 			ret = 0;
 			break;
@@ -244,37 +130,32 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			int i;
 			unsigned long tmp;
 			for (i = 0; i < H8300_REGS_NO; i++) {
-			    if (get_user(tmp, (unsigned long *) data)) {
+			    if (get_user(tmp, datap)) {
 				ret = -EFAULT;
 				break;
 			    }
 			    h8300_put_reg(child, i, tmp);
-			    data += sizeof(long);
+			    datap++;
 			}
 			ret = 0;
 			break;
 		}
 
 		default:
-			ret = -EIO;
+			ret = ptrace_request(child, request, addr, data);
 			break;
 	}
-out_tsk:
-	free_task_struct(child);
-out:
-	unlock_kernel();
 	return ret;
 }
 
-asmlinkage void syscall_trace(void)
+asmlinkage void do_syscall_trace(void)
 {
-	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
-			!= (PT_PTRACED|PT_TRACESYS))
+	if (!test_thread_flag(TIF_SYSCALL_TRACE))
 		return;
-	current->exit_code = SIGTRAP;
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	if (!(current->ptrace & PT_PTRACED))
+		return;
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

@@ -14,17 +14,18 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
+#include <asm/special_insns.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -50,7 +51,7 @@ sx164_init_irq(void)
 	if (alpha_using_srm)
 		init_srm_irqs(40, 0x3f0000);
 	else
-		init_pyxis_irqs(0xff00003f0000);
+		init_pyxis_irqs(0xff00003f0000UL);
 
 	setup_irq(16+6, &timer_cascade_irqaction);
 }
@@ -94,7 +95,7 @@ sx164_init_irq(void)
  */
 
 static int __init
-sx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+sx164_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[5][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -131,7 +132,7 @@ sx164_init_arch(void)
 
 	if (amask(AMASK_MAX) != 0
 	    && alpha_using_srm
-	    && (cpu->pal_revision & 0xffff) == 0x117) {
+	    && (cpu->pal_revision & 0xffff) <= 0x117) {
 		__asm__ __volatile__(
 		"lda	$16,8($31)\n"
 		"call_pal 9\n"		/* Allow PALRES insns in kernel mode */
@@ -153,26 +154,25 @@ sx164_init_arch(void)
  */
 
 struct alpha_machine_vector sx164_mv __initmv = {
-	vector_name:		"SX164",
+	.vector_name		= "SX164",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		PYXIS_DAC_OFFSET,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= PYXIS_DAC_OFFSET,
 
-	nr_irqs:		48,
-	device_interrupt:	pyxis_device_interrupt,
+	.nr_irqs		= 48,
+	.device_interrupt	= pyxis_device_interrupt,
 
-	init_arch:		sx164_init_arch,
-	init_irq:		sx164_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		sx164_init_pci,
-	kill_arch:		cia_kill_arch,
-	pci_map_irq:		sx164_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= sx164_init_arch,
+	.init_irq		= sx164_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= sx164_init_pci,
+	.kill_arch		= cia_kill_arch,
+	.pci_map_irq		= sx164_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(sx164)

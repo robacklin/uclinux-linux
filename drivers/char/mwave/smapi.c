@@ -46,7 +46,6 @@
 *	First release to the public
 */
 
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/mc146818rtc.h>	/* CMOS defines */
 #include "smapi.h"
@@ -55,11 +54,11 @@
 static unsigned short g_usSmapiPort = 0;
 
 
-int smapi_request(unsigned short inBX, unsigned short inCX,
-                  unsigned short inDI, unsigned short inSI,
-                  unsigned short *outAX, unsigned short *outBX,
-                  unsigned short *outCX, unsigned short *outDX,
-                  unsigned short *outDI, unsigned short *outSI)
+static int smapi_request(unsigned short inBX, unsigned short inCX,
+			 unsigned short inDI, unsigned short inSI,
+			 unsigned short *outAX, unsigned short *outBX,
+			 unsigned short *outCX, unsigned short *outDX,
+			 unsigned short *outDI, unsigned short *outSI)
 {
 	unsigned short myoutAX = 2, *pmyoutAX = &myoutAX;
 	unsigned short myoutBX = 3, *pmyoutBX = &myoutBX;
@@ -448,7 +447,7 @@ int smapi_set_DSP_cfg(void)
 	if (bRC) goto exit_smapi_request_error;
 
 	if (mwave_3780i_io) {
-		usDI = dspio_index;;
+		usDI = dspio_index;
 	}
 	if (mwave_3780i_irq) {
 		usSI = (usSI & 0xff00) | mwave_3780i_irq;
@@ -512,8 +511,8 @@ int smapi_set_DSP_power_state(BOOLEAN bOn)
 	return bRC;
 }
 
-
-int SmapiQuerySystemID(void)
+#if 0
+static int SmapiQuerySystemID(void)
 {
 	int bRC = -EIO;
 	unsigned short usAX = 0xffff, usBX = 0xffff, usCX = 0xffff,
@@ -532,7 +531,7 @@ int SmapiQuerySystemID(void)
 
 	return bRC;
 }
-
+#endif  /*  0  */
 
 int smapi_init(void)
 {

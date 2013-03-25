@@ -10,19 +10,18 @@
  * Code common to all APECS core logic chips.
  */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/ptrace.h>
-#include <asm/smp.h>
-
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_apecs.h>
 #undef __EXTERN_INLINE
+
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/init.h>
+
+#include <asm/ptrace.h>
+#include <asm/smp.h>
+#include <asm/mce.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -90,12 +89,11 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	DBGC(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x,"
 	      " pci_addr=0x%p, type1=0x%p)\n",
@@ -131,7 +129,7 @@ conf_read(unsigned long addr, unsigned char type1)
 	unsigned int stat0, value;
 	unsigned int haxr2 = 0;
 
-	__save_and_cli(flags);	/* avoid getting hit by machine check */
+	local_irq_save(flags);	/* avoid getting hit by machine check */
 
 	DBGC(("conf_read(addr=0x%lx, type1=%d)\n", addr, type1));
 
@@ -201,7 +199,7 @@ conf_read(unsigned long addr, unsigned char type1)
 		*(vuip)APECS_IOC_HAXR2 = haxr2 & ~1;
 		mb();
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 
 	return value;
 }
@@ -213,7 +211,7 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 	unsigned int stat0;
 	unsigned int haxr2 = 0;
 
-	__save_and_cli(flags);	/* avoid getting hit by machine check */
+	local_irq_save(flags);	/* avoid getting hit by machine check */
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vuip)APECS_IOC_DCSR;
@@ -269,91 +267,49 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 		*(vuip)APECS_IOC_HAXR2 = haxr2 & ~1;
 		mb();
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static int
-apecs_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+apecs_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		  int size, u32 *value)
 {
 	unsigned long addr, pci_addr;
 	unsigned char type1;
+	long mask;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + APECS_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-apecs_read_config_word(struct pci_dev *dev, int where, u16 *value)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x08 + APECS_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
+	mask = (size - 1) * 8;
+	shift = (where & 3) * 8;
+	addr = (pci_addr << 5) + mask + APECS_CONF;
+	*value = conf_read(addr, type1) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int
-apecs_read_config_dword(struct pci_dev *dev, int where, u32 *value)
+apecs_write_config(struct pci_bus *bus, unsigned int devfn, int where,
+		   int size, u32 value)
 {
 	unsigned long addr, pci_addr;
 	unsigned char type1;
+	long mask;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x18 + APECS_CONF;
-	*value = conf_read(addr, type1);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-apecs_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + APECS_CONF;
 	conf_write(addr, value << ((where & 3) * 8), type1);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-apecs_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return apecs_write_config(dev, where, value, 0x00);
-}
-
-static int
-apecs_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return apecs_write_config(dev, where, value, 0x08);
-}
-
-static int
-apecs_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return apecs_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops apecs_pci_ops = 
 {
-	read_byte:	apecs_read_config_byte,
-	read_word:	apecs_read_config_word,
-	read_dword:	apecs_read_config_dword,
-	write_byte:	apecs_write_config_byte,
-	write_word:	apecs_write_config_word,
-	write_dword:	apecs_write_config_dword
+	.read =		apecs_read_config,
+	.write =	apecs_write_config,
 };
 
 void
@@ -432,8 +388,7 @@ apecs_pci_clr_err(void)
 }
 
 void
-apecs_machine_check(unsigned long vector, unsigned long la_ptr,
-		    struct pt_regs * regs)
+apecs_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	struct el_common *mchk_header;
 	struct el_apecs_procdata *mchk_procdata;
@@ -457,7 +412,7 @@ apecs_machine_check(unsigned long vector, unsigned long la_ptr,
 	wrmces(0x7);		/* reset machine check pending flag */
 	mb();
 
-	process_mcheck_info(vector, la_ptr, regs, "APECS",
+	process_mcheck_info(vector, la_ptr, "APECS",
 			    (mcheck_expected(0)
 			     && (mchk_sysdata->epic_dcsr & 0x0c00UL)));
 }

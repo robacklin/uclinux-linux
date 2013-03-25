@@ -1,188 +1,156 @@
 /*
- *  linux/arch/frionommu/kernel/time.c
+ * arch/blackfin/kernel/time.c
  *
- *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
- *
- * This file contains the frio-specific time handling details.
+ * This file contains the Blackfin-specific time handling details.
  * Most of the stuff is located in the machine specific files.
  *
- * 1997-09-10	Updated NTP code according to technical memorandum Jan '96
- *		"A Kernel Model for Precision Timekeeping" by Dave Mills
+ * Copyright 2004-2008 Analog Devices Inc.
+ * Licensed under the GPL-2 or later.
  */
 
-#include <linux/config.h> /* CONFIG_HEARTBEAT */
-#include <linux/errno.h>
+#include <linux/module.h>
+#include <linux/profile.h>
+#include <linux/interrupt.h>
+#include <linux/time.h>
+#include <linux/irq.h>
+#include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/param.h>
-#include <linux/string.h>
-#include <linux/mm.h>
 
-#include <asm/machdep.h>
-#include <asm/io.h>
+#include <asm/blackfin.h>
+#include <asm/time.h>
+#include <asm/gptimers.h>
 
-#include <linux/timex.h>
+/* This is an NTP setting */
+#define	TICK_SIZE (tick_nsec / 1000)
 
+static struct irqaction bfin_timer_irq = {
+	.name = "Blackfin Timer Tick",
+};
 
-static inline int set_rtc_mmss(unsigned long nowtime)
+#if defined(CONFIG_IPIPE)
+void __init setup_system_timer0(void)
 {
-  if (mach_set_clock_mmss)
-    return mach_set_clock_mmss (nowtime);
-  return -1;
+	/* Power down the core timer, just to play safe. */
+	bfin_write_TCNTL(0);
+
+	disable_gptimers(TIMER0bit);
+	set_gptimer_status(0, TIMER_STATUS_TRUN0);
+	while (get_gptimer_status(0) & TIMER_STATUS_TRUN0)
+		udelay(10);
+
+	set_gptimer_config(0, 0x59); /* IRQ enable, periodic, PWM_OUT, SCLKed, OUT PAD disabled */
+	set_gptimer_period(TIMER0_id, get_sclk() / HZ);
+	set_gptimer_pwidth(TIMER0_id, 1);
+	SSYNC();
+	enable_gptimers(TIMER0bit);
+}
+#else
+void __init setup_core_timer(void)
+{
+	u32 tcount;
+
+	/* power up the timer, but don't enable it just yet */
+	bfin_write_TCNTL(TMPWR);
+	CSYNC();
+
+	/* the TSCALE prescaler counter */
+	bfin_write_TSCALE(TIME_SCALE - 1);
+
+	tcount = ((get_cclk() / (HZ * TIME_SCALE)) - 1);
+	bfin_write_TPERIOD(tcount);
+	bfin_write_TCOUNT(tcount);
+
+	/* now enable the timer */
+	CSYNC();
+
+	bfin_write_TCNTL(TAUTORLD | TMREN | TMPWR);
+}
+#endif
+
+static void __init
+time_sched_init(irqreturn_t(*timer_routine) (int, void *))
+{
+#if defined(CONFIG_IPIPE)
+	setup_system_timer0();
+	bfin_timer_irq.handler = timer_routine;
+	setup_irq(IRQ_TIMER0, &bfin_timer_irq);
+#else
+	setup_core_timer();
+	bfin_timer_irq.handler = timer_routine;
+	setup_irq(IRQ_CORETMR, &bfin_timer_irq);
+#endif
 }
 
-static inline void do_profile (unsigned long pc)
+#ifdef CONFIG_ARCH_USES_GETTIMEOFFSET
+/*
+ * Should return useconds since last timer tick
+ */
+u32 arch_gettimeoffset(void)
 {
-	if (prof_buffer && current->pid) {
-		extern int _stext;
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-		if (pc < prof_len)
-			++prof_buffer[pc];
-		else
-		/*
-		 * Don't ignore out-of-bounds PC values silently,
-		 * put them into the last histogram slot, so if
-		 * present, they will show up as a sharp peak.
-		 */
-			++prof_buffer[prof_len-1];
-	}
+	unsigned long offset;
+	unsigned long clocks_per_jiffy;
+
+#if defined(CONFIG_IPIPE)
+	clocks_per_jiffy = bfin_read_TIMER0_PERIOD();
+	offset = bfin_read_TIMER0_COUNTER() / \
+		(((clocks_per_jiffy + 1) * HZ) / USEC_PER_SEC);
+
+	if ((get_gptimer_status(0) & TIMER_STATUS_TIMIL0) && offset < (100000 / HZ / 2))
+		offset += (USEC_PER_SEC / HZ);
+#else
+	clocks_per_jiffy = bfin_read_TPERIOD();
+	offset = (clocks_per_jiffy - bfin_read_TCOUNT()) / \
+		(((clocks_per_jiffy + 1) * HZ) / USEC_PER_SEC);
+
+	/* Check if we just wrapped the counters and maybe missed a tick */
+	if ((bfin_read_ILAT() & (1 << IRQ_CORETMR))
+		&& (offset < (100000 / HZ / 2)))
+		offset += (USEC_PER_SEC / HZ);
+#endif
+	return offset;
 }
+#endif
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
- * as well as call the "do_timer()" routine every clocktick
+ * as well as call the "xtime_update()" routine every clocktick
  */
-static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
+#ifdef CONFIG_CORE_TIMER_IRQ_L1
+__attribute__((l1_text))
+#endif
+irqreturn_t timer_interrupt(int irq, void *dummy)
 {
-	/* last time the cmos clock got updated */
-	static long last_rtc_update=0;
+	xtime_update(1);
 
-	/* may need to kick the hardware timer */
-#if 0
-	if (mach_tick)
-	  mach_tick();
+#ifdef CONFIG_IPIPE
+	update_root_process_times(get_irq_regs());
+#else
+	update_process_times(user_mode(get_irq_regs()));
 #endif
+	profile_tick(CPU_PROFILING);
 
-	do_timer(regs);
+	return IRQ_HANDLED;
+}
 
-#if 0
-	if (!user_mode(regs))
-		do_profile(regs->pc);
-#endif
+void read_persistent_clock(struct timespec *ts)
+{
+	time_t secs_since_1970 = (365 * 37 + 9) * 24 * 60 * 60;	/* 1 Jan 2007 */
+	ts->tv_sec = secs_since_1970;
+	ts->tv_nsec = 0;
+}
 
-	/*
-	 * If we have an externally synchronized Linux clock, then update
-	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
-	 * called as close as possible to 500 ms before the new second starts.
+void __init time_init(void)
+{
+#ifdef CONFIG_RTC_DRV_BFIN
+	/* [#2663] hack to filter junk RTC values that would cause
+	 * userspace to have to deal with time values greater than
+	 * 2^31 seconds (which uClibc cannot cope with yet)
 	 */
-	if ((time_status & STA_UNSYNC) == 0 &&
-	    xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
-	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
-	  if (set_rtc_mmss(xtime.tv_sec) == 0)
-	    last_rtc_update = xtime.tv_sec;
-	  else
-	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
+	if ((bfin_read_RTC_STAT() & 0xC0000000) == 0xC0000000) {
+		printk(KERN_NOTICE "bfin-rtc: invalid date; resetting\n");
+		bfin_write_RTC_STAT(0);
 	}
-#if 0
-#ifdef CONFIG_HEARTBEAT
-	/* use power LED as a heartbeat instead -- much more useful
-	   for debugging -- based on the version for PReP by Cort */
-	/* acts like an actual heart beat -- ie thump-thump-pause... */
-	if (mach_heartbeat) {
-	    static unsigned cnt = 0, period = 0, dist = 0;
-
-	    if (cnt == 0 || cnt == dist)
-		mach_heartbeat( 1 );
-	    else if (cnt == 7 || cnt == dist+7)
-		mach_heartbeat( 0 );
-
-	    if (++cnt > period) {
-		cnt = 0;
-		/* The hyperbolic function below modifies the heartbeat period
-		 * length in dependency of the current (5min) load. It goes
-		 * through the points f(0)=126, f(1)=86, f(5)=51,
-		 * f(inf)->30. */
-		period = ((672<<FSHIFT)/(5*avenrun[0]+(7<<FSHIFT))) + 30;
-		dist = period / 4;
-	    }
-	}
-#endif /* CONFIG_HEARTBEAT */
 #endif
-}
 
-void time_init(void)
-{
-	unsigned int year, mon, day, hour, min, sec;
-
-	extern void arch_gettod(int *year, int *mon, int *day, int *hour,
-				int *min, int *sec);
-
-	arch_gettod (&year, &mon, &day, &hour, &min, &sec);
-
-	if ((year += 1900) < 1970)
-		year += 100;
-	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
-
-	mach_sched_init(timer_interrupt);
-}
-
-extern rwlock_t xtime_lock;
-
-/*
- * This version of gettimeofday has near microsecond resolution.
- */
-void do_gettimeofday(struct timeval *tv)
-{
-#if 0 /* DAVIDM later if possible */
-	extern volatile unsigned long lost_ticks;
-	unsigned long lost;
-#endif
-	unsigned long flags = 0;
-	unsigned long usec, sec;
-
-	read_lock_irqsave(&xtime_lock, flags);
-	usec = mach_gettimeoffset ? mach_gettimeoffset() : 0;
-#if 0 /* DAVIDM later if possible */
-	lost = lost_ticks;
-	if (lost)
-		usec += lost * (1000000/HZ);
-#endif
-	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
-	read_unlock_irqrestore(&xtime_lock, flags);
-
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		sec++;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
-}
-
-void do_settimeofday(struct timeval *tv)
-{
-	write_lock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_usec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
-	 */
-	tv->tv_usec -= mach_gettimeoffset();
-
-	while (tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
-		tv->tv_sec--;
-	}
-
-	xtime = *tv;
-	time_adjust = 0;		/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+	time_sched_init(timer_interrupt);
 }

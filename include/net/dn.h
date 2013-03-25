@@ -2,14 +2,10 @@
 #define _NET_DN_H
 
 #include <linux/dn.h>
+#include <net/sock.h>
+#include <net/flow.h>
 #include <asm/byteorder.h>
-
-typedef unsigned short dn_address;
-
-#define dn_ntohs(x) le16_to_cpu((unsigned short)(x))
-#define dn_htons(x) cpu_to_le16((unsigned short)(x))
-
-#define DN_SK(sk) (&sk->protinfo.dn)
+#include <asm/unaligned.h>
 
 struct dn_scp                                   /* Session Control Port */
 {
@@ -31,36 +27,36 @@ struct dn_scp                                   /* Session Control Port */
 #define DN_CL    15                     /* Closed               */
 #define DN_CN    16                     /* Closed Notification  */
 
-        unsigned short          addrloc;
-        unsigned short          addrrem;
-        unsigned short          numdat;
-        unsigned short          numoth;
-        unsigned short          numoth_rcv;
-        unsigned short          numdat_rcv;
-        unsigned short          ackxmt_dat;
-        unsigned short          ackxmt_oth;
-        unsigned short          ackrcv_dat;
-        unsigned short          ackrcv_oth;
-        unsigned char           flowrem_sw;
-	unsigned char		flowloc_sw;
+        __le16          addrloc;
+        __le16          addrrem;
+        __u16          numdat;
+        __u16          numoth;
+        __u16          numoth_rcv;
+        __u16          numdat_rcv;
+        __u16          ackxmt_dat;
+        __u16          ackxmt_oth;
+        __u16          ackrcv_dat;
+        __u16          ackrcv_oth;
+        __u8           flowrem_sw;
+	__u8           flowloc_sw;
 #define DN_SEND         2
 #define DN_DONTSEND     1
 #define DN_NOCHANGE     0
-	unsigned short		flowrem_dat;
-	unsigned short		flowrem_oth;
-	unsigned short		flowloc_dat;
-	unsigned short		flowloc_oth;
-	unsigned char		services_rem;
-	unsigned char		services_loc;
-	unsigned char		info_rem;
-	unsigned char		info_loc;
+	__u16		flowrem_dat;
+	__u16		flowrem_oth;
+	__u16		flowloc_dat;
+	__u16		flowloc_oth;
+	__u8		services_rem;
+	__u8		services_loc;
+	__u8		info_rem;
+	__u8		info_loc;
 
-	unsigned short		segsize_rem;
-	unsigned short		segsize_loc;
+	__u16		segsize_rem;
+	__u16		segsize_loc;
 
-	unsigned char		nonagle;
-	unsigned char		multi_ireq;
-	unsigned char		accept_mode;
+	__u8		nonagle;
+	__u8		multi_ireq;
+	__u8		accept_mode;
 	unsigned long		seg_total; /* Running total of current segment */
 
 	struct optdata_dn     conndata_in;
@@ -135,6 +131,11 @@ struct dn_scp                                   /* Session Control Port */
 
 };
 
+static inline struct dn_scp *DN_SK(struct sock *sk)
+{
+	return (struct dn_scp *)(sk + 1);
+}
+
 /*
  * src,dst : Source and Destination DECnet addresses
  * hops : Number of hops through the network
@@ -155,41 +156,50 @@ struct dn_scp                                   /* Session Control Port */
  */
 #define DN_SKB_CB(skb) ((struct dn_skb_cb *)(skb)->cb)
 struct dn_skb_cb {
-	unsigned short dst;
-	unsigned short src;
-	unsigned short hops;
-	unsigned short dst_port;
-	unsigned short src_port;
-	unsigned char services;
-	unsigned char info;
-	unsigned char rt_flags;
-	unsigned char nsp_flags;
-	unsigned short segsize;
-	unsigned short segnum;
-	unsigned short xmit_count;
+	__le16 dst;
+	__le16 src;
+	__u16 hops;
+	__le16 dst_port;
+	__le16 src_port;
+	__u8 services;
+	__u8 info;
+	__u8 rt_flags;
+	__u8 nsp_flags;
+	__u16 segsize;
+	__u16 segnum;
+	__u16 xmit_count;
 	unsigned long stamp;
 	int iif;
 };
 
-static __inline__ dn_address dn_eth2dn(unsigned char *ethaddr)
+static inline __le16 dn_eth2dn(unsigned char *ethaddr)
 {
-	return ethaddr[4] | (ethaddr[5] << 8);
+	return get_unaligned((__le16 *)(ethaddr + 4));
 }
 
-static __inline__ dn_address dn_saddr2dn(struct sockaddr_dn *saddr)
+static inline __le16 dn_saddr2dn(struct sockaddr_dn *saddr)
 {
-	return *(dn_address *)saddr->sdn_nodeaddr;
+	return *(__le16 *)saddr->sdn_nodeaddr;
 }
 
-static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
+static inline void dn_dn2eth(unsigned char *ethaddr, __le16 addr)
 {
+	__u16 a = le16_to_cpu(addr);
 	ethaddr[0] = 0xAA;
 	ethaddr[1] = 0x00;
 	ethaddr[2] = 0x04;
 	ethaddr[3] = 0x00;
-	ethaddr[4] = (unsigned char)(addr & 0xff);
-	ethaddr[5] = (unsigned char)(addr >> 8);
+	ethaddr[4] = (__u8)(a & 0xff);
+	ethaddr[5] = (__u8)(a >> 8);
 }
+
+static inline void dn_sk_ports_copy(struct flowidn *fld, struct dn_scp *scp)
+{
+	fld->fld_sport = scp->addrloc;
+	fld->fld_dport = scp->addrrem;
+}
+
+extern unsigned dn_mss_from_pmtu(struct net_device *dev, int mtu);
 
 #define DN_MENUVER_ACC 0x01
 #define DN_MENUVER_USR 0x02
@@ -199,7 +209,7 @@ static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 extern struct sock *dn_sklist_find_listener(struct sockaddr_dn *addr);
 extern struct sock *dn_find_by_skb(struct sk_buff *skb);
 #define DN_ASCBUF_LEN 9
-extern char *dn_addr2asc(dn_address, char *);
+extern char *dn_addr2asc(__u16, char *);
 extern int dn_destroy_timer(struct sock *sk);
 
 extern int dn_sockaddr2username(struct sockaddr_dn *addr, unsigned char *buf, unsigned char type);
@@ -207,16 +217,17 @@ extern int dn_username2sockaddr(unsigned char *data, int len, struct sockaddr_dn
 
 extern void dn_start_slow_timer(struct sock *sk);
 extern void dn_stop_slow_timer(struct sock *sk);
-extern void dn_start_fast_timer(struct sock *sk);
-extern void dn_stop_fast_timer(struct sock *sk);
 
-extern dn_address decnet_address;
-extern unsigned char decnet_ether_address[6];
+extern __le16 decnet_address;
 extern int decnet_debug_level;
 extern int decnet_time_wait;
 extern int decnet_dn_count;
 extern int decnet_di_count;
 extern int decnet_dr_count;
 extern int decnet_no_fc_max_cwnd;
+
+extern long sysctl_decnet_mem[3];
+extern int sysctl_decnet_wmem[3];
+extern int sysctl_decnet_rmem[3];
 
 #endif /* _NET_DN_H */

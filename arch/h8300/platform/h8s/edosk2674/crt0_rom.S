@@ -3,27 +3,16 @@
  *
  *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
- *  Platform depend startup for uClinux-2.4.x
- *  Target Archtecture:	EDOSK-2674R
+ *  Platform depend startup
+ *  Target Archtecture:	EDOSK-2674
  *  Memory Layout     :	ROM
  */
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
 #include <asm/regs267x.h>
 		
-#if !defined(CONFIG_BLKDEV_RESERVE)
-#if defined(CONFIG_GDB_DEBUG)
-#define RAMEND (_ramend - 0xc000)
-#else
-#define RAMEND _ramend
-#endif
-#else
-#define RAMEND CONFIG_BLKDEV_RESERVE_ADDRESS
-#endif
-	
 	.global SYMBOL_NAME(_start)
 	.global SYMBOL_NAME(_command_line)
 	.global SYMBOL_NAME(_platform_gpio_table)
@@ -35,7 +24,7 @@
 
 	/* CPU Reset entry */
 SYMBOL_NAME_LABEL(_start)
-	mov.l	#RAMEND,sp
+	mov.l	#__ramend,sp
 	ldc	#0x80,ccr
 	ldc	#0,exr
 	
@@ -97,10 +86,9 @@ SYMBOL_NAME_LABEL(_start)
 	mov.w	#512,r4
 	eepmov.w
 
-	/* uClinux kernel start */
+	/* linux kernel start */
 	ldc	#0x90,ccr	/* running kernel */
-	mov.l	#SYMBOL_NAME(init_task_union),sp
-	mov.l	sp,@SYMBOL_NAME(_current_task)
+	mov.l	#SYMBOL_NAME(init_thread_union),sp
 	add.l	#0x2000,sp
 	jsr	@_start_kernel
 _exit:
@@ -179,6 +167,7 @@ gpio_table:
 	;; PHDDR
 	.byte	0x00,0x00
 
+	.section .rodata
 __target_name:	
 	.asciz	"EDOSK-2674"
 	
@@ -191,7 +180,7 @@ __command_line:
 	.long	__start
 	.long	__start
 vector	=	2
-	.rept	126-1
+	.rept	126
 	.long	_interrupt_redirect_table+vector*4
 vector	=	vector + 1
 	.endr

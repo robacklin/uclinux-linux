@@ -22,10 +22,12 @@
 #include <linux/linkage.h>
 #include <linux/init.h>
 #include <linux/major.h>
+#include <linux/genhd.h>
 #include <linux/rtc.h>
+#include <linux/interrupt.h>
+#include <linux/bcd.h>
 
 #include <asm/bootinfo.h>
-#include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/setup.h>
 #include <asm/irq.h>
@@ -34,36 +36,18 @@
 #include <asm/machdep.h>
 #include <asm/bvme6000hw.h>
 
-extern void bvme6000_process_int (int level, struct pt_regs *regs);
-extern void bvme6000_init_IRQ (void);
-extern void bvme6000_free_irq (unsigned int, void *);
-extern int  bvme6000_get_irq_list (char *);
-extern void bvme6000_enable_irq (unsigned int);
-extern void bvme6000_disable_irq (unsigned int);
 static void bvme6000_get_model(char *model);
-static int  bvme6000_get_hardware_list(char *buffer);
-extern int  bvme6000_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname, void *dev_id);
-extern void bvme6000_sched_init(void (*handler)(int, void *, struct pt_regs *));
-extern int  bvme6000_keyb_init(void);
-extern int  bvme6000_kbdrate (struct kbd_repeat *);
+extern void bvme6000_sched_init(irq_handler_t handler);
 extern unsigned long bvme6000_gettimeoffset (void);
-extern void bvme6000_gettod (int *year, int *mon, int *day, int *hour,
-                           int *min, int *sec);
 extern int bvme6000_hwclk (int, struct rtc_time *);
 extern int bvme6000_set_clock_mmss (unsigned long);
-extern void bvme6000_check_partition (struct gendisk *hd, unsigned int dev);
-extern void bvme6000_mksound( unsigned int count, unsigned int ticks );
 extern void bvme6000_reset (void);
-extern void bvme6000_waitbut(void);
 void bvme6000_set_vectors (void);
 
-static unsigned char bcd2bin (unsigned char b);
-static unsigned char bin2bcd (unsigned char b);
+/* Save tick handler routine pointer, will point to xtime_update() in
+ * kernel/timer/timekeeping.c, called via bvme6000_process_int() */
 
-/* Save tick handler routine pointer, will point to do_timer() in
- * kernel/sched.c, called via bvme6000_process_int() */
-
-static void (*tick_handler)(int, void *, struct pt_regs *);
+static irq_handler_t tick_handler;
 
 
 int bvme6000_parse_bootinfo(const struct bi_record *bi)
@@ -74,16 +58,7 @@ int bvme6000_parse_bootinfo(const struct bi_record *bi)
 		return 1;
 }
 
-int bvme6000_kbdrate (struct kbd_repeat *k)
-{
-	return 0;
-}
-
-void bvme6000_mksound( unsigned int count, unsigned int ticks )
-{
-}
-
-void bvme6000_reset()
+void bvme6000_reset(void)
 {
 	volatile PitRegsPtr pit = (PitRegsPtr)BVME_PIT_BASE;
 
@@ -104,15 +79,14 @@ static void bvme6000_get_model(char *model)
     sprintf(model, "BVME%d000", m68k_cputype == CPU_68060 ? 6 : 4);
 }
 
-
-/* No hardware options on BVME6000? */
-
-static int bvme6000_get_hardware_list(char *buffer)
+/*
+ * This function is called during kernel startup to initialize
+ * the bvme6000 IRQ handling routines.
+ */
+static void __init bvme6000_init_IRQ(void)
 {
-    *buffer = '\0';
-    return 0;
+	m68k_setup_user_interrupt(VEC_USER, 192);
 }
-
 
 void __init config_bvme6000(void)
 {
@@ -135,25 +109,12 @@ void __init config_bvme6000(void)
 
     mach_max_dma_address = 0xffffffff;
     mach_sched_init      = bvme6000_sched_init;
-#ifdef CONFIG_VT
-    mach_keyb_init       = bvme6000_keyb_init;
-    mach_kbdrate         = bvme6000_kbdrate;
-#endif
     mach_init_IRQ        = bvme6000_init_IRQ;
     mach_gettimeoffset   = bvme6000_gettimeoffset;
-    mach_gettod  	 = bvme6000_gettod;
     mach_hwclk           = bvme6000_hwclk;
     mach_set_clock_mmss	 = bvme6000_set_clock_mmss;
-/*  mach_mksound         = bvme6000_mksound; */
     mach_reset		 = bvme6000_reset;
-    mach_free_irq	 = bvme6000_free_irq;
-    mach_process_int	 = bvme6000_process_int;
-    mach_get_irq_list	 = bvme6000_get_irq_list;
-    mach_request_irq	 = bvme6000_request_irq;
-    enable_irq		 = bvme6000_enable_irq;
-    disable_irq          = bvme6000_disable_irq;
     mach_get_model       = bvme6000_get_model;
-    mach_get_hardware_list = bvme6000_get_hardware_list;
 
     printk ("Board is %sconfigured as a System Controller\n",
 		*config_reg_ptr & BVME_CONFIG_SW1 ? "" : "not ");
@@ -161,7 +122,7 @@ void __init config_bvme6000(void)
     /* Now do the PIT configuration */
 
     pit->pgcr	= 0x00;	/* Unidirectional 8 bit, no handshake for now */
-    pit->psrr	= 0x18;	/* PIACK and PIRQ fucntions enabled */
+    pit->psrr	= 0x18;	/* PIACK and PIRQ functions enabled */
     pit->pacr	= 0x00;	/* Sub Mode 00, H2 i/p, no DMA */
     pit->padr	= 0x00;	/* Just to be tidy! */
     pit->paddr	= 0x00;	/* All inputs for now (safest) */
@@ -178,7 +139,7 @@ void __init config_bvme6000(void)
 }
 
 
-void bvme6000_abort_int (int irq, void *dev_id, struct pt_regs *fp)
+irqreturn_t bvme6000_abort_int (int irq, void *dev_id)
 {
         unsigned long *new = (unsigned long *)vectors;
         unsigned long *old = (unsigned long *)0xf8000000;
@@ -191,17 +152,18 @@ void bvme6000_abort_int (int irq, void *dev_id, struct pt_regs *fp)
         *(new+9) = *(old+9);            /* Trace */
         *(new+47) = *(old+47);          /* Trap #15 */
         *(new+0x1f) = *(old+0x1f);      /* ABORT switch */
+	return IRQ_HANDLED;
 }
 
 
-static void bvme6000_timer_int (int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t bvme6000_timer_int (int irq, void *dev_id)
 {
     volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
     unsigned char msr = rtc->msr & 0xc0;
 
     rtc->msr = msr | 0x20;		/* Ack the interrupt */
 
-    tick_handler(irq, dev_id, fp);
+    return tick_handler(irq, dev_id);
 }
 
 /*
@@ -213,7 +175,7 @@ static void bvme6000_timer_int (int irq, void *dev_id, struct pt_regs *fp)
  * so divide by 8 to get the microsecond result.
  */
 
-void bvme6000_sched_init (void (*timer_routine)(int, void *, struct pt_regs *))
+void bvme6000_sched_init (irq_handler_t timer_routine)
 {
     volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
     unsigned char msr = rtc->msr & 0xc0;
@@ -286,37 +248,6 @@ unsigned long bvme6000_gettimeoffset (void)
 
     return v;
 }
-
-extern void bvme6000_gettod (int *year, int *mon, int *day, int *hour,
-                           int *min, int *sec)
-{
-	volatile RtcPtr_t rtc = (RtcPtr_t)BVME_RTC_BASE;
-	unsigned char msr = rtc->msr & 0xc0;
-
-	rtc->msr = 0;		/* Ensure clock accessible */
-
-	do {	/* Loop until we get a reading with a stable seconds field */
-		*sec = bcd2bin (rtc->bcd_sec);
-		*min = bcd2bin (rtc->bcd_min);
-		*hour = bcd2bin (rtc->bcd_hr);
-		*day = bcd2bin (rtc->bcd_dom);
-		*mon = bcd2bin (rtc->bcd_mth);
-		*year = bcd2bin (rtc->bcd_year);
-	} while (bcd2bin (rtc->bcd_sec) != *sec);
-
-	rtc->msr = msr;
-}
-
-static unsigned char bcd2bin (unsigned char b)
-{
-	return ((b>>4)*10 + (b&15));
-}
-
-static unsigned char bin2bcd (unsigned char b)
-{
-	return (((b/10)*16) + (b%10));
-}
-
 
 /*
  * Looks like op is non-zero for setting the clock, and zero for
@@ -398,8 +329,7 @@ int bvme6000_set_clock_mmss (unsigned long nowtime)
 		? real_minutes - rtc_minutes
 			: rtc_minutes - real_minutes) < 30)
 	{
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		rtc_tenms = rtc->bcd_tenms;
 		while (rtc_tenms == rtc->bcd_tenms)
 			;
@@ -407,7 +337,7 @@ int bvme6000_set_clock_mmss (unsigned long nowtime)
 			;
 		rtc->bcd_min = bin2bcd(real_minutes);
 		rtc->bcd_sec = bin2bcd(real_seconds);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 	else
 		retval = -1;
@@ -417,8 +347,3 @@ int bvme6000_set_clock_mmss (unsigned long nowtime)
 	return retval;
 }
 
-
-int bvme6000_keyb_init (void)
-{
-	return 0;
-}

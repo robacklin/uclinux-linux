@@ -10,27 +10,31 @@
  *                         2002/08/07 Erich Focht <efocht@ess.nec.de>
  */
 
-#include <linux/config.h>
+#include <linux/cpu.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/node.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
-#include <linux/mmzone.h>
-#include <linux/smp.h>
+#include <linux/module.h>
+#include <asm/mmzone.h>
 #include <asm/numa.h>
+
 
 /*
  * The following structures are usually initialized by ACPI or
  * similar mechanisms and describe the NUMA characteristics of the machine.
  */
-int num_memblks = 0;
-struct node_memblk_s node_memblk[NR_MEMBLKS];
-struct node_cpuid_s node_cpuid[NR_CPUS];
+int num_node_memblks;
+struct node_memblk_s node_memblk[NR_NODE_MEMBLKS];
+struct node_cpuid_s node_cpuid[NR_CPUS] =
+	{ [0 ... NR_CPUS-1] = { .phys_id = 0, .nid = NUMA_NO_NODE } };
+
 /*
  * This is a matrix with "distances" between nodes, they should be
  * proportional to the memory access latency ratios.
  */
-u8 numa_slit[NR_NODES * NR_NODES];
+u8 numa_slit[MAX_NUMNODES * MAX_NUMNODES];
 
 /* Identify which cnode a physical address resides on */
 int
@@ -38,67 +42,51 @@ paddr_to_nid(unsigned long paddr)
 {
 	int	i;
 
-	for (i = 0; i < num_memblks; i++)
+	for (i = 0; i < num_node_memblks; i++)
 		if (paddr >= node_memblk[i].start_paddr &&
 		    paddr < node_memblk[i].start_paddr + node_memblk[i].size)
 			break;
 
-	return (i < num_memblks) ? node_memblk[i].nid : (num_memblks ? -1 : 0);
+	return (i < num_node_memblks) ? node_memblk[i].nid : (num_node_memblks ? -1 : 0);
 }
 
-/* return end addr of a memblk */
-unsigned long
-memblk_endpaddr(unsigned long paddr)
-{
-	int	i;
-
-	for (i = 0; i < num_memblks; i++)
-		if (paddr >= node_memblk[i].start_paddr &&
-		    paddr < node_memblk[i].start_paddr + node_memblk[i].size)
-			return node_memblk[i].start_paddr + node_memblk[i].size;
-
-	return 0;
-}
-
-
-/* on which node is each logical CPU (one cacheline even for 64 CPUs) */
-volatile char cpu_to_node_map[NR_CPUS] __cacheline_aligned;
-
-/* which logical CPUs are on which nodes */
-volatile unsigned long node_to_cpu_mask[NR_NODES]  __cacheline_aligned;
-
+#if defined(CONFIG_SPARSEMEM) && defined(CONFIG_NUMA)
 /*
- * Build cpu to node mapping and initialize the per node cpu masks.
+ * Because of holes evaluate on section limits.
+ * If the section of memory exists, then return the node where the section
+ * resides.  Otherwise return node 0 as the default.  This is used by
+ * SPARSEMEM to allocate the SPARSEMEM sectionmap on the NUMA node where
+ * the section resides.
  */
-void __init
-build_cpu_to_node_map (void)
+int __meminit __early_pfn_to_nid(unsigned long pfn)
 {
-	int cpu, i, node;
+	int i, section = pfn >> PFN_SECTION_SHIFT, ssec, esec;
 
-	for(cpu = 0; cpu < NR_CPUS; ++cpu) {
-		/*
-		 * All Itanium NUMA platforms I know use ACPI, so maybe we
-		 * can drop this ifdef completely.                    [EF]
-		 */
-#ifdef CONFIG_SMP
-# ifdef CONFIG_ACPI_NUMA
-		node = -1;
-		for (i = 0; i < NR_CPUS; ++i) {
-			extern volatile int ia64_cpu_to_sapicid[];
-			if (ia64_cpu_to_sapicid[cpu] == node_cpuid[i].phys_id) {
-				node = node_cpuid[i].nid;
-				break;
-			}
-		}
-# else
-#		error Fixme: Dunno how to build CPU-to-node map.
-# endif
-		cpu_to_node_map[cpu] = node;
-		if (node >= 0)
-			__set_bit(cpu, &node_to_cpu_mask[node]);
-#else
-			__set_bit(0, &node_to_cpu_mask[0]);
-#endif
+	for (i = 0; i < num_node_memblks; i++) {
+		ssec = node_memblk[i].start_paddr >> PA_SECTION_SHIFT;
+		esec = (node_memblk[i].start_paddr + node_memblk[i].size +
+			((1L << PA_SECTION_SHIFT) - 1)) >> PA_SECTION_SHIFT;
+		if (section >= ssec && section < esec)
+			return node_memblk[i].nid;
 	}
+
+	return -1;
 }
 
+#ifdef CONFIG_MEMORY_HOTPLUG
+/*
+ *  SRAT information is stored in node_memblk[], then we can use SRAT
+ *  information at memory-hot-add if necessary.
+ */
+
+int memory_add_physaddr_to_nid(u64 addr)
+{
+	int nid = paddr_to_nid(addr);
+	if (nid < 0)
+		return 0;
+	return nid;
+}
+
+EXPORT_SYMBOL_GPL(memory_add_physaddr_to_nid);
+#endif
+#endif

@@ -1,7 +1,8 @@
 #ifndef _LINUX_LINKAGE_H
 #define _LINUX_LINKAGE_H
 
-#include <linux/config.h>
+#include <linux/compiler.h>
+#include <asm/linkage.h>
 
 #ifdef __cplusplus
 #define CPP_ASMLINKAGE extern "C"
@@ -9,54 +10,81 @@
 #define CPP_ASMLINKAGE
 #endif
 
-#if defined __i386__
-#define asmlinkage CPP_ASMLINKAGE __attribute__((regparm(0)))
-#elif defined __ia64__
-#define asmlinkage CPP_ASMLINKAGE __attribute__((syscall_linkage))
-#else
+#ifndef asmlinkage
 #define asmlinkage CPP_ASMLINKAGE
 #endif
 
-#define SYMBOL_NAME_STR(X) #X
-#define SYMBOL_NAME(X) X
-#ifdef __STDC__
-#define SYMBOL_NAME_LABEL(X) X##:
-#else
-#define SYMBOL_NAME_LABEL(X) X/**/:
+#define __page_aligned_data	__section(.data..page_aligned) __aligned(PAGE_SIZE)
+#define __page_aligned_bss	__section(.bss..page_aligned) __aligned(PAGE_SIZE)
+
+/*
+ * For assembly routines.
+ *
+ * Note when using these that you must specify the appropriate
+ * alignment directives yourself
+ */
+#define __PAGE_ALIGNED_DATA	.section ".data..page_aligned", "aw"
+#define __PAGE_ALIGNED_BSS	.section ".bss..page_aligned", "aw"
+
+/*
+ * This is used by architectures to keep arguments on the stack
+ * untouched by the compiler by keeping them live until the end.
+ * The argument stack may be owned by the assembly-language
+ * caller, not the callee, and gcc doesn't always understand
+ * that.
+ *
+ * We have the return value, and a maximum of six arguments.
+ *
+ * This should always be followed by a "return ret" for the
+ * protection to work (ie no more work that the compiler might
+ * end up needing stack temporaries for).
+ */
+/* Assembly files may be compiled with -traditional .. */
+#ifndef __ASSEMBLY__
+#ifndef asmlinkage_protect
+# define asmlinkage_protect(n, ret, args...)	do { } while (0)
+#endif
 #endif
 
-#ifdef __arm__
-#define __ALIGN .align 0
-#define __ALIGN_STR ".align 0"
-#else
-#ifdef __mc68000__
-#define __ALIGN .align 4
-#define __ALIGN_STR ".align 4"
-#else
-#ifdef __sh__
-#define __ALIGN .balign 4
-#define __ALIGN_STR ".balign 4"
-#else
-#if defined(__i386__) && defined(CONFIG_X86_ALIGNMENT_16)
-#define __ALIGN .align 16,0x90
-#define __ALIGN_STR ".align 16,0x90"
-#else
-#define __ALIGN .align 4,0x90
-#define __ALIGN_STR ".align 4,0x90"
+#ifndef __ALIGN
+#define __ALIGN		.align 4,0x90
+#define __ALIGN_STR	".align 4,0x90"
 #endif
-#endif /* __sh__ */
-#endif /* __mc68000__ */
-#endif /* __arm__ */
 
 #ifdef __ASSEMBLY__
 
+#ifndef LINKER_SCRIPT
 #define ALIGN __ALIGN
 #define ALIGN_STR __ALIGN_STR
 
+#ifndef ENTRY
 #define ENTRY(name) \
-  .globl SYMBOL_NAME(name); \
+  .globl name; \
   ALIGN; \
-  SYMBOL_NAME_LABEL(name)
+  name:
+#endif
+#endif /* LINKER_SCRIPT */
+
+#ifndef WEAK
+#define WEAK(name)	   \
+	.weak name;	   \
+	name:
+#endif
+
+#ifndef END
+#define END(name) \
+  .size name, .-name
+#endif
+
+/* If symbol 'name' is treated as a subroutine (gets called, and returns)
+ * then please use ENDPROC to mark 'name' as STT_FUNC for the benefit of
+ * static analysis tools such as stack depth analyzer.
+ */
+#ifndef ENDPROC
+#define ENDPROC(name) \
+  .type name, @function; \
+  END(name)
+#endif
 
 #endif
 

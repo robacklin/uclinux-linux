@@ -10,24 +10,24 @@
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 
 /*****************************************************************************/
 /*
  * copy a null terminated string from userspace
  */
-long strncpy_from_user(char *dst, const char *src, long count)
+long strncpy_from_user(char *dst, const char __user *src, long count)
 {
 	unsigned long max;
 	char *p, ch;
 	long err = -EFAULT;
 
-	if (count < 0)
-		BUG();
+	BUG_ON(count < 0);
 
 	p = dst;
 
-#ifdef NO_MM
+#ifndef CONFIG_MMU
 	if ((unsigned long) src < memory_start)
 		goto error;
 #endif
@@ -40,7 +40,7 @@ long strncpy_from_user(char *dst, const char *src, long count)
 		memset(dst + max, 0, count - max);
 		count = max;
 	}
-	
+
 	err = 0;
 	for (; count > 0; count--, p++, src++) {
 		__get_user_asm(err, ch, src, "ub", "=r");
@@ -58,7 +58,10 @@ long strncpy_from_user(char *dst, const char *src, long count)
 		memset(p, 0, count); /* clear remainder of buffer [security] */
 
 	return err;
+
 } /* end strncpy_from_user() */
+
+EXPORT_SYMBOL(strncpy_from_user);
 
 /*****************************************************************************/
 /*
@@ -66,16 +69,15 @@ long strncpy_from_user(char *dst, const char *src, long count)
  *
  * Return 0 on exception, a value greater than N if too long
  */
-long strnlen_user(const char *src, long count)
+long strnlen_user(const char __user *src, long count)
 {
-	const char *p;
+	const char __user *p;
 	long err = 0;
 	char ch;
 
-	if (count < 0)
-		BUG();
+	BUG_ON(count < 0);
 
-#ifdef NO_MM
+#ifndef CONFIG_MMU
 	if ((unsigned long) src < memory_start)
 		return 0;
 #endif
@@ -92,4 +94,7 @@ long strnlen_user(const char *src, long count)
 	}
 
 	return p - src + 1; /* return length including NUL */
+
 } /* end strnlen_user() */
+
+EXPORT_SYMBOL(strnlen_user);

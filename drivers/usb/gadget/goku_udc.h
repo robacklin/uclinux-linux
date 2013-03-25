@@ -41,8 +41,10 @@ struct goku_udc_regs {
 #define INT_SYSERROR		0x40000
 #define INT_PWRDETECT		0x80000
 
-#define	INT_DEVWIDE		(INT_PWRDETECT|INT_SYSERROR/*|INT_ERR*/|INT_USBRESET|INT_SUSPEND)
-#define	INT_EP0 		(INT_SETUP|INT_ENDPOINT0/*|INT_STATUS*/|INT_STATUSNAK)
+#define	INT_DEVWIDE \
+	(INT_PWRDETECT|INT_SYSERROR/*|INT_ERR*/|INT_USBRESET|INT_SUSPEND)
+#define	INT_EP0 \
+	(INT_SETUP|INT_ENDPOINT0/*|INT_STATUS*/|INT_STATUSNAK)
 
 	u32	dma_master;
 #define MST_EOPB_DIS		0x0800
@@ -216,9 +218,9 @@ struct goku_ep {
 	struct list_head			queue;
 	const struct usb_endpoint_descriptor	*desc;
 
-	u32					*reg_fifo;
-	u32					*reg_mode;
-	u32					*reg_status;
+	u32 __iomem				*reg_fifo;
+	u32 __iomem				*reg_mode;
+	u32 __iomem				*reg_status;
 };
 
 struct goku_request {
@@ -231,7 +233,7 @@ struct goku_request {
 enum ep0state {
 	EP0_DISCONNECT,		/* no host */
 	EP0_IDLE,		/* between STATUS ack and SETUP report */
-	EP0_IN, EP0_OUT, 	/* data stage */
+	EP0_IN, EP0_OUT,	/* data stage */
 	EP0_STATUS,		/* status stage */
 	EP0_STALL,		/* data or status stages */
 	EP0_SUSPEND,		/* usb suspend */
@@ -242,18 +244,19 @@ struct goku_udc {
 	struct usb_gadget		gadget;
 	spinlock_t			lock;
 	struct goku_ep			ep[4];
-	struct usb_gadget_driver 	*driver;
+	struct usb_gadget_driver	*driver;
 
 	enum ep0state			ep0state;
 	unsigned			got_irq:1,
 					got_region:1,
 					req_config:1,
 					configured:1,
-					enabled:1;
+					enabled:1,
+					registered:1;
 
 	/* pci state used to access those endpoints */
 	struct pci_dev			*pdev;
-	struct goku_udc_regs		*regs;
+	struct goku_udc_regs __iomem	*regs;
 	u32				int_enable;
 
 	/* statistics... */
@@ -283,39 +286,8 @@ struct goku_udc {
 
 #define ERROR(dev,fmt,args...) \
 	xprintk(dev , KERN_ERR , fmt , ## args)
-#define WARN(dev,fmt,args...) \
+#define WARNING(dev,fmt,args...) \
 	xprintk(dev , KERN_WARNING , fmt , ## args)
 #define INFO(dev,fmt,args...) \
 	xprintk(dev , KERN_INFO , fmt , ## args)
 
-/*-------------------------------------------------------------------------*/
-
-/* 2.5 stuff that's sometimes missing in 2.4 */
-
-#ifndef container_of
-#define	container_of	list_entry
-#endif
-
-#ifndef likely
-#define likely(x)	(x)
-#define unlikely(x)	(x)
-#endif
-
-#ifndef BUG_ON
-#define BUG_ON(condition) do { if (unlikely((condition)!=0)) BUG(); } while(0)
-#endif
-
-#ifndef WARN_ON
-#define	WARN_ON(x)	do { } while (0)
-#endif
-
-#ifndef	IRQ_NONE
-typedef void irqreturn_t;
-#define IRQ_NONE
-#define IRQ_HANDLED
-#define IRQ_RETVAL(x)
-#endif
-
-#ifndef pci_name
-#define pci_name(pdev)	((pdev)->slot_name)
-#endif

@@ -3,14 +3,13 @@
  *
  *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
- *  Platform depend startup for uClinux-2.4.x
+ *  Platform depend startup
  *  Target Archtecture:	AE-3068 (aka. aki3068net)
  *  Memory Layout     :	RAM
  */
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
 	
 #if !defined(CONFIG_BLKDEV_RESERVE)
@@ -40,14 +39,13 @@ SYMBOL_NAME_LABEL(_start)
 
 	/* Peripheral Setup */
 	
-#if defined(CONFIG_BLK_DEV_BLKMEM)
+#if defined(CONFIG_MTD_UCLINUX)
 	/* move romfs image */
 	jsr	@__move_romfs	
 #endif
 	
 	/* .bss clear */
 	mov.l	#__sbss,er5
-	mov.l	er5,er6
 	mov.l	#__ebss,er4
 	sub.l	er5,er4
 	shlr	er4
@@ -67,8 +65,7 @@ SYMBOL_NAME_LABEL(_start)
 
 	/* uClinux kernel start */
 	ldc	#0x90,ccr	/* running kernel */
-	mov.l	#SYMBOL_NAME(init_task_union),sp
-	mov.l	sp,@SYMBOL_NAME(_current_task)
+	mov.l	#SYMBOL_NAME(init_thread_union),sp
 	add.l	#0x2000,sp
 	jsr	@_start_kernel
 _exit:

@@ -3,55 +3,40 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1995, 1998, 2001 by Ralf Baechle
+# Copyright (C) 1995, 1998, 2001, 2002 by Ralf Baechle
 # Copyright (C) 2004  Maciej W. Rozycki
 #
-
-USE_STANDARD_AS_RULE := true
 
 #
 # Some DECstations need all possible sections of an ECOFF executable
 #
-ifdef CONFIG_DECSTATION
-  E2EFLAGS = -a
-else
-  E2EFLAGS =
+ifdef CONFIG_MACH_DECSTATION
+  e2eflag := -a
 endif
 
 #
 # Drop some uninteresting sections in the kernel.
 # This is only relevant for ELF kernels but doesn't hurt a.out
 #
-drop-sections	= .reginfo .mdebug .comment .note .pdr .options .MIPS.options
-strip-flags	= $(addprefix --remove-section=,$(drop-sections))
+drop-sections := .reginfo .mdebug .comment .note .pdr .options .MIPS.options
+strip-flags   := $(addprefix --remove-section=,$(drop-sections))
 
-VMLINUX = $(TOPDIR)/vmlinux
+hostprogs-y := elf2ecoff
 
-all:
+targets := vmlinux.ecoff
+quiet_cmd_ecoff = ECOFF   $@
+      cmd_ecoff = $(obj)/elf2ecoff $(VMLINUX) $@ $(e2eflag)
+$(obj)/vmlinux.ecoff: $(obj)/elf2ecoff $(VMLINUX) FORCE
+	$(call if_changed,ecoff)
 
-boot: vmlinux.ecoff vmlinux.srec addinitrd
+targets += vmlinux.bin
+quiet_cmd_bin = OBJCOPY $@
+      cmd_bin = $(OBJCOPY) -O binary $(strip-flags) $(VMLINUX) $@
+$(obj)/vmlinux.bin: $(VMLINUX) FORCE
+	$(call if_changed,bin)
 
-vmlinux.ecoff:	$(CONFIGURE) elf2ecoff $(VMLINUX)
-	./elf2ecoff $(VMLINUX) vmlinux.ecoff $(E2EFLAGS)
-
-elf2ecoff: elf2ecoff.c
-	$(HOSTCC) -o $@ $^
-
-vmlinux.srec: $(CONFIGURE) $(VMLINUX)
-	$(OBJCOPY) -S -O srec $(strip-flags) $(VMLINUX) vmlinux.srec
-
-addinitrd: addinitrd.c
-	$(HOSTCC) -o $@ $^
-
-# Don't build dependencies, this may die if $(CC) isn't gcc
-dep:
-
-clean:
-	rm -f vmlinux.ecoff vmlinux.srec
-
-mrproper:
-	rm -f vmlinux.ecoff vmlinux.srec addinitrd elf2ecoff
-
-dummy:
-
-include $(TOPDIR)/Rules.make
+targets += vmlinux.srec
+quiet_cmd_srec = OBJCOPY $@
+      cmd_srec = $(OBJCOPY) -S -O srec $(strip-flags) $(VMLINUX) $@
+$(obj)/vmlinux.srec: $(VMLINUX) FORCE
+	$(call if_changed,srec)

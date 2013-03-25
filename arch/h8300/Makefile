@@ -1,61 +1,71 @@
 #
-# h8300/Makefile
-#
-# This file is included by the global makefile so that you can add your own
-# architecture-specific flags and dependencies. Remember to do have actions
-# for "archclean" and "archdep" for cleaning up and making dependencies for
-# this architecture
+# arch/h8300/Makefile
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (c) 2002 Yoshinori Sato <ysato@users.sourceforge.jp>
-#
-# Based on arch/m68knommu/Makefile
-# Copyright (c) 1999,2001  D. Jeff Dionne <jeff@uClinux.org>,
-#	                   Rt-Control Inc. / Lineo, Inc.
-#
-# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uclinux.org>,
-#                          Kenneth Albanowski <kjahds@kjahds.com>,
-#
-# Based on arch/m68k/Makefile:
-# Copyright (C) 1994 by Hamish Macdonald
+# (C) Copyright 2002,2003 Yoshinori Sato <ysato@users.sourceforge.jp>
 #
 
-# test for cross compiling
-COMPILE_ARCH = $(shell uname -m)
+platform-$(CONFIG_CPU_H8300H)	:= h8300h
+platform-$(CONFIG_CPU_H8S)	:= h8s
+PLATFORM := $(platform-y)
 
-#
-# If you want the kernel build to build modules outside of the tree
-# then define this and pass it to the main linux makefile
-#
-ifdef EXTRA_MODULE_DIRS
-SUBDIRS += $(EXTRA_MODULE_DIRS)
-endif
+board-$(CONFIG_H8300H_GENERIC)		:= generic
+board-$(CONFIG_H8300H_AKI3068NET)	:= aki3068net
+board-$(CONFIG_H8300H_H8MAX)		:= h8max
+board-$(CONFIG_H8300H_SIM)		:= generic
+board-$(CONFIG_H8S_GENERIC)		:= generic
+board-$(CONFIG_H8S_EDOSK2674)		:= edosk2674
+board-$(CONFIG_H8S_SIM)			:= generic
+BOARD := $(board-y)
 
-UTS_SYSNAME = -DUTS_SYSNAME=\"uClinux\"
+model-$(CONFIG_RAMKERNEL)	:= ram
+model-$(CONFIG_ROMKERNEL)	:= rom
+MODEL := $(model-y)
 
-# Find out which board we are compiling for
-include arch/$(ARCH)/Boards.mk
+cflags-$(CONFIG_CPU_H8300H)	:= -mh
+ldflags-$(CONFIG_CPU_H8300H)	:= -mh8300helf
+cflags-$(CONFIG_CPU_H8S)	:= -ms
+ldflags-$(CONFIG_CPU_H8S)	:= -mh8300self
 
-# Set up the memory model.  RAM or ROM.
-ifdef CONFIG_RAMKERNEL
-MODEL = ram
-endif
-ifdef CONFIG_ROMKERNEL
-MODEL = rom
-endif
-export MODEL
+KBUILD_CFLAGS += $(cflags-y)
+KBUILD_CFLAGS += -mint32 -fno-builtin
+KBUILD_CFLAGS += -g
+KBUILD_CFLAGS += -D__linux__
+KBUILD_CFLAGS += -DUTS_SYSNAME=\"uClinux\"
+KBUILD_AFLAGS += -DPLATFORM=$(PLATFORM) -DMODEL=$(MODEL) $(cflags-y)
+LDFLAGS += $(ldflags-y)
 
-# get the compiler, flags and targets from the platform
+CROSS_COMPILE = h8300-elf-
+LIBGCC := $(shell $(CROSS-COMPILE)$(CC) $(KBUILD_CFLAGS) -print-libgcc-file-name)
+
+head-y := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/crt0_$(MODEL).o
+
+core-y	+= arch/$(ARCH)/kernel/ \
+	   arch/$(ARCH)/mm/
 ifdef PLATFORM
-include arch/$(ARCH)/platform/$(PLATFORM)/Rules.make
+core-y	+= arch/$(ARCH)/platform/$(PLATFORM)/ \
+	   arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/
 endif
 
-bootstrap:
-	@$(MAKEBOOT) bootstrap
+libs-y	+= arch/$(ARCH)/lib/ $(LIBGCC)
+
+boot := arch/h8300/boot
+
+export MODEL PLATFORM BOARD
 
 archmrproper:
 
-archdep:
+archclean:
+	$(Q)$(MAKE) $(clean)=$(boot)
+
+vmlinux.srec vmlinux.bin zImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+define archhelp
+  @echo  'vmlinux.bin  - Create raw binary'
+  @echo  'vmlinux.srec - Create srec binary'
+  @echo  'zImage       - Compressed kernel image'
+endef

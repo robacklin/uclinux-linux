@@ -4,24 +4,22 @@
  *  Copyright (C) 1995  Hamish Macdonald
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
+#include <linux/gfp.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/machdep.h>
 
-struct pgtable_cache_struct quicklists;
 
 /* ++andreas: {get,free}_pointer_table rewritten to use unused fields from
    struct page instead of separately kmalloced struct.  Stolen from
@@ -30,8 +28,8 @@ struct pgtable_cache_struct quicklists;
 typedef struct list_head ptable_desc;
 static LIST_HEAD(ptable_list);
 
-#define PD_PTABLE(page) ((ptable_desc *)virt_to_page(page))
-#define PD_PAGE(ptable) (list_entry(ptable, struct page, list))
+#define PD_PTABLE(page) ((ptable_desc *)&(virt_to_page(page)->lru))
+#define PD_PAGE(ptable) (list_entry(ptable, struct page, lru))
 #define PD_MARKBITS(dp) (*(unsigned char *)&PD_PAGE(dp)->index)
 
 #define PTABLE_SIZE (PTRS_PER_PMD * sizeof(pmd_t))
@@ -55,7 +53,7 @@ void __init init_pointer_table(unsigned long ptable)
 
 	/* unreserve the page so it's possible to free that page */
 	PD_PAGE(dp)->flags &= ~(1 << PG_reserved);
-	atomic_set(&PD_PAGE(dp)->count, 1);
+	init_page_count(PD_PAGE(dp));
 
 	return;
 }
@@ -74,14 +72,14 @@ pmd_t *get_pointer_table (void)
 	 * virtual address space to be noncacheable.
 	 */
 	if (mask == 0) {
-		unsigned long page;
+		void *page;
 		ptable_desc *new;
 
-		if (!(page = get_free_page (GFP_KERNEL)))
-			return 0;
+		if (!(page = (void *)get_zeroed_page(GFP_KERNEL)))
+			return NULL;
 
 		flush_tlb_kernel_page(page);
-		nocache_page (page);
+		nocache_page(page);
 
 		new = PD_PTABLE(page);
 		PD_MARKBITS(new) = 0xfe;
@@ -95,8 +93,7 @@ pmd_t *get_pointer_table (void)
 	PD_MARKBITS(dp) = mask & ~tmp;
 	if (!PD_MARKBITS(dp)) {
 		/* move to end of list */
-		list_del(dp);
-		list_add_tail(dp, &ptable_list);
+		list_move_tail(dp, &ptable_list);
 	}
 	return (pmd_t *) (page_address(PD_PAGE(dp)) + off);
 }
@@ -116,7 +113,7 @@ int free_pointer_table (pmd_t *ptable)
 	if (PD_MARKBITS(dp) == 0xff) {
 		/* all tables in page are free, free page */
 		list_del(dp);
-		cache_page (page);
+		cache_page((void *)page);
 		free_page (page);
 		return 1;
 	} else if (ptable_list.next != dp) {
@@ -124,72 +121,10 @@ int free_pointer_table (pmd_t *ptable)
 		 * move this descriptor to the front of the list, since
 		 * it has one or more free tables.
 		 */
-		list_del(dp);
-		list_add(dp, &ptable_list);
+		list_move(dp, &ptable_list);
 	}
 	return 0;
 }
-
-#if DEBUG_INVALID_PTOV
-int mm_inv_cnt = 5;
-#endif
-
-#ifndef CONFIG_SINGLE_MEMORY_CHUNK
-/*
- * The following two routines map from a physical address to a kernel
- * virtual address and vice versa.
- */
-unsigned long mm_vtop(unsigned long vaddr)
-{
-	int i=0;
-	unsigned long voff = (unsigned long)vaddr - PAGE_OFFSET;
-
-	do {
-		if (voff < m68k_memory[i].size) {
-#ifdef DEBUGPV
-			printk ("VTOP(%p)=%lx\n", vaddr,
-				m68k_memory[i].addr + voff);
-#endif
-			return m68k_memory[i].addr + voff;
-		}
-		voff -= m68k_memory[i].size;
-	} while (++i < m68k_num_memory);
-
-	/* As a special case allow `__pa(high_memory)'.  */
-	if (voff == 0)
-		return m68k_memory[i-1].addr + m68k_memory[i-1].size;
-
-	return -1;
-}
-#endif
-
-#ifndef CONFIG_SINGLE_MEMORY_CHUNK
-unsigned long mm_ptov (unsigned long paddr)
-{
-	int i = 0;
-	unsigned long poff, voff = PAGE_OFFSET;
-
-	do {
-		poff = paddr - m68k_memory[i].addr;
-		if (poff < m68k_memory[i].size) {
-#ifdef DEBUGPV
-			printk ("PTOV(%lx)=%lx\n", paddr, poff + voff);
-#endif
-			return poff + voff;
-		}
-		voff += m68k_memory[i].size;
-	} while (++i < m68k_num_memory);
-
-#if DEBUG_INVALID_PTOV
-	if (mm_inv_cnt > 0) {
-		mm_inv_cnt--;
-		printk("Invalid use of phys_to_virt(0x%lx) at 0x%p!\n",
-			paddr, __builtin_return_address(0));
-	}
-#endif
-	return -1;
-}
-#endif
 
 /* invalidate page in both caches */
 static inline void clear040(unsigned long paddr)
@@ -267,7 +202,9 @@ static inline void pushcl040(unsigned long paddr)
 
 void cache_clear (unsigned long paddr, int len)
 {
-    if (CPU_IS_040_OR_060) {
+    if (CPU_IS_COLDFIRE) {
+	flush_cf_bcache(0, DCACHE_MAX_ADDR);
+    } else if (CPU_IS_040_OR_060) {
 	int tmp;
 
 	/*
@@ -299,9 +236,10 @@ void cache_clear (unsigned long paddr, int len)
 		      : "d0");
 #ifdef CONFIG_M68K_L2_CACHE
     if(mach_l2_flush)
-    	mach_l2_flush(0);
+	mach_l2_flush(0);
 #endif
 }
+EXPORT_SYMBOL(cache_clear);
 
 
 /*
@@ -313,7 +251,9 @@ void cache_clear (unsigned long paddr, int len)
 
 void cache_push (unsigned long paddr, int len)
 {
-    if (CPU_IS_040_OR_060) {
+    if (CPU_IS_COLDFIRE) {
+	flush_cf_bcache(0, DCACHE_MAX_ADDR);
+    } else if (CPU_IS_040_OR_060) {
 	int tmp = PAGE_SIZE;
 
 	/*
@@ -351,19 +291,8 @@ void cache_push (unsigned long paddr, int len)
 		      : "d0");
 #ifdef CONFIG_M68K_L2_CACHE
     if(mach_l2_flush)
-    	mach_l2_flush(1);
+	mach_l2_flush(1);
 #endif
 }
+EXPORT_SYMBOL(cache_push);
 
-
-#ifndef CONFIG_SINGLE_MEMORY_CHUNK
-int mm_end_of_chunk (unsigned long addr, int len)
-{
-	int i;
-
-	for (i = 0; i < m68k_num_memory; i++)
-		if (m68k_memory[i].addr + m68k_memory[i].size == addr + len)
-			return 1;
-	return 0;
-}
-#endif

@@ -1,11 +1,8 @@
 #
-# Makefile for the Linux Bluetooth RFCOMM layer
+# Makefile for the Linux Bluetooth RFCOMM layer.
 #
 
-O_TARGET := rfcomm.o
+obj-$(CONFIG_BT_RFCOMM) += rfcomm.o
 
-obj-y				:= core.o sock.o crc.o
-obj-$(CONFIG_BLUEZ_RFCOMM_TTY)	+= tty.o
-obj-m				+= $(O_TARGET)
-
-include $(TOPDIR)/Rules.make
+rfcomm-y			:= core.o sock.o
+rfcomm-$(CONFIG_BT_RFCOMM_TTY)	+= tty.o

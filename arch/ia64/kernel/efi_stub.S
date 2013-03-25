@@ -44,7 +44,7 @@
 
 GLOBAL_ENTRY(efi_call_phys)
 	.prologue ASM_UNW_PRLG_RP|ASM_UNW_PRLG_PFS, ASM_UNW_PRLG_GRSAVE(8)
-	alloc loc1=ar.pfs,8,5,7,0
+	alloc loc1=ar.pfs,8,7,7,0
 	ld8 r2=[in0],8			// load EFI function's entry point
 	mov loc0=rp
 	.body
@@ -61,7 +61,7 @@ GLOBAL_ENTRY(efi_call_phys)
 	or loc3=loc3,r17
 	mov b6=r2
 	;;
-	andcm r16=loc3,r16		// get psr with IT, DT, and RT bits cleared
+	andcm r16=loc3,r16	// get psr with IT, DT, and RT bits cleared
 	br.call.sptk.many rp=ia64_switch_mode_phys
 .ret0:	mov out4=in5
 	mov out0=in1
@@ -70,9 +70,13 @@ GLOBAL_ENTRY(efi_call_phys)
 	mov out3=in4
 	mov out5=in6
 	mov out6=in7
+	mov loc5=r19
+	mov loc6=r20
 	br.call.sptk.many rp=b6		// call the EFI function
 .ret1:	mov ar.rsc=0			// put RSE in enforced lazy, LE mode
 	mov r16=loc3
+	mov r19=loc5
+	mov r20=loc6
 	br.call.sptk.many rp=ia64_switch_mode_virt // return to virtual mode
 .ret2:	mov ar.rsc=loc4			// restore RSE configuration
 	mov ar.pfs=loc1

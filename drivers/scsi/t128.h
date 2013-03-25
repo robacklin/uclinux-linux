@@ -8,20 +8,20 @@
  *	drew@colorado.edu
  *      +1 (303) 440-4894
  *
- * DISTRIBUTION RELEASE 3. 
+ * DISTRIBUTION RELEASE 3.
  *
- * For more information, please consult 
+ * For more information, please consult
  *
  * Trantor Systems, Ltd.
  * T128/T128F/T228 SCSI Host Adapter
  * Hardware Specifications
- * 
- * Trantor Systems, Ltd. 
+ *
+ * Trantor Systems, Ltd.
  * 5415 Randall Place
  * Fremont, CA 94538
  * 1+ (415) 770-1400, FAX 1+ (415) 770-9910
- * 
- * and 
+ *
+ * and
  *
  * NCR 5380 Family
  * SCSI Protocol Controller
@@ -43,19 +43,20 @@
 
 #define T128_PUBLIC_RELEASE 3
 
+#define TDEBUG		0
 #define TDEBUG_INIT	0x1
 #define TDEBUG_TRANSFER 0x2
 
 /*
- * The trantor boards are memory mapped. They use an NCR5380 or 
+ * The trantor boards are memory mapped. They use an NCR5380 or
  * equivalent (my sample board had part second sourced from ZILOG).
- * NCR's recommended "Pseudo-DMA" architecture is used, where 
+ * NCR's recommended "Pseudo-DMA" architecture is used, where
  * a PAL drives the DMA signals on the 5380 allowing fast, blind
- * transfers with proper handshaking. 
+ * transfers with proper handshaking.
  */
 
 /*
- * Note : a boot switch is provided for the purpose of informing the 
+ * Note : a boot switch is provided for the purpose of informing the
  * firmware to boot or not boot from attached SCSI devices.  So, I imagine
  * there are fewer people who've yanked the ROM like they do on the Seagate
  * to make bootup faster, and I'll probably use this for autodetection.
@@ -91,70 +92,46 @@
 #define T_DATA_REG_OFFSET	0x1e00	/* rw 512 bytes long */
 
 #ifndef ASM
-int t128_abort(Scsi_Cmnd *);
-int t128_biosparam(Disk *, kdev_t, int*);
-int t128_detect(Scsi_Host_Template *);
-int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int t128_reset(Scsi_Cmnd *, unsigned int reset_flags);
-int t128_proc_info (char *buffer, char **start, off_t offset,
-		   int length, int hostno, int inout);
-
-#ifndef NULL
-#define NULL 0
-#endif
+static int t128_abort(struct scsi_cmnd *);
+static int t128_biosparam(struct scsi_device *, struct block_device *,
+			  sector_t, int*);
+static int t128_detect(struct scsi_host_template *);
+static int t128_queue_command(struct Scsi_Host *, struct scsi_cmnd *);
+static int t128_bus_reset(struct scsi_cmnd *);
 
 #ifndef CMD_PER_LUN
 #define CMD_PER_LUN 2
 #endif
 
 #ifndef CAN_QUEUE
-#define CAN_QUEUE 32 
+#define CAN_QUEUE 32
 #endif
-
-/* 
- * I hadn't thought of this with the earlier drivers - but to prevent
- * macro definition conflicts, we shouldn't define all of the internal
- * macros when this is being used solely for the host stub.
- */
-
-#define TRANTOR_T128 {					\
-	name:           "Trantor T128/T128F/T228",	\
-	detect:         t128_detect,			\
-	queuecommand:   t128_queue_command,		\
-	abort:          t128_abort,			\
-	reset:          t128_reset,			\
-	bios_param:     t128_biosparam,			\
-	can_queue:      CAN_QUEUE,			\
-        this_id:        7,				\
-	sg_tablesize:   SG_ALL,				\
-	cmd_per_lun:    CMD_PER_LUN,			\
-	use_clustering: DISABLE_CLUSTERING}
 
 #ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
-    unsigned long base
+    void __iomem *base
 
 #define NCR5380_local_declare() \
-    unsigned long base
+    void __iomem *base
 
 #define NCR5380_setup(instance) \
-    base = (instance)->base
+    base = ((struct NCR5380_hostdata *)(instance->hostdata))->base
 
 #define T128_address(reg) (base + T_5380_OFFSET + ((reg) * 0x20))
 
-#if !(TDEBUG & TDEBUG_TRANSFER) 
-#define NCR5380_read(reg) isa_readb(T128_address(reg))
-#define NCR5380_write(reg, value) isa_writeb((value),(T128_address(reg)))
+#if !(TDEBUG & TDEBUG_TRANSFER)
+#define NCR5380_read(reg) readb(T128_address(reg))
+#define NCR5380_write(reg, value) writeb((value),(T128_address(reg)))
 #else
 #define NCR5380_read(reg)						\
     (((unsigned char) printk("scsi%d : read register %d at address %08x\n"\
-    , instance->hostno, (reg), T128_address(reg))), isa_readb(T128_address(reg)))
+    , instance->hostno, (reg), T128_address(reg))), readb(T128_address(reg)))
 
 #define NCR5380_write(reg, value) {					\
-    printk("scsi%d : write %02x to register %d at address %08x\n", 	\
+    printk("scsi%d : write %02x to register %d at address %08x\n",	\
 	    instance->hostno, (value), (reg), T128_address(reg));	\
-    isa_writeb((value), (T128_address(reg)));				\
+    writeb((value), (T128_address(reg)));				\
 }
 #endif
 
@@ -162,13 +139,13 @@ int t128_proc_info (char *buffer, char **start, off_t offset,
 #define do_NCR5380_intr do_t128_intr
 #define NCR5380_queue_command t128_queue_command
 #define NCR5380_abort t128_abort
-#define NCR5380_reset t128_reset
+#define NCR5380_bus_reset t128_bus_reset
 #define NCR5380_proc_info t128_proc_info
 
-/* 15 14 12 10 7 5 3 
+/* 15 14 12 10 7 5 3
    1101 0100 1010 1000 */
-   
-#define T128_IRQS 0xc4a8 
+
+#define T128_IRQS 0xc4a8
 
 #endif /* else def HOSTS_C */
 #endif /* ndef ASM */

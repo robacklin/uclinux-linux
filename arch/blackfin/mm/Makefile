@@ -1,13 +1,5 @@
 #
-# Makefile for the linux frio-specific parts of the memory manager.
+# arch/blackfin/mm/Makefile
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := mm.o
-obj-y	 := init.o fault.o memory.o kmap.o
-
-include $(TOPDIR)/Rules.make
+obj-y := sram-alloc.o isram-driver.o init.o maccess.o

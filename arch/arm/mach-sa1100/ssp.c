@@ -17,21 +17,24 @@
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/hardware.h>
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 #include <asm/hardware/ssp.h>
 
-static void ssp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+#define TIMEOUT 100000
+
+static irqreturn_t ssp_interrupt(int irq, void *dev_id)
 {
 	unsigned int status = Ser4SSSR;
 
-	if (status & SSSR_ROR) {
+	if (status & SSSR_ROR)
 		printk(KERN_WARNING "SSP: receiver overrun\n");
-	}
 
 	Ser4SSSR = SSSR_ROR;
+
+	return status ? IRQ_HANDLED : IRQ_NONE;
 }
 
 /**
@@ -39,20 +42,33 @@ static void ssp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
  * @data: 16-bit, MSB justified data to write.
  *
  * Wait for a free entry in the SSP transmit FIFO, and write a data
- * word to the SSP port.
+ * word to the SSP port.  Wait for the SSP port to start sending
+ * the data.
  *
  * The caller is expected to perform the necessary locking.
  *
  * Returns:
- *   %-ETIMEDOUT	timeout occurred (for future)
+ *   %-ETIMEDOUT	timeout occurred
  *   0			success
  */
 int ssp_write_word(u16 data)
 {
-	while (!(Ser4SSSR & SSSR_TNF))
+	int timeout = TIMEOUT;
+
+	while (!(Ser4SSSR & SSSR_TNF)) {
+	        if (!--timeout)
+	        	return -ETIMEDOUT;
 		cpu_relax();
+	}
 
 	Ser4SSDR = data;
+
+	timeout = TIMEOUT;
+	while (!(Ser4SSSR & SSSR_BSY)) {
+	        if (!--timeout)
+	        	return -ETIMEDOUT;
+		cpu_relax();
+	}
 
 	return 0;
 }
@@ -69,15 +85,22 @@ int ssp_write_word(u16 data)
  * The caller is expected to perform the necessary locking.
  *
  * Returns:
- *   %-ETIMEDOUT	timeout occurred (for future)
+ *   %-ETIMEDOUT	timeout occurred
  *   16-bit data	success
  */
-int ssp_read_word(void)
+int ssp_read_word(u16 *data)
 {
-	while (!(Ser4SSSR & SSSR_RNE))
-		cpu_relax();
+	int timeout = TIMEOUT;
 
-	return Ser4SSDR;
+	while (!(Ser4SSSR & SSSR_RNE)) {
+	        if (!--timeout)
+	        	return -ETIMEDOUT;
+		cpu_relax();
+	}
+
+	*data = (u16)Ser4SSDR;
+
+	return 0;
 }
 
 /**
@@ -87,14 +110,26 @@ int ssp_read_word(void)
  * is empty.
  *
  * The caller is expected to perform the necessary locking.
+ *
+ * Returns:
+ *   %-ETIMEDOUT	timeout occurred
+ *   0			success
  */
-void ssp_flush(void)
+int ssp_flush(void)
 {
+	int timeout = TIMEOUT * 2;
+
 	do {
 		while (Ser4SSSR & SSSR_RNE) {
+		        if (!--timeout)
+		        	return -ETIMEDOUT;
 			(void) Ser4SSDR;
 		}
+	        if (!--timeout)
+	        	return -ETIMEDOUT;
 	} while (Ser4SSSR & SSSR_BSY);
+
+	return 0;
 }
 
 /**

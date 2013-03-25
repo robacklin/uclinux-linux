@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/lib/delay.S
  *
- *  Copyright (C) 1995-2003 Russell King
+ *  Copyright (C) 1995, 1996 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -9,68 +9,61 @@
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/delay.h>
-
+#include <asm/param.h>
 		.text
 
+.LC0:		.word	loops_per_jiffy
+.LC1:		.word	(2199023*HZ)>>11
+
 /*
- * See linux/include/asm-arm/delay.h for a description of the maths.
+ * r0  <= 2000
+ * lpj <= 0x01ffffff (max. 3355 bogomips)
+ * HZ  <= 1000
  */
 
-#if NDELAY_FACTOR > 255
-#error NDELAY_FACTOR out of range
-#endif
-#if UDELAY_FACTOR > 65535
-#error UDELAY_FACTOR out of range
-#endif
-
-LC0:		.word	SYMBOL_NAME(loops_per_jiffy)
-
-ENTRY(__const_delay)
-		ldr	r3, LC0
-		mov	r1, r0, lsr #11
-		ldr	r2, [r3, #0]
-		b	2f
-
-ENTRY(__ndelay)
-		mov	r2, #NDELAY_FACTOR
-		b	1f
-
 ENTRY(__udelay)
-		mov	r2,     #UDELAY_FACTOR & 0xff00
-		orr	r2, r2, #UDELAY_FACTOR & 0x00ff
-1:		ldr	r3, LC0
-		mul	r1, r0, r2
-		ldr	r2, [r3, #0]
-		mov	r1, r1, lsr #11
-2:		mov	r2, r2, lsr #12
-		mul	r0, r1, r2
-		movs	r0, r0, lsr #5
-		RETINSTR(moveq,pc,lr)
+		ldr	r2, .LC1
+		mul	r0, r2, r0
+ENTRY(__const_udelay)				@ 0 <= r0 <= 0x7fffff06
+		mov	r1, #-1
+		ldr	r2, .LC0
+		ldr	r2, [r2]		@ max = 0x01ffffff
+		add	r0, r0, r1, lsr #32-14
+		mov	r0, r0, lsr #14		@ max = 0x0001ffff
+		add	r2, r2, r1, lsr #32-10
+		mov	r2, r2, lsr #10		@ max = 0x00007fff
+		mul	r0, r2, r0		@ max = 2^32-1
+		add	r0, r0, r1, lsr #32-6
+		movs	r0, r0, lsr #6
+		moveq	pc, lr
 
 /*
- * loops = (r0 * 0x10c6 * HZ * loops_per_jiffy) / 2^32
+ * loops = r0 * HZ * loops_per_jiffy / 1000000
  *
  * Oh, if only we had a cycle counter...
  */
 
+@ Delay routine
 ENTRY(__delay)
 		subs	r0, r0, #1
 #if 0
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
-		RETINSTR(movls,pc,lr)
+		movls	pc, lr
 		subs	r0, r0, #1
 #endif
-		bhi	SYMBOL_NAME(__delay)
-		RETINSTR(mov,pc,lr)
+		bhi	__delay
+		mov	pc, lr
+ENDPROC(__udelay)
+ENDPROC(__const_udelay)
+ENDPROC(__delay)

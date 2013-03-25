@@ -2,35 +2,31 @@
  * TouCAN - definitions for the Motorola TouCAN module
  *
  * Copyright (c) 1998,2000 port GmbH Halle (Saale)
+ * Copyright Freescale Semiconductor, Inc. 2006
  *------------------------------------------------------------------
- * $Header: /z2/cvsroot/common_include/TouCAN.h,v 1.3 2001/04/19 15:06:30 ro Exp $
- *
- *--------------------------------------------------------------------------
- *
  * 
  *
  * modification history
  * --------------------
- * $Log: TouCAN.h,v $
+ * Revision 1.5 2006/03/16 Yaroslav Vinogradov (yaroslav.vinogradov@freescale.com)
+ *  CAN support for M532x
+ *
+ * Revision 1.4  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
  * Revision 1.3  2001/04/19 15:06:30  ro
  * adapt to CANopenLIB V4.2
  * macros for user adaptation moved at the top of the file
  * Set_Baudrate added
  *
  * Revision 1.2  2000/02/10 13:28:34  boe
- * Vereinbarungen für Motorola TPU CAN-chip
+ * Vereinbarungen fr Motorola TPU CAN-chip
  *
  *
  *
  *--------------------------------------------------------------------------
  */
 
-
-/*
-DESCRIPTION
-Version $Revision: 1.3 $
-.sp
-*/
 
 #ifndef __TOU_CAN_H
 #define __TOU_CAN_H
@@ -72,27 +68,23 @@ typedef struct {
     volatile unsigned char      txectr;
 } tou_can_t;
 
+#if defined(CONFIG_M528x)
 /* FlexCAN mcf5282 located at MCF_MBAR + 0x1C'0000 */
 typedef struct {
-    volatile unsigned short     canmcr;		/* module config register */
+    volatile unsigned short     canmcr;         /* module config register */
     volatile unsigned short     reserved00;
 
     volatile unsigned short     reserved06;
-    volatile unsigned char      canctrl0;	/* control register 0     */
-    volatile unsigned char      canctrl1;	/* control register 1     */
-    
-    volatile unsigned char      presdiv;	/* prescaler divider      */
-    volatile unsigned char      canctrl2;	/* control register 2     */
+    volatile unsigned char      canctrl0;       /* control register 0     */
+    volatile unsigned char      canctrl1;       /* control register 1     */
+
+    volatile unsigned char      presdiv;        /* prescaler divider      */
+    volatile unsigned char      canctrl2;       /* control register 2     */
     volatile unsigned short     timer;
 
     volatile unsigned short     reserved0E;
     volatile unsigned short     reserved0C;
 
-#if 0
-    volatile unsigned int       rxgmsk;		/* RX global mask         */
-    volatile unsigned int       rx14msk;	/* RX Buffer 14 Mask      */
-    volatile unsigned int       rx15msk;	/* RX Buffer 15 Mask      */
-#else
 /* according errata sheet:
 errata id 8:   FlexCAN
 07/23/03   32-bit accesses to FlexCAN registers do not work properly
@@ -104,19 +96,37 @@ errata id 8:   FlexCAN
     volatile unsigned short     rx14msklo;
     volatile unsigned short     rx15mskhi;
     volatile unsigned short     rx15msklo;
-#endif
     volatile unsigned int       reserverd1C;
-    
-    volatile unsigned short     estat;		/* Error and status ESTAT */
-    volatile unsigned short     imask;		/* Interrupt masks IMASK  */
-    
-    volatile unsigned short     iflag;		/* Interrupt flags IFLAG  */
-    volatile unsigned char      rxectr;		/* Rx error counter RXECTR*/
-    volatile unsigned char      txectr;		/* Tx error counter TXECTR*/
+
+    volatile unsigned short     estat;          /* Error and status ESTAT */
+    volatile unsigned short     imask;          /* Interrupt masks IMASK  */
+
+    volatile unsigned short     iflag;          /* Interrupt flags IFLAG  */
+    volatile unsigned char      rxectr;         /* Rx error counter RXECTR*/
+    volatile unsigned char      txectr;         /* Tx error counter TXECTR*/
 } flex_can_t;
+#else
 
+/* FlexCAN m532x located at 0xFC020000 */
+typedef struct {
+    volatile unsigned long int     canmcr;	     /* module config register */
+    volatile unsigned long int     canctrl;          /* control register       */
 
+    volatile unsigned long int     timer;
+    volatile unsigned long int     reserved0C;
+    volatile unsigned long int     rxgmask;	      /* Rx global mask         */
 
+    volatile unsigned long int     rx14mask;          /* Rx Buffer 14 Mask      */
+    volatile unsigned long int     rx15mask;	      /* Rx Buffer 15 Mask      */
+    volatile unsigned long int     errcnt;            /* Error counter register */
+    volatile unsigned long int     errstat;           /* Error and status register */
+
+    volatile unsigned long int     reserved24;
+    volatile unsigned long int     imask;		/* Interrupt mask register*/
+    volatile unsigned long int     reserved2C;
+    volatile unsigned long int     iflag;             /* Interrupt flag register*/
+} flex_can_t;
+#endif
 
 /* To have two different CAN structures here, TouCan and FlexCan
  * to be used with -
@@ -125,99 +135,133 @@ errata id 8:   FlexCAN
  *   /this name is used also in the sja1000 driver)
  */
 # ifdef CONFIG_MULT_LINES
-#   ifdef MCF5282
+#   if defined(CONFIG_FIRE_ENGINE)
     extern flex_can_t *tou_can_addr[];
-#   else 
+#   elif defined(CONFIG_M532x) || defined(CONFIG_M528x)
+    extern flex_can_t *tou_can_addr[];
+#   else
     extern tou_can_t *tou_can_addr[];
 #   endif
-# else 
-#   ifdef MCF5282
+# else
+#   if defined(CONFIG_FIRE_ENGINE)
     extern flex_can_t *tou_can;
     typedef flex_can_t canregs_t;
-#   else 
+#   elif defined(CONFIG_M532x) || defined(CONFIG_M5253) || defined(CONFIG_M528x)
+    extern flex_can_t *tou_can;
+    typedef flex_can_t canregs_t;
+#   else
     extern tou_can_t *tou_can;
     typedef tou_can_t canregs_t;
 #   endif
 # endif
 
+#if defined(CONFIG_M528x)
 
+#define CAN_ControlReg0                 (tou_can->canctrl0)
+#define CAN_ControlReg1                 (tou_can->canctrl1)
+#define CAN_ControlReg2                 (tou_can->canctrl2)
 
-#define CAN_ControlReg0			(tou_can->canctrl0)
-#define CAN_ControlReg1			(tou_can->canctrl1)
-#define CAN_ControlReg2			(tou_can->canctrl2)
-
-#define CAN_TestConfigRegister		(tou_can->cantcr)
-#define CAN_ModulConfigRegister		(tou_can->canmcr)
-#define CAN_InterruptRegister		(tou_can->canicr)
-#define CAN_PrescalerDividerRegister	(tou_can->presdiv)
-#define CAN_TimerRegister		(tou_can->timer)
-#define CAN_ErrorStatusRegister		(tou_can->estat)
-#define CAN_InterruptMasks		(tou_can->imask)
-#define CAN_InterruptFlags		(tou_can->iflag)
-#define CAN_ReceiveErrorCounter		(tou_can->rxectr)
-#define CAN_TransmitErrorCounter	(tou_can->txectr)
+#define CAN_TestConfigRegister          (tou_can->cantcr)
+#define CAN_ModulConfigRegister         (tou_can->canmcr)
+#define CAN_InterruptRegister           (tou_can->canicr)
+#define CAN_PrescalerDividerRegister    (tou_can->presdiv)
+#define CAN_TimerRegister               (tou_can->timer)
+#define CAN_ErrorStatusRegister         (tou_can->estat)
+#define CAN_InterruptMasks              (tou_can->imask)
+#define CAN_InterruptFlags              (tou_can->iflag)
+#define CAN_ReceiveErrorCounter         (tou_can->rxectr)
+#define CAN_TransmitErrorCounter        (tou_can->txectr)
 /* or TouCAN with word access */
-#define CAN_ReceiveGlobalMaskHigh	(tou_can->rxgmskhi)
-#define CAN_ReceiveGlobalMaskLow	(tou_can->rxgmsklo)
-#define CAN_ReceiveBuffer14MaskHigh	(tou_can->rx14mskhi)
-#define CAN_ReceiveBuffer14MaskLow	(tou_can->rx14msklo)
-#define CAN_ReceiveBuffer15MaskHigh	(tou_can->rx15mskhi)
-#define CAN_ReceiveBuffer15MaskLow	(tou_can->rx15msklo)
+#define CAN_ReceiveGlobalMaskHigh       (tou_can->rxgmskhi)
+#define CAN_ReceiveGlobalMaskLow        (tou_can->rxgmsklo)
+#define CAN_ReceiveBuffer14MaskHigh     (tou_can->rx14mskhi)
+#define CAN_ReceiveBuffer14MaskLow      (tou_can->rx14msklo)
+#define CAN_ReceiveBuffer15MaskHigh     (tou_can->rx15mskhi)
+#define CAN_ReceiveBuffer15MaskLow      (tou_can->rx15msklo)
 /* some more for CF FlexCAN with 32bit access */
-#define CAN_ReceiveGlobalMask    	(tou_can->rxgmsk)
-#define CAN_ReceiveBuffer14Mask		(tou_can->rx14msk)
-#define CAN_ReceiveBuffer15Mask		(tou_can->rx15msk)
+#define CAN_ReceiveGlobalMask           (tou_can->rxgmsk)
+#define CAN_ReceiveBuffer14Mask         (tou_can->rx14msk)
+#define CAN_ReceiveBuffer15Mask         (tou_can->rx15msk)
 
 
 /* Bit values of the TouCAN module configuration register */
-
-#define CAN_MCR_STOP			0x8000
-#define CAN_MCR_FRZ			0x4000
-#define CAN_MCR_HALT			0x1000
-#define CAN_MCR_NOT_RDY			0x0800
-#define CAN_MCR_WAKE_MSK		0x0400
-#define CAN_MCR_SOFT_RST		0x0200
-#define CAN_MCR_FRZ_ACK			0x0100
-#define CAN_MCR_SUPV			0x0080
-#define CAN_MCR_SELF_WAKE		0x0040
-#define CAN_MCR_APS			0x0020
-#define CAN_MCR_STOP_ACK		0x0010
-#define CAN_MCR_IARB_MASK		0x000F
-#define CAN_MCR_IARB3			0x0008
-#define CAN_MCR_IARB2			0x0004
-#define CAN_MCR_IARB1			0x0002
-#define CAN_MCR_IARB0			0x0001
+#define CAN_MCR_STOP                    0x8000
+#define CAN_MCR_FRZ                     0x4000
+#define CAN_MCR_HALT                    0x1000
+#define CAN_MCR_NOT_RDY                 0x0800
+#define CAN_MCR_WAKE_MSK                0x0400
+#define CAN_MCR_SOFT_RST                0x0200
+#define CAN_MCR_FRZ_ACK                 0x0100
+#define CAN_MCR_SUPV                    0x0080
+#define CAN_MCR_SELF_WAKE               0x0040
+#define CAN_MCR_APS                     0x0020
+#define CAN_MCR_STOP_ACK                0x0010
+#define CAN_MCR_IARB_MASK               0x000F
+#define CAN_MCR_IARB3                   0x0008
+#define CAN_MCR_IARB2                   0x0004
+#define CAN_MCR_IARB1                   0x0002
+#define CAN_MCR_IARB0                   0x0001
 
 /* Bits of the TouCAN control register 0 */
 
-#define CAN_CTRL0_BOFF_MSK_BIT		7
-#define CAN_CTRL0_ERR_MSK_BIT		6
-#ifdef MCF5282
-/* only one bit for RX configuartion */
-#else
-#define CAN_CTRL0_RXMODE1_BIT		3
-#endif
-#define CAN_CTRL0_RXMODE0_BIT		2
-#define CAN_CTRL0_TXMODE1_BIT		1
-#define CAN_CTRL0_TXMODE0_BIT		0
+#define CAN_CTRL0_BOFF_MSK_BIT          7
+#define CAN_CTRL0_ERR_MSK_BIT           6
+#define CAN_CTRL0_RXMODE0_BIT           2
+#define CAN_CTRL0_TXMODE1_BIT           1
+#define CAN_CTRL0_TXMODE0_BIT           0
 
 /* Bit values of the TouCAN control register 0 */
 
-#define CAN_CTRL0_BOFF_MSK		0x80
-#define CAN_CTRL0_ENABLE_BOFF_INT	0x80
-#define CAN_CTRL0_DISABLE_BOFF_INT	0x00
-#define CAN_CTRL0_ERR_MSK		0x40
-#define CAN_CTRL0_ENABLE_ERR_INT	0x40
-#define CAN_CTRL0_DISABLE_ERR_INT	0x00
-#ifdef MCF5282
-/* only one bit for RX configuartion */
-#else
-#define CAN_CTRL0_RXMODE1		0x08
-#endif
-#define CAN_CTRL0_RXMODE0		0x04
-#define CAN_CTRL0_TXMODE1		0x02
-#define CAN_CTRL0_TXMODE0		0x01
+#define CAN_CTRL0_BOFF_MSK              0x80
+#define CAN_CTRL0_ENABLE_BOFF_INT       0x80
+#define CAN_CTRL0_DISABLE_BOFF_INT      0x00
+#define CAN_CTRL0_ERR_MSK               0x40
+#define CAN_CTRL0_ENABLE_ERR_INT        0x40
+#define CAN_CTRL0_DISABLE_ERR_INT       0x00
+#define CAN_CTRL0_RXMODE0               0x04
+#define CAN_CTRL0_TXMODE1               0x02
+#define CAN_CTRL0_TXMODE0               0x01
 
+#else
+
+#define CAN_ModulConfigRegister		(tou_can->canmcr)
+#define CAN_ControlReg            (tou_can->canctrl)
+#define CAN_TimerRegister         (tou_can->timer)
+#define CAN_ReceiveGlobalMask    	(tou_can->rxgmask)
+#define CAN_ReceiveBuffer14Mask		(tou_can->rx14mask)
+#define CAN_ReceiveBuffer15Mask		(tou_can->rx15mask)
+#define CAN_ErrorCounterRegister	(tou_can->errcnt)
+#define CAN_ErrorStatusRegister		(tou_can->errstat)
+#define CAN_InterruptMasks		    (tou_can->imask)
+#define CAN_InterruptFlags		    (tou_can->iflag)
+
+/* Bit values of the TouCAN control register 0 */
+
+#define CAN_CTRL_PRESDIV(x)		(((x)&0x000000FF)<<24)
+#define CAN_CTRL_RJW          		0x00C00000
+#define CAN_CTRL_RJW1          		0x00800000
+#define CAN_CTRL_RJW0		        0x00400000
+#define CAN_CTRL_PSEG1	                0x00380000
+#define CAN_CTRL_PSEG2           	0x00070000
+#define CAN_CTRL_BOFF_MSK		0x00008000
+#define CAN_CTRL_ERR_MSK                0x00004000
+#define CAN_CTRL_LPB            	0x00001000
+#define CAN_CTRL_SAMP       		0x00000080
+#define CAN_CTRL_BOFF_REC		0x00000040
+#define CAN_CTRL_TSYNC		        0x00000020
+#define CAN_CTRL_LBUF		        0x00000010
+#define CAN_CTRL_LOM		        0x00000008
+#define CAN_CTRL_PROP_SEG		0x00000007
+
+
+/* Bit values of the TouCAN control register 0 */
+
+#define CAN_CTRL0_ENABLE_BOFF_INT	0x00008000
+#define CAN_CTRL0_DISABLE_BOFF_INT	0x00000000
+#define CAN_CTRL0_ENABLE_ERR_INT	0x00004000
+#define CAN_CTRL0_DISABLE_ERR_INT	0x00000000
+
+# endif /* CONFIG_M528x */
 
 /* Bits of the TouCAN control register 1 */
 
@@ -279,7 +323,7 @@ errata id 8:   FlexCAN
 #define CAN_ESTAT_FCS0_BIT		4
 #define CAN_ESTAT_BOFF_INT_BIT		2
 #define CAN_ESTAT_ERR_INT_BIT		1
-#define CAN_ESTAT_WAKE_INT_BIT		0
+#define CAN_ESTAT_WAKE_INT_BIT          0
 
 /* Bit values of the TouCAN error and status register */
 
@@ -294,11 +338,11 @@ errata id 8:   FlexCAN
 #define CAN_ESTAT_IDLE			0x0080
 #define CAN_ESTAT_TX_RX			0x0040
 #define CAN_ESTAT_FCS 			0x0030
-#define CAN_ESTAT_FCS0			0x0010
 #define CAN_ESTAT_FCS1			0x0020
+#define CAN_ESTAT_FCS0			0x0010
 #define CAN_ESTAT_BOFF_INT		0x0004
 #define CAN_ESTAT_ERR_INT		0x0002
-#define CAN_ESTAT_WAKE_INT		0x0001
+#define CAN_ESTAT_WAKE_INT              0x0001
 
 /*
  * Macros to handle CAN objects
@@ -306,26 +350,27 @@ errata id 8:   FlexCAN
  * Structure for a single CAN object
  * A total of 15 such object structures exists (starting at CAN_BASE + 0x80)
  */
+#if defined(CONFIG_M528x)
 struct can_obj {
-  unsigned short int ctl_status;/* 8-bit time stamp + code + length	*/
+  unsigned short int ctl_status;/* 8-bit time stamp + code + length     */
   union {
-    unsigned short int std_id;	/* Standard Identifier			*/
-    unsigned short int id_high;	/* ID high + SRR + IDE			*/
+    unsigned short int std_id;  /* Standard Identifier                  */
+    unsigned short int id_high; /* ID high + SRR + IDE                  */
     } id_high;
   union {
-    unsigned short int timeStamp; /* 2 byte time stamp counter		*/
-    unsigned short int id_low;	/* ID low + RTR				*/
+    unsigned short int timeStamp; /* 2 byte time stamp counter          */
+    unsigned short int id_low;  /* ID low + RTR                         */
     } id_low;
-  unsigned char msg[8];      	/* Message Data 0 .. 7   		*/
-  unsigned char reserved0;	/* Reserved Byte         		*/
-  unsigned char reserved1;	/* Reserved Byte         		*/
+  unsigned char msg[8];         /* Message Data 0 .. 7                  */
+  unsigned char reserved0;      /* Reserved Byte                        */
+  unsigned char reserved1;      /* Reserved Byte                        */
 };
 
 /* The firs data byte ov a message */
 #define MSG0 msg[0]
 
-#define STDID_RTR_BIT		0x10
-#define EXTID_RTR_BIT		0x01
+#define STDID_RTR_BIT           0x10
+#define EXTID_RTR_BIT           0x01
 
 /* CAN object definition */
 #define CAN_OBJ \
@@ -352,8 +397,6 @@ struct can_obj {
       + ((CAN_OBJ[bChannel].id_high.id_high & 0x0007) << 15) \
       + (CAN_OBJ[bChannel].id_low.id_low >> 1) )
 
-
-
 /* ---------------------------------------------------------------------------
  * CAN_WRITE_OID(obj, id) is a macro to write the CAN-ID
  * of the specified object with identifier id.
@@ -363,26 +406,90 @@ struct can_obj {
 
 /* Set the IDE Bit in ID_HIGH */
 #define CAN_WRITE_XOID(bChannel, Id)  \
-	do { (CAN_OBJ[bChannel].id_high.id_high \
-	      = 0x08 + (((Id) & 0x1ffC0000) >> 13) + (((Id)  >> 15) & 0x7)); \
-	CAN_OBJ[bChannel].id_low.id_low = (Id /* & 0x7fff */ << 1); \
-	} while(0);
+        do { (CAN_OBJ[bChannel].id_high.id_high \
+              = 0x08 + (((Id) & 0x1ffC0000) >> 13) + (((Id)  >> 15) & 0x7)); \
+        CAN_OBJ[bChannel].id_low.id_low = (Id /* & 0x7fff */ << 1); \
+        } while(0);
 
 /* ---------------------------------------------------------------------------
  * CAN_WRITE_OID_RTR(obj, id) is a macro to write the CAN-ID
  * of the specified object with identifier id and set the RTR Bit.
  */
 #define CAN_WRITE_OID_RTR(bChannel, Id) \
-	(CAN_OBJ[bChannel].id_high.std_id = ((Id) << 5) + STDID_RTR_BIT)
+        (CAN_OBJ[bChannel].id_high.std_id = ((Id) << 5) + STDID_RTR_BIT)
+
+#define CAN_WRITE_XOID_RTR(bChannel, Id)  \
+        do { (CAN_OBJ[bChannel].id_high.id_high \
+              = 0x18 + (((Id) & 0x1ffC0000) >> 13) + (((Id)  >> 15) & 0x7)); \
+        CAN_OBJ[bChannel].id_low.id_low = (Id /* & 0x7fff */ << 1) + EXTID_RTR_BIT; \
+        } while(0);
+
+#else /* CONFIG_M528x */
+struct can_obj {
+  unsigned long int ctl_status;/* 3-bit(reserved) + code + 1-bit(reserved)
+                                + SRR + IDE + RTR + length + 8-bit time stamp */
+  union {
+    unsigned long int std;	/* Standard Identifier			*/
+    unsigned long int ext;	/* Standard Identifier			*/
+    } id;
+  unsigned char msg[8];      	/* Message Data 0 .. 7   		*/
+};
+
+/* The first data byte of a message */
+#define MSG0 msg[0]
+
+#define DATA_BIT	0x0
+#define RTR_BIT   0x1
+
+/* CAN object definition */
+#define CAN_OBJ \
+   ((struct can_obj volatile *) (((void *)can_base[board]) + 0x80))
+
+/*
+ * the above definition can be used as follows:
+ * CAN_OBJ[Msg].ctl_status = 0x5595;
+ * val = CAN_OBJ[Msg].ctl_status;
+ * with Msg 0....15
+ */
+
+/* ---------------------------------------------------------------------------
+ * CAN_READ_OID(obj) is a macro to read the CAN-ID of the specified object.
+ * It delivers the value as 16 bit from the standard ID registers.
+ */
+
+#define CAN_READ_OID(bChannel) (CAN_OBJ[bChannel].id.std >> 18)
+
+
+/* ---------------------------------------------------------------------------
+ * CAN_WRITE_OID(obj, id) is a macro to write the CAN-ID
+ * of the specified object with identifier id.
+ * CAN_WRITE_XOID(obj, id) is a macro to write the extended CAN-ID
+ */
+#define CAN_WRITE_OID(bChannel, Id) (CAN_OBJ[bChannel].id.std = (Id) << 18)
+
+#define CAN_WRITE_XOID(bChannel, Id) (CAN_OBJ[bChannel].id.ext = Id)
+
+/* ---------------------------------------------------------------------------
+ * CAN_WRITE_OID_RTR(obj, id) is a macro to write the CAN-ID
+ * of the specified object with identifier id and set the RTR Bit.
+ */
+#define CAN_WRITE_IDE(bChannel, Id) \
+	(CAN_OBJ[bChannel].id_high.std_id = ((Id) << 21)
+
+#define CAN_WRITE_RTR(bChannel, Id) \
+	(CAN_OBJ[bChannel].id_high.std_id = ((Id) << 22)
 
 #define CAN_WRITE_XOID_RTR(bChannel, Id)  \
 	do { (CAN_OBJ[bChannel].id_high.id_high \
-	      = 0x18 + (((Id) & 0x1ffC0000) >> 13) + (((Id)  >> 15) & 0x7)); \
+	      = 0x18 + (((Id) & 0x1ffC000
+	      
+#define	MCFICM_INTC1		0x0d00		/* Base for Interrupt Ctrl 0 */0) >> 13) + (((Id)  >> 15) & 0x7)); \
 	CAN_OBJ[bChannel].id_low.id_low = (Id /* & 0x7fff */ << 1) + EXTID_RTR_BIT; \
 	} while(0);
+#endif /* CONFIG_M528x */
 
 /* ---------------------------------------------------------------------------
- * CAN_WRITE_CTRL(obj, code, length) is a macro to write to the 
+ * CAN_WRITE_CTRL(obj, code, length) is a macro to write to the
  * specified objects control register
  *
  * Writes 2 byte, TIME STAMP is overwritten with 0.
@@ -583,7 +690,7 @@ typedef struct {
     #define CAN_PROPSEG_125K		0x07
     #define CAN_PSEG1_125K		0x07
     #define CAN_PSEG2_125K		0x02
-    
+
     #define CAN_PRESDIV_250K		(0x03*2+1)
     #define CAN_PROPSEG_250K		0x07
     #define CAN_PSEG1_250K		0x07
@@ -594,24 +701,76 @@ typedef struct {
     #define CAN_PSEG1_500K		0x07
     #define CAN_PSEG2_500K		0x02
 
-    /* bad samplepoint !!! */ 	
+    /* bad samplepoint !!! */
     #define CAN_PRESDIV_800K		(0x00*2+1)
     #define CAN_PROPSEG_800K		0x07
     #define CAN_PSEG1_800K		0x07
     #define CAN_PSEG2_800K		0x07
-    
+
     #define CAN_PRESDIV_1000K		(0x00*2+1)
     #define CAN_PROPSEG_1000K		0x07
     #define CAN_PSEG1_1000K		0x07
     #define CAN_PSEG2_1000K		0x02
-    
+
     #define CAN_SYSCLK_is_ok		1
 #endif
 
+#if CAN_SYSCLK == 16
+    #define CAN_SJW			   0
+
+    #define CAN_PRESDIV_10K		(0x63)
+    #define CAN_PROPSEG_10K		0x04
+    #define CAN_PSEG1_10K		0x07
+    #define CAN_PSEG2_10K		0x01
+
+    #define CAN_PRESDIV_20K		(0x31)
+    #define CAN_PROPSEG_20K		0x04
+    #define CAN_PSEG1_20K		0x07
+    #define CAN_PSEG2_20K		0x01
+
+    #define CAN_PRESDIV_50K		(0x13)
+    #define CAN_PROPSEG_50K		0x04
+    #define CAN_PSEG1_50K		0x07
+    #define CAN_PSEG2_50K		0x01
+
+    #define CAN_PRESDIV_100K		(0x9)
+    #define CAN_PROPSEG_100K		0x04
+    #define CAN_PSEG1_100K		0x07
+    #define CAN_PSEG2_100K		0x01
+
+    #define CAN_PRESDIV_125K		(0x7)
+    #define CAN_PROPSEG_125K		0x04
+    #define CAN_PSEG1_125K		0x07
+    #define CAN_PSEG2_125K		0x01
+
+    #define CAN_PRESDIV_250K		(0x3)
+    #define CAN_PROPSEG_250K		0x04
+    #define CAN_PSEG1_250K		0x07
+    #define CAN_PSEG2_250K		0x01
+
+    #define CAN_PRESDIV_500K		(0x1)
+    #define CAN_PROPSEG_500K		0x04
+    #define CAN_PSEG1_500K		0x07
+    #define CAN_PSEG2_500K		0x01
+
+    #define CAN_PRESDIV_800K		(0x0)
+    #define CAN_PROPSEG_800K		0x07
+    #define CAN_PSEG1_800K		0x07
+    #define CAN_PSEG2_800K		0x02
+
+    #define CAN_PRESDIV_1000K		(1)
+    #define CAN_PROPSEG_1000K		0x04
+    #define CAN_PSEG1_1000K		0x07
+    #define CAN_PSEG2_1000K		0x01
+
+    #define CAN_SYSCLK_is_ok		1
+#endif
+
+
 /*
- * with Motorola TouCAN, 32 MHz, sample point at 87.5% 
+ * with Motorola TouCAN, 32 MHz, sample point at 87.5%
  * used with ColdFire M5282EVB
- */ 
+ */
 #if CAN_SYSCLK == 32
     #define CAN_SJW			   0
 
@@ -639,7 +798,7 @@ typedef struct {
     #define CAN_PROPSEG_125K		0x04
     #define CAN_PSEG1_125K		0x07
     #define CAN_PSEG2_125K		0x01
-    
+
     #define CAN_PRESDIV_250K		(7)
     #define CAN_PROPSEG_250K		0x04
     #define CAN_PSEG1_250K		0x07
@@ -654,67 +813,68 @@ typedef struct {
     #define CAN_PROPSEG_800K		0x07
     #define CAN_PSEG1_800K		0x07
     #define CAN_PSEG2_800K		0x02
-    
+
     #define CAN_PRESDIV_1000K		(1)
     #define CAN_PROPSEG_1000K		0x04
     #define CAN_PSEG1_1000K		0x07
     #define CAN_PSEG2_1000K		0x01
-    
+
     #define CAN_SYSCLK_is_ok		1
 #endif
 
 /* wdh: bitrate table for 40 MHz */
 /* using same as for 10 MHz except for PRESDIV */
 #if CAN_SYSCLK == 40
-#ifdef CONFIG_M5282   /* use the same as 32 MHz except for PRESDIV */
-    #define CAN_SJW			   0
+#if defined(CONFIG_M528x)    /* use the same as 32 MHz except for PRESDIV */
+    #define CAN_SJW                        0
 
-    #define CAN_PRESDIV_10K		(249)
-    #define CAN_PROPSEG_10K		0x04
-    #define CAN_PSEG1_10K		0x07
-    #define CAN_PSEG2_10K		0x01
+    #define CAN_PRESDIV_10K             (249)
+    #define CAN_PROPSEG_10K             0x04
+    #define CAN_PSEG1_10K               0x07
+    #define CAN_PSEG2_10K               0x01
 
-    #define CAN_PRESDIV_20K		(124)
-    #define CAN_PROPSEG_20K		0x04
-    #define CAN_PSEG1_20K		0x07
-    #define CAN_PSEG2_20K		0x01
+    #define CAN_PRESDIV_20K             (124)
+    #define CAN_PROPSEG_20K             0x04
+    #define CAN_PSEG1_20K               0x07
+    #define CAN_PSEG2_20K               0x01
 
-    #define CAN_PRESDIV_50K		(49)
-    #define CAN_PROPSEG_50K		0x04
-    #define CAN_PSEG1_50K		0x07
-    #define CAN_PSEG2_50K		0x01
+    #define CAN_PRESDIV_50K             (49)
+    #define CAN_PROPSEG_50K             0x04
+    #define CAN_PSEG1_50K               0x07
+    #define CAN_PSEG2_50K               0x01
 
-    #define CAN_PRESDIV_100K		(24)
-    #define CAN_PROPSEG_100K		0x04
-    #define CAN_PSEG1_100K		0x07
-    #define CAN_PSEG2_100K		0x01
+    #define CAN_PRESDIV_100K            (24)
+    #define CAN_PROPSEG_100K            0x04
+    #define CAN_PSEG1_100K              0x07
+    #define CAN_PSEG2_100K              0x01
 
-    #define CAN_PRESDIV_125K		(19)
-    #define CAN_PROPSEG_125K		0x04
-    #define CAN_PSEG1_125K		0x07
-    #define CAN_PSEG2_125K		0x01
+    #define CAN_PRESDIV_125K            (19)
+    #define CAN_PROPSEG_125K            0x04
+    #define CAN_PSEG1_125K              0x07
+    #define CAN_PSEG2_125K              0x01
 
-    #define CAN_PRESDIV_250K		(9)
-    #define CAN_PROPSEG_250K		0x04
-    #define CAN_PSEG1_250K		0x07
-    #define CAN_PSEG2_250K		0x01
+    #define CAN_PRESDIV_250K            (9)
+    #define CAN_PROPSEG_250K            0x04
+    #define CAN_PSEG1_250K              0x07
+    #define CAN_PSEG2_250K              0x01
 
-    #define CAN_PRESDIV_500K		(4)
-    #define CAN_PROPSEG_500K		0x04
-    #define CAN_PSEG1_500K		0x07
-    #define CAN_PSEG2_500K		0x01
+    #define CAN_PRESDIV_500K            (4)
+    #define CAN_PROPSEG_500K            0x04
+    #define CAN_PSEG1_500K              0x07
+    #define CAN_PSEG2_500K              0x01
 
-    #define CAN_PRESDIV_800K		(1)
-    #define CAN_PROPSEG_800K		0x07
-    #define CAN_PSEG1_800K		0x07
-    #define CAN_PSEG2_800K		0x07
-    
-    #define CAN_PRESDIV_1000K		(1)
-    #define CAN_PROPSEG_1000K		0x07
-    #define CAN_PSEG1_1000K		0x07
-    #define CAN_PSEG2_1000K		0x02
-    
-    #define CAN_SYSCLK_is_ok		1
+    #define CAN_PRESDIV_800K            (1)
+    #define CAN_PROPSEG_800K            0x07
+    #define CAN_PSEG1_800K              0x07
+    #define CAN_PSEG2_800K              0x07
+
+    #define CAN_PRESDIV_1000K           (1)
+    #define CAN_PROPSEG_1000K           0x07
+    #define CAN_PSEG1_1000K             0x07
+    #define CAN_PSEG2_1000K             0x02
+
+    #define CAN_SYSCLK_is_ok            1
+
 #else
     #define CAN_SJW			   0
 
@@ -753,7 +913,7 @@ typedef struct {
     #define CAN_PSEG1_500K		0x07
     #define CAN_PSEG2_500K		0x02
 
-    /* bad samplepoint !!! */ 	
+    /* bad samplepoint !!! */
     #define CAN_PRESDIV_800K		(0x00*4+3)
     #define CAN_PROPSEG_800K		0x07
     #define CAN_PSEG1_800K		0x07
@@ -767,6 +927,100 @@ typedef struct {
     #define CAN_SYSCLK_is_ok		1
 #endif
 #endif
+
+/*
+ * Motorola TouCAN, SYSCLK = 80Mhz
+ * Used with M5329EVB
+ */
+
+#if CAN_SYSCLK == 80
+    #define CAN_SJW			   0
+
+    #define CAN_PRESDIV_20K		0xf9
+    #define CAN_PROPSEG_20K		0x04
+    #define CAN_PSEG1_20K		0x07
+    #define CAN_PSEG2_20K		0x01
+
+    #define CAN_PRESDIV_50K		0x63
+    #define CAN_PROPSEG_50K		0x04
+    #define CAN_PSEG1_50K		0x07
+    #define CAN_PSEG2_50K		0x01
+
+    #define CAN_PRESDIV_100K		0x31
+    #define CAN_PROPSEG_100K		0x04
+    #define CAN_PSEG1_100K		0x07
+    #define CAN_PSEG2_100K		0x01
+
+    #define CAN_PRESDIV_125K		0x27
+    #define CAN_PROPSEG_125K		0x04
+    #define CAN_PSEG1_125K		0x07
+    #define CAN_PSEG2_125K		0x01
+    
+    #define CAN_PRESDIV_250K		0x13
+    #define CAN_PROPSEG_250K		0x04
+    #define CAN_PSEG1_250K		0x07
+    #define CAN_PSEG2_250K		0x01
+
+    #define CAN_PRESDIV_500K		0x07
+    #define CAN_PROPSEG_500K		0x07
+    #define CAN_PSEG1_500K		0x07
+    #define CAN_PSEG2_500K		0x02
+
+    #define CAN_PRESDIV_800K		0x03
+    #define CAN_PROPSEG_800K		0x07
+    #define CAN_PSEG1_800K		0x07
+    #define CAN_PSEG2_800K		0x07
+    
+    #define CAN_PRESDIV_1000K		0x04
+    #define CAN_PROPSEG_1000K		0x04
+    #define CAN_PSEG1_1000K		0x07
+    #define CAN_PSEG2_1000K		0x01
+    
+    #define CAN_SYSCLK_is_ok		1
+#endif
+
+
+#if CAN_SYSCLK == 70
+    #define CAN_SJW			   0
+
+    #define CAN_PRESDIV_20K		0xae
+    #define CAN_PROPSEG_20K		0x07
+    #define CAN_PSEG1_20K		0x07
+    #define CAN_PSEG2_20K		0x02
+
+    #define CAN_PRESDIV_50K		0x45
+    #define CAN_PROPSEG_50K		0x07
+    #define CAN_PSEG1_50K		0x07
+    #define CAN_PSEG2_50K		0x02
+
+    #define CAN_PRESDIV_100K		0x22
+    #define CAN_PROPSEG_100K		0x07
+    #define CAN_PSEG1_100K		0x07
+    #define CAN_PSEG2_100K		0x02
+
+    #define CAN_PRESDIV_125K		0x22
+    #define CAN_PROPSEG_125K		0x04
+    #define CAN_PSEG1_125K		0x07
+    #define CAN_PSEG2_125K		0x01
+
+    #define CAN_PRESDIV_250K		0x0d
+    #define CAN_PROPSEG_250K		0x07
+    #define CAN_PSEG1_250K		0x07
+    #define CAN_PSEG2_250K		0x02
+
+    #define CAN_PRESDIV_500K		0x06
+    #define CAN_PROPSEG_500K		0x07
+    #define CAN_PSEG1_500K		0x07
+    #define CAN_PSEG2_500K		0x02
+    
+    #define CAN_PRESDIV_1000K		0x04
+    #define CAN_PROPSEG_1000K		0x02
+    #define CAN_PSEG1_1000K		0x07
+    #define CAN_PSEG2_1000K		0x01
+
+    #define CAN_SYSCLK_is_ok		1
+#endif
+
 
 #ifndef CAN_SYSCLK_is_ok
 #  error Please specify a valid CAN_SYSCLK value (i.e. 10,20,40) or define new parameters

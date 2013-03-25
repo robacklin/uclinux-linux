@@ -2,7 +2,7 @@
  *  ebtable_broute
  *
  *	Authors:
- *	Bart De Schuymer <bart.de.schuymer@pandora.be>
+ *	Bart De Schuymer <bdschuym@pandora.be>
  *
  *  April, 2002
  *
@@ -14,17 +14,24 @@
 #include <linux/netfilter_bridge/ebtables.h>
 #include <linux/module.h>
 #include <linux/if_bridge.h>
-#include <linux/brlock.h>
 
-// EBT_ACCEPT means the frame will be bridged
-// EBT_DROP means the frame will be routed
-static struct ebt_entries initial_chain =
-  {0, "BROUTING", 0, EBT_ACCEPT, 0};
+/* EBT_ACCEPT means the frame will be bridged
+ * EBT_DROP means the frame will be routed
+ */
+static struct ebt_entries initial_chain = {
+	.name		= "BROUTING",
+	.policy		= EBT_ACCEPT,
+};
 
-static struct ebt_replace initial_table =
+static struct ebt_replace_kernel initial_table =
 {
-  "broute", 1 << NF_BR_BROUTING, 0, sizeof(struct ebt_entries),
-  { [NF_BR_BROUTING]&initial_chain}, 0, NULL, (char *)&initial_chain
+	.name		= "broute",
+	.valid_hooks	= 1 << NF_BR_BROUTING,
+	.entries_size	= sizeof(struct ebt_entries),
+	.hook_entry	= {
+		[NF_BR_BROUTING]	= &initial_chain,
+	},
+	.entries	= (char *)&initial_chain,
 };
 
 static int check(const struct ebt_table_info *info, unsigned int valid_hooks)
@@ -34,46 +41,64 @@ static int check(const struct ebt_table_info *info, unsigned int valid_hooks)
 	return 0;
 }
 
-static struct ebt_table broute_table =
+static const struct ebt_table broute_table =
 {
-  {NULL, NULL}, "broute", &initial_table, 1 << NF_BR_BROUTING,
-  RW_LOCK_UNLOCKED, check, NULL
+	.name		= "broute",
+	.table		= &initial_table,
+	.valid_hooks	= 1 << NF_BR_BROUTING,
+	.check		= check,
+	.me		= THIS_MODULE,
 };
 
-static int ebt_broute(struct sk_buff **pskb)
+static int ebt_broute(struct sk_buff *skb)
 {
 	int ret;
 
-	ret = ebt_do_table(NF_BR_BROUTING, pskb, (*pskb)->dev, NULL,
-	   &broute_table);
+	ret = ebt_do_table(NF_BR_BROUTING, skb, skb->dev, NULL,
+			   dev_net(skb->dev)->xt.broute_table);
 	if (ret == NF_DROP)
-		return 1; // route it
-	return 0; // bridge it
+		return 1; /* route it */
+	return 0; /* bridge it */
 }
 
-static int __init init(void)
+static int __net_init broute_net_init(struct net *net)
+{
+	net->xt.broute_table = ebt_register_table(net, &broute_table);
+	if (IS_ERR(net->xt.broute_table))
+		return PTR_ERR(net->xt.broute_table);
+	return 0;
+}
+
+static void __net_exit broute_net_exit(struct net *net)
+{
+	ebt_unregister_table(net, net->xt.broute_table);
+}
+
+static struct pernet_operations broute_net_ops = {
+	.init = broute_net_init,
+	.exit = broute_net_exit,
+};
+
+static int __init ebtable_broute_init(void)
 {
 	int ret;
 
-	ret = ebt_register_table(&broute_table);
+	ret = register_pernet_subsys(&broute_net_ops);
 	if (ret < 0)
 		return ret;
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	// see br_input.c
-	br_should_route_hook = ebt_broute;
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
-	return ret;
+	/* see br_input.c */
+	RCU_INIT_POINTER(br_should_route_hook,
+			   (br_should_route_hook_t *)ebt_broute);
+	return 0;
 }
 
-static void __exit fini(void)
+static void __exit ebtable_broute_fini(void)
 {
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_should_route_hook = NULL;
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
-	ebt_unregister_table(&broute_table);
+	RCU_INIT_POINTER(br_should_route_hook, NULL);
+	synchronize_net();
+	unregister_pernet_subsys(&broute_net_ops);
 }
 
-module_init(init);
-module_exit(fini);
-EXPORT_NO_SYMBOLS;
+module_init(ebtable_broute_init);
+module_exit(ebtable_broute_fini);
 MODULE_LICENSE("GPL");

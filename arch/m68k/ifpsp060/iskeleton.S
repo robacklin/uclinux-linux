@@ -4,11 +4,11 @@
 |M68060 Software Package
 |Production Release P1.00 -- October 10, 1994
 |
-|M68060 Software Package Copyright © 1993, 1994 Motorola Inc.  All rights reserved.
-| 
+|M68060 Software Package Copyright Â© 1993, 1994 Motorola Inc.  All rights reserved.
+|
 |THE SOFTWARE is provided on an "AS IS" basis and without warranty.
 |To the maximum extent permitted by applicable law,
-|MOTOROLA DISCLAIMS ALL WARRANTIES WHETHER EXPRESS OR IMPLIED, 
+|MOTOROLA DISCLAIMS ALL WARRANTIES WHETHER EXPRESS OR IMPLIED,
 |INCLUDING IMPLIED WARRANTIES OF MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE
 |and any warranty against infringement with regard to the SOFTWARE
 |(INCLUDING ANY MODIFIED VERSIONS THEREOF) and any accompanying written materials.
@@ -36,11 +36,11 @@
 
 #include <linux/linkage.h>
 #include <asm/entry.h>
-#include "../kernel/m68k_defs.h"
+#include <asm/asm-offsets.h>
 
 
 |################################
-| (1) EXAMPLE CALL-OUTS 	#
+| (1) EXAMPLE CALL-OUTS		#
 |				#
 | _060_isp_done()		#
 | _060_real_chk()		#
@@ -56,7 +56,7 @@
 | _060_isp_done():
 |
 | This is and example main exit point for the Unimplemented Integer
-| Instruction exception handler. For a normal exit, the 
+| Instruction exception handler. For a normal exit, the
 | _isp_unimp() branches to here so that the operating system
 | can do any clean-up desired. The stack frame is the
 | Unimplemented Integer Instruction stack frame with
@@ -75,10 +75,8 @@ _060_isp_done:
 .Lnotkern:
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	tstl	%curptr@(TASK_NEEDRESCHED)
-	jne	SYMBOL_NAME(ret_from_exception)	| deliver signals,
-						| reschedule etc..
-	RESTORE_ALL
+	| deliver signals, reschedule etc..
+	jra	ret_from_exception
 
 |
 | _060_real_chk():
@@ -113,14 +111,14 @@ _060_real_chk:
 |	bral		_060_real_trace
 
 real_chk_end:
-	bral		SYMBOL_NAME(trap)	| jump to trap handler
+	bral		trap			| jump to trap handler
 
 |
 | _060_real_divbyzero:
 |
-| This is an alternate exit point for the Unimplemented Integer 
+| This is an alternate exit point for the Unimplemented Integer
 | Instruction exception handler isp_unimp(). If the instruction is a 64-bit
-| integer divide where the source operand is a zero, then the _isp_unimp() 
+| integer divide where the source operand is a zero, then the _isp_unimp()
 | creates a Divide-by-zero exception stack frame from the Unimplemented
 | Integer Instruction stack frame and branches to this routine.
 |
@@ -128,7 +126,7 @@ real_chk_end:
 | no action associated with the "chk" exception. If tracing is enabled,
 | then it create a Trace exception stack frame from the "chk" exception
 | stack frame and branches to the _real_trace() entry point.
-| 
+|
 | Linux/68k: commented out test for tracing
 
 	.global		_060_real_divbyzero
@@ -153,7 +151,7 @@ _060_real_divbyzero:
 |	bral		_060_real_trace
 
 real_divbyzero_end:
-	bral		SYMBOL_NAME(trap)	| jump to trap handler
+	bral		trap			| jump to trap handler
 
 |##########################
 
@@ -185,7 +183,7 @@ _060_real_cas2:
 | Entry point for the operating system`s routine to "lock" a page
 | from being paged out. This routine is needed by the cas/cas2
 | algorithms so that no page faults occur within the "core" code
-| region. Note: the routine must lock two pages if the operand 
+| region. Note: the routine must lock two pages if the operand
 | spans two pages.
 | NOTE: THE ROUTINE SHOULD RETURN AN FSLW VALUE IN D0 ON FAILURE
 | SO THAT THE 060SP CAN CREATE A PROPER ACCESS ERROR FRAME.
@@ -256,7 +254,7 @@ _060_real_lock_page:
 | Note: the routine must unlock two pages if the operand spans
 | two pages.
 | Arguments:
-| 	a0 = operand address
+|	a0 = operand address
 |	d0 = `xxxxxxff -> supervisor; `xxxxxx00 -> user
 |	d1 = `xxxxxxff -> longword; `xxxxxx00 -> word
 |
@@ -346,4 +344,4 @@ _I_CALL_TOP:
 |###########################################################################
 
 | 060 INTEGER KERNEL PACKAGE MUST GO HERE!!!
-	.include "isp.sa"
+#include "isp.sa"

@@ -28,6 +28,12 @@
 #ifndef NCR5380_H
 #define NCR5380_H
 
+#include <linux/interrupt.h>
+
+#ifdef AUTOSENSE
+#include <scsi/scsi_eh.h>
+#endif
+
 #define NCR5380_PUBLIC_RELEASE 7
 #define NCR53C400_PUBLIC_RELEASE 2
 
@@ -248,6 +254,7 @@
 #ifndef ASM
 struct NCR5380_hostdata {
 	NCR5380_implementation_fields;		/* implementation specific */
+	struct Scsi_Host *host;			/* Host backpointer */
 	unsigned char id_mask, id_higher_mask;	/* 1 << id, all bits greater */
 	unsigned char targets_present;		/* targets we have connected
 						   to, so we can call a select
@@ -266,9 +273,9 @@ struct NCR5380_hostdata {
 	volatile unsigned aborted:1;		/* flag, says aborted */
 	int flags;
 	unsigned long time_expires;		/* in jiffies, set prior to sleeping */
-	struct Scsi_Host *next_timer;
 	int select_time;			/* timer in select for target response */
 	volatile Scsi_Cmnd *selecting;
+	struct delayed_work coroutine;		/* our co-routine */
 #ifdef NCR5380_STATS
 	unsigned timebase;			/* Base for time calcs */
 	long time_read[8];			/* time to do reads */
@@ -278,10 +285,12 @@ struct NCR5380_hostdata {
 	unsigned pendingr;
 	unsigned pendingw;
 #endif
+#ifdef AUTOSENSE
+	struct scsi_eh_save ses;
+#endif
 };
 
 #ifdef __KERNEL__
-static struct Scsi_Host *first_instance;	/* linked list of 5380's */
 
 #define dprintk(a,b)			do {} while(0)
 #define NCR5380_dprint(a,b)		do {} while(0)
@@ -290,29 +299,23 @@ static struct Scsi_Host *first_instance;	/* linked list of 5380's */
 #if defined(AUTOPROBE_IRQ)
 static int NCR5380_probe_irq(struct Scsi_Host *instance, int possible);
 #endif
-static void NCR5380_init(struct Scsi_Host *instance, int flags);
+static int NCR5380_init(struct Scsi_Host *instance, int flags);
+static void NCR5380_exit(struct Scsi_Host *instance);
 static void NCR5380_information_transfer(struct Scsi_Host *instance);
 #ifndef DONT_USE_INTR
-static void NCR5380_intr(int irq, void *dev_id, struct pt_regs *regs);
-static void do_NCR5380_intr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t NCR5380_intr(int irq, void *dev_id);
 #endif
-static void NCR5380_main(void);
-static void NCR5380_print_options(struct Scsi_Host *instance);
+static void NCR5380_main(struct work_struct *work);
+static void __maybe_unused NCR5380_print_options(struct Scsi_Host *instance);
+#ifdef NDEBUG
 static void NCR5380_print_phase(struct Scsi_Host *instance);
 static void NCR5380_print(struct Scsi_Host *instance);
-#ifndef NCR5380_abort
-static
 #endif
-int NCR5380_abort(Scsi_Cmnd * cmd);
-#ifndef NCR5380_reset
-static
-#endif
-int NCR5380_reset(Scsi_Cmnd * cmd, unsigned int reset_flags);
-#ifndef NCR5380_queue_command
-static
-#endif
-int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *));
-
+static int NCR5380_abort(Scsi_Cmnd * cmd);
+static int NCR5380_bus_reset(Scsi_Cmnd * cmd);
+static int NCR5380_queue_command(struct Scsi_Host *, struct scsi_cmnd *);
+static int __maybe_unused NCR5380_proc_info(struct Scsi_Host *instance,
+	char *buffer, char **start, off_t offset, int length, int inout);
 
 static void NCR5380_reselect(struct Scsi_Host *instance);
 static int NCR5380_select(struct Scsi_Host *instance, Scsi_Cmnd * cmd, int tag);

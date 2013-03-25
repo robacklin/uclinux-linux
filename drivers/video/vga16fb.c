@@ -7,33 +7,31 @@
  *
  * This file is subject to the terms and conditions of the GNU General
  * Public License.  See the file COPYING in the main directory of this
- * archive for more details.  */
+ * archive for more details.  
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
-#include <linux/console.h>
-#include <linux/selection.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/platform_device.h>
+#include <linux/screen_info.h>
 
 #include <asm/io.h>
-
-#include <video/fbcon.h>
-#include <video/fbcon-vga-planes.h>
-#include "vga.h"
-
-#define dac_reg	(0x3c8)
-#define dac_val	(0x3c9)
+#include <video/vga.h>
 
 #define VGA_FB_PHYS 0xA0000
 #define VGA_FB_PHYS_LEN 65536
+
+#define MODE_SKIP4	1
+#define MODE_8BPP	2
+#define MODE_CFB	4
+#define MODE_TEXT	8
 
 /* --------------------------------------------------------------------- */
 
@@ -41,171 +39,215 @@
  * card parameters
  */
 
-static struct vga16fb_info {
-	struct fb_info  fb_info;
-	char *video_vbase;			/* 0xa0000 map address */
-	int isVGA;
-	
+struct vga16fb_par {
 	/* structure holding original VGA register settings when the
            screen is blanked */
 	struct {
-		unsigned char	SeqCtrlIndex;		/* Sequencer Index reg.   */
-		unsigned char	CrtCtrlIndex;		/* CRT-Contr. Index reg.  */
-		unsigned char	CrtMiscIO;		/* Miscellaneous register */
-		unsigned char	HorizontalTotal;	/* CRT-Controller:00h */
-		unsigned char	HorizDisplayEnd;	/* CRT-Controller:01h */
-		unsigned char	StartHorizRetrace;	/* CRT-Controller:04h */
-		unsigned char	EndHorizRetrace;	/* CRT-Controller:05h */
-		unsigned char	Overflow;		/* CRT-Controller:07h */
-		unsigned char	StartVertRetrace;	/* CRT-Controller:10h */
-		unsigned char	EndVertRetrace;		/* CRT-Controller:11h */
-		unsigned char	ModeControl;		/* CRT-Controller:17h */
-		unsigned char	ClockingMode;		/* Seq-Controller:01h */
+		unsigned char	SeqCtrlIndex;	  /* Sequencer Index reg.   */
+		unsigned char	CrtCtrlIndex;	  /* CRT-Contr. Index reg.  */
+		unsigned char	CrtMiscIO;	  /* Miscellaneous register */
+		unsigned char	HorizontalTotal;  /* CRT-Controller:00h */
+		unsigned char	HorizDisplayEnd;  /* CRT-Controller:01h */
+		unsigned char	StartHorizRetrace;/* CRT-Controller:04h */
+		unsigned char	EndHorizRetrace;  /* CRT-Controller:05h */
+		unsigned char	Overflow;	  /* CRT-Controller:07h */
+		unsigned char	StartVertRetrace; /* CRT-Controller:10h */
+		unsigned char	EndVertRetrace;	  /* CRT-Controller:11h */
+		unsigned char	ModeControl;	  /* CRT-Controller:17h */
+		unsigned char	ClockingMode;	  /* Seq-Controller:01h */
 	} vga_state;
-
-	int palette_blanked;
-	int vesa_blanked;
-} vga16fb;
-
-
-struct vga16fb_par {
+	struct vgastate state;
+	unsigned int ref_count;
+	int palette_blanked, vesa_blanked, mode, isVGA;
+	u8 misc, pel_msk, vss, clkdiv;
 	u8 crtc[VGA_CRT_C];
-	u8 atc[VGA_ATT_C];
-	u8 gdc[VGA_GFX_C];
-	u8 seq[VGA_SEQ_C];
-	u8 misc;
-	u8 vss;
-	struct fb_var_screeninfo var;
 };
 
 /* --------------------------------------------------------------------- */
 
-static struct fb_var_screeninfo vga16fb_defined = {
-	640,480,640,480,/* W,H, W, H (virtual) load xres,xres_virtual*/
-	0,0,		/* virtual -> visible no offset */
-	4,		/* depth -> load bits_per_pixel */
-	0,		/* greyscale ? */
-	{0,0,0},	/* R */
-	{0,0,0},	/* G */
-	{0,0,0},	/* B */
-	{0,0,0},	/* transparency */
-	0,		/* standard pixel format */
-	FB_ACTIVATE_NOW,
-	-1,-1,
-	0,
-	39721, 48, 16, 39, 8,
-	96, 2, 0,	/* No sync info */
-	FB_VMODE_NONINTERLACED,
-	{0,0,0,0,0,0}
+static struct fb_var_screeninfo vga16fb_defined __devinitdata = {
+	.xres		= 640,
+	.yres		= 480,
+	.xres_virtual	= 640,
+	.yres_virtual	= 480,
+	.bits_per_pixel	= 4,	
+	.activate	= FB_ACTIVATE_TEST,
+	.height		= -1,
+	.width		= -1,
+	.pixclock	= 39721,
+	.left_margin	= 48,
+	.right_margin	= 16,
+	.upper_margin	= 33,
+	.lower_margin	= 10,
+	.hsync_len 	= 96,
+	.vsync_len	= 2,
+	.vmode		= FB_VMODE_NONINTERLACED,
 };
 
-static struct display disp;
-static struct { u_short blue, green, red, pad; } palette[256];
+/* name should not depend on EGA/VGA */
+static struct fb_fix_screeninfo vga16fb_fix __devinitdata = {
+	.id		= "VGA16 VGA",
+	.smem_start	= VGA_FB_PHYS,
+	.smem_len	= VGA_FB_PHYS_LEN,
+	.type		= FB_TYPE_VGA_PLANES,
+	.type_aux	= FB_AUX_VGA_PLANES_VGA4,
+	.visual		= FB_VISUAL_PSEUDOCOLOR,
+	.xpanstep	= 8,
+	.ypanstep	= 1,
+	.line_length	= 640 / 8,
+	.accel		= FB_ACCEL_NONE
+};
 
-static int             currcon   = 0;
+/* The VGA's weird architecture often requires that we read a byte and
+   write a byte to the same location.  It doesn't matter *what* byte
+   we write, however.  This is because all the action goes on behind
+   the scenes in the VGA's 32-bit latch register, and reading and writing
+   video memory just invokes latch behavior.
 
-/* --------------------------------------------------------------------- */
-
-static void vga16fb_pan_var(struct fb_info *info, struct fb_var_screeninfo *var)
+   To avoid race conditions (is this necessary?), reading and writing
+   the memory byte should be done with a single instruction.  One
+   suitable instruction is the x86 bitwise OR.  The following
+   read-modify-write routine should optimize to one such bitwise
+   OR. */
+static inline void rmw(volatile char __iomem *p)
 {
-	u32 pos = (var->xres_virtual * var->yoffset + var->xoffset) >> 3;
-	outb(VGA_CRTC_START_HI, VGA_CRT_IC);
-	outb(pos >> 8, VGA_CRT_DC);
-	outb(VGA_CRTC_START_LO, VGA_CRT_IC);
-	outb(pos & 0xFF, VGA_CRT_DC);
-#if 0
-	/* if someone supports xoffset in bit resolution */
-	inb(VGA_IS1_RC);		/* reset flip-flop */
-	outb(VGA_ATC_PEL, VGA_ATT_IW);
-	outb(xoffset & 7, VGA_ATT_IW);
-	inb(VGA_IS1_RC);
-	outb(0x20, VGA_ATT_IW);
-#endif
+	readb(p);
+	writeb(1, p);
 }
 
-static int vga16fb_update_var(int con, struct fb_info *info)
+/* Set the Graphics Mode Register, and return its previous value.
+   Bits 0-1 are write mode, bit 3 is read mode. */
+static inline int setmode(int mode)
 {
-	vga16fb_pan_var(info, &fb_display[con].var);
-	return 0;
-}
-
-static int vga16fb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			   struct fb_info *info)
-{
-	struct display *p;
-
-	if (con < 0)
-		p = &disp;
-	else
-		p = fb_display + con;
-
-	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id,"VGA16 VGA");
-
-	fix->smem_start = VGA_FB_PHYS;
-	fix->smem_len = VGA_FB_PHYS_LEN;
-	fix->type = FB_TYPE_VGA_PLANES;
-	fix->visual = FB_VISUAL_PSEUDOCOLOR;
-	fix->xpanstep  = 8;
-	fix->ypanstep  = 1;
-	fix->ywrapstep = 0;
-	fix->line_length = p->var.xres_virtual / 8;
-	return 0;
-}
-
-static int vga16fb_get_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info)
-{
-	if(con==-1)
-		memcpy(var, &vga16fb_defined, sizeof(struct fb_var_screeninfo));
-	else
-		*var=fb_display[con].var;
-	return 0;
-}
-
-static void vga16fb_set_disp(int con, struct vga16fb_info *info)
-{
-	struct fb_fix_screeninfo fix;
-	struct display *display;
-
-	if (con < 0)
-		display = &disp;
-	else
-		display = fb_display + con;
-
+	int oldmode;
 	
-	vga16fb_get_fix(&fix, con, &info->fb_info);
-
-	display->screen_base = info->video_vbase;
-	display->visual = fix.visual;
-	display->type = fix.type;
-	display->type_aux = fix.type_aux;
-	display->ypanstep = fix.ypanstep;
-	display->ywrapstep = fix.ywrapstep;
-	display->line_length = fix.line_length;
-	display->next_line = fix.line_length;
-	display->can_soft_blank = 1;
-	display->inverse = 0;
-
-	if (info->isVGA)
-		display->dispsw = &fbcon_vga_planes;
-	else
-		display->dispsw = &fbcon_ega_planes;
-	display->scrollmode = SCROLL_YREDRAW;
+	oldmode = vga_io_rgfx(VGA_GFX_MODE);
+	vga_io_w(VGA_GFX_D, mode);
+	return oldmode;
 }
 
-static void vga16fb_encode_var(struct fb_var_screeninfo *var,
-			       const struct vga16fb_par *par,
-			       const struct vga16fb_info *info)
+/* Select the Bit Mask Register and return its value. */
+static inline int selectmask(void)
 {
-	*var = par->var;
+	return vga_io_rgfx(VGA_GFX_BIT_MASK);
+}
+
+/* Set the value of the Bit Mask Register.  It must already have been
+   selected with selectmask(). */
+static inline void setmask(int mask)
+{
+	vga_io_w(VGA_GFX_D, mask);
+}
+
+/* Set the Data Rotate Register and return its old value. 
+   Bits 0-2 are rotate count, bits 3-4 are logical operation
+   (0=NOP, 1=AND, 2=OR, 3=XOR). */
+static inline int setop(int op)
+{
+	int oldop;
+	
+	oldop = vga_io_rgfx(VGA_GFX_DATA_ROTATE);
+	vga_io_w(VGA_GFX_D, op);
+	return oldop;
+}
+
+/* Set the Enable Set/Reset Register and return its old value.  
+   The code here always uses value 0xf for this register. */
+static inline int setsr(int sr)
+{
+	int oldsr;
+
+	oldsr = vga_io_rgfx(VGA_GFX_SR_ENABLE);
+	vga_io_w(VGA_GFX_D, sr);
+	return oldsr;
+}
+
+/* Set the Set/Reset Register and return its old value. */
+static inline int setcolor(int color)
+{
+	int oldcolor;
+
+	oldcolor = vga_io_rgfx(VGA_GFX_SR_VALUE);
+	vga_io_w(VGA_GFX_D, color);
+	return oldcolor;
+}
+
+/* Return the value in the Graphics Address Register. */
+static inline int getindex(void)
+{
+	return vga_io_r(VGA_GFX_I);
+}
+
+/* Set the value in the Graphics Address Register. */
+static inline void setindex(int index)
+{
+	vga_io_w(VGA_GFX_I, index);
+}
+
+static void vga16fb_pan_var(struct fb_info *info, 
+			    struct fb_var_screeninfo *var)
+{
+	struct vga16fb_par *par = info->par;
+	u32 xoffset, pos;
+
+	xoffset = var->xoffset;
+	if (info->var.bits_per_pixel == 8) {
+		pos = (info->var.xres_virtual * var->yoffset + xoffset) >> 2;
+	} else if (par->mode & MODE_TEXT) {
+		int fh = 16; // FIXME !!! font height. Fugde for now.
+		pos = (info->var.xres_virtual * (var->yoffset / fh) + xoffset) >> 3;
+	} else {
+		if (info->var.nonstd)
+			xoffset--;
+		pos = (info->var.xres_virtual * var->yoffset + xoffset) >> 3;
+	}
+	vga_io_wcrt(VGA_CRTC_START_HI, pos >> 8);
+	vga_io_wcrt(VGA_CRTC_START_LO, pos & 0xFF);
+	/* if we support CFB4, then we must! support xoffset with pixel
+	 * granularity if someone supports xoffset in bit resolution */
+	vga_io_r(VGA_IS1_RC);		/* reset flip-flop */
+	vga_io_w(VGA_ATT_IW, VGA_ATC_PEL);
+	if (info->var.bits_per_pixel == 8)
+		vga_io_w(VGA_ATT_IW, (xoffset & 3) << 1);
+	else
+		vga_io_w(VGA_ATT_IW, xoffset & 7);
+	vga_io_r(VGA_IS1_RC);
+	vga_io_w(VGA_ATT_IW, 0x20);
+}
+
+static void vga16fb_update_fix(struct fb_info *info)
+{
+	if (info->var.bits_per_pixel == 4) {
+		if (info->var.nonstd) {
+			info->fix.type = FB_TYPE_PACKED_PIXELS;
+			info->fix.line_length = info->var.xres_virtual / 2;
+		} else {
+			info->fix.type = FB_TYPE_VGA_PLANES;
+			info->fix.type_aux = FB_AUX_VGA_PLANES_VGA4;
+			info->fix.line_length = info->var.xres_virtual / 8;
+		}
+	} else if (info->var.bits_per_pixel == 0) {
+		info->fix.type = FB_TYPE_TEXT;
+		info->fix.type_aux = FB_AUX_TEXT_CGA;
+		info->fix.line_length = info->var.xres_virtual / 4;
+	} else {	/* 8bpp */
+		if (info->var.nonstd) {
+			info->fix.type = FB_TYPE_VGA_PLANES;
+			info->fix.type_aux = FB_AUX_VGA_PLANES_CFB8;
+			info->fix.line_length = info->var.xres_virtual / 4;
+		} else {
+			info->fix.type = FB_TYPE_PACKED_PIXELS;
+			info->fix.line_length = info->var.xres_virtual;
+		}
+	}
 }
 
 static void vga16fb_clock_chip(struct vga16fb_par *par,
 			       unsigned int pixclock,
-			       const struct vga16fb_info *info)
+			       const struct fb_info *info,
+			       int mul, int div)
 {
-	static struct {
+	static const struct {
 		u32 pixclock;
 		u8  misc;
 		u8  seq_clock_mode;
@@ -217,6 +259,7 @@ static void vga16fb_clock_chip(struct vga16fb_par *par,
 		{     0 /* bad */,    0x00, 0x00}};
 	int err;
 
+	pixclock = (pixclock * mul) / div;
 	best = vgaclocks;
 	err = pixclock - best->pixclock;
 	if (err < 0) err = -err;
@@ -231,25 +274,83 @@ static void vga16fb_clock_chip(struct vga16fb_par *par,
 		}
 	}
 	par->misc |= best->misc;
-	par->seq[VGA_SEQ_CLOCK_MODE] |= best->seq_clock_mode;
-	par->var.pixclock = best->pixclock;		
+	par->clkdiv = best->seq_clock_mode;
+	pixclock = (best->pixclock * div) / mul;		
 }
 			       
 #define FAIL(X) return -EINVAL
 
-static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
-			      struct vga16fb_par *par,
-			      const struct vga16fb_info *info)
+static int vga16fb_open(struct fb_info *info, int user)
 {
+	struct vga16fb_par *par = info->par;
+
+	if (!par->ref_count) {
+		memset(&par->state, 0, sizeof(struct vgastate));
+		par->state.flags = VGA_SAVE_FONTS | VGA_SAVE_MODE |
+			VGA_SAVE_CMAP;
+		save_vga(&par->state);
+	}
+	par->ref_count++;
+
+	return 0;
+}
+
+static int vga16fb_release(struct fb_info *info, int user)
+{
+	struct vga16fb_par *par = info->par;
+
+	if (!par->ref_count)
+		return -EINVAL;
+
+	if (par->ref_count == 1)
+		restore_vga(&par->state);
+	par->ref_count--;
+
+	return 0;
+}
+
+static int vga16fb_check_var(struct fb_var_screeninfo *var,
+			     struct fb_info *info)
+{
+	struct vga16fb_par *par = info->par;
 	u32 xres, right, hslen, left, xtotal;
 	u32 yres, lower, vslen, upper, ytotal;
 	u32 vxres, xoffset, vyres, yoffset;
 	u32 pos;
 	u8 r7, rMode;
-	int i;
+	int shift;
+	int mode;
+	u32 maxmem;
 
-	if (var->bits_per_pixel != 4)
+	par->pel_msk = 0xFF;
+
+	if (var->bits_per_pixel == 4) {
+		if (var->nonstd) {
+			if (!par->isVGA)
+				return -EINVAL;
+			shift = 3;
+			mode = MODE_SKIP4 | MODE_CFB;
+			maxmem = 16384;
+			par->pel_msk = 0x0F;
+		} else {
+			shift = 3;
+			mode = 0;
+			maxmem = 65536;
+		}
+	} else if (var->bits_per_pixel == 8) {
+		if (!par->isVGA)
+			return -EINVAL;	/* no support on EGA */
+		shift = 2;
+		if (var->nonstd) {
+			mode = MODE_8BPP | MODE_CFB;
+			maxmem = 65536;
+		} else {
+			mode = MODE_SKIP4 | MODE_8BPP | MODE_CFB;
+			maxmem = 16384;
+		}
+	} else
 		return -EINVAL;
+
 	xres = (var->xres + 7) & ~7;
 	vxres = (var->xres_virtual + 0xF) & ~0xF;
 	xoffset = (var->xoffset + 7) & ~7;
@@ -262,18 +363,18 @@ static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
 	if (xres + xoffset > vxres)
 		xoffset = vxres - xres;
 
-	par->var.xres = xres;
-	par->var.right_margin = right;
-	par->var.hsync_len = hslen;
-	par->var.left_margin = left;
-	par->var.xres_virtual = vxres;
-	par->var.xoffset = xoffset;
+	var->xres = xres;
+	var->right_margin = right;
+	var->hsync_len = hslen;
+	var->left_margin = left;
+	var->xres_virtual = vxres;
+	var->xoffset = xoffset;
 
-	xres >>= 3;
-	right >>= 3;
-	hslen >>= 3;
-	left >>= 3;
-	vxres >>= 3;
+	xres >>= shift;
+	right >>= shift;
+	hslen >>= shift;
+	left >>= shift;
+	vxres >>= shift;
 	xtotal = xres + right + hslen + left;
 	if (xtotal >= 256)
 		FAIL("xtotal too big");
@@ -302,19 +403,19 @@ static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
 
 	if (yres > vyres)
 		vyres = yres;
-	if (vxres * vyres > 65536) {
-		vyres = 65536 / vxres;
+	if (vxres * vyres > maxmem) {
+		vyres = maxmem / vxres;
 		if (vyres < yres)
 			return -ENOMEM;
 	}
 	if (yoffset + yres > vyres)
 		yoffset = vyres - yres;
-	par->var.yres = yres;
-	par->var.lower_margin = lower;
-	par->var.vsync_len = vslen;
-	par->var.upper_margin = upper;
-	par->var.yres_virtual = vyres;
-	par->var.yoffset = yoffset;
+	var->yres = yres;
+	var->lower_margin = lower;
+	var->vsync_len = vslen;
+	var->upper_margin = upper;
+	var->yres_virtual = vyres;
+	var->yoffset = yoffset;
 
 	if (var->vmode & FB_VMODE_DOUBLE) {
 		yres <<= 1;
@@ -342,12 +443,13 @@ static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
 	if (ytotal & 0x200) r7 |= 0x20;
 	par->crtc[VGA_CRTC_PRESET_ROW] = 0;
 	par->crtc[VGA_CRTC_MAX_SCAN] = 0x40;	/* 1 scanline, no linecmp */
-	par->var.vmode = var->vmode;
 	if (var->vmode & FB_VMODE_DOUBLE)
 		par->crtc[VGA_CRTC_MAX_SCAN] |= 0x80;
 	par->crtc[VGA_CRTC_CURSOR_START] = 0x20;
 	par->crtc[VGA_CRTC_CURSOR_END]   = 0x00;
-	pos = yoffset * vxres + (xoffset >> 3);
+	if ((mode & (MODE_CFB | MODE_8BPP)) == MODE_CFB)
+		xoffset--;
+	pos = yoffset * vxres + (xoffset >> shift);
 	par->crtc[VGA_CRTC_START_HI]     = pos >> 8;
 	par->crtc[VGA_CRTC_START_LO]     = pos & 0xFF;
 	par->crtc[VGA_CRTC_CURSOR_HI]    = 0x00;
@@ -375,217 +477,189 @@ static int vga16fb_decode_var(const struct fb_var_screeninfo *var,
 	if (vxres >= 512)
 		FAIL("vxres too long");
 	par->crtc[VGA_CRTC_OFFSET] = vxres >> 1;
-	par->crtc[VGA_CRTC_UNDERLINE] = 0x1F;
-	par->crtc[VGA_CRTC_MODE] = rMode | 0xE3;
+	if (mode & MODE_SKIP4)
+		par->crtc[VGA_CRTC_UNDERLINE] = 0x5F;	/* 256, cfb8 */
+	else
+		par->crtc[VGA_CRTC_UNDERLINE] = 0x1F;	/* 16, vgap */
+	par->crtc[VGA_CRTC_MODE] = rMode | ((mode & MODE_TEXT) ? 0xA3 : 0xE3);
 	par->crtc[VGA_CRTC_LINE_COMPARE] = 0xFF;
 	par->crtc[VGA_CRTC_OVERFLOW] = r7;
 
 	par->vss = 0x00;	/* 3DA */
 
-	for (i = 0x00; i < 0x10; i++)
-		par->atc[i] = i;
-	par->atc[VGA_ATC_MODE] = 0x81;
-	par->atc[VGA_ATC_OVERSCAN] = 0x00;	/* 0 for EGA, 0xFF for VGA */
-	par->atc[VGA_ATC_PLANE_ENABLE] = 0x0F;
-	par->atc[VGA_ATC_PEL] = xoffset & 7;
-	par->atc[VGA_ATC_COLOR_PAGE] = 0x00;
-	
-	par->misc = 0xC3;	/* enable CPU, ports 0x3Dx, positive sync */
-	par->var.sync = var->sync;
+	par->misc = 0xE3;	/* enable CPU, ports 0x3Dx, positive sync */
 	if (var->sync & FB_SYNC_HOR_HIGH_ACT)
 		par->misc &= ~0x40;
 	if (var->sync & FB_SYNC_VERT_HIGH_ACT)
 		par->misc &= ~0x80;
 	
-	par->seq[VGA_SEQ_CLOCK_MODE] = 0x01;
-	par->seq[VGA_SEQ_PLANE_WRITE] = 0x0F;
-	par->seq[VGA_SEQ_CHARACTER_MAP] = 0x00;
-	par->seq[VGA_SEQ_MEMORY_MODE] = 0x06;
-	
-	par->gdc[VGA_GFX_SR_VALUE] = 0x00;
-	par->gdc[VGA_GFX_SR_ENABLE] = 0x0F;
-	par->gdc[VGA_GFX_COMPARE_VALUE] = 0x00;
-	par->gdc[VGA_GFX_DATA_ROTATE] = 0x20;
-	par->gdc[VGA_GFX_PLANE_READ] = 0;
-	par->gdc[VGA_GFX_MODE] = 0x00;
-	par->gdc[VGA_GFX_MISC] = 0x05;
-	par->gdc[VGA_GFX_COMPARE_MASK] = 0x0F;
-	par->gdc[VGA_GFX_BIT_MASK] = 0xFF;
+	par->mode = mode;
 
-	vga16fb_clock_chip(par, var->pixclock, info);
-
-	par->var.bits_per_pixel = 4;
-	par->var.grayscale = var->grayscale;
-	par->var.red.offset = par->var.green.offset = par->var.blue.offset = 
-	par->var.transp.offset = 0;
-	par->var.red.length = par->var.green.length = par->var.blue.length =
-		(info->isVGA) ? 6 : 2;
-	par->var.transp.length = 0;
-	par->var.nonstd = 0;
-	par->var.activate = FB_ACTIVATE_NOW;
-	par->var.height = -1;
-	par->var.width = -1;
-	par->var.accel_flags = 0;
+	if (mode & MODE_8BPP)
+		/* pixel clock == vga clock / 2 */
+		vga16fb_clock_chip(par, var->pixclock, info, 1, 2);
+	else
+		/* pixel clock == vga clock */
+		vga16fb_clock_chip(par, var->pixclock, info, 1, 1);
 	
+	var->red.offset = var->green.offset = var->blue.offset = 
+	var->transp.offset = 0;
+	var->red.length = var->green.length = var->blue.length =
+		(par->isVGA) ? 6 : 2;
+	var->transp.length = 0;
+	var->activate = FB_ACTIVATE_NOW;
+	var->height = -1;
+	var->width = -1;
+	var->accel_flags = 0;
 	return 0;
 }
 #undef FAIL
 
-static int vga16fb_set_par(const struct vga16fb_par *par,
-			   struct vga16fb_info *info)
+static int vga16fb_set_par(struct fb_info *info)
 {
-	int i;
+	struct vga16fb_par *par = info->par;
+	u8 gdc[VGA_GFX_C];
+	u8 seq[VGA_SEQ_C];
+	u8 atc[VGA_ATT_C];
+	int fh, i;
 
-	outb(inb(VGA_MIS_R) | 0x01, VGA_MIS_W);
+	seq[VGA_SEQ_CLOCK_MODE] = 0x01 | par->clkdiv;
+	if (par->mode & MODE_TEXT)
+		seq[VGA_SEQ_PLANE_WRITE] = 0x03;
+	else
+		seq[VGA_SEQ_PLANE_WRITE] = 0x0F;
+	seq[VGA_SEQ_CHARACTER_MAP] = 0x00;
+	if (par->mode & MODE_TEXT)
+		seq[VGA_SEQ_MEMORY_MODE] = 0x03;
+	else if (par->mode & MODE_SKIP4)
+		seq[VGA_SEQ_MEMORY_MODE] = 0x0E;
+	else
+		seq[VGA_SEQ_MEMORY_MODE] = 0x06;
+
+	gdc[VGA_GFX_SR_VALUE] = 0x00;
+	gdc[VGA_GFX_SR_ENABLE] = 0x00;
+	gdc[VGA_GFX_COMPARE_VALUE] = 0x00;
+	gdc[VGA_GFX_DATA_ROTATE] = 0x00;
+	gdc[VGA_GFX_PLANE_READ] = 0;
+	if (par->mode & MODE_TEXT) {
+		gdc[VGA_GFX_MODE] = 0x10;
+		gdc[VGA_GFX_MISC] = 0x06;
+	} else {
+		if (par->mode & MODE_CFB)
+			gdc[VGA_GFX_MODE] = 0x40;
+		else
+			gdc[VGA_GFX_MODE] = 0x00;
+		gdc[VGA_GFX_MISC] = 0x05;
+	}
+	gdc[VGA_GFX_COMPARE_MASK] = 0x0F;
+	gdc[VGA_GFX_BIT_MASK] = 0xFF;
+
+	for (i = 0x00; i < 0x10; i++)
+		atc[i] = i;
+	if (par->mode & MODE_TEXT)
+		atc[VGA_ATC_MODE] = 0x04;
+	else if (par->mode & MODE_8BPP)
+		atc[VGA_ATC_MODE] = 0x41;
+	else
+		atc[VGA_ATC_MODE] = 0x81;
+	atc[VGA_ATC_OVERSCAN] = 0x00;	/* 0 for EGA, 0xFF for VGA */
+	atc[VGA_ATC_PLANE_ENABLE] = 0x0F;
+	if (par->mode & MODE_8BPP)
+		atc[VGA_ATC_PEL] = (info->var.xoffset & 3) << 1;
+	else
+		atc[VGA_ATC_PEL] = info->var.xoffset & 7;
+	atc[VGA_ATC_COLOR_PAGE] = 0x00;
+	
+	if (par->mode & MODE_TEXT) {
+		fh = 16; // FIXME !!! Fudge font height. 
+		par->crtc[VGA_CRTC_MAX_SCAN] = (par->crtc[VGA_CRTC_MAX_SCAN] 
+					       & ~0x1F) | (fh - 1);
+	}
+
+	vga_io_w(VGA_MIS_W, vga_io_r(VGA_MIS_R) | 0x01);
 
 	/* Enable graphics register modification */
-	if (!info->isVGA) {
-		outb(0x00, EGA_GFX_E0);
-		outb(0x01, EGA_GFX_E1);
+	if (!par->isVGA) {
+		vga_io_w(EGA_GFX_E0, 0x00);
+		vga_io_w(EGA_GFX_E1, 0x01);
 	}
 	
 	/* update misc output register */
-	outb(par->misc, VGA_MIS_W);
+	vga_io_w(VGA_MIS_W, par->misc);
 	
 	/* synchronous reset on */
-	outb(0x00, VGA_SEQ_I);
-	outb(0x01, VGA_SEQ_D);
-	
+	vga_io_wseq(0x00, 0x01);
+
+	if (par->isVGA)
+		vga_io_w(VGA_PEL_MSK, par->pel_msk);
+
 	/* write sequencer registers */
-	outb(1, VGA_SEQ_I);
-	outb(par->seq[1] | 0x20, VGA_SEQ_D);
+	vga_io_wseq(VGA_SEQ_CLOCK_MODE, seq[VGA_SEQ_CLOCK_MODE] | 0x20);
 	for (i = 2; i < VGA_SEQ_C; i++) {
-		outb(i, VGA_SEQ_I);
-		outb(par->seq[i], VGA_SEQ_D);
+		vga_io_wseq(i, seq[i]);
 	}
 	
 	/* synchronous reset off */
-	outb(0x00, VGA_SEQ_I);
-	outb(0x03, VGA_SEQ_D);
-	
+	vga_io_wseq(0x00, 0x03);
+
 	/* deprotect CRT registers 0-7 */
-	outb(0x11, VGA_CRT_IC);
-	outb(par->crtc[0x11], VGA_CRT_DC);
+	vga_io_wcrt(VGA_CRTC_V_SYNC_END, par->crtc[VGA_CRTC_V_SYNC_END]);
 
 	/* write CRT registers */
-	for (i = 0; i < VGA_CRT_C; i++) {
-		outb(i, VGA_CRT_IC);
-		outb(par->crtc[i], VGA_CRT_DC);
+	for (i = 0; i < VGA_CRTC_REGS; i++) {
+		vga_io_wcrt(i, par->crtc[i]);
 	}
 	
 	/* write graphics controller registers */
 	for (i = 0; i < VGA_GFX_C; i++) {
-		outb(i, VGA_GFX_I);
-		outb(par->gdc[i], VGA_GFX_D);
+		vga_io_wgfx(i, gdc[i]);
 	}
 	
 	/* write attribute controller registers */
 	for (i = 0; i < VGA_ATT_C; i++) {
-		inb_p(VGA_IS1_RC);		/* reset flip-flop */
-		outb_p(i, VGA_ATT_IW);
-		outb_p(par->atc[i], VGA_ATT_IW);
+		vga_io_r(VGA_IS1_RC);		/* reset flip-flop */
+		vga_io_wattr(i, atc[i]);
 	}
 
 	/* Wait for screen to stabilize. */
 	mdelay(50);
 
-	outb(0x01, VGA_SEQ_I);
-	outb(par->seq[1], VGA_SEQ_D);
+	vga_io_wseq(VGA_SEQ_CLOCK_MODE, seq[VGA_SEQ_CLOCK_MODE]);
 
-	inb(VGA_IS1_RC);
-	outb(0x20, VGA_ATT_IW);
-	
-	return 0;
-}
+	vga_io_r(VGA_IS1_RC);
+	vga_io_w(VGA_ATT_IW, 0x20);
 
-static int vga16fb_set_var(struct fb_var_screeninfo *var, int con,
-			  struct fb_info *fb)
-{
-	struct vga16fb_info *info = (struct vga16fb_info*)fb;
-	struct vga16fb_par par;
-	struct display *display;
-	int err;
-
-	if (con < 0)
-		display = fb->disp;
-	else
-		display = fb_display + con;
-	if ((err = vga16fb_decode_var(var, &par, info)) != 0)
-		return err;
-	vga16fb_encode_var(var, &par, info);
-	
-	if ((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_TEST)
-		return 0;
-
-	if ((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) {
-		u32 oldxres, oldyres, oldvxres, oldvyres, oldbpp;
-
-		oldxres = display->var.xres;
-		oldyres = display->var.yres;
-		oldvxres = display->var.xres_virtual;
-		oldvyres = display->var.yres_virtual;
-		oldbpp = display->var.bits_per_pixel;
-
-		display->var = *var;
-
-		if (oldxres != var->xres || oldyres != var->yres ||
-		    oldvxres != var->xres_virtual || oldvyres != var->yres_virtual ||
-		    oldbpp != var->bits_per_pixel) {
-			vga16fb_set_disp(con, info);
-			if (info->fb_info.changevar)
-				info->fb_info.changevar(con);
-		}
-		if (con == currcon)
-			vga16fb_set_par(&par, info);
-	}
-
+	vga16fb_update_fix(info);
 	return 0;
 }
 
 static void ega16_setpalette(int regno, unsigned red, unsigned green, unsigned blue)
 {
-	static unsigned char map[] = { 000, 001, 010, 011 };
+	static const unsigned char map[] = { 000, 001, 010, 011 };
 	int val;
 	
-	val = map[red>>14] | ((map[green>>14]) << 1) | ((map[blue>>14]) << 2);
-	inb_p(0x3DA);   /* ! 0x3BA */
-	outb_p(regno, 0x3C0);
-	outb_p(val, 0x3C0);
-	inb_p(0x3DA);   /* some clones need it */
-	outb_p(0x20, 0x3C0); /* unblank screen */
-}
-
-static int vga16_getcolreg(unsigned regno, unsigned *red, unsigned *green,
-			  unsigned *blue, unsigned *transp,
-			  struct fb_info *fb_info)
-{
-	/*
-	 *  Read a single color register and split it into colors/transparent.
-	 *  Return != 0 for invalid regno.
-	 */
-
 	if (regno >= 16)
-		return 1;
-
-	*red   = palette[regno].red;
-	*green = palette[regno].green;
-	*blue  = palette[regno].blue;
-	*transp = 0;
-	return 0;
+		return;
+	val = map[red>>14] | ((map[green>>14]) << 1) | ((map[blue>>14]) << 2);
+	vga_io_r(VGA_IS1_RC);   /* ! 0x3BA */
+	vga_io_wattr(regno, val);
+	vga_io_r(VGA_IS1_RC);   /* some clones need it */
+	vga_io_w(VGA_ATT_IW, 0x20); /* unblank screen */
 }
 
 static void vga16_setpalette(int regno, unsigned red, unsigned green, unsigned blue)
 {
-	outb(regno,       dac_reg);
-	outb(red   >> 10, dac_val);
-	outb(green >> 10, dac_val);
-	outb(blue  >> 10, dac_val);
+	outb(regno,       VGA_PEL_IW);
+	outb(red   >> 10, VGA_PEL_D);
+	outb(green >> 10, VGA_PEL_D);
+	outb(blue  >> 10, VGA_PEL_D);
 }
 
-static int vga16_setcolreg(unsigned regno, unsigned red, unsigned green,
-			  unsigned blue, unsigned transp,
-			  struct fb_info *fb_info)
+static int vga16fb_setcolreg(unsigned regno, unsigned red, unsigned green,
+			     unsigned blue, unsigned transp,
+			     struct fb_info *info)
 {
+	struct vga16fb_par *par = info->par;
 	int gray;
 
 	/*
@@ -595,258 +669,120 @@ static int vga16_setcolreg(unsigned regno, unsigned red, unsigned green,
 	 *  != 0 for invalid regno.
 	 */
 	
-	if (regno >= 16)
+	if (regno >= 256)
 		return 1;
 
-	palette[regno].red   = red;
-	palette[regno].green = green;
-	palette[regno].blue  = blue;
+	gray = info->var.grayscale;
 	
-	if (currcon < 0)
-		gray = disp.var.grayscale;
-	else
-		gray = fb_display[currcon].var.grayscale;
 	if (gray) {
 		/* gray = 0.30*R + 0.59*G + 0.11*B */
 		red = green = blue = (red * 77 + green * 151 + blue * 28) >> 8;
 	}
-	if (((struct vga16fb_info *) fb_info)->isVGA) 
+	if (par->isVGA) 
 		vga16_setpalette(regno,red,green,blue);
 	else
 		ega16_setpalette(regno,red,green,blue);
-	
 	return 0;
 }
 
-static void do_install_cmap(int con, struct fb_info *info)
-{
-	if (con != currcon)
-		return;
-	if (fb_display[con].cmap.len)
-		fb_set_cmap(&fb_display[con].cmap, 1, vga16_setcolreg, info);
-	else
-		fb_set_cmap(fb_default_cmap(16), 1, vga16_setcolreg,
-			    info);
-}
-
-static int vga16fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			   struct fb_info *info)
-{
-	if (con == currcon) /* current console? */
-		return fb_get_cmap(cmap, kspc, vga16_getcolreg, info);
-	else if (fb_display[con].cmap.len) /* non default colormap? */
-		fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
-	else
-		fb_copy_cmap(fb_default_cmap(16),
-		     cmap, kspc ? 0 : 2);
-	return 0;
-}
-
-static int vga16fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-			   struct fb_info *info)
-{
-	int err;
-
-	if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
-		err = fb_alloc_cmap(&fb_display[con].cmap,16,0);
-		if (err)
-			return err;
-	}
-	if (con == currcon)			/* current console? */
-		return fb_set_cmap(cmap, kspc, vga16_setcolreg, info);
-	else
-		fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
-	return 0;
-}
-
-static int vga16fb_pan_display(struct fb_var_screeninfo *var, int con,
+static int vga16fb_pan_display(struct fb_var_screeninfo *var,
 			       struct fb_info *info) 
 {
-	if (var->xoffset + fb_display[con].var.xres > fb_display[con].var.xres_virtual ||
-	    var->yoffset + fb_display[con].var.yres > fb_display[con].var.yres_virtual)
-		return -EINVAL;
-	if (con == currcon)
-		vga16fb_pan_var(info, var);
-	fb_display[con].var.xoffset = var->xoffset;
-	fb_display[con].var.yoffset = var->yoffset;
-	fb_display[con].var.vmode &= ~FB_VMODE_YWRAP;
+	vga16fb_pan_var(info, var);
 	return 0;
-}
-
-static struct fb_ops vga16fb_ops = {
-	owner:		THIS_MODULE,
-	fb_get_fix:	vga16fb_get_fix,
-	fb_get_var:	vga16fb_get_var,
-	fb_set_var:	vga16fb_set_var,
-	fb_get_cmap:	vga16fb_get_cmap,
-	fb_set_cmap:	vga16fb_set_cmap,
-	fb_pan_display:	vga16fb_pan_display,
-};
-
-int vga16fb_setup(char *options)
-{
-	char *this_opt;
-	
-	vga16fb.fb_info.fontname[0] = '\0';
-	
-	if (!options || !*options)
-		return 0;
-	
-	while ((this_opt = strsep(&options, ",")) != NULL) {
-		if (!*this_opt) continue;
-		
-		if (!strncmp(this_opt, "font:", 5))
-			strcpy(vga16fb.fb_info.fontname, this_opt+5);
-	}
-	return 0;
-}
-
-static int vga16fb_switch(int con, struct fb_info *fb)
-{
-	struct vga16fb_par par;
-	struct vga16fb_info *info = (struct vga16fb_info*)fb;
-
-	/* Do we have to save the colormap? */
-	if (fb_display[currcon].cmap.len)
-		fb_get_cmap(&fb_display[currcon].cmap, 1, vga16_getcolreg,
-			    fb);
-	
-	currcon = con;
-	vga16fb_decode_var(&fb_display[con].var, &par, info);
-	vga16fb_set_par(&par, info);
-	vga16fb_set_disp(con, info);
-
-	/* Install new colormap */
-	do_install_cmap(con, fb);
-/*	vga16fb_update_var(con, fb); */
-	return 1;
 }
 
 /* The following VESA blanking code is taken from vgacon.c.  The VGA
    blanking code was originally by Huang shi chao, and modified by
    Christoph Rimek (chrimek@toppoint.de) and todd j. derr
    (tjd@barefoot.org) for Linux. */
-#define attrib_port	0x3c0
-#define seq_port_reg	0x3c4
-#define seq_port_val	0x3c5
-#define gr_port_reg	0x3ce
-#define gr_port_val	0x3cf
-#define video_misc_rd	0x3cc
-#define video_misc_wr	0x3c2
-#define vga_video_port_reg	0x3d4
-#define vga_video_port_val	0x3d5
 
-static void vga_vesa_blank(struct vga16fb_info *info, int mode)
+static void vga_vesa_blank(struct vga16fb_par *par, int mode)
 {
-	unsigned char SeqCtrlIndex;
-	unsigned char CrtCtrlIndex;
+	unsigned char SeqCtrlIndex = vga_io_r(VGA_SEQ_I);
+	unsigned char CrtCtrlIndex = vga_io_r(VGA_CRT_IC);
 	
-	cli();
-	SeqCtrlIndex = inb_p(seq_port_reg);
-	CrtCtrlIndex = inb_p(vga_video_port_reg);
-
 	/* save original values of VGA controller registers */
-	if(!info->vesa_blanked) {
-		info->vga_state.CrtMiscIO = inb_p(video_misc_rd);
-		sti();
+	if(!par->vesa_blanked) {
+		par->vga_state.CrtMiscIO = vga_io_r(VGA_MIS_R);
+		//sti();
 
-		outb_p(0x00,vga_video_port_reg);	/* HorizontalTotal */
-		info->vga_state.HorizontalTotal = inb_p(vga_video_port_val);
-		outb_p(0x01,vga_video_port_reg);	/* HorizDisplayEnd */
-		info->vga_state.HorizDisplayEnd = inb_p(vga_video_port_val);
-		outb_p(0x04,vga_video_port_reg);	/* StartHorizRetrace */
-		info->vga_state.StartHorizRetrace = inb_p(vga_video_port_val);
-		outb_p(0x05,vga_video_port_reg);	/* EndHorizRetrace */
-		info->vga_state.EndHorizRetrace = inb_p(vga_video_port_val);
-		outb_p(0x07,vga_video_port_reg);	/* Overflow */
-		info->vga_state.Overflow = inb_p(vga_video_port_val);
-		outb_p(0x10,vga_video_port_reg);	/* StartVertRetrace */
-		info->vga_state.StartVertRetrace = inb_p(vga_video_port_val);
-		outb_p(0x11,vga_video_port_reg);	/* EndVertRetrace */
-		info->vga_state.EndVertRetrace = inb_p(vga_video_port_val);
-		outb_p(0x17,vga_video_port_reg);	/* ModeControl */
-		info->vga_state.ModeControl = inb_p(vga_video_port_val);
-		outb_p(0x01,seq_port_reg);		/* ClockingMode */
-		info->vga_state.ClockingMode = inb_p(seq_port_val);
+		par->vga_state.HorizontalTotal = vga_io_rcrt(0x00);	/* HorizontalTotal */
+		par->vga_state.HorizDisplayEnd = vga_io_rcrt(0x01);	/* HorizDisplayEnd */
+		par->vga_state.StartHorizRetrace = vga_io_rcrt(0x04);	/* StartHorizRetrace */
+		par->vga_state.EndHorizRetrace = vga_io_rcrt(0x05);	/* EndHorizRetrace */
+		par->vga_state.Overflow = vga_io_rcrt(0x07);		/* Overflow */
+		par->vga_state.StartVertRetrace = vga_io_rcrt(0x10);	/* StartVertRetrace */
+		par->vga_state.EndVertRetrace = vga_io_rcrt(0x11);	/* EndVertRetrace */
+		par->vga_state.ModeControl = vga_io_rcrt(0x17);	/* ModeControl */
+		par->vga_state.ClockingMode = vga_io_rseq(0x01);	/* ClockingMode */
 	}
 
 	/* assure that video is enabled */
 	/* "0x20" is VIDEO_ENABLE_bit in register 01 of sequencer */
-	cli();
-	outb_p(0x01,seq_port_reg);
-	outb_p(info->vga_state.ClockingMode | 0x20,seq_port_val);
+	vga_io_wseq(0x01, par->vga_state.ClockingMode | 0x20);
 
 	/* test for vertical retrace in process.... */
-	if ((info->vga_state.CrtMiscIO & 0x80) == 0x80)
-		outb_p(info->vga_state.CrtMiscIO & 0xef,video_misc_wr);
+	if ((par->vga_state.CrtMiscIO & 0x80) == 0x80)
+		vga_io_w(VGA_MIS_W, par->vga_state.CrtMiscIO & 0xef);
 
 	/*
 	 * Set <End of vertical retrace> to minimum (0) and
 	 * <Start of vertical Retrace> to maximum (incl. overflow)
 	 * Result: turn off vertical sync (VSync) pulse.
 	 */
-	if (mode & VESA_VSYNC_SUSPEND) {
-		outb_p(0x10,vga_video_port_reg);	/* StartVertRetrace */
-		outb_p(0xff,vga_video_port_val); 	/* maximum value */
-		outb_p(0x11,vga_video_port_reg);	/* EndVertRetrace */
-		outb_p(0x40,vga_video_port_val);	/* minimum (bits 0..3)  */
-		outb_p(0x07,vga_video_port_reg);	/* Overflow */
-		outb_p(info->vga_state.Overflow | 0x84,vga_video_port_val); /* bits 9,10 of vert. retrace */
+	if (mode & FB_BLANK_VSYNC_SUSPEND) {
+		vga_io_wcrt(VGA_CRTC_V_SYNC_START, 0xff);
+		vga_io_wcrt(VGA_CRTC_V_SYNC_END, 0x40);
+		/* bits 9,10 of vert. retrace */
+		vga_io_wcrt(VGA_CRTC_OVERFLOW, par->vga_state.Overflow | 0x84);
 	}
 
-	if (mode & VESA_HSYNC_SUSPEND) {
+	if (mode & FB_BLANK_HSYNC_SUSPEND) {
 		/*
 		 * Set <End of horizontal retrace> to minimum (0) and
 		 *  <Start of horizontal Retrace> to maximum
 		 * Result: turn off horizontal sync (HSync) pulse.
 		 */
-		outb_p(0x04,vga_video_port_reg);	/* StartHorizRetrace */
-		outb_p(0xff,vga_video_port_val);	/* maximum */
-		outb_p(0x05,vga_video_port_reg);	/* EndHorizRetrace */
-		outb_p(0x00,vga_video_port_val);	/* minimum (0) */
+		vga_io_wcrt(VGA_CRTC_H_SYNC_START, 0xff);
+		vga_io_wcrt(VGA_CRTC_H_SYNC_END, 0x00);
 	}
 
 	/* restore both index registers */
-	outb_p(SeqCtrlIndex,seq_port_reg);
-	outb_p(CrtCtrlIndex,vga_video_port_reg);
-	sti();
+	outb_p(SeqCtrlIndex, VGA_SEQ_I);
+	outb_p(CrtCtrlIndex, VGA_CRT_IC);
 }
 
-static void vga_vesa_unblank(struct vga16fb_info *info)
+static void vga_vesa_unblank(struct vga16fb_par *par)
 {
-	unsigned char SeqCtrlIndex;
-	unsigned char CrtCtrlIndex;
+	unsigned char SeqCtrlIndex = vga_io_r(VGA_SEQ_I);
+	unsigned char CrtCtrlIndex = vga_io_r(VGA_CRT_IC);
 	
-	cli();
-	SeqCtrlIndex = inb_p(seq_port_reg);
-	CrtCtrlIndex = inb_p(vga_video_port_reg);
-
 	/* restore original values of VGA controller registers */
-	outb_p(info->vga_state.CrtMiscIO,video_misc_wr);
+	vga_io_w(VGA_MIS_W, par->vga_state.CrtMiscIO);
 
-	outb_p(0x00,vga_video_port_reg);		/* HorizontalTotal */
-	outb_p(info->vga_state.HorizontalTotal,vga_video_port_val);
-	outb_p(0x01,vga_video_port_reg);		/* HorizDisplayEnd */
-	outb_p(info->vga_state.HorizDisplayEnd,vga_video_port_val);
-	outb_p(0x04,vga_video_port_reg);		/* StartHorizRetrace */
-	outb_p(info->vga_state.StartHorizRetrace,vga_video_port_val);
-	outb_p(0x05,vga_video_port_reg);		/* EndHorizRetrace */
-	outb_p(info->vga_state.EndHorizRetrace,vga_video_port_val);
-	outb_p(0x07,vga_video_port_reg);		/* Overflow */
-	outb_p(info->vga_state.Overflow,vga_video_port_val);
-	outb_p(0x10,vga_video_port_reg);		/* StartVertRetrace */
-	outb_p(info->vga_state.StartVertRetrace,vga_video_port_val);
-	outb_p(0x11,vga_video_port_reg);		/* EndVertRetrace */
-	outb_p(info->vga_state.EndVertRetrace,vga_video_port_val);
-	outb_p(0x17,vga_video_port_reg);		/* ModeControl */
-	outb_p(info->vga_state.ModeControl,vga_video_port_val);
-	outb_p(0x01,seq_port_reg);		/* ClockingMode */
-	outb_p(info->vga_state.ClockingMode,seq_port_val);
+	/* HorizontalTotal */
+	vga_io_wcrt(0x00, par->vga_state.HorizontalTotal);
+	/* HorizDisplayEnd */
+	vga_io_wcrt(0x01, par->vga_state.HorizDisplayEnd);
+	/* StartHorizRetrace */
+	vga_io_wcrt(0x04, par->vga_state.StartHorizRetrace);
+	/* EndHorizRetrace */
+	vga_io_wcrt(0x05, par->vga_state.EndHorizRetrace);
+	/* Overflow */
+	vga_io_wcrt(0x07, par->vga_state.Overflow);
+	/* StartVertRetrace */
+	vga_io_wcrt(0x10, par->vga_state.StartVertRetrace);
+	/* EndVertRetrace */
+	vga_io_wcrt(0x11, par->vga_state.EndVertRetrace);
+	/* ModeControl */
+	vga_io_wcrt(0x17, par->vga_state.ModeControl);
+	/* ClockingMode */
+	vga_io_wseq(0x01, par->vga_state.ClockingMode);
 
 	/* restore index/control registers */
-	outb_p(SeqCtrlIndex,seq_port_reg);
-	outb_p(CrtCtrlIndex,vga_video_port_reg);
-	sti();
+	vga_io_w(VGA_SEQ_I, SeqCtrlIndex);
+	vga_io_w(VGA_CRT_IC, CrtCtrlIndex);
 }
 
 static void vga_pal_blank(void)
@@ -854,109 +790,670 @@ static void vga_pal_blank(void)
 	int i;
 
 	for (i=0; i<16; i++) {
-		outb_p (i, dac_reg) ;
-		outb_p (0, dac_val) ;
-		outb_p (0, dac_val) ;
-		outb_p (0, dac_val) ;
+		outb_p(i, VGA_PEL_IW);
+		outb_p(0, VGA_PEL_D);
+		outb_p(0, VGA_PEL_D);
+		outb_p(0, VGA_PEL_D);
 	}
 }
 
 /* 0 unblank, 1 blank, 2 no vsync, 3 no hsync, 4 off */
-static void vga16fb_blank(int blank, struct fb_info *fb_info)
+static int vga16fb_blank(int blank, struct fb_info *info)
 {
-	struct vga16fb_info *info = (struct vga16fb_info*)fb_info;
+	struct vga16fb_par *par = info->par;
 
 	switch (blank) {
-	case 0:				/* Unblank */
-		if (info->vesa_blanked) {
-			vga_vesa_unblank(info);
-			info->vesa_blanked = 0;
+	case FB_BLANK_UNBLANK:				/* Unblank */
+		if (par->vesa_blanked) {
+			vga_vesa_unblank(par);
+			par->vesa_blanked = 0;
 		}
-		if (info->palette_blanked) {
-			do_install_cmap(currcon, fb_info);
-			info->palette_blanked = 0;
+		if (par->palette_blanked) {
+			par->palette_blanked = 0;
 		}
 		break;
-	case 1:				/* blank */
+	case FB_BLANK_NORMAL:				/* blank */
 		vga_pal_blank();
-		info->palette_blanked = 1;
+		par->palette_blanked = 1;
 		break;
 	default:			/* VESA blanking */
-		vga_vesa_blank(info, blank-1);
-		info->vesa_blanked = 1;
+		vga_vesa_blank(par, blank);
+		par->vesa_blanked = 1;
+		break;
+	}
+	return 0;
+}
+
+static void vga_8planes_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
+{
+	u32 dx = rect->dx, width = rect->width;
+        char oldindex = getindex();
+        char oldmode = setmode(0x40);
+        char oldmask = selectmask();
+        int line_ofs, height;
+        char oldop, oldsr;
+        char __iomem *where;
+
+        dx /= 4;
+        where = info->screen_base + dx + rect->dy * info->fix.line_length;
+
+        if (rect->rop == ROP_COPY) {
+                oldop = setop(0);
+                oldsr = setsr(0);
+
+                width /= 4;
+                line_ofs = info->fix.line_length - width;
+                setmask(0xff);
+
+                height = rect->height;
+
+                while (height--) {
+                        int x;
+
+                        /* we can do memset... */
+                        for (x = width; x > 0; --x) {
+                                writeb(rect->color, where);
+                                where++;
+                        }
+                        where += line_ofs;
+                }
+        } else {
+                char oldcolor = setcolor(0xf);
+                int y;
+
+                oldop = setop(0x18);
+                oldsr = setsr(0xf);
+                setmask(0x0F);
+                for (y = 0; y < rect->height; y++) {
+                        rmw(where);
+                        rmw(where+1);
+                        where += info->fix.line_length;
+                }
+                setcolor(oldcolor);
+        }
+        setmask(oldmask);
+        setsr(oldsr);
+        setop(oldop);
+        setmode(oldmode);
+        setindex(oldindex);
+}
+
+static void vga16fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
+{
+	int x, x2, y2, vxres, vyres, width, height, line_ofs;
+	char __iomem *dst;
+
+	vxres = info->var.xres_virtual;
+	vyres = info->var.yres_virtual;
+
+	if (!rect->width || !rect->height || rect->dx > vxres || rect->dy > vyres)
+		return;
+
+	/* We could use hardware clipping but on many cards you get around
+	 * hardware clipping by writing to framebuffer directly. */
+
+	x2 = rect->dx + rect->width;
+	y2 = rect->dy + rect->height;
+	x2 = x2 < vxres ? x2 : vxres;
+	y2 = y2 < vyres ? y2 : vyres;
+	width = x2 - rect->dx;
+
+	switch (info->fix.type) {
+	case FB_TYPE_VGA_PLANES:
+		if (info->fix.type_aux == FB_AUX_VGA_PLANES_VGA4) {
+
+			height = y2 - rect->dy;
+			width = rect->width/8;
+
+			line_ofs = info->fix.line_length - width;
+			dst = info->screen_base + (rect->dx/8) + rect->dy * info->fix.line_length;
+
+			switch (rect->rop) {
+			case ROP_COPY:
+				setmode(0);
+				setop(0);
+				setsr(0xf);
+				setcolor(rect->color);
+				selectmask();
+
+				setmask(0xff);
+
+				while (height--) {
+					for (x = 0; x < width; x++) {
+						writeb(0, dst);
+						dst++;
+					}
+					dst += line_ofs;
+				}
+				break;
+			case ROP_XOR:
+				setmode(0);
+				setop(0x18);
+				setsr(0xf);
+				setcolor(0xf);
+				selectmask();
+
+				setmask(0xff);
+				while (height--) {
+					for (x = 0; x < width; x++) {
+						rmw(dst);
+						dst++;
+					}
+					dst += line_ofs;
+				}
+				break;
+			}
+		} else 
+			vga_8planes_fillrect(info, rect);
+		break;
+	case FB_TYPE_PACKED_PIXELS:
+	default:
+		cfb_fillrect(info, rect);
 		break;
 	}
 }
 
-int __init vga16fb_init(void)
+static void vga_8planes_copyarea(struct fb_info *info, const struct fb_copyarea *area)
 {
-	int i,j;
+        char oldindex = getindex();
+        char oldmode = setmode(0x41);
+        char oldop = setop(0);
+        char oldsr = setsr(0xf);
+        int height, line_ofs, x;
+	u32 sx, dx, width;
+	char __iomem *dest;
+	char __iomem *src;
+
+        height = area->height;
+
+        sx = area->sx / 4;
+        dx = area->dx / 4;
+        width = area->width / 4;
+
+        if (area->dy < area->sy || (area->dy == area->sy && dx < sx)) {
+                line_ofs = info->fix.line_length - width;
+                dest = info->screen_base + dx + area->dy * info->fix.line_length;
+                src = info->screen_base + sx + area->sy * info->fix.line_length;
+                while (height--) {
+                        for (x = 0; x < width; x++) {
+                                readb(src);
+                                writeb(0, dest);
+                                src++;
+                                dest++;
+                        }
+                        src += line_ofs;
+                        dest += line_ofs;
+                }
+        } else {
+                line_ofs = info->fix.line_length - width;
+                dest = info->screen_base + dx + width +
+			(area->dy + height - 1) * info->fix.line_length;
+                src = info->screen_base + sx + width +
+			(area->sy + height - 1) * info->fix.line_length;
+                while (height--) {
+                        for (x = 0; x < width; x++) {
+                                --src;
+                                --dest;
+                                readb(src);
+                                writeb(0, dest);
+                        }
+                        src -= line_ofs;
+                        dest -= line_ofs;
+                }
+        }
+
+        setsr(oldsr);
+        setop(oldop);
+        setmode(oldmode);
+        setindex(oldindex);
+}
+
+static void vga16fb_copyarea(struct fb_info *info, const struct fb_copyarea *area)
+{
+	u32 dx = area->dx, dy = area->dy, sx = area->sx, sy = area->sy; 
+	int x, x2, y2, old_dx, old_dy, vxres, vyres;
+	int height, width, line_ofs;
+	char __iomem *dst = NULL;
+	char __iomem *src = NULL;
+
+	vxres = info->var.xres_virtual;
+	vyres = info->var.yres_virtual;
+
+	if (area->dx > vxres || area->sx > vxres || area->dy > vyres ||
+	    area->sy > vyres)
+		return;
+
+	/* clip the destination */
+	old_dx = area->dx;
+	old_dy = area->dy;
+
+	/*
+	 * We could use hardware clipping but on many cards you get around
+	 * hardware clipping by writing to framebuffer directly.
+	 */
+	x2 = area->dx + area->width;
+	y2 = area->dy + area->height;
+	dx = area->dx > 0 ? area->dx : 0;
+	dy = area->dy > 0 ? area->dy : 0;
+	x2 = x2 < vxres ? x2 : vxres;
+	y2 = y2 < vyres ? y2 : vyres;
+	width = x2 - dx;
+	height = y2 - dy;
+
+	if (sx + dx < old_dx || sy + dy < old_dy)
+		return;
+
+	/* update sx1,sy1 */
+	sx += (dx - old_dx);
+	sy += (dy - old_dy);
+
+	/* the source must be completely inside the virtual screen */
+	if (sx + width > vxres || sy + height > vyres)
+		return;
+
+	switch (info->fix.type) {
+	case FB_TYPE_VGA_PLANES:
+		if (info->fix.type_aux == FB_AUX_VGA_PLANES_VGA4) {
+			width = width/8;
+			height = height;
+			line_ofs = info->fix.line_length - width;
+
+			setmode(1);
+			setop(0);
+			setsr(0xf);
+
+			if (dy < sy || (dy == sy && dx < sx)) {
+				dst = info->screen_base + (dx/8) + dy * info->fix.line_length;
+				src = info->screen_base + (sx/8) + sy * info->fix.line_length;
+				while (height--) {
+					for (x = 0; x < width; x++) {
+						readb(src);
+						writeb(0, dst);
+						dst++;
+						src++;
+					}
+					src += line_ofs;
+					dst += line_ofs;
+				}
+			} else {
+				dst = info->screen_base + (dx/8) + width + 
+					(dy + height - 1) * info->fix.line_length;
+				src = info->screen_base + (sx/8) + width + 
+					(sy + height  - 1) * info->fix.line_length;
+				while (height--) {
+					for (x = 0; x < width; x++) {
+						dst--;
+						src--;
+						readb(src);
+						writeb(0, dst);
+					}
+					src -= line_ofs;
+					dst -= line_ofs;
+				}
+			}
+		} else 
+			vga_8planes_copyarea(info, area);
+		break;
+	case FB_TYPE_PACKED_PIXELS:
+	default:
+		cfb_copyarea(info, area);
+		break;
+	}
+}
+
+#define TRANS_MASK_LOW  {0x0,0x8,0x4,0xC,0x2,0xA,0x6,0xE,0x1,0x9,0x5,0xD,0x3,0xB,0x7,0xF}
+#define TRANS_MASK_HIGH {0x000, 0x800, 0x400, 0xC00, 0x200, 0xA00, 0x600, 0xE00, \
+			 0x100, 0x900, 0x500, 0xD00, 0x300, 0xB00, 0x700, 0xF00}
+
+#if defined(__LITTLE_ENDIAN)
+static const u16 transl_l[] = TRANS_MASK_LOW;
+static const u16 transl_h[] = TRANS_MASK_HIGH;
+#elif defined(__BIG_ENDIAN)
+static const u16 transl_l[] = TRANS_MASK_HIGH;
+static const u16 transl_h[] = TRANS_MASK_LOW;
+#else
+#error "Only __BIG_ENDIAN and __LITTLE_ENDIAN are supported in vga-planes"
+#endif
+
+static void vga_8planes_imageblit(struct fb_info *info, const struct fb_image *image)
+{
+        char oldindex = getindex();
+        char oldmode = setmode(0x40);
+        char oldop = setop(0);
+        char oldsr = setsr(0);
+        char oldmask = selectmask();
+        const char *cdat = image->data;
+	u32 dx = image->dx;
+        char __iomem *where;
+        int y;
+
+        dx /= 4;
+        where = info->screen_base + dx + image->dy * info->fix.line_length;
+
+        setmask(0xff);
+        writeb(image->bg_color, where);
+        readb(where);
+        selectmask();
+        setmask(image->fg_color ^ image->bg_color);
+        setmode(0x42);
+        setop(0x18);
+        for (y = 0; y < image->height; y++, where += info->fix.line_length)
+                writew(transl_h[cdat[y]&0xF] | transl_l[cdat[y] >> 4], where);
+        setmask(oldmask);
+        setsr(oldsr);
+        setop(oldop);
+        setmode(oldmode);
+        setindex(oldindex);
+}
+
+static void vga_imageblit_expand(struct fb_info *info, const struct fb_image *image)
+{
+	char __iomem *where = info->screen_base + (image->dx/8) +
+		image->dy * info->fix.line_length;
+	struct vga16fb_par *par = info->par;
+	char *cdat = (char *) image->data;
+	char __iomem *dst;
+	int x, y;
+
+	switch (info->fix.type) {
+	case FB_TYPE_VGA_PLANES:
+		if (info->fix.type_aux == FB_AUX_VGA_PLANES_VGA4) {
+			if (par->isVGA) {
+				setmode(2);
+				setop(0);
+				setsr(0xf);
+				setcolor(image->fg_color);
+				selectmask();
+				
+				setmask(0xff);
+				writeb(image->bg_color, where);
+				rmb();
+				readb(where); /* fill latches */
+				setmode(3);
+				wmb();
+				for (y = 0; y < image->height; y++) {
+					dst = where;
+					for (x = image->width/8; x--;) 
+						writeb(*cdat++, dst++);
+					where += info->fix.line_length;
+				}
+				wmb();
+			} else {
+				setmode(0);
+				setop(0);
+				setsr(0xf);
+				setcolor(image->bg_color);
+				selectmask();
+				
+				setmask(0xff);
+				for (y = 0; y < image->height; y++) {
+					dst = where;
+					for (x=image->width/8; x--;){
+						rmw(dst);
+						setcolor(image->fg_color);
+						selectmask();
+						if (*cdat) {
+							setmask(*cdat++);
+							rmw(dst++);
+						}
+					}
+					where += info->fix.line_length;
+				}
+			}
+		} else 
+			vga_8planes_imageblit(info, image);
+		break;
+	case FB_TYPE_PACKED_PIXELS:
+	default:
+		cfb_imageblit(info, image);
+		break;
+	}
+}
+
+static void vga_imageblit_color(struct fb_info *info, const struct fb_image *image)
+{
+	/*
+	 * Draw logo 
+	 */
+	struct vga16fb_par *par = info->par;
+	char __iomem *where =
+		info->screen_base + image->dy * info->fix.line_length +
+		image->dx/8;
+	const char *cdat = image->data;
+	char __iomem *dst;
+	int x, y;
+
+	switch (info->fix.type) {
+	case FB_TYPE_VGA_PLANES:
+		if (info->fix.type_aux == FB_AUX_VGA_PLANES_VGA4 &&
+		    par->isVGA) {
+			setsr(0xf);
+			setop(0);
+			setmode(0);
+			
+			for (y = 0; y < image->height; y++) {
+				for (x = 0; x < image->width; x++) {
+					dst = where + x/8;
+
+					setcolor(*cdat);
+					selectmask();
+					setmask(1 << (7 - (x % 8)));
+					fb_readb(dst);
+					fb_writeb(0, dst);
+
+					cdat++;
+				}
+				where += info->fix.line_length;
+			}
+		}
+		break;
+	case FB_TYPE_PACKED_PIXELS:
+		cfb_imageblit(info, image);
+		break;
+	default:
+		break;
+	}
+}
+				
+static void vga16fb_imageblit(struct fb_info *info, const struct fb_image *image)
+{
+	if (image->depth == 1)
+		vga_imageblit_expand(info, image);
+	else
+		vga_imageblit_color(info, image);
+}
+
+static void vga16fb_destroy(struct fb_info *info)
+{
+	struct platform_device *dev = container_of(info->device, struct platform_device, dev);
+	iounmap(info->screen_base);
+	fb_dealloc_cmap(&info->cmap);
+	/* XXX unshare VGA regions */
+	platform_set_drvdata(dev, NULL);
+	framebuffer_release(info);
+}
+
+static struct fb_ops vga16fb_ops = {
+	.owner		= THIS_MODULE,
+	.fb_open        = vga16fb_open,
+	.fb_release     = vga16fb_release,
+	.fb_destroy	= vga16fb_destroy,
+	.fb_check_var	= vga16fb_check_var,
+	.fb_set_par	= vga16fb_set_par,
+	.fb_setcolreg 	= vga16fb_setcolreg,
+	.fb_pan_display = vga16fb_pan_display,
+	.fb_blank 	= vga16fb_blank,
+	.fb_fillrect	= vga16fb_fillrect,
+	.fb_copyarea	= vga16fb_copyarea,
+	.fb_imageblit	= vga16fb_imageblit,
+};
+
+#ifndef MODULE
+static int __init vga16fb_setup(char *options)
+{
+	char *this_opt;
+	
+	if (!options || !*options)
+		return 0;
+	
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!*this_opt) continue;
+	}
+	return 0;
+}
+#endif
+
+static int __devinit vga16fb_probe(struct platform_device *dev)
+{
+	struct fb_info *info;
+	struct vga16fb_par *par;
+	int i;
+	int ret = 0;
 
 	printk(KERN_DEBUG "vga16fb: initializing\n");
+	info = framebuffer_alloc(sizeof(struct vga16fb_par), &dev->dev);
 
-	/* XXX share VGA_FB_PHYS region with vgacon */
-
-        vga16fb.video_vbase = ioremap(VGA_FB_PHYS, VGA_FB_PHYS_LEN);
-	if (!vga16fb.video_vbase) {
-		printk(KERN_ERR "vga16fb: unable to map device\n");
-		return -ENOMEM;
+	if (!info) {
+		ret = -ENOMEM;
+		goto err_fb_alloc;
 	}
-	printk(KERN_INFO "vga16fb: mapped to 0x%p\n", vga16fb.video_vbase);
+	info->apertures = alloc_apertures(1);
+	if (!info->apertures) {
+		ret = -ENOMEM;
+		goto err_ioremap;
+	}
 
-	vga16fb.isVGA = ORIG_VIDEO_ISVGA;
-	vga16fb.palette_blanked = 0;
-	vga16fb.vesa_blanked = 0;
+	/* XXX share VGA_FB_PHYS and I/O region with vgacon and others */
+	info->screen_base = (void __iomem *)VGA_MAP_MEM(VGA_FB_PHYS, 0);
 
-	i = vga16fb.isVGA? 6 : 2;
+	if (!info->screen_base) {
+		printk(KERN_ERR "vga16fb: unable to map device\n");
+		ret = -ENOMEM;
+		goto err_ioremap;
+	}
+
+	printk(KERN_INFO "vga16fb: mapped to 0x%p\n", info->screen_base);
+	par = info->par;
+
+	par->isVGA = screen_info.orig_video_isVGA;
+	par->palette_blanked = 0;
+	par->vesa_blanked = 0;
+
+	i = par->isVGA? 6 : 2;
 	
 	vga16fb_defined.red.length   = i;
 	vga16fb_defined.green.length = i;
 	vga16fb_defined.blue.length  = i;	
-	for(i = 0; i < 16; i++) {
-		j = color_table[i];
-		palette[i].red   = default_red[j];
-		palette[i].green = default_grn[j];
-		palette[i].blue  = default_blu[j];
-	}
-
-	/* XXX share VGA I/O region with vgacon and others */
-
-	disp.var = vga16fb_defined;
 
 	/* name should not depend on EGA/VGA */
-	strcpy(vga16fb.fb_info.modename, "VGA16 VGA");
-	vga16fb.fb_info.changevar = NULL;
-	vga16fb.fb_info.node = -1;
-	vga16fb.fb_info.fbops = &vga16fb_ops;
-	vga16fb.fb_info.disp=&disp;
-	vga16fb.fb_info.switch_con=&vga16fb_switch;
-	vga16fb.fb_info.updatevar=&vga16fb_update_var;
-	vga16fb.fb_info.blank=&vga16fb_blank;
-	vga16fb.fb_info.flags=FBINFO_FLAG_DEFAULT;
-	vga16fb_set_disp(-1, &vga16fb);
+	info->fbops = &vga16fb_ops;
+	info->var = vga16fb_defined;
+	info->fix = vga16fb_fix;
+	/* supports rectangles with widths of multiples of 8 */
+	info->pixmap.blit_x = 1 << 7 | 1 << 15 | 1 << 23 | 1 << 31;
+	info->flags = FBINFO_FLAG_DEFAULT | FBINFO_MISC_FIRMWARE |
+		FBINFO_HWACCEL_YPAN;
 
-	if (register_framebuffer(&vga16fb.fb_info)<0) {
-		iounmap(vga16fb.video_vbase);
-		return -EINVAL;
+	i = (info->var.bits_per_pixel == 8) ? 256 : 16;
+	ret = fb_alloc_cmap(&info->cmap, i, 0);
+	if (ret) {
+		printk(KERN_ERR "vga16fb: unable to allocate colormap\n");
+		ret = -ENOMEM;
+		goto err_alloc_cmap;
+	}
+
+	if (vga16fb_check_var(&info->var, info)) {
+		printk(KERN_ERR "vga16fb: unable to validate variable\n");
+		ret = -EINVAL;
+		goto err_check_var;
+	}
+
+	vga16fb_update_fix(info);
+
+	info->apertures->ranges[0].base = VGA_FB_PHYS;
+	info->apertures->ranges[0].size = VGA_FB_PHYS_LEN;
+
+	if (register_framebuffer(info) < 0) {
+		printk(KERN_ERR "vga16fb: unable to register framebuffer\n");
+		ret = -EINVAL;
+		goto err_check_var;
 	}
 
 	printk(KERN_INFO "fb%d: %s frame buffer device\n",
-	       GET_FB_IDX(vga16fb.fb_info.node), vga16fb.fb_info.modename);
+	       info->node, info->fix.id);
+	platform_set_drvdata(dev, info);
+
+	return 0;
+
+ err_check_var:
+	fb_dealloc_cmap(&info->cmap);
+ err_alloc_cmap:
+	iounmap(info->screen_base);
+ err_ioremap:
+	framebuffer_release(info);
+ err_fb_alloc:
+	return ret;
+}
+
+static int __devexit vga16fb_remove(struct platform_device *dev)
+{
+	struct fb_info *info = platform_get_drvdata(dev);
+
+	if (info)
+		unregister_framebuffer(info);
 
 	return 0;
 }
 
-static void __exit vga16fb_exit(void)
+static struct platform_driver vga16fb_driver = {
+	.probe = vga16fb_probe,
+	.remove = __devexit_p(vga16fb_remove),
+	.driver = {
+		.name = "vga16fb",
+	},
+};
+
+static struct platform_device *vga16fb_device;
+
+static int __init vga16fb_init(void)
 {
-    unregister_framebuffer(&vga16fb.fb_info);
-    iounmap(vga16fb.video_vbase);
-    /* XXX unshare VGA regions */
+	int ret;
+#ifndef MODULE
+	char *option = NULL;
+
+	if (fb_get_options("vga16fb", &option))
+		return -ENODEV;
+
+	vga16fb_setup(option);
+#endif
+	ret = platform_driver_register(&vga16fb_driver);
+
+	if (!ret) {
+		vga16fb_device = platform_device_alloc("vga16fb", 0);
+
+		if (vga16fb_device)
+			ret = platform_device_add(vga16fb_device);
+		else
+			ret = -ENOMEM;
+
+		if (ret) {
+			platform_device_put(vga16fb_device);
+			platform_driver_unregister(&vga16fb_driver);
+		}
+	}
+
+	return ret;
 }
 
-#ifdef MODULE
+static void __exit vga16fb_exit(void)
+{
+	platform_device_unregister(vga16fb_device);
+	platform_driver_unregister(&vga16fb_driver);
+}
+
+MODULE_DESCRIPTION("Legacy VGA framebuffer device driver");
 MODULE_LICENSE("GPL");
 module_init(vga16fb_init);
-#endif
 module_exit(vga16fb_exit);
 
 

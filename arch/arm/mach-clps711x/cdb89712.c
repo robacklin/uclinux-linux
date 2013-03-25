@@ -17,14 +17,14 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
+#include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <asm/setup.h>
@@ -32,43 +32,32 @@
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
 
-extern void clps711x_init_irq(void);
-extern void clps711x_map_io(void);
+#include "common.h"
 
 /*
  * Map the CS89712 Ethernet port.  That should be moved to the
  * ethernet driver, perhaps.
  */
 static struct map_desc cdb89712_io_desc[] __initdata = {
-	{ ETHER_BASE, ETHER_START, ETHER_SIZE, DOMAIN_IO, 0, 1, 0, 0 },
-	LAST_DESC
+	{
+		.virtual	= ETHER_BASE,
+		.pfn		=__phys_to_pfn(ETHER_START),
+		.length		= ETHER_SIZE,
+		.type		= MT_DEVICE
+	}
 };
-
-static void __init
-fixup_cdb89712(struct machine_desc *desc, struct param_struct *params,
-	    char **cmdline, struct meminfo *mi)
-{
-}
 
 static void __init cdb89712_map_io(void)
 {
 	clps711x_map_io();
-	iotable_init(cdb89712_io_desc);
+	iotable_init(cdb89712_io_desc, ARRAY_SIZE(cdb89712_io_desc));
 }
 
 MACHINE_START(CDB89712, "Cirrus-CDB89712")
-	MAINTAINER("Ray Lehtiniemi")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xff000000)
-	BOOT_PARAMS(0xc0000100)
-	FIXUP(fixup_cdb89712)
-	MAPIO(cdb89712_map_io)
-	INITIRQ(clps711x_init_irq)
+	/* Maintainer: Ray Lehtiniemi */
+	.atag_offset	= 0x100,
+	.map_io		= cdb89712_map_io,
+	.init_irq	= clps711x_init_irq,
+	.timer		= &clps711x_timer,
+	.restart	= clps711x_restart,
 MACHINE_END
-
-static int cdb89712_hw_init(void)
-{
-	return 0;
-}
-
-__initcall(cdb89712_hw_init);
-

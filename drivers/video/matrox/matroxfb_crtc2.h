@@ -2,13 +2,12 @@
 #define __MATROXFB_CRTC2_H__
 
 #include <linux/ioctl.h>
-#include <linux/i2c.h>
-#include <linux/i2c-algo-bit.h>
 #include "matroxfb_base.h"
 
 struct matroxfb_dh_fb_info {
 	struct fb_info		fbcon;
 	int			fbcon_registered;
+	int                     initialized;
 
 	struct matrox_fb_info*	primary_dev;
 
@@ -27,20 +26,9 @@ struct matroxfb_dh_fb_info {
 		unsigned int	len;
 			      } mmio;
 
-	int			currcon;
-	struct display*		currcon_display;
-	
-	int			interlaced:1;
+	unsigned int		interlaced:1;
 
-	union {
-#ifdef FBCON_HAS_CFB16
-		u_int16_t	cfb16[16];
-#endif
-#ifdef FBCON_HAS_CFB32
-		u_int32_t	cfb32[16];
-#endif
-	} cmap;
-	struct { unsigned red, green, blue, transp; } palette[16];
+	u_int32_t cmap[16];
 };
 
 #endif /* __MATROXFB_CRTC2_H__ */

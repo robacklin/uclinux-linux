@@ -2,21 +2,8 @@
 # Makefile for the FPU instruction emulation.
 #
 
-CFLAGS += -I. -I$(TOPDIR)/include/math-emu -w
+ccflags-y := -w
 
-ifeq ($(CONFIG_MATHEMU),y)
+obj-$(CONFIG_MATHEMU) += math-emu.o
 
-O_TARGET	:= math-emu.o
-obj-y		:= math.o qrnnd.o
-
-else
-
-list-multi	:= math-emu.o
-math-emu-objs	:= math.o qrnnd.o
-obj-m		:= math-emu.o
-math-emu.o: $(math-emu-objs)
-	$(LD) -r -o $@ $(math-emu-objs)
-
-endif
-
-include $(TOPDIR)/Rules.make
+math-emu-objs := math.o qrnnd.o

@@ -4,193 +4,161 @@
  * PCMCIA implementation routines for H3600
  *
  */
+#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/device.h>
+#include <linux/interrupt.h>
+#include <linux/init.h>
+#include <linux/delay.h>
+#include <linux/gpio.h>
 
-#include <asm/hardware.h>
+#include <mach/hardware.h>
 #include <asm/irq.h>
+#include <asm/mach-types.h>
+#include <mach/h3xxx.h>
+
 #include "sa1100_generic.h"
 
-static struct irqs {
-	int irq;
-	const char *str;
-} irqs[] = {
-	{ IRQ_GPIO_H3600_PCMCIA_CD0, "PCMCIA CD0" },
-	{ IRQ_GPIO_H3600_PCMCIA_CD1, "PCMCIA CD1" }
-};
-
-static int h3600_pcmcia_init(struct pcmcia_init *init)
+static int h3600_pcmcia_hw_init(struct soc_pcmcia_socket *skt)
 {
-	int i, res;
+	int err;
 
-	/*
-	 * Set transition detect
-	 */
-	set_GPIO_IRQ_edge(GPIO_H3600_PCMCIA_IRQ0 | GPIO_H3600_PCMCIA_IRQ1,
-			  GPIO_FALLING_EDGE);
-
-	/*
-	 * Register interrupts
-	 */
-	for (i = res = 0; i < ARRAY_SIZE(irqs); i++) {
-		res = request_irq(irqs[i].irq, init->handler, SA_INTERRUPT,
-				  irqs[i].str, NULL);
-		if (res)
-			break;
-	}
-
-	if (res) {
-		printk(KERN_ERR "h3600_pcmcia: request for IRQ%d failed: %d\n",
-		       irqs[i].irq, res);
-
-		while (i--)
-			free_irq(irqs[i].irq, NULL);
-	}
-
-	return res ? -1 : 2;
-}
-
-static int h3600_pcmcia_shutdown(void)
-{
-	int i;
-
-	/*
-	 * disable IRQs
-	 */
-	for (i = 0; i < ARRAY_SIZE(irqs); i++)
-		free_irq(irqs[i].irq, NULL);
-  
-	/* Disable CF bus: */
-	clr_h3600_egpio(IPAQ_EGPIO_OPT_NVRAM_ON);
-	clr_h3600_egpio(IPAQ_EGPIO_OPT_ON);
-	set_h3600_egpio(IPAQ_EGPIO_OPT_RESET);
-
-	return 0;
-}
-
-static int
-h3600_pcmcia_socket_state(struct pcmcia_state_array *state)
-{
-	unsigned long levels;
-
-	if (state->size < 2)
-		return -1;
-
-	levels = GPLR;
-
-	state->state[0].detect = levels & GPIO_H3600_PCMCIA_CD0 ? 0 : 1;
-	state->state[0].ready = levels & GPIO_H3600_PCMCIA_IRQ0 ? 1 : 0;
-	state->state[0].bvd1 = 0;
-	state->state[0].bvd2 = 0;
-	state->state[0].wrprot = 0; /* Not available on H3600. */
-	state->state[0].vs_3v = 0;
-	state->state[0].vs_Xv = 0;
-
-	state->state[1].detect = levels & GPIO_H3600_PCMCIA_CD1 ? 0 : 1;
-	state->state[1].ready = levels & GPIO_H3600_PCMCIA_IRQ1 ? 1 : 0;
-	state->state[1].bvd1 = 0;
-	state->state[1].bvd2 = 0;
-	state->state[1].wrprot = 0; /* Not available on H3600. */
-	state->state[1].vs_3v = 0;
-	state->state[1].vs_Xv = 0;
-
-	return 1;
-}
-
-static int h3600_pcmcia_get_irq_info(struct pcmcia_irq_info *info)
-{
-	switch (info->sock) {
+	switch (skt->nr) {
 	case 0:
-		info->irq = IRQ_GPIO_H3600_PCMCIA_IRQ0;
+		skt->stat[SOC_STAT_CD].gpio = H3XXX_GPIO_PCMCIA_CD0;
+		skt->stat[SOC_STAT_CD].name = "PCMCIA CD0";
+		skt->stat[SOC_STAT_RDY].gpio = H3XXX_GPIO_PCMCIA_IRQ0;
+		skt->stat[SOC_STAT_RDY].name = "PCMCIA IRQ0";
+
+		err = gpio_request(H3XXX_EGPIO_OPT_NVRAM_ON, "OPT NVRAM ON");
+		if (err)
+			goto err01;
+		err = gpio_direction_output(H3XXX_EGPIO_OPT_NVRAM_ON, 0);
+		if (err)
+			goto err03;
+		err = gpio_request(H3XXX_EGPIO_OPT_ON, "OPT ON");
+		if (err)
+			goto err03;
+		err = gpio_direction_output(H3XXX_EGPIO_OPT_ON, 0);
+		if (err)
+			goto err04;
+		err = gpio_request(H3XXX_EGPIO_OPT_RESET, "OPT RESET");
+		if (err)
+			goto err04;
+		err = gpio_direction_output(H3XXX_EGPIO_OPT_RESET, 0);
+		if (err)
+			goto err05;
+		err = gpio_request(H3XXX_EGPIO_CARD_RESET, "PCMCIA CARD RESET");
+		if (err)
+			goto err05;
+		err = gpio_direction_output(H3XXX_EGPIO_CARD_RESET, 0);
+		if (err)
+			goto err06;
 		break;
 	case 1:
-		info->irq = IRQ_GPIO_H3600_PCMCIA_IRQ1;
+		skt->stat[SOC_STAT_CD].gpio = H3XXX_GPIO_PCMCIA_CD1;
+		skt->stat[SOC_STAT_CD].name = "PCMCIA CD1";
+		skt->stat[SOC_STAT_RDY].gpio = H3XXX_GPIO_PCMCIA_IRQ1;
+		skt->stat[SOC_STAT_RDY].name = "PCMCIA IRQ1";
 		break;
-	default:
-		return -1;
 	}
 	return 0;
+
+err06:	gpio_free(H3XXX_EGPIO_CARD_RESET);
+err05:	gpio_free(H3XXX_EGPIO_OPT_RESET);
+err04:	gpio_free(H3XXX_EGPIO_OPT_ON);
+err03:	gpio_free(H3XXX_EGPIO_OPT_NVRAM_ON);
+err01:	gpio_free(H3XXX_GPIO_PCMCIA_IRQ0);
+	return err;
+}
+
+static void h3600_pcmcia_hw_shutdown(struct soc_pcmcia_socket *skt)
+{
+	switch (skt->nr) {
+	case 0:
+		/* Disable CF bus: */
+		gpio_set_value(H3XXX_EGPIO_OPT_NVRAM_ON, 0);
+		gpio_set_value(H3XXX_EGPIO_OPT_ON, 0);
+		gpio_set_value(H3XXX_EGPIO_OPT_RESET, 1);
+
+		gpio_free(H3XXX_EGPIO_CARD_RESET);
+		gpio_free(H3XXX_EGPIO_OPT_RESET);
+		gpio_free(H3XXX_EGPIO_OPT_ON);
+		gpio_free(H3XXX_EGPIO_OPT_NVRAM_ON);
+		break;
+	case 1:
+		break;
+	}
+}
+
+static void
+h3600_pcmcia_socket_state(struct soc_pcmcia_socket *skt, struct pcmcia_state *state)
+{
+	state->bvd1 = 0;
+	state->bvd2 = 0;
+	state->vs_3v = 0;
+	state->vs_Xv = 0;
 }
 
 static int
-h3600_pcmcia_configure_socket(const struct pcmcia_configure *conf)
+h3600_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state_t *state)
 {
-	if (conf->sock > 1)
-		return -1;
-
-	if (conf->vcc != 0 && conf->vcc != 33 && conf->vcc != 50) {
+	if (state->Vcc != 0 && state->Vcc != 33 && state->Vcc != 50) {
 		printk(KERN_ERR "h3600_pcmcia: unrecognized Vcc %u.%uV\n",
-		       conf->vcc / 10, conf->vcc % 10);
+		       state->Vcc / 10, state->Vcc % 10);
 		return -1;
 	}
 
-	if (conf->reset)
-		set_h3600_egpio(IPAQ_EGPIO_CARD_RESET);
-	else
-		clr_h3600_egpio(IPAQ_EGPIO_CARD_RESET);
+	gpio_set_value(H3XXX_EGPIO_CARD_RESET, !!(state->flags & SS_RESET));
 
 	/* Silently ignore Vpp, output enable, speaker enable. */
 
 	return 0;
 }
 
-static int h3600_pcmcia_socket_init(int sock)
+static void h3600_pcmcia_socket_init(struct soc_pcmcia_socket *skt)
 {
 	/* Enable CF bus: */
-	set_h3600_egpio(IPAQ_EGPIO_OPT_NVRAM_ON);
-	set_h3600_egpio(IPAQ_EGPIO_OPT_ON);
-	clr_h3600_egpio(IPAQ_EGPIO_OPT_RESET);
+	gpio_set_value(H3XXX_EGPIO_OPT_NVRAM_ON, 1);
+	gpio_set_value(H3XXX_EGPIO_OPT_ON, 1);
+	gpio_set_value(H3XXX_EGPIO_OPT_RESET, 0);
 
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout(10*HZ / 1000);
-
-	switch (sock) {
-	case 0:
-		set_GPIO_IRQ_edge(GPIO_H3600_PCMCIA_CD0, GPIO_BOTH_EDGES);
-		break;
-	case 1:
-		set_GPIO_IRQ_edge(GPIO_H3600_PCMCIA_CD1, GPIO_BOTH_EDGES);
-		break;
-	}
-
-	return 0;
+	msleep(10);
 }
 
-static int h3600_pcmcia_socket_suspend(int sock)
+static void h3600_pcmcia_socket_suspend(struct soc_pcmcia_socket *skt)
 {
-	switch (sock) {
-	case 0:
-		set_GPIO_IRQ_edge(GPIO_H3600_PCMCIA_CD0, GPIO_NO_EDGES);
-		break;
-	case 1:
-		set_GPIO_IRQ_edge(GPIO_H3600_PCMCIA_CD1, GPIO_NO_EDGES);
-		break;
-	}
-
 	/*
 	 * FIXME:  This doesn't fit well.  We don't have the mechanism in
 	 * the generic PCMCIA layer to deal with the idea of two sockets
 	 * on one bus.  We rely on the cs.c behaviour shutting down
 	 * socket 0 then socket 1.
 	 */
-	if (sock == 1) {
-		clr_h3600_egpio(IPAQ_EGPIO_OPT_ON);
-		clr_h3600_egpio(IPAQ_EGPIO_OPT_NVRAM_ON);
+	if (skt->nr == 1) {
+		gpio_set_value(H3XXX_EGPIO_OPT_ON, 0);
+		gpio_set_value(H3XXX_EGPIO_OPT_NVRAM_ON, 0);
 		/* hmm, does this suck power? */
-		set_h3600_egpio(IPAQ_EGPIO_OPT_RESET);
+		gpio_set_value(H3XXX_EGPIO_OPT_RESET, 1);
 	}
-
-	return 0;
 }
 
 struct pcmcia_low_level h3600_pcmcia_ops = { 
-	init:			h3600_pcmcia_init,
-	shutdown:		h3600_pcmcia_shutdown,
-	socket_state:		h3600_pcmcia_socket_state,
-	get_irq_info:		h3600_pcmcia_get_irq_info,
-	configure_socket:	h3600_pcmcia_configure_socket,
+	.owner			= THIS_MODULE,
+	.hw_init		= h3600_pcmcia_hw_init,
+	.hw_shutdown		= h3600_pcmcia_hw_shutdown,
+	.socket_state		= h3600_pcmcia_socket_state,
+	.configure_socket	= h3600_pcmcia_configure_socket,
 
-	socket_init:		h3600_pcmcia_socket_init,
-	socket_suspend:		h3600_pcmcia_socket_suspend,
+	.socket_init		= h3600_pcmcia_socket_init,
+	.socket_suspend		= h3600_pcmcia_socket_suspend,
 };
 
+int __devinit pcmcia_h3600_init(struct device *dev)
+{
+	int ret = -ENODEV;
+
+	if (machine_is_h3600() || machine_is_h3100())
+		ret = sa11xx_drv_pcmcia_probe(dev, &h3600_pcmcia_ops, 0, 2);
+
+	return ret;
+}

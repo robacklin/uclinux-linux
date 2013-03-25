@@ -6,23 +6,17 @@
  *	in1:	source address
  *	in2:	number of bytes to copy
  * Output:
- *	for bcopy:     return nothing
  *	for memcpy:    return dest
- * 	for copy_user: 0 if success,
- *		       or number of bytes NOT copied if error occurred.
+ * 	for copy_user: return 0 if success,
+ *		       or number of byte NOT copied if error occurred.
  *
  * Copyright (C) 2002 Intel Corp.
  * Copyright (C) 2002 Ken Chen <kenneth.w.chen@intel.com>
  */
-#include <linux/config.h>
 #include <asm/asmmacro.h>
 #include <asm/page.h>
 
-#if __GNUC__ >= 3
-# define EK(y...)	EX(y)
-#else
-# define EK(y,x...)	x
-#endif
+#define EK(y...) EX(y)
 
 /* McKinley specific optimization */
 
@@ -76,14 +70,6 @@
 #define in1		r33
 #define in2		r34
 
-GLOBAL_ENTRY(bcopy)
-	.regstk 3,0,0,0
-	mov r8=in0		// swap the src and dest arguments
-	mov in0=in1
-	;;
-	mov in1=r8
-	;;
-END(bcopy)			// fall through to memcpy
 GLOBAL_ENTRY(memcpy)
 	and	r28=0x7,in0
 	and	r29=0x7,in1
@@ -142,8 +128,8 @@ GLOBAL_ENTRY(__copy_user)
 	;;
 
 .prefetch:
-	lfetch	  [src_pre_mem], 128
-	lfetch.excl [dst_pre_mem], 128
+	lfetch.fault	  [src_pre_mem], 128
+	lfetch.fault.excl [dst_pre_mem], 128
 	br.cloop.dptk.few .prefetch
 	;;
 
@@ -163,7 +149,7 @@ GLOBAL_ENTRY(__copy_user)
 	mov	ar.ec=2
 (p10)	br.dpnt.few .aligned_src_tail
 	;;
-//	.align 32
+	TEXT_ALIGN(32)
 1:
 EX(.ex_handler, (p16)	ld8	r34=[src0],16)
 EK(.ex_handler, (p16)	ld8	r38=[src1],16)
@@ -317,12 +303,12 @@ EK(.ex_handler,	(p[D])	st8 [dst1] = t15, 4*8)
 	add	src_pre_mem=0,src0	// prefetch src pointer
 	add	dst_pre_mem=0,dst0	// prefetch dest pointer
 	and	src0=-8,src0		// 1st src pointer
-(p7)	mov	ar.lc = r21
+(p7)	mov	ar.lc = cnt
 (p8)	mov	ar.lc = r0
 	;;
-//	.align 32
-1:	lfetch	  [src_pre_mem], 128
-	lfetch.excl [dst_pre_mem], 128
+	TEXT_ALIGN(32)
+1:	lfetch.fault	  [src_pre_mem], 128
+	lfetch.fault.excl [dst_pre_mem], 128
 	br.cloop.dptk.few 1b
 	;;
 
@@ -526,7 +512,7 @@ EK(.ex_handler,  (p17)	st8	[dst1]=r39,8);						\
 		 shrp	r21=r22,r38,shift;	/* speculative work */			\
 		 br.sptk.few .unaligned_src_tail /* branch out of jump table */		\
 		 ;;
-//	.align 32
+	TEXT_ALIGN(32)
 .jump_table:
 	COPYU(8)	// unaligned cases
 .jmp1:
@@ -541,7 +527,6 @@ EK(.ex_handler,  (p17)	st8	[dst1]=r39,8);						\
 #undef B
 #undef C
 #undef D
-END(memcpy)
 
 /*
  * Due to lack of local tag support in gcc 2.x assembler, it is not clear which
@@ -642,7 +627,10 @@ END(memcpy)
 	clrrrb
 	;;
 	alloc	saved_pfs_stack=ar.pfs,3,3,3,0
+	cmp.lt	p8,p0=A,r0
 	sub	B = dst0, saved_in0	// how many byte copied so far
+	;;
+(p8)	mov	A = 0;			// A shouldn't be negative, cap it
 	;;
 	sub	C = A, B
 	sub	D = saved_in2, A

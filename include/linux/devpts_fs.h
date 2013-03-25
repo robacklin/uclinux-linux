@@ -2,7 +2,7 @@
  *
  * linux/include/linux/devpts_fs.h
  *
- *  Copyright 1998 H. Peter Anvin -- All Rights Reserved
+ *  Copyright 1998-2004 H. Peter Anvin -- All Rights Reserved
  *
  * This file is part of the Linux kernel and is made available under
  * the terms of the GNU General Public License, version 2, or at your
@@ -10,65 +10,40 @@
  *
  * ------------------------------------------------------------------------- */
 
-/*
- * Prototypes for the pty driver <-> devpts filesystem interface.  Most
- * of this is really just a hack so we can exclude it or build it as a
- * module, and probably should go away eventually.
- */
-
 #ifndef _LINUX_DEVPTS_FS_H
-#define _LINUX_DEVPTS_FS_H 1
+#define _LINUX_DEVPTS_FS_H
 
-#include <linux/config.h>
-#include <linux/kdev_t.h>
-#include <linux/tty.h>
+#include <linux/errno.h>
 
-#ifdef CONFIG_DEVPTS_FS
+#ifdef CONFIG_UNIX98_PTYS
 
-void devpts_pty_new(int, kdev_t);
-void devpts_pty_kill(int);
-#define unix98_max_ptys               NR_PTYS * UNIX98_NR_MAJORS;
+int devpts_new_index(struct inode *ptmx_inode);
+void devpts_kill_index(struct inode *ptmx_inode, int idx);
+/* mknod in devpts */
+int devpts_pty_new(struct inode *ptmx_inode, struct tty_struct *tty);
+/* get tty structure */
+struct tty_struct *devpts_get_tty(struct inode *pts_inode, int number);
+/* unlink */
+void devpts_pty_kill(struct tty_struct *tty);
 
-#elif defined(CONFIG_DEVPTS_FS_MODULE)
-
-#ifdef BUILDING_PTY_C
-void (*devpts_upcall_new)(int,kdev_t) = NULL;
-void (*devpts_upcall_kill)(int)       = NULL;
-unsigned int unix98_max_ptys          = NR_PTYS * UNIX98_NR_MAJORS;
-
-EXPORT_SYMBOL(devpts_upcall_new);
-EXPORT_SYMBOL(devpts_upcall_kill);
-EXPORT_SYMBOL(unix98_max_ptys);
 #else
-extern void (*devpts_upcall_new)(int,kdev_t);
-extern void (*devpts_upcall_kill)(int);
-extern unsigned int unix98_max_ptys;
-#endif
 
-#ifndef BUILDING_DEVPTS
-static inline void
-devpts_pty_new(int line, kdev_t device)
+/* Dummy stubs in the no-pty case */
+static inline int devpts_new_index(struct inode *ptmx_inode) { return -EINVAL; }
+static inline void devpts_kill_index(struct inode *ptmx_inode, int idx) { }
+static inline int devpts_pty_new(struct inode *ptmx_inode,
+				struct tty_struct *tty)
 {
-	if ( devpts_upcall_new )
-		return devpts_upcall_new(line,device);
+	return -EINVAL;
 }
-
-static inline void
-devpts_pty_kill(int line)
+static inline struct tty_struct *devpts_get_tty(struct inode *pts_inode,
+		int number)
 {
-	if ( devpts_upcall_kill )
-		return devpts_upcall_kill(line);
+	return NULL;
 }
-#endif
-
-#else  /* No /dev/pts filesystem at all */
-
-static inline void
-devpts_pty_new(int line, kdev_t device) { }
-
-static inline void
-devpts_pty_kill(int line) { }
+static inline void devpts_pty_kill(struct tty_struct *tty) { }
 
 #endif
+
 
 #endif /* _LINUX_DEVPTS_FS_H */

@@ -10,55 +10,33 @@
  *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 
-#include <linux/config.h> /* CONFIG_HEARTBEAT */
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/rtc.h>
+#include <linux/platform_device.h>
 
 #include <asm/machdep.h>
 #include <asm/io.h>
+#include <asm/irq_regs.h>
 
+#include <linux/time.h>
 #include <linux/timex.h>
-
-
-static inline int set_rtc_mmss(unsigned long nowtime)
-{
-  if (mach_set_clock_mmss)
-    return mach_set_clock_mmss (nowtime);
-  return -1;
-}
-
-static inline void do_profile (unsigned long pc)
-{
-	if (prof_buffer && current->pid) {
-		extern int _stext;
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-		if (pc < prof_len)
-			++prof_buffer[pc];
-		else
-		/*
-		 * Don't ignore out-of-bounds PC values silently,
-		 * put them into the last histogram slot, so if
-		 * present, they will show up as a sharp peak.
-		 */
-			++prof_buffer[prof_len-1];
-	}
-}
+#include <linux/profile.h>
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
- * as well as call the "do_timer()" routine every clocktick
+ * as well as call the "xtime_update()" routine every clocktick
  */
-static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
+static irqreturn_t timer_interrupt(int irq, void *dummy)
 {
-	do_timer(regs);
-
-	if (!user_mode(regs))
-		do_profile(regs->pc);
+	xtime_update(1);
+	update_process_times(user_mode(get_irq_regs()));
+	profile_tick(CPU_PROFILING);
 
 #ifdef CONFIG_HEARTBEAT
 	/* use power LED as a heartbeat instead -- much more useful
@@ -83,74 +61,51 @@ static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
 	    }
 	}
 #endif /* CONFIG_HEARTBEAT */
+	return IRQ_HANDLED;
 }
 
-void time_init(void)
+void read_persistent_clock(struct timespec *ts)
 {
-	unsigned int year, mon, day, hour, min, sec;
+	struct rtc_time time;
+	ts->tv_sec = 0;
+	ts->tv_nsec = 0;
 
-	extern void arch_gettod(int *year, int *mon, int *day, int *hour,
-				int *min, int *sec);
+	if (mach_hwclk) {
+		mach_hwclk(0, &time);
 
-	arch_gettod (&year, &mon, &day, &hour, &min, &sec);
+		if ((time.tm_year += 1900) < 1970)
+			time.tm_year += 100;
+		ts->tv_sec = mktime(time.tm_year, time.tm_mon, time.tm_mday,
+				      time.tm_hour, time.tm_min, time.tm_sec);
+	}
+}
 
-	if ((year += 1900) < 1970)
-		year += 100;
-	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
-
+void __init time_init(void)
+{
 	mach_sched_init(timer_interrupt);
 }
 
-extern rwlock_t xtime_lock;
+#ifdef CONFIG_ARCH_USES_GETTIMEOFFSET
 
-/*
- * This version of gettimeofday has near microsecond resolution.
- */
-void do_gettimeofday(struct timeval *tv)
+u32 arch_gettimeoffset(void)
 {
-	extern unsigned long wall_jiffies;
-	unsigned long flags;
-	unsigned long usec, sec, lost;
-
-	read_lock_irqsave(&xtime_lock, flags);
-	usec = mach_gettimeoffset();
-	lost = jiffies - wall_jiffies;
-	if (lost)
-		usec += lost * (1000000/HZ);
-	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
-	read_unlock_irqrestore(&xtime_lock, flags);
-
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		sec++;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
+	return mach_gettimeoffset() * 1000;
 }
 
-void do_settimeofday(struct timeval *tv)
+static int __init rtc_init(void)
 {
-	write_lock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_usec
-	 * correctly. However, the value in this location is
-	 * is value at the last tick.
-	 * Discover what correction gettimeofday
-	 * would have done, and then undo it!
-	 */
-	tv->tv_usec -= mach_gettimeoffset();
+	struct platform_device *pdev;
 
-	while (tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
-		tv->tv_sec--;
-	}
+	if (!mach_hwclk)
+		return -ENODEV;
 
-	xtime = *tv;
-	time_adjust = 0;		/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+	pdev = platform_device_register_simple("rtc-generic", -1, NULL, 0);
+	if (IS_ERR(pdev))
+		return PTR_ERR(pdev);
+
+	return 0;
 }
+
+module_init(rtc_init);
+
+#endif /* CONFIG_ARCH_USES_GETTIMEOFFSET */

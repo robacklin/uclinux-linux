@@ -1,214 +1,111 @@
-
-/* Common Flash Interface structures 
- * See http://support.intel.com/design/flash/technote/index.htm
- * $Id: cfi.h,v 1.32 2002/09/05 05:15:32 acurtis Exp $
+/*
+ * Copyright © 2000-2010 David Woodhouse <dwmw2@infradead.org> et al.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+ *
  */
 
 #ifndef __MTD_CFI_H__
 #define __MTD_CFI_H__
 
-#include <linux/config.h>
 #include <linux/delay.h>
 #include <linux/types.h>
+#include <linux/bug.h>
 #include <linux/interrupt.h>
 #include <linux/mtd/flashchip.h>
+#include <linux/mtd/map.h>
 #include <linux/mtd/cfi_endian.h>
-
-/*
- * You can optimize the code size and performance by defining only 
- * the geometry(ies) available on your hardware.
- * CFIDEV_INTERLEAVE_n, where  represents the interleave (number of chips to fill the bus width)
- * CFIDEV_BUSWIDTH_n, where n is the bus width in bytes (1, 2, 4 or 8 bytes)
- *
- * By default, all (known) geometries are supported.
- */
-
-#ifndef CONFIG_MTD_CFI_GEOMETRY
-
-/* The default case - support all but 64-bit, which has
-   a performance penalty */
-
-#define CFIDEV_INTERLEAVE_1 (1)
-#define CFIDEV_INTERLEAVE_2 (2)
-#define CFIDEV_INTERLEAVE_4 (4)
-
-#define CFIDEV_BUSWIDTH_1 (1)
-#define CFIDEV_BUSWIDTH_2 (2)
-#define CFIDEV_BUSWIDTH_4 (4)
-
-typedef __u32 cfi_word;
-
-#else
-
-/* Explicitly configured buswidth/interleave support */
+#include <linux/mtd/xip.h>
 
 #ifdef CONFIG_MTD_CFI_I1
-#define CFIDEV_INTERLEAVE_1 (1)
+#define cfi_interleave(cfi) 1
+#define cfi_interleave_is_1(cfi) (cfi_interleave(cfi) == 1)
+#else
+#define cfi_interleave_is_1(cfi) (0)
+#endif
+
+#ifdef CONFIG_MTD_CFI_I2
+# ifdef cfi_interleave
+#  undef cfi_interleave
+#  define cfi_interleave(cfi) ((cfi)->interleave)
+# else
+#  define cfi_interleave(cfi) 2
+# endif
+#define cfi_interleave_is_2(cfi) (cfi_interleave(cfi) == 2)
+#else
+#define cfi_interleave_is_2(cfi) (0)
+#endif
+
+#ifdef CONFIG_MTD_CFI_I4
+# ifdef cfi_interleave
+#  undef cfi_interleave
+#  define cfi_interleave(cfi) ((cfi)->interleave)
+# else
+#  define cfi_interleave(cfi) 4
+# endif
+#define cfi_interleave_is_4(cfi) (cfi_interleave(cfi) == 4)
+#else
+#define cfi_interleave_is_4(cfi) (0)
+#endif
+
+#ifdef CONFIG_MTD_CFI_I8
+# ifdef cfi_interleave
+#  undef cfi_interleave
+#  define cfi_interleave(cfi) ((cfi)->interleave)
+# else
+#  define cfi_interleave(cfi) 8
+# endif
+#define cfi_interleave_is_8(cfi) (cfi_interleave(cfi) == 8)
+#else
+#define cfi_interleave_is_8(cfi) (0)
+#endif
+
+#ifndef cfi_interleave
+#warning No CONFIG_MTD_CFI_Ix selected. No NOR chip support can work.
+static inline int cfi_interleave(void *cfi)
+{
+	BUG();
+	return 0;
+}
+#endif
+
+static inline int cfi_interleave_supported(int i)
+{
+	switch (i) {
+#ifdef CONFIG_MTD_CFI_I1
+	case 1:
 #endif
 #ifdef CONFIG_MTD_CFI_I2
-#define CFIDEV_INTERLEAVE_2 (2)
+	case 2:
 #endif
 #ifdef CONFIG_MTD_CFI_I4
-#define CFIDEV_INTERLEAVE_4 (4)
+	case 4:
 #endif
 #ifdef CONFIG_MTD_CFI_I8
-#define CFIDEV_INTERLEAVE_8 (8)
+	case 8:
 #endif
+		return 1;
 
-#ifdef CONFIG_MTD_CFI_B1
-#define CFIDEV_BUSWIDTH_1 (1)
-#endif
-#ifdef CONFIG_MTD_CFI_B2
-#define CFIDEV_BUSWIDTH_2 (2)
-#endif
-#ifdef CONFIG_MTD_CFI_B4
-#define CFIDEV_BUSWIDTH_4 (4)
-#endif
-#ifdef CONFIG_MTD_CFI_B8
-#define CFIDEV_BUSWIDTH_8 (8)
-#endif
+	default:
+		return 0;
+	}
+}
 
-/* pick the largest necessary */
-#ifdef CONFIG_MTD_CFI_B8
-typedef __u64 cfi_word;
 
-/* This only works if asm/io.h is included first */
-#ifndef __raw_readll
-#define __raw_readll(addr)	(*(volatile __u64 *)(addr))
-#endif
-#ifndef __raw_writell
-#define __raw_writell(v, addr)	(*(volatile __u64 *)(addr) = (v))
-#endif
-#define CFI_WORD_64
-#else  /* CONFIG_MTD_CFI_B8 */
-/* All others can use 32-bits. It's probably more efficient than
-   the smaller types anyway */
-typedef __u32 cfi_word;
-#endif /* CONFIG_MTD_CFI_B8 */
-
-#endif
-
-/*
- * The following macros are used to select the code to execute:
- *   cfi_buswidth_is_*()
- *   cfi_interleave_is_*()
- *   [where * is either 1, 2, 4, or 8]
- * Those macros should be used with 'if' statements.  If only one of few
- * geometry arrangements are selected, they expand to constants thus allowing
- * the compiler (most of them being 0) to optimize away all the unneeded code,
- * while still validating the syntax (which is not possible with embedded 
- * #if ... #endif constructs).
- * The exception to this is the 64-bit versions, which need an extension
- * to the cfi_word type, and cause compiler warnings about shifts being
- * out of range.
- */
-
-#ifdef CFIDEV_INTERLEAVE_1
-# ifdef CFIDEV_INTERLEAVE
-#  undef CFIDEV_INTERLEAVE
-#  define CFIDEV_INTERLEAVE (cfi->interleave)
-# else
-#  define CFIDEV_INTERLEAVE CFIDEV_INTERLEAVE_1
-# endif
-# define cfi_interleave_is_1() (CFIDEV_INTERLEAVE == CFIDEV_INTERLEAVE_1)
-#else
-# define cfi_interleave_is_1() (0)
-#endif
-
-#ifdef CFIDEV_INTERLEAVE_2
-# ifdef CFIDEV_INTERLEAVE
-#  undef CFIDEV_INTERLEAVE
-#  define CFIDEV_INTERLEAVE (cfi->interleave)
-# else
-#  define CFIDEV_INTERLEAVE CFIDEV_INTERLEAVE_2
-# endif
-# define cfi_interleave_is_2() (CFIDEV_INTERLEAVE == CFIDEV_INTERLEAVE_2)
-#else
-# define cfi_interleave_is_2() (0)
-#endif
-
-#ifdef CFIDEV_INTERLEAVE_4
-# ifdef CFIDEV_INTERLEAVE
-#  undef CFIDEV_INTERLEAVE
-#  define CFIDEV_INTERLEAVE (cfi->interleave)
-# else
-#  define CFIDEV_INTERLEAVE CFIDEV_INTERLEAVE_4
-# endif
-# define cfi_interleave_is_4() (CFIDEV_INTERLEAVE == CFIDEV_INTERLEAVE_4)
-#else
-# define cfi_interleave_is_4() (0)
-#endif
-
-#ifdef CFIDEV_INTERLEAVE_8
-# ifdef CFIDEV_INTERLEAVE
-#  undef CFIDEV_INTERLEAVE
-#  define CFIDEV_INTERLEAVE (cfi->interleave)
-# else
-#  define CFIDEV_INTERLEAVE CFIDEV_INTERLEAVE_8
-# endif
-# define cfi_interleave_is_8() (CFIDEV_INTERLEAVE == CFIDEV_INTERLEAVE_8)
-#else
-# define cfi_interleave_is_8() (0)
-#endif
-
-#ifndef CFIDEV_INTERLEAVE
-#error You must define at least one interleave to support!
-#endif
-
-#ifdef CFIDEV_BUSWIDTH_1
-# ifdef CFIDEV_BUSWIDTH
-#  undef CFIDEV_BUSWIDTH
-#  define CFIDEV_BUSWIDTH (map->buswidth)
-# else
-#  define CFIDEV_BUSWIDTH CFIDEV_BUSWIDTH_1
-# endif
-# define cfi_buswidth_is_1() (CFIDEV_BUSWIDTH == CFIDEV_BUSWIDTH_1)
-#else
-# define cfi_buswidth_is_1() (0)
-#endif
-
-#ifdef CFIDEV_BUSWIDTH_2
-# ifdef CFIDEV_BUSWIDTH
-#  undef CFIDEV_BUSWIDTH
-#  define CFIDEV_BUSWIDTH (map->buswidth)
-# else
-#  define CFIDEV_BUSWIDTH CFIDEV_BUSWIDTH_2
-# endif
-# define cfi_buswidth_is_2() (CFIDEV_BUSWIDTH == CFIDEV_BUSWIDTH_2)
-#else
-# define cfi_buswidth_is_2() (0)
-#endif
-
-#ifdef CFIDEV_BUSWIDTH_4
-# ifdef CFIDEV_BUSWIDTH
-#  undef CFIDEV_BUSWIDTH
-#  define CFIDEV_BUSWIDTH (map->buswidth)
-# else
-#  define CFIDEV_BUSWIDTH CFIDEV_BUSWIDTH_4
-# endif
-# define cfi_buswidth_is_4() (CFIDEV_BUSWIDTH == CFIDEV_BUSWIDTH_4)
-#else
-# define cfi_buswidth_is_4() (0)
-#endif
-
-#ifdef CFIDEV_BUSWIDTH_8
-# ifdef CFIDEV_BUSWIDTH
-#  undef CFIDEV_BUSWIDTH
-#  define CFIDEV_BUSWIDTH (map->buswidth)
-# else
-#  define CFIDEV_BUSWIDTH CFIDEV_BUSWIDTH_8
-# endif
-# define cfi_buswidth_is_8() (CFIDEV_BUSWIDTH == CFIDEV_BUSWIDTH_8)
-#else
-# define cfi_buswidth_is_8() (0)
-#endif
-
-#ifndef CFIDEV_BUSWIDTH
-#error You must define at least one bus width to support!
-#endif
-
-/* NB: these values must represents the number of bytes needed to meet the 
- *     device type (x8, x16, x32).  Eg. a 32 bit device is 4 x 8 bytes. 
+/* NB: these values must represents the number of bytes needed to meet the
+ *     device type (x8, x16, x32).  Eg. a 32 bit device is 4 x 8 bytes.
  *     These numbers are used in calculations.
  */
 #define CFI_DEVICETYPE_X8  (8 / 8)
@@ -216,205 +113,343 @@ typedef __u32 cfi_word;
 #define CFI_DEVICETYPE_X32 (32 / 8)
 #define CFI_DEVICETYPE_X64 (64 / 8)
 
+
+/* Device Interface Code Assignments from the "Common Flash Memory Interface
+ * Publication 100" dated December 1, 2001.
+ */
+#define CFI_INTERFACE_X8_ASYNC		0x0000
+#define CFI_INTERFACE_X16_ASYNC		0x0001
+#define CFI_INTERFACE_X8_BY_X16_ASYNC	0x0002
+#define CFI_INTERFACE_X32_ASYNC		0x0003
+#define CFI_INTERFACE_X16_BY_X32_ASYNC	0x0005
+#define CFI_INTERFACE_NOT_ALLOWED	0xffff
+
+
 /* NB: We keep these structures in memory in HOST byteorder, except
  * where individually noted.
  */
 
 /* Basic Query Structure */
 struct cfi_ident {
-  __u8  qry[3];
-  __u16 P_ID;
-  __u16 P_ADR;
-  __u16 A_ID;
-  __u16 A_ADR;
-  __u8  VccMin;
-  __u8  VccMax;
-  __u8  VppMin;
-  __u8  VppMax;
-  __u8  WordWriteTimeoutTyp;
-  __u8  BufWriteTimeoutTyp;
-  __u8  BlockEraseTimeoutTyp;
-  __u8  ChipEraseTimeoutTyp;
-  __u8  WordWriteTimeoutMax;
-  __u8  BufWriteTimeoutMax;
-  __u8  BlockEraseTimeoutMax;
-  __u8  ChipEraseTimeoutMax;
-  __u8  DevSize;
-  __u16 InterfaceDesc;
-  __u16 MaxBufWriteSize;
-  __u8  NumEraseRegions;
-  __u32 EraseRegionInfo[0]; /* Not host ordered */
+	uint8_t  qry[3];
+	uint16_t P_ID;
+	uint16_t P_ADR;
+	uint16_t A_ID;
+	uint16_t A_ADR;
+	uint8_t  VccMin;
+	uint8_t  VccMax;
+	uint8_t  VppMin;
+	uint8_t  VppMax;
+	uint8_t  WordWriteTimeoutTyp;
+	uint8_t  BufWriteTimeoutTyp;
+	uint8_t  BlockEraseTimeoutTyp;
+	uint8_t  ChipEraseTimeoutTyp;
+	uint8_t  WordWriteTimeoutMax;
+	uint8_t  BufWriteTimeoutMax;
+	uint8_t  BlockEraseTimeoutMax;
+	uint8_t  ChipEraseTimeoutMax;
+	uint8_t  DevSize;
+	uint16_t InterfaceDesc;
+	uint16_t MaxBufWriteSize;
+	uint8_t  NumEraseRegions;
+	uint32_t EraseRegionInfo[0]; /* Not host ordered */
 } __attribute__((packed));
 
 /* Extended Query Structure for both PRI and ALT */
 
 struct cfi_extquery {
-  __u8  pri[3];
-  __u8  MajorVersion;
-  __u8  MinorVersion;
+	uint8_t  pri[3];
+	uint8_t  MajorVersion;
+	uint8_t  MinorVersion;
 } __attribute__((packed));
 
 /* Vendor-Specific PRI for Intel/Sharp Extended Command Set (0x0001) */
 
 struct cfi_pri_intelext {
-  __u8  pri[3];
-  __u8  MajorVersion;
-  __u8  MinorVersion;
-  __u32 FeatureSupport;
-  __u8  SuspendCmdSupport;
-  __u16 BlkStatusRegMask;
-  __u8  VccOptimal;
-  __u8  VppOptimal;
-  __u8  NumProtectionFields;
-  __u16 ProtRegAddr;
-  __u8  FactProtRegSize;
-  __u8  UserProtRegSize;
+	uint8_t  pri[3];
+	uint8_t  MajorVersion;
+	uint8_t  MinorVersion;
+	uint32_t FeatureSupport; /* if bit 31 is set then an additional uint32_t feature
+				    block follows - FIXME - not currently supported */
+	uint8_t  SuspendCmdSupport;
+	uint16_t BlkStatusRegMask;
+	uint8_t  VccOptimal;
+	uint8_t  VppOptimal;
+	uint8_t  NumProtectionFields;
+	uint16_t ProtRegAddr;
+	uint8_t  FactProtRegSize;
+	uint8_t  UserProtRegSize;
+	uint8_t  extra[0];
+} __attribute__((packed));
+
+struct cfi_intelext_otpinfo {
+	uint32_t ProtRegAddr;
+	uint16_t FactGroups;
+	uint8_t  FactProtRegSize;
+	uint16_t UserGroups;
+	uint8_t  UserProtRegSize;
+} __attribute__((packed));
+
+struct cfi_intelext_blockinfo {
+	uint16_t NumIdentBlocks;
+	uint16_t BlockSize;
+	uint16_t MinBlockEraseCycles;
+	uint8_t  BitsPerCell;
+	uint8_t  BlockCap;
+} __attribute__((packed));
+
+struct cfi_intelext_regioninfo {
+	uint16_t NumIdentPartitions;
+	uint8_t  NumOpAllowed;
+	uint8_t  NumOpAllowedSimProgMode;
+	uint8_t  NumOpAllowedSimEraMode;
+	uint8_t  NumBlockTypes;
+	struct cfi_intelext_blockinfo BlockTypes[1];
+} __attribute__((packed));
+
+struct cfi_intelext_programming_regioninfo {
+	uint8_t  ProgRegShift;
+	uint8_t  Reserved1;
+	uint8_t  ControlValid;
+	uint8_t  Reserved2;
+	uint8_t  ControlInvalid;
+	uint8_t  Reserved3;
+} __attribute__((packed));
+
+/* Vendor-Specific PRI for AMD/Fujitsu Extended Command Set (0x0002) */
+
+struct cfi_pri_amdstd {
+	uint8_t  pri[3];
+	uint8_t  MajorVersion;
+	uint8_t  MinorVersion;
+	uint8_t  SiliconRevision; /* bits 1-0: Address Sensitive Unlock */
+	uint8_t  EraseSuspend;
+	uint8_t  BlkProt;
+	uint8_t  TmpBlkUnprotect;
+	uint8_t  BlkProtUnprot;
+	uint8_t  SimultaneousOps;
+	uint8_t  BurstMode;
+	uint8_t  PageMode;
+	uint8_t  VppMin;
+	uint8_t  VppMax;
+	uint8_t  TopBottom;
+} __attribute__((packed));
+
+/* Vendor-Specific PRI for Atmel chips (command set 0x0002) */
+
+struct cfi_pri_atmel {
+	uint8_t pri[3];
+	uint8_t MajorVersion;
+	uint8_t MinorVersion;
+	uint8_t Features;
+	uint8_t BottomBoot;
+	uint8_t BurstMode;
+	uint8_t PageMode;
 } __attribute__((packed));
 
 struct cfi_pri_query {
-  __u8  NumFields;
-  __u32 ProtField[1]; /* Not host ordered */
+	uint8_t  NumFields;
+	uint32_t ProtField[1]; /* Not host ordered */
 } __attribute__((packed));
 
 struct cfi_bri_query {
-  __u8  PageModeReadCap;
-  __u8  NumFields;
-  __u32 ConfField[1]; /* Not host ordered */
+	uint8_t  PageModeReadCap;
+	uint8_t  NumFields;
+	uint32_t ConfField[1]; /* Not host ordered */
 } __attribute__((packed));
 
-#define P_ID_NONE 0
-#define P_ID_INTEL_EXT 1
-#define P_ID_AMD_STD 2
-#define P_ID_INTEL_STD 3
-#define P_ID_AMD_EXT 4
-#define P_ID_MITSUBISHI_STD 256
-#define P_ID_MITSUBISHI_EXT 257
-#define P_ID_RESERVED 65535
+#define P_ID_NONE               0x0000
+#define P_ID_INTEL_EXT          0x0001
+#define P_ID_AMD_STD            0x0002
+#define P_ID_INTEL_STD          0x0003
+#define P_ID_AMD_EXT            0x0004
+#define P_ID_WINBOND            0x0006
+#define P_ID_ST_ADV             0x0020
+#define P_ID_MITSUBISHI_STD     0x0100
+#define P_ID_MITSUBISHI_EXT     0x0101
+#define P_ID_SST_PAGE           0x0102
+#define P_ID_SST_OLD            0x0701
+#define P_ID_INTEL_PERFORMANCE  0x0200
+#define P_ID_INTEL_DATA         0x0210
+#define P_ID_RESERVED           0xffff
 
 
 #define CFI_MODE_CFI	1
 #define CFI_MODE_JEDEC	0
 
 struct cfi_private {
-	__u16 cmdset;
+	uint16_t cmdset;
 	void *cmdset_priv;
 	int interleave;
 	int device_type;
 	int cfi_mode;		/* Are we a JEDEC device pretending to be CFI? */
 	int addr_unlock1;
 	int addr_unlock2;
-	int fast_prog;
 	struct mtd_info *(*cmdset_setup)(struct map_info *);
 	struct cfi_ident *cfiq; /* For now only one. We insist that all devs
 				  must be of the same type. */
-	int mfr, id, extra;
+	int mfr, id;
 	int numchips;
+	map_word sector_erase_cmd;
 	unsigned long chipshift; /* Because they're of the same type */
 	const char *im_name;	 /* inter_module name for cmdset_setup */
 	struct flchip chips[0];  /* per-chip data structure for each chip */
 };
 
-#define MAX_CFI_CHIPS 8 /* Entirely arbitrary to avoid realloc() */
-
 /*
  * Returns the command address according to the given geometry.
  */
-static inline __u32 cfi_build_cmd_addr(__u32 cmd_ofs, int interleave, int type)
+static inline uint32_t cfi_build_cmd_addr(uint32_t cmd_ofs,
+				struct map_info *map, struct cfi_private *cfi)
 {
-	return (cmd_ofs * type) * interleave;
+	unsigned bankwidth = map_bankwidth(map);
+	unsigned interleave = cfi_interleave(cfi);
+	unsigned type = cfi->device_type;
+	uint32_t addr;
+	
+	addr = (cmd_ofs * type) * interleave;
+
+	/* Modify the unlock address if we are in compatibility mode.
+	 * For 16bit devices on 8 bit busses
+	 * and 32bit devices on 16 bit busses
+	 * set the low bit of the alternating bit sequence of the address.
+	 */
+	if (((type * interleave) > bankwidth) && ((cmd_ofs & 0xff) == 0xaa))
+		addr |= (type >> 1)*interleave;
+
+	return  addr;
 }
 
 /*
- * Transforms the CFI command for the given geometry (bus width & interleave.
+ * Transforms the CFI command for the given geometry (bus width & interleave).
+ * It looks too long to be inline, but in the common case it should almost all
+ * get optimised away.
  */
-static inline cfi_word cfi_build_cmd(u_char cmd, struct map_info *map, struct cfi_private *cfi)
+static inline map_word cfi_build_cmd(u_long cmd, struct map_info *map, struct cfi_private *cfi)
 {
-	cfi_word val = 0;
+	map_word val = { {0} };
+	int wordwidth, words_per_bus, chip_mode, chips_per_word;
+	unsigned long onecmd;
+	int i;
 
-	if (cfi_buswidth_is_1()) {
-		/* 1 x8 device */
-		val = cmd;
-	} else if (cfi_buswidth_is_2()) {
-		if (cfi_interleave_is_1()) {
-			/* 1 x16 device in x16 mode */
-			val = cpu_to_cfi16(cmd);
-		} else if (cfi_interleave_is_2()) {
-			/* 2 (x8, x16 or x32) devices in x8 mode */
-			val = cpu_to_cfi16((cmd << 8) | cmd);
-		}
-	} else if (cfi_buswidth_is_4()) {
-		if (cfi_interleave_is_1()) {
-			/* 1 x32 device in x32 mode */
-			val = cpu_to_cfi32(cmd);
-		} else if (cfi_interleave_is_2()) {
-			/* 2 x16 device in x16 mode */
-			val = cpu_to_cfi32((cmd << 16) | cmd);
-		} else if (cfi_interleave_is_4()) {
-			/* 4 (x8, x16 or x32) devices in x8 mode */
-			val = (cmd << 16) | cmd;
-			val = cpu_to_cfi32((val << 8) | val);
-		}
-#ifdef CFI_WORD_64
-	} else if (cfi_buswidth_is_8()) {
-		if (cfi_interleave_is_1()) {
-			/* 1 x64 device in x64 mode */
-			val = cpu_to_cfi64(cmd);
-		} else if (cfi_interleave_is_2()) {
-			/* 2 x32 device in x32 mode */
-			val = cmd;
-			val = cpu_to_cfi64((val << 32) | val);
-		} else if (cfi_interleave_is_4()) {
-			/* 4 (x16, x32 or x64) devices in x16 mode */
-			val = (cmd << 16) | cmd;
-			val = cpu_to_cfi64((val << 32) | val);
-		} else if (cfi_interleave_is_8()) {
-			/* 8 (x8, x16 or x32) devices in x8 mode */
-			val = (cmd << 8) | cmd;
-			val = (val << 16) | val;
-			val = (val << 32) | val;
-			val = cpu_to_cfi64(val);
-		}
-#endif /* CFI_WORD_64 */
+	/* We do it this way to give the compiler a fighting chance
+	   of optimising away all the crap for 'bankwidth' larger than
+	   an unsigned long, in the common case where that support is
+	   disabled */
+	if (map_bankwidth_is_large(map)) {
+		wordwidth = sizeof(unsigned long);
+		words_per_bus = (map_bankwidth(map)) / wordwidth; // i.e. normally 1
+	} else {
+		wordwidth = map_bankwidth(map);
+		words_per_bus = 1;
 	}
+
+	chip_mode = map_bankwidth(map) / cfi_interleave(cfi);
+	chips_per_word = wordwidth * cfi_interleave(cfi) / map_bankwidth(map);
+
+	/* First, determine what the bit-pattern should be for a single
+	   device, according to chip mode and endianness... */
+	switch (chip_mode) {
+	default: BUG();
+	case 1:
+		onecmd = cmd;
+		break;
+	case 2:
+		onecmd = cpu_to_cfi16(map, cmd);
+		break;
+	case 4:
+		onecmd = cpu_to_cfi32(map, cmd);
+		break;
+	}
+
+	/* Now replicate it across the size of an unsigned long, or
+	   just to the bus width as appropriate */
+	switch (chips_per_word) {
+	default: BUG();
+#if BITS_PER_LONG >= 64
+	case 8:
+		onecmd |= (onecmd << (chip_mode * 32));
+#endif
+	case 4:
+		onecmd |= (onecmd << (chip_mode * 16));
+	case 2:
+		onecmd |= (onecmd << (chip_mode * 8));
+	case 1:
+		;
+	}
+
+	/* And finally, for the multi-word case, replicate it
+	   in all words in the structure */
+	for (i=0; i < words_per_bus; i++) {
+		val.x[i] = onecmd;
+	}
+
 	return val;
 }
 #define CMD(x)  cfi_build_cmd((x), map, cfi)
 
-/*
- * Read a value according to the bus width.
- */
 
-static inline cfi_word cfi_read(struct map_info *map, __u32 addr)
+static inline unsigned long cfi_merge_status(map_word val, struct map_info *map,
+					   struct cfi_private *cfi)
 {
-	if (cfi_buswidth_is_1()) {
-		return map->read8(map, addr);
-	} else if (cfi_buswidth_is_2()) {
-		return map->read16(map, addr);
-	} else if (cfi_buswidth_is_4()) {
-		return map->read32(map, addr);
-	} else if (cfi_buswidth_is_8()) {
-		return map->read64(map, addr);
+	int wordwidth, words_per_bus, chip_mode, chips_per_word;
+	unsigned long onestat, res = 0;
+	int i;
+
+	/* We do it this way to give the compiler a fighting chance
+	   of optimising away all the crap for 'bankwidth' larger than
+	   an unsigned long, in the common case where that support is
+	   disabled */
+	if (map_bankwidth_is_large(map)) {
+		wordwidth = sizeof(unsigned long);
+		words_per_bus = (map_bankwidth(map)) / wordwidth; // i.e. normally 1
 	} else {
-		return 0;
+		wordwidth = map_bankwidth(map);
+		words_per_bus = 1;
 	}
+
+	chip_mode = map_bankwidth(map) / cfi_interleave(cfi);
+	chips_per_word = wordwidth * cfi_interleave(cfi) / map_bankwidth(map);
+
+	onestat = val.x[0];
+	/* Or all status words together */
+	for (i=1; i < words_per_bus; i++) {
+		onestat |= val.x[i];
+	}
+
+	res = onestat;
+	switch(chips_per_word) {
+	default: BUG();
+#if BITS_PER_LONG >= 64
+	case 8:
+		res |= (onestat >> (chip_mode * 32));
+#endif
+	case 4:
+		res |= (onestat >> (chip_mode * 16));
+	case 2:
+		res |= (onestat >> (chip_mode * 8));
+	case 1:
+		;
+	}
+
+	/* Last, determine what the bit-pattern should be for a single
+	   device, according to chip mode and endianness... */
+	switch (chip_mode) {
+	case 1:
+		break;
+	case 2:
+		res = cfi16_to_cpu(map, res);
+		break;
+	case 4:
+		res = cfi32_to_cpu(map, res);
+		break;
+	default: BUG();
+	}
+	return res;
 }
 
-/*
- * Write a value according to the bus width.
- */
+#define MERGESTATUS(x) cfi_merge_status((x), map, cfi)
 
-static inline void cfi_write(struct map_info *map, cfi_word val, __u32 addr)
-{
-	if (cfi_buswidth_is_1()) {
-		map->write8(map, val, addr);
-	} else if (cfi_buswidth_is_2()) {
-		map->write16(map, val, addr);
-	} else if (cfi_buswidth_is_4()) {
-		map->write32(map, val, addr);
-	} else if (cfi_buswidth_is_8()) {
-		map->write64(map, val, addr);
-	}
-}
 
 /*
  * Sends a CFI command to a bank of flash for the given geometry.
@@ -423,61 +458,107 @@ static inline void cfi_write(struct map_info *map, cfi_word val, __u32 addr)
  * If prev_val is non-null, it will be set to the value at the command address,
  * before the command was written.
  */
-static inline __u32 cfi_send_gen_cmd(u_char cmd, __u32 cmd_addr, __u32 base,
+static inline uint32_t cfi_send_gen_cmd(u_char cmd, uint32_t cmd_addr, uint32_t base,
 				struct map_info *map, struct cfi_private *cfi,
-				int type, cfi_word *prev_val)
+				int type, map_word *prev_val)
 {
-	cfi_word val;
-	__u32 addr = base + cfi_build_cmd_addr(cmd_addr, CFIDEV_INTERLEAVE, type);
-
+	map_word val;
+	uint32_t addr = base + cfi_build_cmd_addr(cmd_addr, map, cfi);
 	val = cfi_build_cmd(cmd, map, cfi);
 
 	if (prev_val)
-		*prev_val = cfi_read(map, addr);
+		*prev_val = map_read(map, addr);
 
-	cfi_write(map, val, addr);
+	map_write(map, val, addr);
 
 	return addr - base;
 }
 
-static inline __u8 cfi_read_query(struct map_info *map, __u32 addr)
+static inline uint8_t cfi_read_query(struct map_info *map, uint32_t addr)
 {
-	if (cfi_buswidth_is_1()) {
-		return map->read8(map, addr);
-	} else if (cfi_buswidth_is_2()) {
-		return cfi16_to_cpu(map->read16(map, addr));
-	} else if (cfi_buswidth_is_4()) {
-		return cfi32_to_cpu(map->read32(map, addr));
-	} else if (cfi_buswidth_is_8()) {
-		return cfi64_to_cpu(map->read64(map, addr));
+	map_word val = map_read(map, addr);
+
+	if (map_bankwidth_is_1(map)) {
+		return val.x[0];
+	} else if (map_bankwidth_is_2(map)) {
+		return cfi16_to_cpu(map, val.x[0]);
 	} else {
-		return 0;
+		/* No point in a 64-bit byteswap since that would just be
+		   swapping the responses from different chips, and we are
+		   only interested in one chip (a representative sample) */
+		return cfi32_to_cpu(map, val.x[0]);
+	}
+}
+
+static inline uint16_t cfi_read_query16(struct map_info *map, uint32_t addr)
+{
+	map_word val = map_read(map, addr);
+
+	if (map_bankwidth_is_1(map)) {
+		return val.x[0] & 0xff;
+	} else if (map_bankwidth_is_2(map)) {
+		return cfi16_to_cpu(map, val.x[0]);
+	} else {
+		/* No point in a 64-bit byteswap since that would just be
+		   swapping the responses from different chips, and we are
+		   only interested in one chip (a representative sample) */
+		return cfi32_to_cpu(map, val.x[0]);
 	}
 }
 
 static inline void cfi_udelay(int us)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-	unsigned long t = us * HZ / 1000000;
-	if (t) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout(t);
-		return;
+	if (us >= 1000) {
+		msleep((us+999)/1000);
+	} else {
+		udelay(us);
+		cond_resched();
 	}
-#endif
-	udelay(us);
-	cond_resched();
 }
 
-static inline void cfi_spin_lock(spinlock_t *mutex)
-{
-	spin_lock_bh(mutex);
-}
+int __xipram cfi_qry_present(struct map_info *map, __u32 base,
+			     struct cfi_private *cfi);
+int __xipram cfi_qry_mode_on(uint32_t base, struct map_info *map,
+			     struct cfi_private *cfi);
+void __xipram cfi_qry_mode_off(uint32_t base, struct map_info *map,
+			       struct cfi_private *cfi);
 
-static inline void cfi_spin_unlock(spinlock_t *mutex)
-{
-	spin_unlock_bh(mutex);
-}
+struct cfi_extquery *cfi_read_pri(struct map_info *map, uint16_t adr, uint16_t size,
+			     const char* name);
+struct cfi_fixup {
+	uint16_t mfr;
+	uint16_t id;
+	void (*fixup)(struct mtd_info *mtd);
+};
+
+#define CFI_MFR_ANY		0xFFFF
+#define CFI_ID_ANY		0xFFFF
+#define CFI_MFR_CONTINUATION	0x007F
+
+#define CFI_MFR_AMD		0x0001
+#define CFI_MFR_AMIC		0x0037
+#define CFI_MFR_ATMEL		0x001F
+#define CFI_MFR_EON		0x001C
+#define CFI_MFR_FUJITSU		0x0004
+#define CFI_MFR_HYUNDAI		0x00AD
+#define CFI_MFR_INTEL		0x0089
+#define CFI_MFR_MACRONIX	0x00C2
+#define CFI_MFR_NEC		0x0010
+#define CFI_MFR_PMC		0x009D
+#define CFI_MFR_SAMSUNG		0x00EC
+#define CFI_MFR_SHARP		0x00B0
+#define CFI_MFR_SST		0x00BF
+#define CFI_MFR_ST		0x0020 /* STMicroelectronics */
+#define CFI_MFR_TOSHIBA		0x0098
+#define CFI_MFR_WINBOND		0x00DA
+
+void cfi_fixup(struct mtd_info *mtd, struct cfi_fixup* fixups);
+
+typedef int (*varsize_frob_t)(struct map_info *map, struct flchip *chip,
+			      unsigned long adr, int len, void *thunk);
+
+int cfi_varsize_frob(struct mtd_info *mtd, varsize_frob_t frob,
+	loff_t ofs, size_t len, void *thunk);
 
 
 #endif /* __MTD_CFI_H__ */

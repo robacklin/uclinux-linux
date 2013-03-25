@@ -35,23 +35,22 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/entry.h>
 
 #include "fp_emu.h"
 
-	.globl	SYMBOL_NAME(fpu_emu)
+	.globl	fpu_emu
 	.globl	fp_debugprint
 	.globl	fp_err_ua1,fp_err_ua2
 
 	.text
-SYMBOL_NAME_LABEL(fpu_emu)
+fpu_emu:
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
 
 #if defined(CPU_M68020_OR_M68030) && defined(CPU_M68040_OR_M68060)
-        tst.l	SYMBOL_NAME(m68k_is040or060)
+        tst.l	m68k_is040or060
         jeq	1f
 #endif
 #if defined(CPU_M68040_OR_M68060)
@@ -63,7 +62,7 @@ SYMBOL_NAME_LABEL(fpu_emu)
 
 #if defined(CONFIG_M68060)
 #if !defined(CPU_M68060_ONLY)
-	btst	#3,SYMBOL_NAME(m68k_cputype)+3
+	btst	#3,m68k_cputype+3
 	jeq	1f
 #endif
 	btst	#7,(FPS_SR,%sp)
@@ -72,11 +71,11 @@ SYMBOL_NAME_LABEL(fpu_emu)
 1:
 	| emulation successful?
 	tst.l	%d0
-	jeq	SYMBOL_NAME(ret_from_exception)
+	jeq	ret_from_exception
 
 	| send some signal to program here
 
-	jra	SYMBOL_NAME(ret_from_exception)
+	jra	ret_from_exception
 
 	| we jump here after an access error while trying to access
 	| user space, we correct stackpointer and send a SIGSEGV to
@@ -86,22 +85,22 @@ fp_err_ua2:
 fp_err_ua1:
 	addq.l	#4,%sp
 	move.l	%a0,-(%sp)
-	pea	SEGV_MAPERR
-	pea	SIGSEGV
-	jsr	SYMBOL_NAME(fpemu_signal)
+	pea	LSEGV_MAPERR
+	pea	LSIGSEGV
+	jsr	fpemu_signal
 	add.w	#12,%sp
-	jra	SYMBOL_NAME(ret_from_exception)
+	jra	ret_from_exception
 
 #if defined(CONFIG_M68060)
 	| send a trace signal if we are debugged
 	| it does not really belong here, but...
 fp_sendtrace060:
 	move.l	(FPS_PC,%sp),-(%sp)
-	pea	TRAP_TRACE
-	pea	SIGTRAP
-	jsr	SYMBOL_NAME(fpemu_signal)
+	pea	LTRAP_TRACE
+	pea	LSIGTRAP
+	jsr	fpemu_signal
 	add.w	#12,%sp
-	jra	SYMBOL_NAME(ret_from_exception)
+	jra	ret_from_exception
 #endif
 
 	.globl	fp_get_data_reg, fp_put_data_reg
@@ -123,17 +122,17 @@ fp_get_data_reg:
 	.long	fp_get_d6, fp_get_d7
 
 fp_get_d0:
-	move.l	(PT_D0+8,%sp),%d0
+	move.l	(PT_OFF_D0+8,%sp),%d0
 	printf	PREGISTER,"{d0->%08x}",1,%d0
 	rts
 
 fp_get_d1:
-	move.l	(PT_D1+8,%sp),%d0
+	move.l	(PT_OFF_D1+8,%sp),%d0
 	printf	PREGISTER,"{d1->%08x}",1,%d0
 	rts
 
 fp_get_d2:
-	move.l	(PT_D2+8,%sp),%d0
+	move.l	(PT_OFF_D2+8,%sp),%d0
 	printf	PREGISTER,"{d2->%08x}",1,%d0
 	rts
 
@@ -174,35 +173,35 @@ fp_put_data_reg:
 
 fp_put_d0:
 	printf	PREGISTER,"{d0<-%08x}",1,%d0
-	move.l	%d0,(PT_D0+8,%sp)
+	move.l	%d0,(PT_OFF_D0+8,%sp)
 	rts
 
 fp_put_d1:
 	printf	PREGISTER,"{d1<-%08x}",1,%d0
-	move.l	%d0,(PT_D1+8,%sp)
+	move.l	%d0,(PT_OFF_D1+8,%sp)
 	rts
 
 fp_put_d2:
 	printf	PREGISTER,"{d2<-%08x}",1,%d0
-	move.l	%d0,(PT_D2+8,%sp)
+	move.l	%d0,(PT_OFF_D2+8,%sp)
 	rts
 
 fp_put_d3:
 	printf	PREGISTER,"{d3<-%08x}",1,%d0
 |	move.l	%d0,%d3
-	move.l	%d0,(PT_D3+8,%sp)
+	move.l	%d0,(PT_OFF_D3+8,%sp)
 	rts
 
 fp_put_d4:
 	printf	PREGISTER,"{d4<-%08x}",1,%d0
 |	move.l	%d0,%d4
-	move.l	%d0,(PT_D4+8,%sp)
+	move.l	%d0,(PT_OFF_D4+8,%sp)
 	rts
 
 fp_put_d5:
 	printf	PREGISTER,"{d5<-%08x}",1,%d0
 |	move.l	%d0,%d5
-	move.l	%d0,(PT_D5+8,%sp)
+	move.l	%d0,(PT_OFF_D5+8,%sp)
 	rts
 
 fp_put_d6:
@@ -226,17 +225,17 @@ fp_get_addr_reg:
 	.long	fp_get_a6, fp_get_a7
 
 fp_get_a0:
-	move.l	(PT_A0+8,%sp),%a0
+	move.l	(PT_OFF_A0+8,%sp),%a0
 	printf	PREGISTER,"{a0->%08x}",1,%a0
 	rts
 
 fp_get_a1:
-	move.l	(PT_A1+8,%sp),%a0
+	move.l	(PT_OFF_A1+8,%sp),%a0
 	printf	PREGISTER,"{a1->%08x}",1,%a0
 	rts
 
 fp_get_a2:
-	move.l	(PT_A2+8,%sp),%a0
+	move.l	(PT_OFF_A2+8,%sp),%a0
 	printf	PREGISTER,"{a2->%08x}",1,%a0
 	rts
 
@@ -277,17 +276,17 @@ fp_put_addr_reg:
 
 fp_put_a0:
 	printf	PREGISTER,"{a0<-%08x}",1,%a0
-	move.l	%a0,(PT_A0+8,%sp)
+	move.l	%a0,(PT_OFF_A0+8,%sp)
 	rts
 
 fp_put_a1:
 	printf	PREGISTER,"{a1<-%08x}",1,%a0
-	move.l	%a0,(PT_A1+8,%sp)
+	move.l	%a0,(PT_OFF_A1+8,%sp)
 	rts
 
 fp_put_a2:
 	printf	PREGISTER,"{a2<-%08x}",1,%a0
-	move.l	%a0,(PT_A2+8,%sp)
+	move.l	%a0,(PT_OFF_A2+8,%sp)
 	rts
 
 fp_put_a3:

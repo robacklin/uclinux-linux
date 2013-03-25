@@ -9,20 +9,19 @@
  * Code common to all T2 core logic chips.
  */
 
-#include <linux/kernel.h>
+#define __EXTERN_INLINE
+#include <asm/io.h>
+#include <asm/core_t2.h>
+#undef __EXTERN_INLINE
+
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/delay.h>
-
-#define __EXTERN_INLINE
-#include <asm/io.h>
-#include <asm/core_t2.h>
-#undef __EXTERN_INLINE
+#include <asm/mce.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -138,12 +137,11 @@ static struct
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	DBG(("mk_conf_addr(bus=%d, dfn=0x%x, where=0x%x,"
 	     " addr=0x%lx, type1=0x%x)\n",
@@ -282,87 +280,45 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 }
 
 static int
-t2_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+t2_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+	       int size, u32 *value)
 {
 	unsigned long addr, pci_addr;
 	unsigned char type1;
+	int shift;
+	long mask;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + T2_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
+	mask = (size - 1) * 8;
+	shift = (where & 3) * 8;
+	addr = (pci_addr << 5) + mask + T2_CONF;
+	*value = conf_read(addr, type1) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-t2_read_config_word(struct pci_dev *dev, int where, u16 *value)
+t2_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		u32 value)
 {
 	unsigned long addr, pci_addr;
 	unsigned char type1;
+	long mask;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + T2_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-t2_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + T2_CONF;
-	*value = conf_read(addr, type1);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-t2_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + T2_CONF;
 	conf_write(addr, value << ((where & 3) * 8), type1);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int 
-t2_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return t2_write_config(dev, where, value, 0x00);
-}
-
-static int 
-t2_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return t2_write_config(dev, where, value, 0x08);
-}
-
-static int 
-t2_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return t2_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops t2_pci_ops = 
 {
-	read_byte:	t2_read_config_byte,
-	read_word:	t2_read_config_word,
-	read_dword:	t2_read_config_dword,
-	write_byte:	t2_write_config_byte,
-	write_word:	t2_write_config_word,
-	write_dword:	t2_write_config_dword
+	.read =		t2_read_config,
+	.write =	t2_write_config,
 };
 
 static void __init
@@ -381,10 +337,7 @@ t2_direct_map_window1(unsigned long base, unsigned long length)
 
 #if DEBUG_PRINT_FINAL_SETTINGS
 	printk("%s: setting WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n",
-	       __FUNCTION__,
-	       *(vulp)T2_WBASE1,
-	       *(vulp)T2_WMASK1,
-	       *(vulp)T2_TBASE1);
+	       __func__, *(vulp)T2_WBASE1, *(vulp)T2_WMASK1, *(vulp)T2_TBASE1);
 #endif
 }
 
@@ -411,10 +364,7 @@ t2_sg_map_window2(struct pci_controller *hose,
 
 #if DEBUG_PRINT_FINAL_SETTINGS
 	printk("%s: setting WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n",
-	       __FUNCTION__,
-	       *(vulp)T2_WBASE2,
-	       *(vulp)T2_WMASK2,
-	       *(vulp)T2_TBASE2);
+	       __func__, *(vulp)T2_WBASE2, *(vulp)T2_WMASK2, *(vulp)T2_TBASE2);
 #endif
 }
 
@@ -422,15 +372,15 @@ static void __init
 t2_save_configuration(void)
 {
 #if DEBUG_PRINT_INITIAL_SETTINGS
-	printk("%s: HAE_1 was 0x%lx\n", __FUNCTION__, srm_hae); /* HW is 0 */
-	printk("%s: HAE_2 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_2);
-	printk("%s: HAE_3 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_3);
-	printk("%s: HAE_4 was 0x%lx\n", __FUNCTION__, *(vulp)T2_HAE_4);
-	printk("%s: HBASE was 0x%lx\n", __FUNCTION__, *(vulp)T2_HBASE);
+	printk("%s: HAE_1 was 0x%lx\n", __func__, srm_hae); /* HW is 0 */
+	printk("%s: HAE_2 was 0x%lx\n", __func__, *(vulp)T2_HAE_2);
+	printk("%s: HAE_3 was 0x%lx\n", __func__, *(vulp)T2_HAE_3);
+	printk("%s: HAE_4 was 0x%lx\n", __func__, *(vulp)T2_HAE_4);
+	printk("%s: HBASE was 0x%lx\n", __func__, *(vulp)T2_HBASE);
 
-	printk("%s: WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n", __FUNCTION__, 
+	printk("%s: WBASE1=0x%lx WMASK1=0x%lx TBASE1=0x%lx\n", __func__,
 	       *(vulp)T2_WBASE1, *(vulp)T2_WMASK1, *(vulp)T2_TBASE1);
-	printk("%s: WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n", __FUNCTION__, 
+	printk("%s: WBASE2=0x%lx WMASK2=0x%lx TBASE2=0x%lx\n", __func__,
 	       *(vulp)T2_WBASE2, *(vulp)T2_WMASK2, *(vulp)T2_TBASE2);
 #endif
 
@@ -455,6 +405,7 @@ void __init
 t2_init_arch(void)
 {
 	struct pci_controller *hose;
+	struct resource *hae_mem;
 	unsigned long temp;
 	unsigned int i;
 
@@ -482,7 +433,13 @@ t2_init_arch(void)
 	 */
 	pci_isa_hose = hose = alloc_pci_controller();
 	hose->io_space = &ioport_resource;
-	hose->mem_space = &iomem_resource;
+	hae_mem = alloc_resource();
+	hae_mem->start = 0;
+	hae_mem->end = T2_MEM_R1_MASK;
+	hae_mem->name = pci_hae0_name;
+	if (request_resource(&iomem_resource, hae_mem) < 0)
+		printk(KERN_ERR "Failed to request HAE_MEM\n");
+	hose->mem_space = hae_mem;
 	hose->index = 0;
 
 	hose->sparse_mem_base = T2_SPARSE_MEM - IDENT_ADDR;
@@ -596,11 +553,10 @@ t2_clear_errors(int cpu)
  * Hence all the taken/expected/any_expected/last_taken stuff...
  */
 void
-t2_machine_check(unsigned long vector, unsigned long la_ptr,
-		 struct pt_regs * regs)
+t2_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	int cpu = smp_processor_id();
-#if DEBUG_MCHECK > 0
+#ifdef CONFIG_VERBOSE_MCHECK
 	struct el_common *mchk_header = (struct el_common *)la_ptr;
 #endif
 
@@ -623,39 +579,45 @@ t2_machine_check(unsigned long vector, unsigned long la_ptr,
 		 *
 		 * Just dismiss it for now on this CPU...
 		 */
-#if DEBUG_MCHECK > 0
-		printk("t2_machine_check(cpu%d): any_expected 0x%x -"
-		       " (assumed) spurious -"
-		       " code 0x%x\n", cpu, t2_mcheck_any_expected,
-		       (unsigned int)mchk_header->code);
-#endif /* DEBUG_MCHECK */
+#ifdef CONFIG_VERBOSE_MCHECK
+		if (alpha_verbose_mcheck > 1) {
+			printk("t2_machine_check(cpu%d): any_expected 0x%x -"
+			       " (assumed) spurious -"
+			       " code 0x%x\n", cpu, t2_mcheck_any_expected,
+			       (unsigned int)mchk_header->code);
+		}
+#endif
 		return;
 	}
 
 	if (!mcheck_expected(cpu) && !t2_mcheck_any_expected) {
 		if (t2_mcheck_last_taken & (1 << cpu)) {
-#if DEBUG_MCHECK > 0
-			printk("t2_machine_check(cpu%d): last_taken 0x%x -"
-			       " unexpected mcheck -"
-			       " code 0x%x\n", cpu, t2_mcheck_last_taken,
+#ifdef CONFIG_VERBOSE_MCHECK
+		    if (alpha_verbose_mcheck > 1) {
+			printk("t2_machine_check(cpu%d): last_taken 0x%x - "
+			       "unexpected mcheck - code 0x%x\n",
+			       cpu, t2_mcheck_last_taken,
 			       (unsigned int)mchk_header->code);
-#endif /* DEBUG_MCHECK */
-			t2_mcheck_last_taken = 0;
-			mb();
-			return;
+		    }
+#endif
+		    t2_mcheck_last_taken = 0;
+		    mb();
+		    return;
 		} else {
 			t2_mcheck_last_taken = 0;
 			mb();
 		}
 	}
 
-#if DEBUG_MCHECK > 0
-	printk("%s t2_mcheck(cpu%d): last_taken 0x%x -"
-	       " any_expected 0x%x - code 0x%x\n",
-	       (mcheck_expected(cpu) ? "EX" : "UN"),
-	       cpu, t2_mcheck_last_taken, t2_mcheck_any_expected,
-	       (unsigned int)mchk_header->code);
-#endif /* DEBUG_MCHECK */
+#ifdef CONFIG_VERBOSE_MCHECK
+	if (alpha_verbose_mcheck > 1) {
+		printk("%s t2_mcheck(cpu%d): last_taken 0x%x - "
+		       "any_expected 0x%x - code 0x%x\n",
+		       (mcheck_expected(cpu) ? "EX" : "UN"), cpu,
+		       t2_mcheck_last_taken, t2_mcheck_any_expected,
+		       (unsigned int)mchk_header->code);
+	}
+#endif
 
-	process_mcheck_info(vector, la_ptr, regs, "T2", mcheck_expected(cpu));
+	process_mcheck_info(vector, la_ptr, "T2", mcheck_expected(cpu));
 }

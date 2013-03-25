@@ -1,4 +1,4 @@
-/* $Id: capi.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
+/* $Id: capi.h,v 1.4.6.1 2001/09/23 22:25:05 kai Exp $
  * 
  * CAPI 2.0 Interface for Linux
  * 
@@ -12,7 +12,7 @@
 #ifndef __LINUX_CAPI_H__
 #define __LINUX_CAPI_H__
 
-#include <asm/types.h>
+#include <linux/types.h>
 #include <linux/ioctl.h>
 #ifndef __KERNEL__
 #include <linux/kernelcapi.h>
@@ -36,7 +36,7 @@ typedef struct capi_register_params {	/* CAPI_REGISTER */
 
 #define CAPI_MANUFACTURER_LEN		64
 
-#define	CAPI_GET_MANUFACTURER	_IOWR('C',0x06,CAPI_MANUFACTURER_LEN)
+#define	CAPI_GET_MANUFACTURER	_IOWR('C',0x06,int)	/* broken: wanted size 64 (CAPI_MANUFACTURER_LEN) */
 
 /*
  * CAPI_GET_VERSION
@@ -56,7 +56,7 @@ typedef struct capi_version {
  */
 
 #define CAPI_SERIAL_LEN		8
-#define CAPI_GET_SERIAL		_IOWR('C',0x08, CAPI_SERIAL_LEN)
+#define CAPI_GET_SERIAL		_IOWR('C',0x08,int)	/* broken: wanted size 8 (CAPI_SERIAL_LEN) */
 
 /*
  * CAPI_GET_PROFILE
@@ -77,7 +77,7 @@ typedef struct capi_profile {
 
 typedef struct capi_manufacturer_cmd {
 	unsigned long cmd;
-	void *data;
+	void __user *data;
 } capi_manufacturer_cmd;
 
 /*

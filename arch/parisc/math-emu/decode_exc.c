@@ -16,7 +16,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * BEGIN_DESC
@@ -40,7 +40,7 @@
  * END_DESC
 */
 
-
+#include <linux/kernel.h>
 #include "float.h"
 #include "sgl_float.h"
 #include "dbl_float.h"
@@ -56,7 +56,7 @@
 /* General definitions */
 #define DOESTRAP 1
 #define NOTRAP 0
-#define SIGNALCODE(signal, code) ((signal) << 24 | (code));
+#define SIGNALCODE(signal, code) ((signal) << 24 | (code))
 #define copropbit	1<<31-2	/* bit position 2 */
 #define opclass		9	/* bits 21 & 22 */
 #define fmt		11	/* bits 19 & 20 */
@@ -337,17 +337,19 @@ decode_fpu(unsigned int Fpu_register[], unsigned int trap_counts[])
 		}
 		break;
 	  case INVALIDEXCEPTION:
+	  case OPC_2E_INVALIDEXCEPTION:
 		update_trap_counts(Fpu_register, aflags, bflags, trap_counts);
 		return SIGNALCODE(SIGFPE, FPE_FLTINV);
 	  case DIVISIONBYZEROEXCEPTION:
 		update_trap_counts(Fpu_register, aflags, bflags, trap_counts);
+		Clear_excp_register(exception_index);
 	  	return SIGNALCODE(SIGFPE, FPE_FLTDIV);
 	  case INEXACTEXCEPTION:
 		update_trap_counts(Fpu_register, aflags, bflags, trap_counts);
 		return SIGNALCODE(SIGFPE, FPE_FLTRES);
 	  default:
 		update_trap_counts(Fpu_register, aflags, bflags, trap_counts);
-		printk(__FILE__ "(%d) Unknown FPU exception 0x%x\n",
+		printk("%s(%d) Unknown FPU exception 0x%x\n", __FILE__,
 			__LINE__, Excp_type(exception_index));
 		return SIGNALCODE(SIGILL, ILL_COPROC);
 	  case NOEXCEPTION:	/* no exception */

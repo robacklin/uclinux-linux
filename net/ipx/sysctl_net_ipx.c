@@ -6,7 +6,6 @@
  * Added /proc/sys/net/ipx/ipx_pprop_broadcasting - acme March 4, 2001
  */
 
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/sysctl.h>
 
@@ -17,28 +16,28 @@
 /* From af_ipx.c */
 extern int sysctl_ipx_pprop_broadcasting;
 
-ctl_table ipx_table[] = {
-	{ NET_IPX_PPROP_BROADCASTING, "ipx_pprop_broadcasting",
-	  &sysctl_ipx_pprop_broadcasting, sizeof(int), 0644, NULL,
-	  &proc_dointvec },
-	{ 0 }
+static struct ctl_table ipx_table[] = {
+	{
+		.procname	= "ipx_pprop_broadcasting",
+		.data		= &sysctl_ipx_pprop_broadcasting,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{ },
 };
 
-static ctl_table ipx_dir_table[] = {
-	{ NET_IPX, "ipx", NULL, 0, 0555, ipx_table },
-	{ 0 }
-};
-
-static ctl_table ipx_root_table[] = {
-	{ CTL_NET, "net", NULL, 0, 0555, ipx_dir_table },
-	{ 0 }
+static struct ctl_path ipx_path[] = {
+	{ .procname = "net", },
+	{ .procname = "ipx", },
+	{ }
 };
 
 static struct ctl_table_header *ipx_table_header;
 
 void ipx_register_sysctl(void)
 {
-	ipx_table_header = register_sysctl_table(ipx_root_table, 1);
+	ipx_table_header = register_sysctl_paths(ipx_path, ipx_table);
 }
 
 void ipx_unregister_sysctl(void)

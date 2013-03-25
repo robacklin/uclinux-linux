@@ -9,44 +9,32 @@
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
-
-#include <asm/div64.h>
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/slab.h>
-#include <linux/stat.h>
 #include <linux/sched.h>
-#include <linux/affs_fs.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/string.h>
-#include <linux/locks.h>
-#include <linux/genhd.h>
-#include <linux/amigaffs.h>
-#include <linux/major.h>
-#include <linux/blkdev.h>
-#include <linux/init.h>
-#include <linux/smp_lock.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
-#include <linux/module.h>
+#include <linux/gfp.h>
+#include "affs.h"
 
-extern struct inode_operations affs_symlink_inode_operations;
+extern const struct inode_operations affs_symlink_inode_operations;
 extern struct timezone sys_tz;
 
-void
-affs_read_inode(struct inode *inode)
+struct inode *affs_iget(struct super_block *sb, unsigned long ino)
 {
-	struct super_block	*sb = inode->i_sb;
+	struct affs_sb_info	*sbi = AFFS_SB(sb);
 	struct buffer_head	*bh;
 	struct affs_head	*head;
 	struct affs_tail	*tail;
+	struct inode		*inode;
 	u32			 block;
 	u32			 size;
 	u32			 prot;
 	u16			 id;
 
-	pr_debug("AFFS: read_inode(%lu)\n",inode->i_ino);
+	inode = iget_locked(sb, ino);
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+	if (!(inode->i_state & I_NEW))
+		return inode;
+
+	pr_debug("AFFS: affs_iget(%lu)\n", inode->i_ino);
 
 	block = inode->i_ino;
 	bh = affs_bread(sb, block);
@@ -66,44 +54,52 @@ affs_read_inode(struct inode *inode)
 	prot = be32_to_cpu(tail->protect);
 
 	inode->i_size = 0;
-	inode->i_nlink = 1;
+	set_nlink(inode, 1);
 	inode->i_mode = 0;
-	memset(AFFS_INODE, 0, sizeof(*AFFS_INODE));
-	init_MUTEX(&AFFS_INODE->i_link_lock);
-	init_MUTEX(&AFFS_INODE->i_ext_lock);
-	AFFS_INODE->i_extcnt = 1;
-	AFFS_INODE->i_ext_last = ~1;
-	AFFS_INODE->i_protect = prot;
+	AFFS_I(inode)->i_extcnt = 1;
+	AFFS_I(inode)->i_ext_last = ~1;
+	AFFS_I(inode)->i_protect = prot;
+	atomic_set(&AFFS_I(inode)->i_opencnt, 0);
+	AFFS_I(inode)->i_blkcnt = 0;
+	AFFS_I(inode)->i_lc = NULL;
+	AFFS_I(inode)->i_lc_size = 0;
+	AFFS_I(inode)->i_lc_shift = 0;
+	AFFS_I(inode)->i_lc_mask = 0;
+	AFFS_I(inode)->i_ac = NULL;
+	AFFS_I(inode)->i_ext_bh = NULL;
+	AFFS_I(inode)->mmu_private = 0;
+	AFFS_I(inode)->i_lastalloc = 0;
+	AFFS_I(inode)->i_pa_cnt = 0;
 
-	if (AFFS_SB->s_flags & SF_SETMODE)
-		inode->i_mode = AFFS_SB->s_mode;
+	if (sbi->s_flags & SF_SETMODE)
+		inode->i_mode = sbi->s_mode;
 	else
 		inode->i_mode = prot_to_mode(prot);
 
 	id = be16_to_cpu(tail->uid);
-	if (id == 0 || AFFS_SB->s_flags & SF_SETUID)
-		inode->i_uid = AFFS_SB->s_uid;
-	else if (id == 0xFFFF && AFFS_SB->s_flags & SF_MUFS)
+	if (id == 0 || sbi->s_flags & SF_SETUID)
+		inode->i_uid = sbi->s_uid;
+	else if (id == 0xFFFF && sbi->s_flags & SF_MUFS)
 		inode->i_uid = 0;
 	else
 		inode->i_uid = id;
 
 	id = be16_to_cpu(tail->gid);
-	if (id == 0 || AFFS_SB->s_flags & SF_SETGID)
-		inode->i_gid = AFFS_SB->s_gid;
-	else if (id == 0xFFFF && AFFS_SB->s_flags & SF_MUFS)
+	if (id == 0 || sbi->s_flags & SF_SETGID)
+		inode->i_gid = sbi->s_gid;
+	else if (id == 0xFFFF && sbi->s_flags & SF_MUFS)
 		inode->i_gid = 0;
 	else
 		inode->i_gid = id;
 
 	switch (be32_to_cpu(tail->stype)) {
 	case ST_ROOT:
-		inode->i_uid = AFFS_SB->s_uid;
-		inode->i_gid = AFFS_SB->s_gid;
+		inode->i_uid = sbi->s_uid;
+		inode->i_gid = sbi->s_gid;
 		/* fall through */
 	case ST_USERDIR:
 		if (be32_to_cpu(tail->stype) == ST_USERDIR ||
-		    AFFS_SB->s_flags & SF_SETMODE) {
+		    sbi->s_flags & SF_SETMODE) {
 			if (inode->i_mode & S_IRUSR)
 				inode->i_mode |= S_IXUSR;
 			if (inode->i_mode & S_IRGRP)
@@ -113,8 +109,6 @@ affs_read_inode(struct inode *inode)
 			inode->i_mode |= S_IFDIR;
 		} else
 			inode->i_mode = S_IRUGO | S_IXUGO | S_IWUSR | S_IFDIR;
-		if (tail->link_chain)
-			inode->i_nlink = 2;
 		/* Maybe it should be controlled by mount parameter? */
 		//inode->i_mode |= S_ISVTX;
 		inode->i_op = &affs_dir_inode_operations;
@@ -126,8 +120,7 @@ affs_read_inode(struct inode *inode)
 		goto bad_inode;
 #else
 		inode->i_mode |= S_IFDIR;
-		inode->i_op = NULL;
-		inode->i_fop = NULL;
+		/* ... and leave ->i_op and ->i_fop pointing to empty */
 		break;
 #endif
 	case ST_LINKFILE:
@@ -136,16 +129,16 @@ affs_read_inode(struct inode *inode)
 	case ST_FILE:
 		size = be32_to_cpu(tail->size);
 		inode->i_mode |= S_IFREG;
-		AFFS_INODE->mmu_private = inode->i_size = size;
+		AFFS_I(inode)->mmu_private = inode->i_size = size;
 		if (inode->i_size) {
-			AFFS_INODE->i_blkcnt = (size - 1) /
-					       AFFS_SB->s_data_blksize + 1;
-			AFFS_INODE->i_extcnt = (AFFS_INODE->i_blkcnt - 1) /
-					       AFFS_SB->s_hashsize + 1;
+			AFFS_I(inode)->i_blkcnt = (size - 1) /
+					       sbi->s_data_blksize + 1;
+			AFFS_I(inode)->i_extcnt = (AFFS_I(inode)->i_blkcnt - 1) /
+					       sbi->s_hashsize + 1;
 		}
 		if (tail->link_chain)
-			inode->i_nlink = 2;
-		inode->i_mapping->a_ops = (AFFS_SB->s_flags & SF_OFS) ? &affs_aops_ofs : &affs_aops;
+			set_nlink(inode, 2);
+		inode->i_mapping->a_ops = (sbi->s_flags & SF_OFS) ? &affs_aops_ofs : &affs_aops;
 		inode->i_op = &affs_file_inode_operations;
 		inode->i_fop = &affs_file_operations;
 		break;
@@ -156,23 +149,25 @@ affs_read_inode(struct inode *inode)
 		break;
 	}
 
-	inode->i_mtime = inode->i_atime = inode->i_ctime
+	inode->i_mtime.tv_sec = inode->i_atime.tv_sec = inode->i_ctime.tv_sec
 		       = (be32_to_cpu(tail->change.days) * (24 * 60 * 60) +
 		         be32_to_cpu(tail->change.mins) * 60 +
 			 be32_to_cpu(tail->change.ticks) / 50 +
 			 ((8 * 365 + 2) * 24 * 60 * 60)) +
 			 sys_tz.tz_minuteswest * 60;
+	inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = inode->i_atime.tv_nsec = 0;
 	affs_brelse(bh);
-	return;
+	unlock_new_inode(inode);
+	return inode;
 
 bad_inode:
-	make_bad_inode(inode);
 	affs_brelse(bh);
-	return;
+	iget_failed(inode);
+	return ERR_PTR(-EIO);
 }
 
-void
-affs_write_inode(struct inode *inode, int unused)
+int
+affs_write_inode(struct inode *inode, struct writeback_control *wbc)
 {
 	struct super_block	*sb = inode->i_sb;
 	struct buffer_head	*bh;
@@ -184,40 +179,39 @@ affs_write_inode(struct inode *inode, int unused)
 
 	if (!inode->i_nlink)
 		// possibly free block
-		return;
-	lock_kernel();
+		return 0;
 	bh = affs_bread(sb, inode->i_ino);
 	if (!bh) {
 		affs_error(sb,"write_inode","Cannot read block %lu",inode->i_ino);
-		unlock_kernel();
-		return;
+		return -EIO;
 	}
 	tail = AFFS_TAIL(sb, bh);
-	if (tail->stype == be32_to_cpu(ST_ROOT)) {
-		secs_to_datestamp(inode->i_mtime,&AFFS_ROOT_TAIL(sb, bh)->root_change);
+	if (tail->stype == cpu_to_be32(ST_ROOT)) {
+		secs_to_datestamp(inode->i_mtime.tv_sec,&AFFS_ROOT_TAIL(sb, bh)->root_change);
 	} else {
-		tail->protect = cpu_to_be32(AFFS_INODE->i_protect);
+		tail->protect = cpu_to_be32(AFFS_I(inode)->i_protect);
 		tail->size = cpu_to_be32(inode->i_size);
-		secs_to_datestamp(inode->i_mtime,&tail->change);
-		if (!(inode->i_ino == AFFS_SB->s_root_block)) {
+		secs_to_datestamp(inode->i_mtime.tv_sec,&tail->change);
+		if (!(inode->i_ino == AFFS_SB(sb)->s_root_block)) {
 			uid = inode->i_uid;
 			gid = inode->i_gid;
-			if (sb->u.affs_sb.s_flags & SF_MUFS) {
+			if (AFFS_SB(sb)->s_flags & SF_MUFS) {
 				if (inode->i_uid == 0 || inode->i_uid == 0xFFFF)
 					uid = inode->i_uid ^ ~0;
 				if (inode->i_gid == 0 || inode->i_gid == 0xFFFF)
 					gid = inode->i_gid ^ ~0;
 			}
-			if (!(sb->u.affs_sb.s_flags & SF_SETUID))
+			if (!(AFFS_SB(sb)->s_flags & SF_SETUID))
 				tail->uid = cpu_to_be16(uid);
-			if (!(sb->u.affs_sb.s_flags & SF_SETGID))
+			if (!(AFFS_SB(sb)->s_flags & SF_SETGID))
 				tail->gid = cpu_to_be16(gid);
 		}
 	}
 	affs_fix_checksum(sb, bh);
 	mark_buffer_dirty_inode(bh, inode);
 	affs_brelse(bh);
-	unlock_kernel();
+	affs_free_prealloc(inode);
+	return 0;
 }
 
 int
@@ -232,65 +226,59 @@ affs_notify_change(struct dentry *dentry, struct iattr *attr)
 	if (error)
 		goto out;
 
-	if (((attr->ia_valid & ATTR_UID) && (inode->i_sb->u.affs_sb.s_flags & SF_SETUID)) ||
-	    ((attr->ia_valid & ATTR_GID) && (inode->i_sb->u.affs_sb.s_flags & SF_SETGID)) ||
+	if (((attr->ia_valid & ATTR_UID) && (AFFS_SB(inode->i_sb)->s_flags & SF_SETUID)) ||
+	    ((attr->ia_valid & ATTR_GID) && (AFFS_SB(inode->i_sb)->s_flags & SF_SETGID)) ||
 	    ((attr->ia_valid & ATTR_MODE) &&
-	     (inode->i_sb->u.affs_sb.s_flags & (SF_SETMODE | SF_IMMUTABLE)))) {
-		if (!(inode->i_sb->u.affs_sb.s_flags & SF_QUIET))
+	     (AFFS_SB(inode->i_sb)->s_flags & (SF_SETMODE | SF_IMMUTABLE)))) {
+		if (!(AFFS_SB(inode->i_sb)->s_flags & SF_QUIET))
 			error = -EPERM;
 		goto out;
 	}
 
-	inode_setattr(inode, attr);
-	if (!error && (attr->ia_valid & ATTR_MODE))
+	if ((attr->ia_valid & ATTR_SIZE) &&
+	    attr->ia_size != i_size_read(inode)) {
+		error = vmtruncate(inode, attr->ia_size);
+		if (error)
+			return error;
+	}
+
+	setattr_copy(inode, attr);
+	mark_inode_dirty(inode);
+
+	if (attr->ia_valid & ATTR_MODE)
 		mode_to_prot(inode);
 out:
 	return error;
 }
 
 void
-affs_put_inode(struct inode *inode)
+affs_evict_inode(struct inode *inode)
 {
-	pr_debug("AFFS: put_inode(ino=%lu, nlink=%u)\n", inode->i_ino, inode->i_nlink);
-	lock_kernel();
-	affs_free_prealloc(inode);
-	if (atomic_read(&inode->i_count) == 1) {
-		if (inode->i_size != AFFS_INODE->mmu_private)
-			affs_truncate(inode);
-		//if (inode->i_nlink)
-		//	affs_clear_inode(inode);
-	}
-	unlock_kernel();
-}
+	unsigned long cache_page;
+	pr_debug("AFFS: evict_inode(ino=%lu, nlink=%u)\n", inode->i_ino, inode->i_nlink);
+	truncate_inode_pages(&inode->i_data, 0);
 
-void
-affs_delete_inode(struct inode *inode)
-{
-	pr_debug("AFFS: delete_inode(ino=%lu, nlink=%u)\n", inode->i_ino, inode->i_nlink);
-	lock_kernel();
-	inode->i_size = 0;
-	if (S_ISREG(inode->i_mode))
+	if (!inode->i_nlink) {
+		inode->i_size = 0;
 		affs_truncate(inode);
-	clear_inode(inode);
-	affs_free_block(inode->i_sb, inode->i_ino);
-	unlock_kernel();
-}
+	}
 
-void
-affs_clear_inode(struct inode *inode)
-{
-	unsigned long cache_page = (unsigned long) inode->u.affs_i.i_lc;
-
-	pr_debug("AFFS: clear_inode(ino=%lu, nlink=%u)\n", inode->i_ino, inode->i_nlink);
+	invalidate_inode_buffers(inode);
+	end_writeback(inode);
+	affs_free_prealloc(inode);
+	cache_page = (unsigned long)AFFS_I(inode)->i_lc;
 	if (cache_page) {
 		pr_debug("AFFS: freeing ext cache\n");
-		inode->u.affs_i.i_lc = NULL;
-		inode->u.affs_i.i_ac = NULL;
+		AFFS_I(inode)->i_lc = NULL;
+		AFFS_I(inode)->i_ac = NULL;
 		free_page(cache_page);
 	}
-	affs_brelse(AFFS_INODE->i_ext_bh);
-	AFFS_INODE->i_ext_last = ~1;
-	AFFS_INODE->i_ext_bh = NULL;
+	affs_brelse(AFFS_I(inode)->i_ext_bh);
+	AFFS_I(inode)->i_ext_last = ~1;
+	AFFS_I(inode)->i_ext_bh = NULL;
+
+	if (!inode->i_nlink)
+		affs_free_block(inode->i_sb, inode->i_ino);
 }
 
 struct inode *
@@ -313,16 +301,25 @@ affs_new_inode(struct inode *dir)
 	mark_buffer_dirty_inode(bh, inode);
 	affs_brelse(bh);
 
-	inode->i_uid     = current->fsuid;
-	inode->i_gid     = current->fsgid;
+	inode->i_uid     = current_fsuid();
+	inode->i_gid     = current_fsgid();
 	inode->i_ino     = block;
-	inode->i_nlink   = 1;
-	inode->i_mtime   = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	memset(AFFS_INODE, 0, sizeof(*AFFS_INODE));
-	AFFS_INODE->i_extcnt = 1;
-	AFFS_INODE->i_ext_last = ~1;
-	init_MUTEX(&AFFS_INODE->i_link_lock);
-	init_MUTEX(&AFFS_INODE->i_ext_lock);
+	set_nlink(inode, 1);
+	inode->i_mtime   = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
+	atomic_set(&AFFS_I(inode)->i_opencnt, 0);
+	AFFS_I(inode)->i_blkcnt = 0;
+	AFFS_I(inode)->i_lc = NULL;
+	AFFS_I(inode)->i_lc_size = 0;
+	AFFS_I(inode)->i_lc_shift = 0;
+	AFFS_I(inode)->i_lc_mask = 0;
+	AFFS_I(inode)->i_ac = NULL;
+	AFFS_I(inode)->i_ext_bh = NULL;
+	AFFS_I(inode)->mmu_private = 0;
+	AFFS_I(inode)->i_protect = 0;
+	AFFS_I(inode)->i_lastalloc = 0;
+	AFFS_I(inode)->i_pa_cnt = 0;
+	AFFS_I(inode)->i_extcnt = 1;
+	AFFS_I(inode)->i_ext_last = ~1;
 
 	insert_inode_hash(inode);
 
@@ -362,12 +359,12 @@ affs_add_entry(struct inode *dir, struct inode *inode, struct dentry *dentry, s3
 	switch (type) {
 	case ST_LINKFILE:
 	case ST_LINKDIR:
-		inode_bh = bh;
 		retval = -ENOSPC;
 		block = affs_alloc_block(dir, dir->i_ino);
 		if (!block)
 			goto err;
 		retval = -EIO;
+		inode_bh = bh;
 		bh = affs_getzeroblk(sb, block);
 		if (!bh)
 			goto err;
@@ -383,19 +380,19 @@ affs_add_entry(struct inode *dir, struct inode *inode, struct dentry *dentry, s3
 	AFFS_TAIL(sb, bh)->parent = cpu_to_be32(dir->i_ino);
 
 	if (inode_bh) {
-		u32 chain;
+		__be32 chain;
 	       	chain = AFFS_TAIL(sb, inode_bh)->link_chain;
 		AFFS_TAIL(sb, bh)->original = cpu_to_be32(inode->i_ino);
 		AFFS_TAIL(sb, bh)->link_chain = chain;
 		AFFS_TAIL(sb, inode_bh)->link_chain = cpu_to_be32(block);
 		affs_adjust_checksum(inode_bh, block - be32_to_cpu(chain));
 		mark_buffer_dirty_inode(inode_bh, inode);
-		inode->i_nlink = 2;
-		atomic_inc(&inode->i_count);
+		set_nlink(inode, 2);
+		ihold(inode);
 	}
 	affs_fix_checksum(sb, bh);
 	mark_buffer_dirty_inode(bh, inode);
-	dentry->d_fsdata = (void *)bh->b_blocknr;
+	dentry->d_fsdata = (void *)(long)bh->b_blocknr;
 
 	affs_lock_dir(dir);
 	retval = affs_insert_hash(dir, bh);
@@ -414,4 +411,3 @@ err:
 	affs_unlock_link(inode);
 	goto done;
 }
-MODULE_LICENSE("GPL");

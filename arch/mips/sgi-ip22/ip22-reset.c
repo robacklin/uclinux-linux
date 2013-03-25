@@ -3,19 +3,22 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1997, 1998, 2001, 2003 by Ralf Baechle
+ * Copyright (C) 1997, 1998, 2001, 03, 05, 06 by Ralf Baechle
  */
+#include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/ds1286.h>
+#include <linux/module.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/notifier.h>
+#include <linux/pm.h>
 #include <linux/timer.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/reboot.h>
-#include <asm/ds1286.h>
 #include <asm/sgialib.h>
 #include <asm/sgi/ioc.h>
 #include <asm/sgi/hpc3.h>
@@ -30,41 +33,23 @@
 #define POWERDOWN_TIMEOUT	120
 
 /*
- * Blink frequency during reboot grace period and when paniced.
+ * Blink frequency during reboot grace period and when panicked.
  */
 #define POWERDOWN_FREQ		(HZ / 4)
 #define PANIC_FREQ		(HZ / 8)
 
-static struct timer_list power_timer, blink_timer, debounce_timer, volume_timer;
+static struct timer_list power_timer, blink_timer, debounce_timer;
 
 #define MACHINE_PANICED		1
 #define MACHINE_SHUTTING_DOWN	2
-static int machine_state = 0;
 
-static void sgi_machine_restart(char *command) __attribute__((noreturn));
-static void sgi_machine_halt(void) __attribute__((noreturn));
-static void sgi_machine_power_off(void) __attribute__((noreturn));
+static int machine_state;
 
-static void sgi_machine_restart(char *command)
-{
-	if (machine_state & MACHINE_SHUTTING_DOWN)
-		sgi_machine_power_off();
-	sgimc->cpuctrl0 |= SGIMC_CCTRL0_SYSINIT;
-	while (1);
-}
-
-static void sgi_machine_halt(void)
-{
-	if (machine_state & MACHINE_SHUTTING_DOWN)
-		sgi_machine_power_off();
-	ArcEnterInteractiveMode();
-}
-
-static void sgi_machine_power_off(void)
+static void __noreturn sgi_machine_power_off(void)
 {
 	unsigned int tmp;
 
-	cli();
+	local_irq_disable();
 
 	/* Disable watchdog */
 	tmp = hpc3c0->rtcregs[RTC_CMD] & 0xff;
@@ -82,6 +67,21 @@ static void sgi_machine_power_off(void)
 	}
 }
 
+static void __noreturn sgi_machine_restart(char *command)
+{
+	if (machine_state & MACHINE_SHUTTING_DOWN)
+		sgi_machine_power_off();
+	sgimc->cpuctrl0 |= SGIMC_CCTRL0_SYSINIT;
+	while (1);
+}
+
+static void __noreturn sgi_machine_halt(void)
+{
+	if (machine_state & MACHINE_SHUTTING_DOWN)
+		sgi_machine_power_off();
+	ArcEnterInteractiveMode();
+}
+
 static void power_timeout(unsigned long data)
 {
 	sgi_machine_power_off();
@@ -93,7 +93,7 @@ static void blink_timeout(unsigned long data)
 	sgi_ioc_reset ^= (SGIOC_RESET_LC0OFF|SGIOC_RESET_LC1OFF);
 	sgioc->reset = sgi_ioc_reset;
 
-	mod_timer(&blink_timer, jiffies+data);
+	mod_timer(&blink_timer, jiffies + data);
 }
 
 static void debounce(unsigned long data)
@@ -101,7 +101,7 @@ static void debounce(unsigned long data)
 	del_timer(&debounce_timer);
 	if (sgint->istat1 & SGINT_ISTAT1_PWR) {
 		/* Interrupt still being sent. */
-		debounce_timer.expires = jiffies + 5; /* 0.05s  */
+		debounce_timer.expires = jiffies + (HZ / 20); /* 0.05s  */
 		add_timer(&debounce_timer);
 
 		sgioc->panel = SGIOC_PANEL_POWERON | SGIOC_PANEL_POWERINTR |
@@ -122,7 +122,8 @@ static inline void power_button(void)
 	if (machine_state & MACHINE_PANICED)
 		return;
 
-	if ((machine_state & MACHINE_SHUTTING_DOWN) || kill_proc(1,SIGINT,1)) {
+	if ((machine_state & MACHINE_SHUTTING_DOWN) ||
+			kill_cad_pid(SIGINT, 1)) {
 		/* No init process or button pressed twice.  */
 		sgi_machine_power_off();
 	}
@@ -137,35 +138,7 @@ static inline void power_button(void)
 	add_timer(&power_timer);
 }
 
-void (*indy_volume_button)(int) = NULL;
-
-static inline void volume_up_button(unsigned long data)
-{
-	del_timer(&volume_timer);
-
-	if (indy_volume_button)
-		indy_volume_button(1);
-
-	if (sgint->istat1 & SGINT_ISTAT1_PWR) {
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
-}
-
-static inline void volume_down_button(unsigned long data)
-{
-	del_timer(&volume_timer);
-
-	if (indy_volume_button)
-		indy_volume_button(-1);
-
-	if (sgint->istat1 & SGINT_ISTAT1_PWR) {
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
-}
-
-static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t panel_int(int irq, void *dev_id)
 {
 	unsigned int buttons;
 
@@ -174,37 +147,22 @@ static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (sgint->istat1 & SGINT_ISTAT1_PWR) {
 		/* Wait until interrupt goes away */
-		disable_irq(SGI_PANEL_IRQ);
+		disable_irq_nosync(SGI_PANEL_IRQ);
 		init_timer(&debounce_timer);
 		debounce_timer.function = debounce;
 		debounce_timer.expires = jiffies + 5;
 		add_timer(&debounce_timer);
 	}
 
-	/* Power button was pressed 
+	/* Power button was pressed
 	 * ioc.ps page 22: "The Panel Register is called Power Control by Full
 	 * House. Only lowest 2 bits are used. Guiness uses upper four bits
 	 * for volume control". This is not true, all bits are pulled high
 	 * on fullhouse */
-	if (ip22_is_fullhouse() || !(buttons & SGIOC_PANEL_POWERINTR)) {
+	if (!(buttons & SGIOC_PANEL_POWERINTR))
 		power_button();
-		return;
-	}
-	/* TODO: mute/unmute */
-	/* Volume up button was pressed */
-	if (!(buttons & SGIOC_PANEL_VOLUPINTR)) {
-		init_timer(&volume_timer);
-		volume_timer.function = volume_up_button;
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
-	/* Volume down button was pressed */
-	if (!(buttons & SGIOC_PANEL_VOLDNINTR)) {
-		init_timer(&volume_timer);
-		volume_timer.function = volume_down_button;
-		volume_timer.expires = jiffies + 1;
-		add_timer(&volume_timer);
-	}
+
+	return IRQ_HANDLED;
 }
 
 static int panic_event(struct notifier_block *this, unsigned long event,
@@ -226,16 +184,23 @@ static struct notifier_block panic_block = {
 
 static int __init reboot_setup(void)
 {
+	int res;
+
 	_machine_restart = sgi_machine_restart;
 	_machine_halt = sgi_machine_halt;
-	_machine_power_off = sgi_machine_power_off;
+	pm_power_off = sgi_machine_power_off;
 
-	request_irq(SGI_PANEL_IRQ, panel_int, 0, "Front Panel", NULL);
+	res = request_irq(SGI_PANEL_IRQ, panel_int, 0, "Front Panel", NULL);
+	if (res) {
+		printk(KERN_ERR "Allocation of front panel IRQ failed\n");
+		return res;
+	}
+
 	init_timer(&blink_timer);
 	blink_timer.function = blink_timeout;
-	notifier_chain_register(&panic_notifier_list, &panic_block);
+	atomic_notifier_chain_register(&panic_notifier_list, &panic_block);
 
 	return 0;
 }
 
-module_init(reboot_setup);
+subsys_initcall(reboot_setup);

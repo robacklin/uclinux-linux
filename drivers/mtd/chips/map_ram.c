@@ -1,7 +1,6 @@
 /*
  * Common code to handle map devices which are simple RAM
  * (C) 2000 Red Hat. GPL'd.
- * $Id: map_ram.c,v 1.14 2001/10/02 15:05:12 dwmw2 Exp $
  */
 
 #include <linux/module.h>
@@ -11,7 +10,8 @@
 #include <asm/byteorder.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
-
+#include <linux/init.h>
+#include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 
 
@@ -20,12 +20,14 @@ static int mapram_write (struct mtd_info *, loff_t, size_t, size_t *, const u_ch
 static int mapram_erase (struct mtd_info *, struct erase_info *);
 static void mapram_nop (struct mtd_info *);
 static struct mtd_info *map_ram_probe(struct map_info *map);
+static unsigned long mapram_unmapped_area(struct mtd_info *, unsigned long,
+					  unsigned long, unsigned long);
 
 
 static struct mtd_chip_driver mapram_chipdrv = {
-	probe: map_ram_probe,
-	name: "map_ram",
-	module: THIS_MODULE
+	.probe	= map_ram_probe,
+	.name	= "map_ram",
+	.module	= THIS_MODULE
 };
 
 static struct mtd_info *map_ram_probe(struct map_info *map)
@@ -34,70 +36,79 @@ static struct mtd_info *map_ram_probe(struct map_info *map)
 
 	/* Check the first byte is RAM */
 #if 0
-	/*
-	 * enabling this code will corrupt the first and last byte of memory
-	 * in the area.  This is particularly bad if you have pre-loaded
-	 * something useful into the area (like a rom filesystem)
-	 */
-	map->write8(map, 0x55, 0);
-	if (map->read8(map, 0) != 0x55)
+	map_write8(map, 0x55, 0);
+	if (map_read8(map, 0) != 0x55)
 		return NULL;
 
-	map->write8(map, 0xAA, 0);
-	if (map->read8(map, 0) != 0xAA)
+	map_write8(map, 0xAA, 0);
+	if (map_read8(map, 0) != 0xAA)
 		return NULL;
 
 	/* Check the last byte is RAM */
-	map->write8(map, 0x55, map->size-1);
-	if (map->read8(map, map->size-1) != 0x55)
+	map_write8(map, 0x55, map->size-1);
+	if (map_read8(map, map->size-1) != 0x55)
 		return NULL;
 
-	map->write8(map, 0xAA, map->size-1);
-	if (map->read8(map, map->size-1) != 0xAA)
+	map_write8(map, 0xAA, map->size-1);
+	if (map_read8(map, map->size-1) != 0xAA)
 		return NULL;
 #endif
 	/* OK. It seems to be RAM. */
 
-	mtd = kmalloc(sizeof(*mtd), GFP_KERNEL);
+	mtd = kzalloc(sizeof(*mtd), GFP_KERNEL);
 	if (!mtd)
 		return NULL;
-
-	memset(mtd, 0, sizeof(*mtd));
 
 	map->fldrv = &mapram_chipdrv;
 	mtd->priv = map;
 	mtd->name = map->name;
 	mtd->type = MTD_RAM;
 	mtd->size = map->size;
-	mtd->erase = mapram_erase;
-	mtd->read = mapram_read;
-	mtd->write = mapram_write;
-	mtd->sync = mapram_nop;
-	mtd->flags = MTD_CAP_RAM | MTD_VOLATILE;
+	mtd->_erase = mapram_erase;
+	mtd->_get_unmapped_area = mapram_unmapped_area;
+	mtd->_read = mapram_read;
+	mtd->_write = mapram_write;
+	mtd->_sync = mapram_nop;
+	mtd->flags = MTD_CAP_RAM;
+	mtd->writesize = 1;
 
 	mtd->erasesize = PAGE_SIZE;
  	while(mtd->size & (mtd->erasesize - 1))
 		mtd->erasesize >>= 1;
 
-	MOD_INC_USE_COUNT;
+	__module_get(THIS_MODULE);
 	return mtd;
 }
 
 
+/*
+ * Allow NOMMU mmap() to directly map the device (if not NULL)
+ * - return the address to which the offset maps
+ * - return -ENOSYS to indicate refusal to do the mapping
+ */
+static unsigned long mapram_unmapped_area(struct mtd_info *mtd,
+					  unsigned long len,
+					  unsigned long offset,
+					  unsigned long flags)
+{
+	struct map_info *map = mtd->priv;
+	return (unsigned long) map->virt + offset;
+}
+
 static int mapram_read (struct mtd_info *mtd, loff_t from, size_t len, size_t *retlen, u_char *buf)
 {
-	struct map_info *map = (struct map_info *)mtd->priv;
+	struct map_info *map = mtd->priv;
 
-	map->copy_from(map, buf, from, len);
+	map_copy_from(map, buf, from, len);
 	*retlen = len;
 	return 0;
 }
 
 static int mapram_write (struct mtd_info *mtd, loff_t to, size_t len, size_t *retlen, const u_char *buf)
 {
-	struct map_info *map = (struct map_info *)mtd->priv;
+	struct map_info *map = mtd->priv;
 
-	map->copy_to(map, to, buf, len);
+	map_copy_to(map, to, buf, len);
 	*retlen = len;
 	return 0;
 }
@@ -106,15 +117,15 @@ static int mapram_erase (struct mtd_info *mtd, struct erase_info *instr)
 {
 	/* Yeah, it's inefficient. Who cares? It's faster than a _real_
 	   flash erase. */
-	struct map_info *map = (struct map_info *)mtd->priv;
+	struct map_info *map = mtd->priv;
+	map_word allff;
 	unsigned long i;
 
-	for (i=0; i<instr->len; i++)
-		map->write8(map, 0xFF, instr->addr + i);
-
-	if (instr->callback)
-		instr->callback(instr);
-
+	allff = map_word_ff(map);
+	for (i=0; i<instr->len; i += map_bankwidth(map))
+		map_write(map, allff, instr->addr + i);
+	instr->state = MTD_ERASE_DONE;
+	mtd_erase_callback(instr);
 	return 0;
 }
 
@@ -123,7 +134,7 @@ static void mapram_nop(struct mtd_info *mtd)
 	/* Nothing to see here */
 }
 
-int __init map_ram_init(void)
+static int __init map_ram_init(void)
 {
 	register_mtd_chip_driver(&mapram_chipdrv);
 	return 0;

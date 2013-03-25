@@ -84,16 +84,15 @@ enum adb_message {
     ADB_MSG_PRE_RESET,	/* Called before resetting the bus */
     ADB_MSG_POST_RESET	/* Called after resetting the bus (re-do init & register) */
 };
-extern struct adb_driver *adb_controller;
-extern struct notifier_block *adb_client_list;
+extern struct blocking_notifier_head adb_client_list;
 
 int adb_request(struct adb_request *req, void (*done)(struct adb_request *),
 		int flags, int nbytes, ...);
 int adb_register(int default_id,int handler_id,struct adb_ids *ids,
-		 void (*handler)(unsigned char *, int, struct pt_regs *, int));
+		 void (*handler)(unsigned char *, int, int));
 int adb_unregister(int index);
 void adb_poll(void);
-void adb_input(unsigned char *, int, struct pt_regs *, int);
+void adb_input(unsigned char *, int, int);
 int adb_reset_bus(void);
 
 int adb_try_handler_change(int address, int new_id);

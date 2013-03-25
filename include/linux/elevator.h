@@ -1,50 +1,167 @@
 #ifndef _LINUX_ELEVATOR_H
 #define _LINUX_ELEVATOR_H
 
-typedef void (elevator_fn) (struct request *, elevator_t *,
-			    struct list_head *,
-			    struct list_head *, int);
+#include <linux/percpu.h>
 
-typedef int (elevator_merge_fn) (request_queue_t *, struct request **, struct list_head *,
-				 struct buffer_head *, int, int);
+#ifdef CONFIG_BLOCK
 
-typedef void (elevator_merge_cleanup_fn) (request_queue_t *, struct request *, int);
+struct io_cq;
 
-typedef void (elevator_merge_req_fn) (struct request *, struct request *);
+typedef int (elevator_merge_fn) (struct request_queue *, struct request **,
+				 struct bio *);
 
-struct elevator_s
+typedef void (elevator_merge_req_fn) (struct request_queue *, struct request *, struct request *);
+
+typedef void (elevator_merged_fn) (struct request_queue *, struct request *, int);
+
+typedef int (elevator_allow_merge_fn) (struct request_queue *, struct request *, struct bio *);
+
+typedef void (elevator_bio_merged_fn) (struct request_queue *,
+						struct request *, struct bio *);
+
+typedef int (elevator_dispatch_fn) (struct request_queue *, int);
+
+typedef void (elevator_add_req_fn) (struct request_queue *, struct request *);
+typedef struct request *(elevator_request_list_fn) (struct request_queue *, struct request *);
+typedef void (elevator_completed_req_fn) (struct request_queue *, struct request *);
+typedef int (elevator_may_queue_fn) (struct request_queue *, int);
+
+typedef void (elevator_init_icq_fn) (struct io_cq *);
+typedef void (elevator_exit_icq_fn) (struct io_cq *);
+typedef int (elevator_set_req_fn) (struct request_queue *, struct request *, gfp_t);
+typedef void (elevator_put_req_fn) (struct request *);
+typedef void (elevator_activate_req_fn) (struct request_queue *, struct request *);
+typedef void (elevator_deactivate_req_fn) (struct request_queue *, struct request *);
+
+typedef void *(elevator_init_fn) (struct request_queue *);
+typedef void (elevator_exit_fn) (struct elevator_queue *);
+
+struct elevator_ops
 {
-	int read_latency;
-	int write_latency;
-
 	elevator_merge_fn *elevator_merge_fn;
+	elevator_merged_fn *elevator_merged_fn;
 	elevator_merge_req_fn *elevator_merge_req_fn;
+	elevator_allow_merge_fn *elevator_allow_merge_fn;
+	elevator_bio_merged_fn *elevator_bio_merged_fn;
 
-	unsigned int queue_ID;
+	elevator_dispatch_fn *elevator_dispatch_fn;
+	elevator_add_req_fn *elevator_add_req_fn;
+	elevator_activate_req_fn *elevator_activate_req_fn;
+	elevator_deactivate_req_fn *elevator_deactivate_req_fn;
+
+	elevator_completed_req_fn *elevator_completed_req_fn;
+
+	elevator_request_list_fn *elevator_former_req_fn;
+	elevator_request_list_fn *elevator_latter_req_fn;
+
+	elevator_init_icq_fn *elevator_init_icq_fn;	/* see iocontext.h */
+	elevator_exit_icq_fn *elevator_exit_icq_fn;	/* ditto */
+
+	elevator_set_req_fn *elevator_set_req_fn;
+	elevator_put_req_fn *elevator_put_req_fn;
+
+	elevator_may_queue_fn *elevator_may_queue_fn;
+
+	elevator_init_fn *elevator_init_fn;
+	elevator_exit_fn *elevator_exit_fn;
 };
 
-int elevator_noop_merge(request_queue_t *, struct request **, struct list_head *, struct buffer_head *, int, int);
-void elevator_noop_merge_cleanup(request_queue_t *, struct request *, int);
-void elevator_noop_merge_req(struct request *, struct request *);
+#define ELV_NAME_MAX	(16)
 
-int elevator_linus_merge(request_queue_t *, struct request **, struct list_head *, struct buffer_head *, int, int);
-void elevator_linus_merge_cleanup(request_queue_t *, struct request *, int);
-void elevator_linus_merge_req(struct request *, struct request *);
+struct elv_fs_entry {
+	struct attribute attr;
+	ssize_t (*show)(struct elevator_queue *, char *);
+	ssize_t (*store)(struct elevator_queue *, const char *, size_t);
+};
 
-typedef struct blkelv_ioctl_arg_s {
-	int queue_ID;
-	int read_latency;
-	int write_latency;
-	int max_bomb_segments;
-} blkelv_ioctl_arg_t;
+/*
+ * identifies an elevator type, such as AS or deadline
+ */
+struct elevator_type
+{
+	/* managed by elevator core */
+	struct kmem_cache *icq_cache;
 
-#define BLKELVGET   _IOR(0x12,106,sizeof(blkelv_ioctl_arg_t))
-#define BLKELVSET   _IOW(0x12,107,sizeof(blkelv_ioctl_arg_t))
+	/* fields provided by elevator implementation */
+	struct elevator_ops ops;
+	size_t icq_size;	/* see iocontext.h */
+	size_t icq_align;	/* ditto */
+	struct elv_fs_entry *elevator_attrs;
+	char elevator_name[ELV_NAME_MAX];
+	struct module *elevator_owner;
 
-extern int blkelvget_ioctl(elevator_t *, blkelv_ioctl_arg_t *);
-extern int blkelvset_ioctl(elevator_t *, const blkelv_ioctl_arg_t *);
+	/* managed by elevator core */
+	char icq_cache_name[ELV_NAME_MAX + 5];	/* elvname + "_io_cq" */
+	struct list_head list;
+};
 
-extern void elevator_init(elevator_t *, elevator_t);
+/*
+ * each queue has an elevator_queue associated with it
+ */
+struct elevator_queue
+{
+	struct elevator_type *type;
+	void *elevator_data;
+	struct kobject kobj;
+	struct mutex sysfs_lock;
+	struct hlist_head *hash;
+	unsigned int registered:1;
+};
+
+/*
+ * block elevator interface
+ */
+extern void elv_dispatch_sort(struct request_queue *, struct request *);
+extern void elv_dispatch_add_tail(struct request_queue *, struct request *);
+extern void elv_add_request(struct request_queue *, struct request *, int);
+extern void __elv_add_request(struct request_queue *, struct request *, int);
+extern int elv_merge(struct request_queue *, struct request **, struct bio *);
+extern void elv_merge_requests(struct request_queue *, struct request *,
+			       struct request *);
+extern void elv_merged_request(struct request_queue *, struct request *, int);
+extern void elv_bio_merged(struct request_queue *q, struct request *,
+				struct bio *);
+extern void elv_requeue_request(struct request_queue *, struct request *);
+extern struct request *elv_former_request(struct request_queue *, struct request *);
+extern struct request *elv_latter_request(struct request_queue *, struct request *);
+extern int elv_register_queue(struct request_queue *q);
+extern void elv_unregister_queue(struct request_queue *q);
+extern int elv_may_queue(struct request_queue *, int);
+extern void elv_abort_queue(struct request_queue *);
+extern void elv_completed_request(struct request_queue *, struct request *);
+extern int elv_set_request(struct request_queue *, struct request *, gfp_t);
+extern void elv_put_request(struct request_queue *, struct request *);
+extern void elv_drain_elevator(struct request_queue *);
+
+/*
+ * io scheduler registration
+ */
+extern int elv_register(struct elevator_type *);
+extern void elv_unregister(struct elevator_type *);
+
+/*
+ * io scheduler sysfs switching
+ */
+extern ssize_t elv_iosched_show(struct request_queue *, char *);
+extern ssize_t elv_iosched_store(struct request_queue *, const char *, size_t);
+
+extern int elevator_init(struct request_queue *, char *);
+extern void elevator_exit(struct elevator_queue *);
+extern int elevator_change(struct request_queue *, const char *);
+extern bool elv_rq_merge_ok(struct request *, struct bio *);
+
+/*
+ * Helper functions.
+ */
+extern struct request *elv_rb_former_request(struct request_queue *, struct request *);
+extern struct request *elv_rb_latter_request(struct request_queue *, struct request *);
+
+/*
+ * rb support functions.
+ */
+extern void elv_rb_add(struct rb_root *, struct request *);
+extern void elv_rb_del(struct rb_root *, struct request *);
+extern struct request *elv_rb_find(struct rb_root *, sector_t);
 
 /*
  * Return values from elevator merger
@@ -54,50 +171,38 @@ extern void elevator_init(elevator_t *, elevator_t);
 #define ELEVATOR_BACK_MERGE	2
 
 /*
- * This is used in the elevator algorithm.  We don't prioritise reads
- * over writes any more --- although reads are more time-critical than
- * writes, by treating them equally we increase filesystem throughput.
- * This turns out to give better overall performance.  -- sct
+ * Insertion selection
  */
-#define IN_ORDER(s1,s2)				\
-	((((s1)->rq_dev == (s2)->rq_dev &&	\
-	   (s1)->sector < (s2)->sector)) ||	\
-	 (s1)->rq_dev < (s2)->rq_dev)
+#define ELEVATOR_INSERT_FRONT	1
+#define ELEVATOR_INSERT_BACK	2
+#define ELEVATOR_INSERT_SORT	3
+#define ELEVATOR_INSERT_REQUEUE	4
+#define ELEVATOR_INSERT_FLUSH	5
+#define ELEVATOR_INSERT_SORT_MERGE	6
 
-#define BHRQ_IN_ORDER(bh, rq)			\
-	((((bh)->b_rdev == (rq)->rq_dev &&	\
-	   (bh)->b_rsector < (rq)->sector)) ||	\
-	 (bh)->b_rdev < (rq)->rq_dev)
+/*
+ * return values from elevator_may_queue_fn
+ */
+enum {
+	ELV_MQUEUE_MAY,
+	ELV_MQUEUE_NO,
+	ELV_MQUEUE_MUST,
+};
 
-static inline int elevator_request_latency(elevator_t * elevator, int rw)
-{
-	int latency;
+#define rq_end_sector(rq)	(blk_rq_pos(rq) + blk_rq_sectors(rq))
+#define rb_entry_rq(node)	rb_entry((node), struct request, rb_node)
 
-	latency = elevator->read_latency;
-	if (rw != READ)
-		latency = elevator->write_latency;
+/*
+ * Hack to reuse the csd.list list_head as the fifo time holder while
+ * the request is in the io scheduler. Saves an unsigned long in rq.
+ */
+#define rq_fifo_time(rq)	((unsigned long) (rq)->csd.list.next)
+#define rq_set_fifo_time(rq,exp)	((rq)->csd.list.next = (void *) (exp))
+#define rq_entry_fifo(ptr)	list_entry((ptr), struct request, queuelist)
+#define rq_fifo_clear(rq)	do {		\
+	list_del_init(&(rq)->queuelist);	\
+	INIT_LIST_HEAD(&(rq)->csd.list);	\
+	} while (0)
 
-	return latency;
-}
-
-#define ELV_LINUS_SEEK_COST	1
-
-#define ELEVATOR_NOOP							\
-((elevator_t) {								\
-	0,				/* read_latency */		\
-	0,				/* write_latency */		\
-									\
-	elevator_noop_merge,		/* elevator_merge_fn */		\
-	elevator_noop_merge_req,	/* elevator_merge_req_fn */	\
-	})
-
-#define ELEVATOR_LINUS							\
-((elevator_t) {								\
-	128,				/* read passovers */		\
-	512,				/* write passovers */		\
-									\
-	elevator_linus_merge,		/* elevator_merge_fn */		\
-	elevator_linus_merge_req,	/* elevator_merge_req_fn */	\
-	})
-
+#endif /* CONFIG_BLOCK */
 #endif

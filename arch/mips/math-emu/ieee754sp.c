@@ -3,8 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -58,6 +57,7 @@ ieee754sp ieee754sp_xcpt(ieee754sp r, const char *op, ...)
 	ax.rv.sp = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.sp;
 }
 
@@ -84,6 +84,7 @@ ieee754sp ieee754sp_nanxcpt(ieee754sp r, const char *op, ...)
 	ax.rv.sp = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.sp;
 }
 
@@ -125,14 +126,14 @@ static unsigned get_rounding(int sn, unsigned xm)
 }
 
 
-/* generate a normal/denormal number with over,under handeling
+/* generate a normal/denormal number with over,under handling
  * sn is sign
  * xe is an unbiased exponent
  * xm is 3bit extended precision value.
  */
 ieee754sp ieee754sp_format(int sn, int xe, unsigned xm)
 {
-	assert(xm);		/* we dont gen exact zeros (probably should) */
+	assert(xm);		/* we don't gen exact zeros (probably should) */
 
 	assert((xm >> (SP_MBITS + 1 + 3)) == 0);	/* no execess */
 	assert(xm & (SP_HIDDEN_BIT << 3));
@@ -147,7 +148,6 @@ ieee754sp ieee754sp_format(int sn, int xe, unsigned xm)
 
 			switch(ieee754_csr.rm) {
 			case IEEE754_RN:
-				return ieee754sp_zero(sn);
 			case IEEE754_RZ:
 				return ieee754sp_zero(sn);
 			case IEEE754_RU:      /* toward +Infinity */

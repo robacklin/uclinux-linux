@@ -21,6 +21,7 @@
 #define KBIC_VERSION      "1.01"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -248,66 +249,57 @@ static void k971_log_adapter( PIA *pi, char * scratch, int verbose )
 {       kbic_log_adapter(pi,scratch,verbose,"KBIC-971A");
 }
 
-static void kbic_init_proto( PIA *pi)
+static struct pi_protocol k951 = {
+	.owner		= THIS_MODULE,
+	.name		= "k951",
+	.max_mode	= 6,
+	.epp_first	= 3,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= kbic_write_regr,
+	.read_regr	= kbic_read_regr,
+	.write_block	= kbic_write_block,
+	.read_block	= kbic_read_block,
+	.connect	= k951_connect,
+	.disconnect	= k951_disconnect,
+	.log_adapter	= k951_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static struct pi_protocol k971 = {
+	.owner		= THIS_MODULE,
+	.name		= "k971",
+	.max_mode	= 6,
+	.epp_first	= 3,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= kbic_write_regr,
+	.read_regr	= kbic_read_regr,
+	.write_block	= kbic_write_block,
+	.read_block	= kbic_read_block,
+	.connect	= k971_connect,
+	.disconnect	= k971_disconnect,
+	.log_adapter	= k971_log_adapter,
+};
+
+static int __init kbic_init(void)
+{
+	int rv;
+
+	rv = paride_register(&k951);
+	if (rv < 0)
+		return rv;
+	rv = paride_register(&k971);
+	if (rv < 0)
+		paride_unregister(&k951);
+	return rv;
 }
 
-static void kbic_release_proto( PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit kbic_exit(void)
+{
+	paride_unregister(&k951);
+	paride_unregister(&k971);
 }
 
-struct pi_protocol k951 = {"k951",0,6,3,1,1,
-                           kbic_write_regr,
-                           kbic_read_regr,
-                           kbic_write_block,
-                           kbic_read_block,
-                           k951_connect,
-                           k951_disconnect,
-                           0,
-                           0,
-                           0,
-                           k951_log_adapter,
-                           kbic_init_proto,
-                           kbic_release_proto
-  			  };
-
-
-struct pi_protocol k971 = {"k971",0,6,3,1,1,
-                           kbic_write_regr,
-                           kbic_read_regr,
-                           kbic_write_block,
-                           kbic_read_block,
-                           k971_connect,
-                           k971_disconnect,
-                           0,
-                           0,
-                           0,
-                           k971_log_adapter,
-                           kbic_init_proto,
-                           kbic_release_proto
-                          };
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       int s5,s7;
-
-	s5 = pi_register(&k951);
-	s7 = pi_register(&k971);
-
-	return (s5 || s7) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &k951 );
-	pi_unregister( &k971 );
-}
-
-#endif
-
-/* end of kbic.c */
 MODULE_LICENSE("GPL");
+module_init(kbic_init)
+module_exit(kbic_exit)

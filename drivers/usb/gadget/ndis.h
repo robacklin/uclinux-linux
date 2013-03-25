@@ -1,21 +1,15 @@
 /*
- * ndis.h 
- * 
+ * ndis.h
+ *
  * ntddndis.h modified by Benedikt Spranger <b.spranger@pengutronix.de>
- * 
- * Thanks to the cygwin development team, 
+ *
+ * Thanks to the cygwin development team,
  * espacially to Casper S. Hornstrup <chorns@users.sourceforge.net>
- * 
+ *
  * THIS SOFTWARE IS NOT COPYRIGHTED
  *
  * This source code is offered for use in the public domain. You may
  * use, modify or distribute it freely.
- *
- * This code is distributed in the hope that it will be useful but
- * WITHOUT ANY WARRANTY. ALL WARRANTIES, EXPRESS OR IMPLIED ARE HEREBY
- * DISCLAIMED. This includes but is not limited to warranties of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- *
  */
 
 #ifndef _LINUX_NDIS_H
@@ -47,17 +41,17 @@ struct NDIS_PM_WAKE_UP_CAPABILITIES {
 #define NDIS_DEVICE_WAKE_ON_MAGIC_PACKET_ENABLE   0x00000004
 
 struct NDIS_PNP_CAPABILITIES {
-	u32					Flags;
+	__le32					Flags;
 	struct NDIS_PM_WAKE_UP_CAPABILITIES	WakeUpCapabilities;
 };
 
 struct NDIS_PM_PACKET_PATTERN {
-	u32	Priority;
-	u32	Reserved;
-	u32	MaskSize;
-	u32	PatternOffset;
-	u32	PatternSize;
-	u32	PatternFlags;
+	__le32	Priority;
+	__le32	Reserved;
+	__le32	MaskSize;
+	__le32	PatternOffset;
+	__le32	PatternSize;
+	__le32	PatternFlags;
 };
 
 

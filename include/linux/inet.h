@@ -1,5 +1,3 @@
-/* $USAGI: inet.h,v 1.14 2002/09/27 08:20:08 yoshfuji Exp $ */
-
 /*
  *		Swansea University Computer Society NET3
  *
@@ -44,30 +42,16 @@
 #ifndef _LINUX_INET_H
 #define _LINUX_INET_H
 
-#ifdef __KERNEL__
+#include <linux/types.h>
 
-struct net_proto;
-struct in_addr;
+/*
+ * These mimic similar macros defined in user-space for inet_ntop(3).
+ * See /usr/include/netinet/in.h .
+ */
+#define INET_ADDRSTRLEN		(16)
+#define INET6_ADDRSTRLEN	(48)
 
-extern void		inet_proto_init(struct net_proto *pro);
-extern __u32		in_aton(const char *str);
-#if defined(CONFIG_IPV6)
-struct in6_addr;
-extern char  *in6_ntop(const struct in6_addr *in6, char *buf);
-#elif defined(CONFIG_IPV6_MODULE)
-#include <linux/in6.h>
-extern __inline__ char	*in6_ntop(const struct in6_addr *in6, char *buf){
-	if (!buf)
-		return NULL;
-	sprintf(buf,
-		"%04x:%04x:%04x:%04x:%04x:%04x:%04x:%04x",
-		ntohs(in6->s6_addr16[0]), ntohs(in6->s6_addr16[1]),
-		ntohs(in6->s6_addr16[2]), ntohs(in6->s6_addr16[3]),
-		ntohs(in6->s6_addr16[4]), ntohs(in6->s6_addr16[5]),
-		ntohs(in6->s6_addr16[6]), ntohs(in6->s6_addr16[7]));
-	return buf;
-}
-#endif
-
-#endif
+extern __be32 in_aton(const char *str);
+extern int in4_pton(const char *src, int srclen, u8 *dst, int delim, const char **end);
+extern int in6_pton(const char *src, int srclen, u8 *dst, int delim, const char **end);
 #endif	/* _LINUX_INET_H */

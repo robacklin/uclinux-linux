@@ -9,56 +9,51 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <linux/locks.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
 #include <linux/list.h>
+#include <linux/sched.h>
+#include <linux/spinlock.h>
 
 #include <linux/coda.h>
-#include <linux/coda_linux.h>
 #include <linux/coda_psdev.h>
-#include <linux/coda_fs_i.h>
-#include <linux/coda_cache.h>
+#include "coda_linux.h"
+#include "coda_cache.h"
+
+static atomic_t permission_epoch = ATOMIC_INIT(0);
 
 /* replace or extend an acl cache hit */
 void coda_cache_enter(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
 
-        if ( !coda_cred_ok(&cii->c_cached_cred) ) {
-                coda_load_creds(&cii->c_cached_cred);
+	spin_lock(&cii->c_lock);
+	cii->c_cached_epoch = atomic_read(&permission_epoch);
+	if (cii->c_uid != current_fsuid()) {
+		cii->c_uid = current_fsuid();
                 cii->c_cached_perm = mask;
         } else
                 cii->c_cached_perm |= mask;
+	spin_unlock(&cii->c_lock);
 }
 
 /* remove cached acl from an inode */
 void coda_cache_clear_inode(struct inode *inode)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-        cii->c_cached_perm = 0;
+	spin_lock(&cii->c_lock);
+	cii->c_cached_epoch = atomic_read(&permission_epoch) - 1;
+	spin_unlock(&cii->c_lock);
 }
 
-/* remove all acl caches for a principal (or all principals when cred == NULL)*/
-void coda_cache_clear_all(struct super_block *sb, struct coda_cred *cred)
+/* remove all acl caches */
+void coda_cache_clear_all(struct super_block *sb)
 {
-        struct coda_sb_info *sbi;
-        struct coda_inode_info *cii;
-        struct list_head *tmp;
-
-        sbi = coda_sbp(sb);
-        if (!sbi) BUG();
-
-        list_for_each(tmp, &sbi->sbi_cihead)
-        {
-		cii = list_entry(tmp, struct coda_inode_info, c_cilist);
-                if (!cred || coda_cred_eq(cred, &cii->c_cached_cred))
-                        cii->c_cached_perm = 0;
-	}
+	atomic_inc(&permission_epoch);
 }
 
 
@@ -66,13 +61,15 @@ void coda_cache_clear_all(struct super_block *sb, struct coda_cred *cred)
 int coda_cache_check(struct inode *inode, int mask)
 {
 	struct coda_inode_info *cii = ITOC(inode);
-        int hit;
+	int hit;
 	
-        hit = ((mask & cii->c_cached_perm) == mask) &&
-                coda_cred_ok(&cii->c_cached_cred);
+	spin_lock(&cii->c_lock);
+	hit = (mask & cii->c_cached_perm) == mask &&
+	    cii->c_uid == current_fsuid() &&
+	    cii->c_cached_epoch == atomic_read(&permission_epoch);
+	spin_unlock(&cii->c_lock);
 
-        CDEBUG(D_CACHE, "%s for ino %ld\n", hit ? "HIT" : "MISS", inode->i_ino);
-        return hit;
+	return hit;
 }
 
 
@@ -95,19 +92,16 @@ static void coda_flag_children(struct dentry *parent, int flag)
 	struct list_head *child;
 	struct dentry *de;
 
-	spin_lock(&dcache_lock);
+	spin_lock(&parent->d_lock);
 	list_for_each(child, &parent->d_subdirs)
 	{
-		de = list_entry(child, struct dentry, d_child);
+		de = list_entry(child, struct dentry, d_u.d_child);
 		/* don't know what to do with negative dentries */
 		if ( ! de->d_inode ) 
 			continue;
-		CDEBUG(D_DOWNCALL, "%d for %*s/%*s\n", flag, 
-		       de->d_name.len, de->d_name.name, 
-		       de->d_parent->d_name.len, de->d_parent->d_name.name);
 		coda_flag_inode(de->d_inode, flag);
 	}
-	spin_unlock(&dcache_lock);
+	spin_unlock(&parent->d_lock);
 	return; 
 }
 

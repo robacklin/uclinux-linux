@@ -1,16 +1,13 @@
 #
 # Makefile for the linux ext2-filesystem routines.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-O_TARGET := ext2.o
+obj-$(CONFIG_EXT2_FS) += ext2.o
 
-obj-y    := balloc.o bitmap.o dir.o file.o fsync.o ialloc.o inode.o \
-		ioctl.o namei.o super.o symlink.o
-obj-m    := $(O_TARGET)
+ext2-y := balloc.o dir.o file.o ialloc.o inode.o \
+	  ioctl.o namei.o super.o symlink.o
 
-include $(TOPDIR)/Rules.make
+ext2-$(CONFIG_EXT2_FS_XATTR)	 += xattr.o xattr_user.o xattr_trusted.o
+ext2-$(CONFIG_EXT2_FS_POSIX_ACL) += acl.o
+ext2-$(CONFIG_EXT2_FS_SECURITY)	 += xattr_security.o
+ext2-$(CONFIG_EXT2_FS_XIP)	 += xip.o

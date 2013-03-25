@@ -1,6 +1,4 @@
 /*
- *  arch/mips/pmc-sierra/yosemite/atmel_read_eeprom.c
- *
  *  Copyright (C) 2003 PMC-Sierra Inc.
  *  Author: Manish Lachwani (lachwani@pmc-sierra.com)
  *
@@ -30,7 +28,7 @@
  *
  * This code reads the ATMEL 24CXX EEPROM. The PMC-Sierra Yosemite board uses the ATMEL
  * 24C32/24C64 which uses two byte addressing as compared to 24C16. Note that this program
- * uses the serial port like /dev/ttyS0, to communicate with the EEPROM. Hence, you are 
+ * uses the serial port like /dev/ttyS0, to communicate with the EEPROM. Hence, you are
  * expected to have a connectivity from the EEPROM to the serial port. This program does
  * __not__ communicate using the I2C protocol
  */
@@ -64,14 +62,14 @@ static void send_ack(void)
 static void send_byte(unsigned char byte)
 {
 	int	i = 0;
-	
-	for (i = 7; i >= 0; i--) 
+
+	for (i = 7; i >= 0; i--)
 		send_bit((byte >> i) & 0x01);
 }
-	
+
 static void send_start(void)
 {
-	sda_hi; 
+	sda_hi;
 	delay(TXX);
 	scl_hi;
 	delay(TXX);
@@ -114,9 +112,9 @@ static unsigned char recv_byte(void) {
         int i;
         unsigned char byte=0;
 
-        for (i=7;i>=0;i--)                             
+        for (i=7;i>=0;i--)
                 byte |= (recv_bit() << i);
- 
+
         return byte;
 }
 
@@ -129,7 +127,7 @@ static int recv_ack(void)
 
 	if (ack) {
 		do_idle();
-		printk(KERN_ERR "Error reading the Atmel 24C32/24C64 EEPROM \n");
+		printk(KERN_ERR "Error reading the Atmel 24C32/24C64 EEPROM\n");
 		return -1;
 	}
 
@@ -148,7 +146,7 @@ int read_eeprom(char *buffer, int eeprom_size, int size)
 	send_byte(W_HEADER);
 	recv_ack();
 
-	/* EEPROM with size of more then 2K need two byte addressing */
+	/* EEPROM with size of more than 2K need two byte addressing */
 	if (eeprom_size > 2048) {
 		send_byte(0x00);
 		recv_ack();

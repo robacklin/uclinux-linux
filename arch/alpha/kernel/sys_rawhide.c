@@ -16,13 +16,13 @@
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_mcpcia.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -41,7 +41,7 @@ static unsigned int hose_irq_masks[4] = {
 	0xff0000, 0xfe0000, 0xff0000, 0xff0000
 };
 static unsigned int cached_irq_masks[4];
-spinlock_t rawhide_irq_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(rawhide_irq_lock);
 
 static inline void
 rawhide_update_irq_hw(int hose, int mask)
@@ -51,13 +51,20 @@ rawhide_update_irq_hw(int hose, int mask)
 	*(vuip)MCPCIA_INT_MASK0(MCPCIA_HOSE2MID(hose));
 }
 
+#define hose_exists(h) \
+  (((h) < MCPCIA_MAX_HOSES) && (cached_irq_masks[(h)] != 0))
+
 static inline void 
-rawhide_enable_irq(unsigned int irq)
+rawhide_enable_irq(struct irq_data *d)
 {
 	unsigned int mask, hose;
+	unsigned int irq = d->irq;
 
 	irq -= 16;
 	hose = irq / 24;
+	if (!hose_exists(hose)) /* if hose non-existent, exit */
+		return;
+
 	irq -= hose * 24;
 	mask = 1 << irq;
 
@@ -69,12 +76,16 @@ rawhide_enable_irq(unsigned int irq)
 }
 
 static void 
-rawhide_disable_irq(unsigned int irq)
+rawhide_disable_irq(struct irq_data *d)
 {
 	unsigned int mask, hose;
+	unsigned int irq = d->irq;
 
 	irq -= 16;
 	hose = irq / 24;
+	if (!hose_exists(hose)) /* if hose non-existent, exit */
+		return;
+
 	irq -= hose * 24;
 	mask = ~(1 << irq) | hose_irq_masks[hose];
 
@@ -86,12 +97,16 @@ rawhide_disable_irq(unsigned int irq)
 }
 
 static void
-rawhide_mask_and_ack_irq(unsigned int irq)
+rawhide_mask_and_ack_irq(struct irq_data *d)
 {
 	unsigned int mask, mask1, hose;
+	unsigned int irq = d->irq;
 
 	irq -= 16;
 	hose = irq / 24;
+	if (!hose_exists(hose)) /* if hose non-existent, exit */
+		return;
+
 	irq -= hose * 24;
 	mask1 = 1 << irq;
 	mask = ~mask1 | hose_irq_masks[hose];
@@ -108,32 +123,15 @@ rawhide_mask_and_ack_irq(unsigned int irq)
 	spin_unlock(&rawhide_irq_lock);
 }
 
-static unsigned int
-rawhide_startup_irq(unsigned int irq)
-{
-	rawhide_enable_irq(irq);
-	return 0;
-}
-
-static void
-rawhide_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		rawhide_enable_irq(irq);
-}
-
-static struct hw_interrupt_type rawhide_irq_type = {
-	typename:	"RAWHIDE",
-	startup:	rawhide_startup_irq,
-	shutdown:	rawhide_disable_irq,
-	enable:		rawhide_enable_irq,
-	disable:	rawhide_disable_irq,
-	ack:		rawhide_mask_and_ack_irq,
-	end:		rawhide_end_irq,
+static struct irq_chip rawhide_irq_type = {
+	.name		= "RAWHIDE",
+	.irq_unmask	= rawhide_enable_irq,
+	.irq_mask	= rawhide_disable_irq,
+	.irq_mask_ack	= rawhide_mask_and_ack_irq,
 };
 
 static void 
-rawhide_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+rawhide_srm_device_interrupt(unsigned long vector)
 {
 	int irq;
 
@@ -157,7 +155,7 @@ rawhide_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	/* Adjust by which hose it is from.  */
 	irq -= ((irq + 16) >> 2) & 0x38;
 
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
@@ -167,6 +165,9 @@ rawhide_init_irq(void)
 	long i;
 
 	mcpcia_init_hoses();
+
+	/* Clear them all; only hoses that exist will be non-zero. */
+	for (i = 0; i < MCPCIA_MAX_HOSES; i++) cached_irq_masks[i] = 0;
 
 	for (hose = hose_head; hose; hose = hose->next) {
 		unsigned int h = hose->index;
@@ -178,8 +179,9 @@ rawhide_init_irq(void)
 	}
 
 	for (i = 16; i < 128; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &rawhide_irq_type;
+		irq_set_chip_and_handler(i, &rawhide_irq_type,
+					 handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
 	init_i8259a_irqs();
@@ -220,7 +222,7 @@ rawhide_init_irq(void)
  */
 
 static int __init
-rawhide_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+rawhide_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[5][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -245,26 +247,25 @@ rawhide_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
  */
 
 struct alpha_machine_vector rawhide_mv __initmv = {
-	vector_name:		"Rawhide",
+	.vector_name		= "Rawhide",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_MCPCIA_IO,
-	DO_MCPCIA_BUS,
-	machine_check:		mcpcia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	MCPCIA_DEFAULT_MEM_BASE,
-	pci_dac_offset:		MCPCIA_DAC_OFFSET,
+	.machine_check		= mcpcia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= MCPCIA_DEFAULT_MEM_BASE,
+	.pci_dac_offset		= MCPCIA_DAC_OFFSET,
 
-	nr_irqs:		128,
-	device_interrupt:	rawhide_srm_device_interrupt,
+	.nr_irqs		= 128,
+	.device_interrupt	= rawhide_srm_device_interrupt,
 
-	init_arch:		mcpcia_init_arch,
-	init_irq:		rawhide_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		NULL,
-	pci_map_irq:		rawhide_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= mcpcia_init_arch,
+	.init_irq		= rawhide_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= NULL,
+	.pci_map_irq		= rawhide_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(rawhide)

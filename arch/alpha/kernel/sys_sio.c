@@ -10,18 +10,16 @@
  * Kenetics's Platform 2000, Avanti (AlphaStation), XL, and AlphaBook1.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 
 #include <asm/compiler.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
@@ -29,13 +27,15 @@
 #include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_lca.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
 #include "pci_impl.h"
 #include "machvec_impl.h"
+#include "pc873xx.h"
 
-#ifdef ALPHA_RESTORE_SRM_SETUP
+#if defined(ALPHA_RESTORE_SRM_SETUP)
 /* Save LCA configuration data as the console had it set up.  */
 struct 
 {
@@ -78,22 +78,26 @@ alphabook1_init_arch(void)
  * example, sound boards seem to like using IRQ 9.
  *
  * This is NOT how we should do it. PIRQ0-X should have
- * their own IRQ's, the way intel uses the IO-APIC irq's.
+ * their own IRQs, the way intel uses the IO-APIC IRQs.
  */
 
 static void __init
 sio_pci_route(void)
 {
-#ifdef ALPHA_RESTORE_SRM_SETUP
-	/* First, read and save the original setting. */
-	pcibios_read_config_dword(0, PCI_DEVFN(7, 0), 0x60,
-				  &saved_config.orig_route_tab);
-	printk("%s: PIRQ original 0x%x new 0x%x\n", __FUNCTION__,
-	       saved_config.orig_route_tab, alpha_mv.sys.sio.route_tab);
+	unsigned int orig_route_tab;
+
+	/* First, ALWAYS read and print the original setting. */
+	pci_bus_read_config_dword(pci_isa_hose->bus, PCI_DEVFN(7, 0), 0x60,
+				  &orig_route_tab);
+	printk("%s: PIRQ original 0x%x new 0x%x\n", __func__,
+	       orig_route_tab, alpha_mv.sys.sio.route_tab);
+
+#if defined(ALPHA_RESTORE_SRM_SETUP)
+	saved_config.orig_route_tab = orig_route_tab;
 #endif
 
 	/* Now override with desired setting. */
-	pcibios_write_config_dword(0, PCI_DEVFN(7, 0), 0x60,
+	pci_bus_write_config_dword(pci_isa_hose->bus, PCI_DEVFN(7, 0), 0x60,
 				   alpha_mv.sys.sio.route_tab);
 }
 
@@ -101,10 +105,10 @@ static unsigned int __init
 sio_collect_irq_levels(void)
 {
 	unsigned int level_bits = 0;
-	struct pci_dev *dev;
+	struct pci_dev *dev = NULL;
 
 	/* Iterate through the devices, collecting IRQ levels.  */
-	pci_for_each_dev(dev) {
+	for_each_pci_dev(dev) {
 		if ((dev->class >> 16 == PCI_BASE_CLASS_BRIDGE) &&
 		    (dev->class >> 8 != PCI_CLASS_BRIDGE_PCMCIA))
 			continue;
@@ -141,7 +145,7 @@ sio_fixup_irq_levels(unsigned int level_bits)
 }
 
 static inline int __init
-noname_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+noname_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	/*
 	 * The Noname board has 5 PCI slots with each of the 4
@@ -180,7 +184,7 @@ noname_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 }
 
 static inline int __init
-p2k_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+p2k_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[][5] __initdata = {
 		/*INT A   B   C   D */
@@ -204,7 +208,27 @@ noname_init_pci(void)
 	common_init_pci();
 	sio_pci_route();
 	sio_fixup_irq_levels(sio_collect_irq_levels());
-	ns87312_enable_ide(0x26e);
+
+	if (pc873xx_probe() == -1) {
+		printk(KERN_ERR "Probing for PC873xx Super IO chip failed.\n");
+	} else {
+		printk(KERN_INFO "Found %s Super IO chip at 0x%x\n",
+			pc873xx_get_model(), pc873xx_get_base());
+
+		/* Enabling things in the Super IO chip doesn't actually
+		 * configure and enable things, the legacy drivers still
+		 * need to do the actual configuration and enabling.
+		 * This only unblocks them.
+		 */
+
+#if !defined(CONFIG_ALPHA_AVANTI)
+		/* Don't bother on the Avanti family.
+		 * None of them had on-board IDE.
+		 */
+		pc873xx_enable_ide();
+#endif
+		pc873xx_enable_epp19();
+	}
 }
 
 static inline void __init
@@ -228,8 +252,8 @@ alphabook1_init_pci(void)
 	 */
 
 	dev = NULL;
-	while ((dev = pci_find_device(PCI_VENDOR_ID_NCR, PCI_ANY_ID, dev))) {
-                if (dev->device == PCI_DEVICE_ID_NCR_53C810
+	while ((dev = pci_get_device(PCI_VENDOR_ID_NCR, PCI_ANY_ID, dev))) {
+		if (dev->device == PCI_DEVICE_ID_NCR_53C810
 		    || dev->device == PCI_DEVICE_ID_NCR_53C815
 		    || dev->device == PCI_DEVICE_ID_NCR_53C820
 		    || dev->device == PCI_DEVICE_ID_NCR_53C825) {
@@ -264,15 +288,15 @@ alphabook1_init_pci(void)
 void
 sio_kill_arch(int mode)
 {
-#ifdef ALPHA_RESTORE_SRM_SETUP
+#if defined(ALPHA_RESTORE_SRM_SETUP)
 	/* Since we cannot read the PCI DMA Window CSRs, we
 	 * cannot restore them here.
 	 *
 	 * However, we CAN read the PIRQ route register, so restore it
 	 * now...
 	 */
-	pcibios_write_config_dword(0, PCI_DEVFN(7, 0), 0x60,
-                                  saved_config.orig_route_tab);
+ 	pci_bus_write_config_dword(pci_isa_hose->bus, PCI_DEVFN(7, 0), 0x60,
+				   saved_config.orig_route_tab);
 #endif
 }
 
@@ -283,30 +307,29 @@ sio_kill_arch(int mode)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_BOOK1)
 struct alpha_machine_vector alphabook1_mv __initmv = {
-	vector_name:		"AlphaBook1",
+	.vector_name		= "AlphaBook1",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_LCA_IO,
-	DO_LCA_BUS,
-	machine_check:		lca_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= lca_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		16,
-	device_interrupt:	isa_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= isa_device_interrupt,
 
-	init_arch:		alphabook1_init_arch,
-	init_irq:		sio_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		alphabook1_init_pci,
-	kill_arch:		sio_kill_arch,
-	pci_map_irq:		noname_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= alphabook1_init_arch,
+	.init_irq		= sio_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= alphabook1_init_pci,
+	.kill_arch		= sio_kill_arch,
+	.pci_map_irq		= noname_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { sio: {
+	.sys = { .sio = {
 		/* NCR810 SCSI is 14, PCMCIA controller is 15.  */
-		route_tab:	0x0e0f0a0a,
+		.route_tab	= 0x0e0f0a0a,
 	}}
 };
 ALIAS_MV(alphabook1)
@@ -314,29 +337,28 @@ ALIAS_MV(alphabook1)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_AVANTI)
 struct alpha_machine_vector avanti_mv __initmv = {
-	vector_name:		"Avanti",
+	.vector_name		= "Avanti",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
-	DO_APECS_BUS,
-	machine_check:		apecs_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= apecs_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		16,
-	device_interrupt:	isa_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= isa_device_interrupt,
 
-	init_arch:		apecs_init_arch,
-	init_irq:		sio_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		noname_init_pci,
-	kill_arch:		sio_kill_arch,
-	pci_map_irq:		noname_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= apecs_init_arch,
+	.init_irq		= sio_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= noname_init_pci,
+	.kill_arch		= sio_kill_arch,
+	.pci_map_irq		= noname_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { sio: {
-		route_tab:	0x0b0a0e0f,
+	.sys = { .sio = {
+		.route_tab	= 0x0b0a050f, /* leave 14 for IDE, 9 for SND */
 	}}
 };
 ALIAS_MV(avanti)
@@ -344,28 +366,27 @@ ALIAS_MV(avanti)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_NONAME)
 struct alpha_machine_vector noname_mv __initmv = {
-	vector_name:		"Noname",
+	.vector_name		= "Noname",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_LCA_IO,
-	DO_LCA_BUS,
-	machine_check:		lca_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= lca_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		16,
-	device_interrupt:	srm_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= srm_device_interrupt,
 
-	init_arch:		lca_init_arch,
-	init_irq:		sio_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		noname_init_pci,
-	kill_arch:		sio_kill_arch,
-	pci_map_irq:		noname_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= lca_init_arch,
+	.init_irq		= sio_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= noname_init_pci,
+	.kill_arch		= sio_kill_arch,
+	.pci_map_irq		= noname_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { sio: {
+	.sys = { .sio = {
 		/* For UDB, the only available PCI slot must not map to IRQ 9,
 		   since that's the builtin MSS sound chip. That PCI slot
 		   will map to PIRQ1 (for INTA at least), so we give it IRQ 15
@@ -375,7 +396,7 @@ struct alpha_machine_vector noname_mv __initmv = {
 		   they are co-indicated when the platform type "Noname" is
 		   selected... :-(  */
 
-		route_tab:	0x0b0a0f0d,
+		.route_tab	= 0x0b0a0f0d,
 	}}
 };
 ALIAS_MV(noname)
@@ -383,29 +404,28 @@ ALIAS_MV(noname)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_P2K)
 struct alpha_machine_vector p2k_mv __initmv = {
-	vector_name:		"Platform2000",
+	.vector_name		= "Platform2000",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_LCA_IO,
-	DO_LCA_BUS,
-	machine_check:		lca_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
+	.machine_check		= lca_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= APECS_AND_LCA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		16,
-	device_interrupt:	srm_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= srm_device_interrupt,
 
-	init_arch:		lca_init_arch,
-	init_irq:		sio_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		noname_init_pci,
-	kill_arch:		sio_kill_arch,
-	pci_map_irq:		p2k_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= lca_init_arch,
+	.init_irq		= sio_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= noname_init_pci,
+	.kill_arch		= sio_kill_arch,
+	.pci_map_irq		= p2k_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { sio: {
-		route_tab:	0x0b0a090f,
+	.sys = { .sio = {
+		.route_tab	= 0x0b0a090f,
 	}}
 };
 ALIAS_MV(p2k)
@@ -413,29 +433,28 @@ ALIAS_MV(p2k)
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_XL)
 struct alpha_machine_vector xl_mv __initmv = {
-	vector_name:		"XL",
+	.vector_name		= "XL",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_APECS_IO,
-	BUS(apecs),
-	machine_check:		apecs_machine_check,
-	max_dma_address:	ALPHA_XL_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	XL_DEFAULT_MEM_BASE,
+	.machine_check		= apecs_machine_check,
+	.max_isa_dma_address	= ALPHA_XL_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= XL_DEFAULT_MEM_BASE,
 
-	nr_irqs:		16,
-	device_interrupt:	isa_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= isa_device_interrupt,
 
-	init_arch:		apecs_init_arch,
-	init_irq:		sio_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		noname_init_pci,
-	kill_arch:		sio_kill_arch,
-	pci_map_irq:		noname_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= apecs_init_arch,
+	.init_irq		= sio_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= noname_init_pci,
+	.kill_arch		= sio_kill_arch,
+	.pci_map_irq		= noname_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { sio: {
-		route_tab:	0x0b0a090f,
+	.sys = { .sio = {
+		.route_tab	= 0x0b0a090f,
 	}}
 };
 ALIAS_MV(xl)

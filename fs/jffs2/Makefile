@@ -1,25 +1,21 @@
 #
-# Makefile for the linux Journalling Flash FileSystem (JFFS) routines.
+# Makefile for the Linux Journalling Flash File System v2 (JFFS2)
 #
-# $Id: Makefile,v 1.25.2.1 2002/10/11 09:04:44 dwmw2 Exp $
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
+obj-$(CONFIG_JFFS2_FS) += jffs2.o
 
-COMPR_OBJS	:= compr.o compr_rubin.o compr_rtime.o pushpull.o \
-			compr_zlib.o
-JFFS2_OBJS	:= dir.o file.o ioctl.o nodelist.o malloc.o \
-	read.o nodemgmt.o readinode.o super.o write.o scan.o gc.o \
-	symlink.o build.o erase.o background.o
+jffs2-y	:= compr.o dir.o file.o ioctl.o nodelist.o malloc.o
+jffs2-y	+= read.o nodemgmt.o readinode.o write.o scan.o gc.o
+jffs2-y	+= symlink.o build.o erase.o background.o fs.o writev.o
+jffs2-y	+= super.o debug.o
 
-O_TARGET := jffs2.o
-
-obj-y := $(COMPR_OBJS) $(JFFS2_OBJS)
-obj-m := $(O_TARGET)
-
-include $(TOPDIR)/Rules.make
-
+jffs2-$(CONFIG_JFFS2_FS_WRITEBUFFER)	+= wbuf.o
+jffs2-$(CONFIG_JFFS2_FS_XATTR)		+= xattr.o xattr_trusted.o xattr_user.o
+jffs2-$(CONFIG_JFFS2_FS_SECURITY)	+= security.o
+jffs2-$(CONFIG_JFFS2_FS_POSIX_ACL)	+= acl.o
+jffs2-$(CONFIG_JFFS2_RUBIN)	+= compr_rubin.o
+jffs2-$(CONFIG_JFFS2_RTIME)	+= compr_rtime.o
+jffs2-$(CONFIG_JFFS2_ZLIB)	+= compr_zlib.o
+jffs2-$(CONFIG_JFFS2_LZO)	+= compr_lzo.o
+jffs2-$(CONFIG_JFFS2_SUMMARY)   += summary.o

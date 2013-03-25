@@ -13,6 +13,8 @@
  * Also thanks to: Salvador Abreu, Dave Thaler, Risto Kankkunen and Wim Van Dorst.
  */
 
+#include <linux/interrupt.h>
+
 /* XT hard disk controller registers */
 #define XD_DATA		(xd_iobase + 0x00)	/* data RW register */
 #define XD_RESET	(xd_iobase + 0x01)	/* reset WO register */
@@ -80,64 +82,53 @@
 
 /* this structure defines the XT drives and their types */
 typedef struct {
-	u8 heads;
-	u16 cylinders;
-	u8 sectors;
-	u8 control;
+	u_char heads;
+	u_short cylinders;
+	u_char sectors;
+	u_char control;
+	int unit;
 } XD_INFO;
-
-/* this structure is returned to the HDIO_GETGEO ioctl */
-typedef struct {
-	__u8 heads;
-	__u8 sectors;
-	__u8 cylinders;
-	__u32 start;
-} XD_GEOMETRY;
 
 /* this structure defines a ROM BIOS signature */
 typedef struct {
 	unsigned int offset;
 	const char *string;
 	void (*init_controller)(unsigned int address);
-	void (*init_drive)(u8 drive);
+	void (*init_drive)(u_char drive);
 	const char *name;
 } XD_SIGNATURE;
 
 #ifndef MODULE
 static int xd_manual_geo_init (char *command);
 #endif /* MODULE */
-static u8 xd_detect (u8 *controller, unsigned int *address);
-static u8 xd_initdrives (void (*init_drive)(u8 drive));
-static void xd_geninit (void);
+static u_char xd_detect (u_char *controller, unsigned int *address);
+static u_char xd_initdrives (void (*init_drive)(u_char drive));
 
-static int xd_open (struct inode *inode,struct file *file);
-static void do_xd_request (request_queue_t * q);
-static int xd_ioctl (struct inode *inode,struct file *file,unsigned int cmd,unsigned long arg);
-static int xd_release (struct inode *inode,struct file *file);
-static int xd_reread_partitions (kdev_t dev);
-static int xd_readwrite (u8 operation,u8 drive,char *buffer,u_int block,u_int count);
-static void xd_recalibrate (u8 drive);
+static void do_xd_request (struct request_queue * q);
+static int xd_ioctl (struct block_device *bdev,fmode_t mode,unsigned int cmd,unsigned long arg);
+static int xd_readwrite (u_char operation,XD_INFO *disk,char *buffer,u_int block,u_int count);
+static void xd_recalibrate (u_char drive);
 
-static void xd_interrupt_handler (int irq, void *dev_id, struct pt_regs *regs);
-static u8 xd_setup_dma (u8 opcode,u8 *buffer,u_int count);
-static u8 *xd_build (u8 *cmdblk,u8 command,u8 drive,u8 head,u16 cylinder,u8 sector,u8 count,u8 control);
+static irqreturn_t xd_interrupt_handler(int irq, void *dev_id);
+static u_char xd_setup_dma (u_char opcode,u_char *buffer,u_int count);
+static u_char *xd_build (u_char *cmdblk,u_char command,u_char drive,u_char head,u_short cylinder,u_char sector,u_char count,u_char control);
 static void xd_watchdog (unsigned long unused);
-static inline u8 xd_waitport (u16 port,u8 flags,u8 mask,unsigned long timeout);
-static u_int xd_command (u8 *command,u8 mode,u8 *indata,u8 *outdata,u8 *sense,unsigned long timeout);
+static inline u_char xd_waitport (u_short port,u_char flags,u_char mask,u_long timeout);
+static u_int xd_command (u_char *command,u_char mode,u_char *indata,u_char *outdata,u_char *sense,u_long timeout);
 
 /* card specific setup and geometry gathering code */
 static void xd_dtc_init_controller (unsigned int address);
-static void xd_dtc5150cx_init_drive (u8 drive);
-static void xd_dtc_init_drive (u8 drive);
+static void xd_dtc5150cx_init_drive (u_char drive);
+static void xd_dtc_init_drive (u_char drive);
 static void xd_wd_init_controller (unsigned int address);
-static void xd_wd_init_drive (u8 drive);
+static void xd_wd_init_drive (u_char drive);
 static void xd_seagate_init_controller (unsigned int address);
-static void xd_seagate_init_drive (u8 drive);
+static void xd_seagate_init_drive (u_char drive);
 static void xd_omti_init_controller (unsigned int address);
-static void xd_omti_init_drive (u8 drive);
+static void xd_omti_init_drive (u_char drive);
 static void xd_xebec_init_controller (unsigned int address);
-static void xd_xebec_init_drive (u8 drive);
-static void xd_setparam (u8 command,u8 drive,u8 heads,u16 cylinders,u16 rwrite,u16 wprecomp,u8 ecc);
-static void xd_override_init_drive (u8 drive);
+static void xd_xebec_init_drive (u_char drive);
+static void xd_setparam (u_char command,u_char drive,u_char heads,u_short cylinders,u_short rwrite,u_short wprecomp,u_char ecc);
+static void xd_override_init_drive (u_char drive);
 
 #endif /* _LINUX_XD_H */

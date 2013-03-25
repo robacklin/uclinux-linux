@@ -1,189 +1,254 @@
 /*
- * linux/drivers/pcmcia/sa1100_sa1111.c
+ * linux/drivers/pcmcia/sa1111_generic.c
  *
  * We implement the generic parts of a SA1111 PCMCIA driver.  This
  * basically means we handle everything except controlling the
  * power.  Power is machine specific...
  */
+#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/ioport.h>
+#include <linux/device.h>
+#include <linux/interrupt.h>
+#include <linux/init.h>
+#include <linux/io.h>
+#include <linux/slab.h>
 
-#include <asm/hardware.h>
+#include <pcmcia/ss.h>
+
+#include <mach/hardware.h>
 #include <asm/hardware/sa1111.h>
 #include <asm/irq.h>
 
-#include "sa1100_generic.h"
 #include "sa1111_generic.h"
 
-static struct irqs {
-	int irq;
-	const char *str;
-} irqs[] = {
-	{ S0_CD_VALID,    "SA1111 PCMCIA card detect" },
-	{ S0_BVD1_STSCHG, "SA1111 PCMCIA BVD1"        },
-	{ S1_CD_VALID,    "SA1111 CF card detect"     },
-	{ S1_BVD1_STSCHG, "SA1111 CF BVD1"            },
-};
+/*
+ * These are offsets from the above base.
+ */
+#define PCCR	0x0000
+#define PCSSR	0x0004
+#define PCSR	0x0008
 
-int sa1111_pcmcia_init(struct pcmcia_init *init)
+#define PCSR_S0_READY	(1<<0)
+#define PCSR_S1_READY	(1<<1)
+#define PCSR_S0_DETECT	(1<<2)
+#define PCSR_S1_DETECT	(1<<3)
+#define PCSR_S0_VS1	(1<<4)
+#define PCSR_S0_VS2	(1<<5)
+#define PCSR_S1_VS1	(1<<6)
+#define PCSR_S1_VS2	(1<<7)
+#define PCSR_S0_WP	(1<<8)
+#define PCSR_S1_WP	(1<<9)
+#define PCSR_S0_BVD1	(1<<10)
+#define PCSR_S0_BVD2	(1<<11)
+#define PCSR_S1_BVD1	(1<<12)
+#define PCSR_S1_BVD2	(1<<13)
+
+#define PCCR_S0_RST	(1<<0)
+#define PCCR_S1_RST	(1<<1)
+#define PCCR_S0_FLT	(1<<2)
+#define PCCR_S1_FLT	(1<<3)
+#define PCCR_S0_PWAITEN	(1<<4)
+#define PCCR_S1_PWAITEN	(1<<5)
+#define PCCR_S0_PSE	(1<<6)
+#define PCCR_S1_PSE	(1<<7)
+
+#define PCSSR_S0_SLEEP	(1<<0)
+#define PCSSR_S1_SLEEP	(1<<1)
+
+#define IDX_IRQ_S0_READY_NINT	(0)
+#define IDX_IRQ_S0_CD_VALID	(1)
+#define IDX_IRQ_S0_BVD1_STSCHG	(2)
+#define IDX_IRQ_S1_READY_NINT	(3)
+#define IDX_IRQ_S1_CD_VALID	(4)
+#define IDX_IRQ_S1_BVD1_STSCHG	(5)
+
+void sa1111_pcmcia_socket_state(struct soc_pcmcia_socket *skt, struct pcmcia_state *state)
 {
-	int i, ret;
+	struct sa1111_pcmcia_socket *s = to_skt(skt);
+	unsigned long status = sa1111_readl(s->dev->mapbase + PCSR);
 
-	if (!request_mem_region(_PCCR, 512, "PCMCIA"))
-		return -1;
+	switch (skt->nr) {
+	case 0:
+		state->detect = status & PCSR_S0_DETECT ? 0 : 1;
+		state->ready  = status & PCSR_S0_READY  ? 1 : 0;
+		state->bvd1   = status & PCSR_S0_BVD1   ? 1 : 0;
+		state->bvd2   = status & PCSR_S0_BVD2   ? 1 : 0;
+		state->wrprot = status & PCSR_S0_WP     ? 1 : 0;
+		state->vs_3v  = status & PCSR_S0_VS1    ? 0 : 1;
+		state->vs_Xv  = status & PCSR_S0_VS2    ? 0 : 1;
+		break;
 
-	INTPOL1 |= SA1111_IRQMASK_HI(S0_CD_VALID) |
-		   SA1111_IRQMASK_HI(S1_CD_VALID) |
-		   SA1111_IRQMASK_HI(S0_BVD1_STSCHG) |
-		   SA1111_IRQMASK_HI(S1_BVD1_STSCHG);
-
-	for (i = ret = 0; i < ARRAY_SIZE(irqs); i++) {
-		ret = request_irq(irqs[i].irq, init->handler, SA_INTERRUPT,
-				  irqs[i].str, NULL);
-		if (ret)
-			break;
+	case 1:
+		state->detect = status & PCSR_S1_DETECT ? 0 : 1;
+		state->ready  = status & PCSR_S1_READY  ? 1 : 0;
+		state->bvd1   = status & PCSR_S1_BVD1   ? 1 : 0;
+		state->bvd2   = status & PCSR_S1_BVD2   ? 1 : 0;
+		state->wrprot = status & PCSR_S1_WP     ? 1 : 0;
+		state->vs_3v  = status & PCSR_S1_VS1    ? 0 : 1;
+		state->vs_Xv  = status & PCSR_S1_VS2    ? 0 : 1;
+		break;
 	}
-
-	if (i < ARRAY_SIZE(irqs)) {
-		printk(KERN_ERR "sa1111_pcmcia: unable to grab IRQ%d (%d)\n",
-			irqs[i].irq, ret);
-		while (i--)
-			free_irq(irqs[i].irq, NULL);
-
-		release_mem_region(_PCCR, 16);
-	}
-
-	return ret ? -1 : 2;
 }
 
-int sa1111_pcmcia_shutdown(void)
+int sa1111_pcmcia_configure_socket(struct soc_pcmcia_socket *skt, const socket_state_t *state)
 {
-	int i;
+	struct sa1111_pcmcia_socket *s = to_skt(skt);
+	unsigned int pccr_skt_mask, pccr_set_mask, val;
+	unsigned long flags;
 
-	for (i = 0; i < ARRAY_SIZE(irqs); i++)
-		free_irq(irqs[i].irq, NULL);
+	switch (skt->nr) {
+	case 0:
+		pccr_skt_mask = PCCR_S0_RST|PCCR_S0_FLT|PCCR_S0_PWAITEN|PCCR_S0_PSE;
+		break;
 
-	INTPOL1 &= ~(SA1111_IRQMASK_HI(S0_CD_VALID) |
-		     SA1111_IRQMASK_HI(S1_CD_VALID) |
-		     SA1111_IRQMASK_HI(S0_BVD1_STSCHG) |
-		     SA1111_IRQMASK_HI(S1_BVD1_STSCHG));
+	case 1:
+		pccr_skt_mask = PCCR_S1_RST|PCCR_S1_FLT|PCCR_S1_PWAITEN|PCCR_S1_PSE;
+		break;
 
-	release_mem_region(_PCCR, 512);
+	default:
+		return -1;
+	}
+
+	pccr_set_mask = 0;
+
+	if (state->Vcc != 0)
+		pccr_set_mask |= PCCR_S0_PWAITEN|PCCR_S1_PWAITEN;
+	if (state->Vcc == 50)
+		pccr_set_mask |= PCCR_S0_PSE|PCCR_S1_PSE;
+	if (state->flags & SS_RESET)
+		pccr_set_mask |= PCCR_S0_RST|PCCR_S1_RST;
+	if (state->flags & SS_OUTPUT_ENA)
+		pccr_set_mask |= PCCR_S0_FLT|PCCR_S1_FLT;
+
+	local_irq_save(flags);
+	val = sa1111_readl(s->dev->mapbase + PCCR);
+	val &= ~pccr_skt_mask;
+	val |= pccr_set_mask & pccr_skt_mask;
+	sa1111_writel(val, s->dev->mapbase + PCCR);
+	local_irq_restore(flags);
 
 	return 0;
 }
 
-int sa1111_pcmcia_socket_state(struct pcmcia_state_array *state)
+int sa1111_pcmcia_add(struct sa1111_dev *dev, struct pcmcia_low_level *ops,
+	int (*add)(struct soc_pcmcia_socket *))
 {
-	unsigned long status;
+	struct sa1111_pcmcia_socket *s;
+	int i, ret = 0;
 
-	if (state->size < 2)
-		return -1;
+	ops->socket_state = sa1111_pcmcia_socket_state;
 
-	status = PCSR;
+	for (i = 0; i < ops->nr; i++) {
+		s = kzalloc(sizeof(*s), GFP_KERNEL);
+		if (!s)
+			return -ENOMEM;
 
-	state->state[0].detect = status & PCSR_S0_DETECT ? 0 : 1;
-	state->state[0].ready  = status & PCSR_S0_READY  ? 1 : 0;
-	state->state[0].bvd1   = status & PCSR_S0_BVD1   ? 1 : 0;
-	state->state[0].bvd2   = status & PCSR_S0_BVD2   ? 1 : 0;
-	state->state[0].wrprot = status & PCSR_S0_WP     ? 1 : 0;
-	state->state[0].vs_3v  = status & PCSR_S0_VS1    ? 0 : 1;
-	state->state[0].vs_Xv  = status & PCSR_S0_VS2    ? 0 : 1;
+		s->soc.nr = ops->first + i;
+		soc_pcmcia_init_one(&s->soc, ops, &dev->dev);
+		s->dev = dev;
+		if (s->soc.nr) {
+			s->soc.socket.pci_irq = dev->irq[IDX_IRQ_S1_READY_NINT];
+			s->soc.stat[SOC_STAT_CD].irq = dev->irq[IDX_IRQ_S1_CD_VALID];
+			s->soc.stat[SOC_STAT_CD].name = "SA1111 CF card detect";
+			s->soc.stat[SOC_STAT_BVD1].irq = dev->irq[IDX_IRQ_S1_BVD1_STSCHG];
+			s->soc.stat[SOC_STAT_BVD1].name = "SA1111 CF BVD1";
+		} else {
+			s->soc.socket.pci_irq = dev->irq[IDX_IRQ_S0_READY_NINT];
+			s->soc.stat[SOC_STAT_CD].irq = dev->irq[IDX_IRQ_S0_CD_VALID];
+			s->soc.stat[SOC_STAT_CD].name = "SA1111 PCMCIA card detect";
+			s->soc.stat[SOC_STAT_BVD1].irq = dev->irq[IDX_IRQ_S0_BVD1_STSCHG];
+			s->soc.stat[SOC_STAT_BVD1].name = "SA1111 PCMCIA BVD1";
+		}
 
-	state->state[1].detect = status & PCSR_S1_DETECT ? 0 : 1;
-	state->state[1].ready  = status & PCSR_S1_READY  ? 1 : 0;
-	state->state[1].bvd1   = status & PCSR_S1_BVD1   ? 1 : 0;
-	state->state[1].bvd2   = status & PCSR_S1_BVD2   ? 1 : 0;
-	state->state[1].wrprot = status & PCSR_S1_WP     ? 1 : 0;
-	state->state[1].vs_3v  = status & PCSR_S1_VS1    ? 0 : 1;
-	state->state[1].vs_Xv  = status & PCSR_S1_VS2    ? 0 : 1;
-
-	return 1;
-}
-
-int sa1111_pcmcia_get_irq_info(struct pcmcia_irq_info *info)
-{
-	int ret = 0;
-
-	switch (info->sock) {
-	case 0:	info->irq = S0_READY_NINT;	break;
-	case 1: info->irq = S1_READY_NINT;	break;
-	default: ret = 1;
+		ret = add(&s->soc);
+		if (ret == 0) {
+			s->next = dev_get_drvdata(&dev->dev);
+			dev_set_drvdata(&dev->dev, s);
+		} else
+			kfree(s);
 	}
 
 	return ret;
 }
 
-int sa1111_pcmcia_configure_socket(const struct pcmcia_configure *conf)
+static int pcmcia_probe(struct sa1111_dev *dev)
 {
-	unsigned int rst, flt, wait, pse, irq, pccr_mask;
-	unsigned long flags;
+	void __iomem *base;
+	int ret;
 
-	switch (conf->sock) {
-	case 0:
-		rst = PCCR_S0_RST;
-		flt = PCCR_S0_FLT;
-		wait = PCCR_S0_PWAITEN;
-		pse = PCCR_S0_PSE;
-		irq = S0_READY_NINT;
-		break;
+	ret = sa1111_enable_device(dev);
+	if (ret)
+		return ret;
 
-	case 1:
-		rst = PCCR_S1_RST;
-		flt = PCCR_S1_FLT;
-		wait = PCCR_S1_PWAITEN;
-		pse = PCCR_S1_PSE;
-		irq = S1_READY_NINT;
-		break;
+	dev_set_drvdata(&dev->dev, NULL);
 
-	default:
-		return -1;
+	if (!request_mem_region(dev->res.start, 512, SA1111_DRIVER_NAME(dev))) {
+		sa1111_disable_device(dev);
+		return -EBUSY;
 	}
 
-	switch (conf->vcc) {
-	case 0:
-		pccr_mask = 0;
-		break;
+	base = dev->mapbase;
 
-	case 33:
-		pccr_mask = wait;
-		break;
+	/*
+	 * Initialise the suspend state.
+	 */
+	sa1111_writel(PCSSR_S0_SLEEP | PCSSR_S1_SLEEP, base + PCSSR);
+	sa1111_writel(PCCR_S0_FLT | PCCR_S1_FLT, base + PCCR);
 
-	case 50:
-		pccr_mask = pse | wait;
-		break;
+#ifdef CONFIG_SA1100_BADGE4
+	pcmcia_badge4_init(&dev->dev);
+#endif
+#ifdef CONFIG_SA1100_JORNADA720
+	pcmcia_jornada720_init(&dev->dev);
+#endif
+#ifdef CONFIG_ARCH_LUBBOCK
+	pcmcia_lubbock_init(dev);
+#endif
+#ifdef CONFIG_ASSABET_NEPONSET
+	pcmcia_neponset_init(dev);
+#endif
+	return 0;
+}
 
-	default:
-		printk(KERN_ERR "sa1111_pcmcia: unrecognised VCC %u\n",
-			conf->vcc);
-		return -1;
+static int __devexit pcmcia_remove(struct sa1111_dev *dev)
+{
+	struct sa1111_pcmcia_socket *next, *s = dev_get_drvdata(&dev->dev);
+
+	dev_set_drvdata(&dev->dev, NULL);
+
+	for (; s; s = next) {
+		next = s->next;
+		soc_pcmcia_remove_one(&s->soc);
+		kfree(s);
 	}
 
-	if (conf->reset)
-		pccr_mask |= rst;
-
-	if (conf->output)
-		pccr_mask |= flt;
-
-	local_irq_save(flags);
-	PCCR = (PCCR & ~(pse | flt | wait | rst)) | pccr_mask;
-	local_irq_restore(flags);
-
-	if (conf->irq)
-		enable_irq(irq);
-	else
-		disable_irq(irq);
-
+	release_mem_region(dev->res.start, 512);
+	sa1111_disable_device(dev);
 	return 0;
 }
 
-int sa1111_pcmcia_socket_init(int sock)
+static struct sa1111_driver pcmcia_driver = {
+	.drv = {
+		.name	= "sa1111-pcmcia",
+	},
+	.devid		= SA1111_DEVID_PCMCIA,
+	.probe		= pcmcia_probe,
+	.remove		= __devexit_p(pcmcia_remove),
+};
+
+static int __init sa1111_drv_pcmcia_init(void)
 {
-	return 0;
+	return sa1111_driver_register(&pcmcia_driver);
 }
 
-int sa1111_pcmcia_socket_suspend(int sock)
+static void __exit sa1111_drv_pcmcia_exit(void)
 {
-	return 0;
+	sa1111_driver_unregister(&pcmcia_driver);
 }
+
+fs_initcall(sa1111_drv_pcmcia_init);
+module_exit(sa1111_drv_pcmcia_exit);
+
+MODULE_DESCRIPTION("SA1111 PCMCIA card socket driver");
+MODULE_LICENSE("GPL");

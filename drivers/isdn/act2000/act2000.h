@@ -1,10 +1,10 @@
-/* $Id: act2000.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+/* $Id: act2000.h,v 1.8.6.3 2001/09/23 22:24:32 kai Exp $
  *
  * ISDN lowlevel-module for the IBM ISDN-S0 Active 2000.
  *
  * Author       Fritz Elfert
  * Copyright    by Fritz Elfert      <fritz@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -14,6 +14,8 @@
 
 #ifndef act2000_h
 #define act2000_h
+
+#include <linux/compiler.h>
 
 #define ACT2000_IOCTL_SETPORT    1
 #define ACT2000_IOCTL_GETPORT    2
@@ -38,21 +40,21 @@
 /* Struct for adding new cards */
 typedef struct act2000_cdef {
 	int bus;
-        int port;
-        int irq;
-        char id[10];
+	int port;
+	int irq;
+	char id[10];
 } act2000_cdef;
 
 /* Struct for downloading firmware */
 typedef struct act2000_ddef {
-        int length;             /* Length of code */
-        char *buffer;           /* Ptr. to code   */
+	int length;             /* Length of code */
+	char __user *buffer;    /* Ptr. to code   */
 } act2000_ddef;
 
 typedef struct act2000_fwid {
-        char isdn[4];
-        char revlen[2];
-        char revision[504];
+	char isdn[4];
+	char revlen[2];
+	char revision[504];
 } act2000_fwid;
 
 #if defined(__KERNEL__) || defined(__DEBUGVAR__)
@@ -62,13 +64,12 @@ typedef struct act2000_fwid {
 
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/major.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
@@ -127,8 +128,8 @@ typedef struct act2000_chan {
 
 typedef struct msn_entry {
 	char eaz;
-        char msn[16];
-        struct msn_entry * next;
+	char msn[16];
+	struct msn_entry *next;
 } msn_entry;
 
 typedef struct irq_data_isa {
@@ -140,60 +141,59 @@ typedef struct irq_data_isa {
 	__u8            rcvhdr[8];
 } irq_data_isa;
 
-typedef union irq_data {
+typedef union act2000_irq_data {
 	irq_data_isa isa;
-} irq_data;
+} act2000_irq_data;
 
 /*
  * Per card driver data
  */
 typedef struct act2000_card {
-        unsigned short port;             /* Base-port-address                */
-        unsigned short irq;              /* Interrupt                        */
-        u_char ptype;                    /* Protocol type (1TR6 or Euro)     */
-        u_char bus;                      /* Cardtype (ISA, MCA, PCMCIA)      */
-        struct act2000_card *next;	 /* Pointer to next device struct    */
-        int myid;                        /* Driver-Nr. assigned by linklevel */
-        unsigned long flags;             /* Statusflags                      */
-        unsigned long ilock;             /* Semaphores for IRQ-Routines      */
-	struct sk_buff_head rcvq;        /* Receive-Message queue            */
-	struct sk_buff_head sndq;        /* Send-Message queue               */
-	struct sk_buff_head ackq;        /* Data-Ack-Message queue           */
-	u_char *ack_msg;                 /* Ptr to User Data in User skb     */
-	__u16 need_b3ack;                /* Flag: Need ACK for current skb   */
-	struct sk_buff *sbuf;            /* skb which is currently sent      */
-	struct timer_list ptimer;        /* Poll timer                       */
-	struct tq_struct snd_tq;         /* Task struct for xmit bh          */
-	struct tq_struct rcv_tq;         /* Task struct for rcv bh           */
-	struct tq_struct poll_tq;        /* Task struct for polled rcv bh    */
+	unsigned short port;		/* Base-port-address                */
+	unsigned short irq;		/* Interrupt                        */
+	u_char ptype;			/* Protocol type (1TR6 or Euro)     */
+	u_char bus;			/* Cardtype (ISA, MCA, PCMCIA)      */
+	struct act2000_card *next;	/* Pointer to next device struct    */
+	spinlock_t lock;		/* protect critical operations      */
+	int myid;			/* Driver-Nr. assigned by linklevel */
+	unsigned long flags;		/* Statusflags                      */
+	unsigned long ilock;		/* Semaphores for IRQ-Routines      */
+	struct sk_buff_head rcvq;	/* Receive-Message queue            */
+	struct sk_buff_head sndq;	/* Send-Message queue               */
+	struct sk_buff_head ackq;	/* Data-Ack-Message queue           */
+	u_char *ack_msg;		/* Ptr to User Data in User skb     */
+	__u16 need_b3ack;		/* Flag: Need ACK for current skb   */
+	struct sk_buff *sbuf;		/* skb which is currently sent      */
+	struct timer_list ptimer;	/* Poll timer                       */
+	struct work_struct snd_tq;	/* Task struct for xmit bh          */
+	struct work_struct rcv_tq;	/* Task struct for rcv bh           */
+	struct work_struct poll_tq;	/* Task struct for polled rcv bh    */
 	msn_entry *msn_list;
-	unsigned short msgnum;           /* Message number fur sending       */
-	act2000_chan bch[ACT2000_BCH];   /* B-Channel status/control         */
-	char   status_buf[256];          /* Buffer for status messages       */
+	unsigned short msgnum;		/* Message number for sending       */
+	spinlock_t mnlock;		/* lock for msgnum                  */
+	act2000_chan bch[ACT2000_BCH];	/* B-Channel status/control         */
+	char   status_buf[256];		/* Buffer for status messages       */
 	char   *status_buf_read;
 	char   *status_buf_write;
 	char   *status_buf_end;
-	irq_data idat;                   /* Data used for IRQ handler        */
-        isdn_if interface;               /* Interface to upper layer         */
-        char regname[35];                /* Name used for request_region     */
+	act2000_irq_data idat;		/* Data used for IRQ handler        */
+	isdn_if interface;		/* Interface to upper layer         */
+	char regname[35];		/* Name used for request_region     */
 } act2000_card;
 
 static inline void act2000_schedule_tx(act2000_card *card)
 {
-        queue_task(&card->snd_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	schedule_work(&card->snd_tq);
 }
 
 static inline void act2000_schedule_rx(act2000_card *card)
 {
-        queue_task(&card->rcv_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	schedule_work(&card->rcv_tq);
 }
 
 static inline void act2000_schedule_poll(act2000_card *card)
 {
-        queue_task(&card->poll_tq, &tq_immediate);
-        mark_bh(IMMEDIATE_BH);
+	schedule_work(&card->poll_tq);
 }
 
 extern char *act2000_find_eaz(act2000_card *, char);

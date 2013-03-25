@@ -1,12 +1,10 @@
 /*
- *      Copyright (c) 2001 Maciej W. Rozycki
+ *	Copyright (c) 2001 Maciej W. Rozycki
  *
- *      This program is free software; you can redistribute it and/or
- *      modify it under the terms of the GNU General Public License
- *      as published by the Free Software Foundation; either version
- *      2 of the License, or (at your option) any later version.
- *
- *	$Id: ms02-nv.c,v 1.2 2003/01/24 14:05:17 dwmw2 Exp $
+ *	This program is free software; you can redistribute it and/or
+ *	modify it under the terms of the GNU General Public License
+ *	as published by the Free Software Foundation; either version
+ *	2 of the License, or (at your option) any later version.
  */
 
 #include <linux/init.h>
@@ -29,18 +27,18 @@
 
 
 static char version[] __initdata =
-        "ms02-nv.c: v.1.0.0  13 Aug 2001  Maciej W. Rozycki.\n";
+	"ms02-nv.c: v.1.0.0  13 Aug 2001  Maciej W. Rozycki.\n";
 
-MODULE_AUTHOR("Maciej W. Rozycki <macro@ds2.pg.gda.pl>");
+MODULE_AUTHOR("Maciej W. Rozycki <macro@linux-mips.org>");
 MODULE_DESCRIPTION("DEC MS02-NV NVRAM module driver");
 MODULE_LICENSE("GPL");
 
 
 /*
  * Addresses we probe for an MS02-NV at.  Modules may be located
- * at any 8MB boundary within a 0MB up to 112MB range or at any 32MB
- * boundary within a 0MB up to 448MB range.  We don't support a module
- * at 0MB, though.
+ * at any 8MiB boundary within a 0MiB up to 112MiB range or at any 32MiB
+ * boundary within a 0MiB up to 448MiB range.  We don't support a module
+ * at 0MiB, though.
  */
 static ulong ms02nv_addrs[] __initdata = {
 	0x07000000, 0x06800000, 0x06000000, 0x05800000, 0x05000000,
@@ -59,28 +57,20 @@ static struct mtd_info *root_ms02nv_mtd;
 static int ms02nv_read(struct mtd_info *mtd, loff_t from,
 			size_t len, size_t *retlen, u_char *buf)
 {
-	struct ms02nv_private *mp = (struct ms02nv_private *)mtd->priv;
-
-	if (from + len > mtd->size)
-		return -EINVAL;
+	struct ms02nv_private *mp = mtd->priv;
 
 	memcpy(buf, mp->uaddr + from, len);
 	*retlen = len;
-
 	return 0;
 }
 
 static int ms02nv_write(struct mtd_info *mtd, loff_t to,
 			size_t len, size_t *retlen, const u_char *buf)
 {
-	struct ms02nv_private *mp = (struct ms02nv_private *)mtd->priv;
-
-	if (to + len > mtd->size)
-		return -EINVAL;
+	struct ms02nv_private *mp = mtd->priv;
 
 	memcpy(mp->uaddr + to, buf, len);
 	*retlen = len;
-
 	return 0;
 }
 
@@ -99,8 +89,8 @@ static inline uint ms02nv_probe_one(ulong addr)
 	 * The firmware writes MS02NV_ID at MS02NV_MAGIC and also
 	 * a diagnostic status at MS02NV_DIAG.
 	 */
-	ms02nv_diagp = (ms02nv_uint *)(KSEG1ADDR(addr + MS02NV_DIAG));
-	ms02nv_magicp = (ms02nv_uint *)(KSEG1ADDR(addr + MS02NV_MAGIC));
+	ms02nv_diagp = (ms02nv_uint *)(CKSEG1ADDR(addr + MS02NV_DIAG));
+	ms02nv_magicp = (ms02nv_uint *)(CKSEG1ADDR(addr + MS02NV_MAGIC));
 	err = get_dbe(ms02nv_magic, ms02nv_magicp);
 	if (err)
 		return 0;
@@ -130,12 +120,11 @@ static int __init ms02nv_init_one(ulong addr)
 
 	int ret = -ENODEV;
 
-	/* The module decodes 8MB of address space. */
-	mod_res = kmalloc(sizeof(*mod_res), GFP_KERNEL);
+	/* The module decodes 8MiB of address space. */
+	mod_res = kzalloc(sizeof(*mod_res), GFP_KERNEL);
 	if (!mod_res)
 		return -ENOMEM;
 
-	memset(mod_res, 0, sizeof(*mod_res));
 	mod_res->name = ms02nv_name;
 	mod_res->start = addr;
 	mod_res->end = addr + MS02NV_SLOT_SIZE - 1;
@@ -153,24 +142,21 @@ static int __init ms02nv_init_one(ulong addr)
 	}
 
 	ret = -ENOMEM;
-	mtd = kmalloc(sizeof(*mtd), GFP_KERNEL);
+	mtd = kzalloc(sizeof(*mtd), GFP_KERNEL);
 	if (!mtd)
 		goto err_out_mod_res_rel;
-	memset(mtd, 0, sizeof(*mtd));
-	mp = kmalloc(sizeof(*mp), GFP_KERNEL);
+	mp = kzalloc(sizeof(*mp), GFP_KERNEL);
 	if (!mp)
 		goto err_out_mtd;
-	memset(mp, 0, sizeof(*mp));
 
 	mtd->priv = mp;
 	mp->resource.module = mod_res;
 
 	/* Firmware's diagnostic NVRAM area. */
-	diag_res = kmalloc(sizeof(*diag_res), GFP_KERNEL);
+	diag_res = kzalloc(sizeof(*diag_res), GFP_KERNEL);
 	if (!diag_res)
 		goto err_out_mp;
 
-	memset(diag_res, 0, sizeof(*diag_res));
 	diag_res->name = ms02nv_res_diag_ram;
 	diag_res->start = addr;
 	diag_res->end = addr + MS02NV_RAM - 1;
@@ -180,11 +166,10 @@ static int __init ms02nv_init_one(ulong addr)
 	mp->resource.diag_ram = diag_res;
 
 	/* User-available general-purpose NVRAM area. */
-	user_res = kmalloc(sizeof(*user_res), GFP_KERNEL);
+	user_res = kzalloc(sizeof(*user_res), GFP_KERNEL);
 	if (!user_res)
 		goto err_out_diag_res;
 
-	memset(user_res, 0, sizeof(*user_res));
 	user_res->name = ms02nv_res_user_ram;
 	user_res->start = addr + MS02NV_RAM;
 	user_res->end = addr + size - 1;
@@ -194,11 +179,10 @@ static int __init ms02nv_init_one(ulong addr)
 	mp->resource.user_ram = user_res;
 
 	/* Control and status register. */
-	csr_res = kmalloc(sizeof(*csr_res), GFP_KERNEL);
+	csr_res = kzalloc(sizeof(*csr_res), GFP_KERNEL);
 	if (!csr_res)
 		goto err_out_user_res;
 
-	memset(csr_res, 0, sizeof(*csr_res));
 	csr_res->name = ms02nv_res_csr;
 	csr_res->start = addr + MS02NV_CSR;
 	csr_res->end = addr + MS02NV_CSR + 3;
@@ -219,21 +203,22 @@ static int __init ms02nv_init_one(ulong addr)
 	mp->uaddr = phys_to_virt(fixaddr);
 
 	mtd->type = MTD_RAM;
-	mtd->flags = MTD_CAP_RAM | MTD_XIP;
+	mtd->flags = MTD_CAP_RAM;
 	mtd->size = fixsize;
 	mtd->name = (char *)ms02nv_name;
-	mtd->module = THIS_MODULE;
-	mtd->read = ms02nv_read;
-	mtd->write = ms02nv_write;
+	mtd->owner = THIS_MODULE;
+	mtd->_read = ms02nv_read;
+	mtd->_write = ms02nv_write;
+	mtd->writesize = 1;
 
 	ret = -EIO;
-	if (add_mtd_device(mtd)) {
+	if (mtd_device_register(mtd, NULL, 0)) {
 		printk(KERN_ERR
 			"ms02-nv: Unable to register MTD device, aborting!\n");
 		goto err_out_csr_res;
 	}
 
-	printk(KERN_INFO "mtd%d: %s at 0x%08lx, size %uMB.\n",
+	printk(KERN_INFO "mtd%d: %s at 0x%08lx, size %zuMiB.\n",
 		mtd->index, ms02nv_name, addr, size >> 20);
 
 	mp->next = root_ms02nv_mtd;
@@ -265,11 +250,11 @@ err_out_mod_res:
 static void __exit ms02nv_remove_one(void)
 {
 	struct mtd_info *mtd = root_ms02nv_mtd;
-	struct ms02nv_private *mp = (struct ms02nv_private *)mtd->priv;
+	struct ms02nv_private *mp = mtd->priv;
 
 	root_ms02nv_mtd = mp->next;
 
-	del_mtd_device(mtd);
+	mtd_device_unregister(mtd);
 
 	release_resource(mp->resource.csr);
 	kfree(mp->resource.csr);
@@ -293,13 +278,13 @@ static int __init ms02nv_init(void)
 
 	switch (mips_machtype) {
 	case MACH_DS5000_200:
-		csr = (volatile u32 *)KN02_CSR_ADDR;
+		csr = (volatile u32 *)CKSEG1ADDR(KN02_SLOT_BASE + KN02_CSR);
 		if (*csr & KN02_CSR_BNK32M)
 			stride = 2;
 		break;
 	case MACH_DS5000_2X0:
-	case MACH_DS5000:
-		csr = (volatile u32 *)KN03_MCR_BASE;
+	case MACH_DS5900:
+		csr = (volatile u32 *)CKSEG1ADDR(KN03_SLOT_BASE + IOASIC_MCR);
 		if (*csr & KN03_MCR_BNK32M)
 			stride = 2;
 		break;
@@ -308,7 +293,7 @@ static int __init ms02nv_init(void)
 		break;
 	}
 
-	for (i = 0; i < (sizeof(ms02nv_addrs) / sizeof(*ms02nv_addrs)); i++)
+	for (i = 0; i < ARRAY_SIZE(ms02nv_addrs); i++)
 		if (!ms02nv_init_one(ms02nv_addrs[i] << stride))
 			count++;
 

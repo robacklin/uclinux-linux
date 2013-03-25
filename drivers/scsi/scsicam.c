@@ -10,96 +10,129 @@
  * For more information, please consult the SCSI-CAM draft.
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
-
+#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/genhd.h>
 #include <linux/kernel.h>
-#include <linux/blk.h>
+#include <linux/blkdev.h>
 #include <asm/unaligned.h>
-#include "scsi.h"
-#include "hosts.h"
-#include "sd.h"
+
 #include <scsi/scsicam.h>
+
 
 static int setsize(unsigned long capacity, unsigned int *cyls, unsigned int *hds,
 		   unsigned int *secs);
 
-
-/*
- * Function : int scsicam_bios_param (Disk *disk, int dev, int *ip)
+/**
+ * scsi_bios_ptable - Read PC partition table out of first sector of device.
+ * @dev: from this device
  *
- * Purpose : to determine the BIOS mapping used for a drive in a 
+ * Description: Reads the first sector from the device and returns %0x42 bytes
+ *              starting at offset %0x1be.
+ * Returns: partition table in kmalloc(GFP_KERNEL) memory, or NULL on error.
+ */
+unsigned char *scsi_bios_ptable(struct block_device *dev)
+{
+	unsigned char *res = kmalloc(66, GFP_KERNEL);
+	if (res) {
+		struct block_device *bdev = dev->bd_contains;
+		Sector sect;
+		void *data = read_dev_sector(bdev, 0, &sect);
+		if (data) {
+			memcpy(res, data + 0x1be, 66);
+			put_dev_sector(sect);
+		} else {
+			kfree(res);
+			res = NULL;
+		}
+	}
+	return res;
+}
+EXPORT_SYMBOL(scsi_bios_ptable);
+
+/**
+ * scsicam_bios_param - Determine geometry of a disk in cylinders/heads/sectors.
+ * @bdev: which device
+ * @capacity: size of the disk in sectors
+ * @ip: return value: ip[0]=heads, ip[1]=sectors, ip[2]=cylinders
+ *
+ * Description : determine the BIOS mapping/geometry used for a drive in a
  *      SCSI-CAM system, storing the results in ip as required
  *      by the HDIO_GETGEO ioctl().
  *
  * Returns : -1 on failure, 0 on success.
- *
  */
 
-int scsicam_bios_param(Disk * disk,	/* SCSI disk */
-		       kdev_t dev,	/* Device major, minor */
-		  int *ip /* Heads, sectors, cylinders in that order */ )
+int scsicam_bios_param(struct block_device *bdev, sector_t capacity, int *ip)
 {
-	struct buffer_head *bh;
-	int ret_code;
-	int size = disk->capacity;
-	unsigned long temp_cyl;
+	unsigned char *p;
+	u64 capacity64 = capacity;	/* Suppress gcc warning */
+	int ret;
 
-	if (!(bh = bread(MKDEV(MAJOR(dev), MINOR(dev)&~0xf), 0, block_size(dev))))
+	p = scsi_bios_ptable(bdev);
+	if (!p)
 		return -1;
 
 	/* try to infer mapping from partition table */
-	ret_code = scsi_partsize(bh, (unsigned long) size, (unsigned int *) ip + 2,
-		       (unsigned int *) ip + 0, (unsigned int *) ip + 1);
-	brelse(bh);
+	ret = scsi_partsize(p, (unsigned long)capacity, (unsigned int *)ip + 2,
+			       (unsigned int *)ip + 0, (unsigned int *)ip + 1);
+	kfree(p);
 
-	if (ret_code == -1) {
+	if (ret == -1 && capacity64 < (1ULL << 32)) {
 		/* pick some standard mapping with at most 1024 cylinders,
 		   and at most 62 sectors per track - this works up to
 		   7905 MB */
-		ret_code = setsize((unsigned long) size, (unsigned int *) ip + 2,
-		       (unsigned int *) ip + 0, (unsigned int *) ip + 1);
+		ret = setsize((unsigned long)capacity, (unsigned int *)ip + 2,
+		       (unsigned int *)ip + 0, (unsigned int *)ip + 1);
 	}
+
 	/* if something went wrong, then apparently we have to return
 	   a geometry with more than 1024 cylinders */
-	if (ret_code || ip[0] > 255 || ip[1] > 63) {
-		ip[0] = 64;
-		ip[1] = 32;
-		temp_cyl = size / (ip[0] * ip[1]);
-		if (temp_cyl > 65534) {
+	if (ret || ip[0] > 255 || ip[1] > 63) {
+		if ((capacity >> 11) > 65534) {
 			ip[0] = 255;
 			ip[1] = 63;
+		} else {
+			ip[0] = 64;
+			ip[1] = 32;
 		}
-		ip[2] = size / (ip[0] * ip[1]);
+
+		if (capacity > 65535*63*255)
+			ip[2] = 65535;
+		else
+			ip[2] = (unsigned long)capacity / (ip[0] * ip[1]);
 	}
+
 	return 0;
 }
+EXPORT_SYMBOL(scsicam_bios_param);
 
-/*
- * Function : static int scsi_partsize(struct buffer_head *bh, unsigned long 
- *     capacity,unsigned int *cyls, unsigned int *hds, unsigned int *secs);
+/**
+ * scsi_partsize - Parse cylinders/heads/sectors from PC partition table
+ * @buf: partition table, see scsi_bios_ptable()
+ * @capacity: size of the disk in sectors
+ * @cyls: put cylinders here
+ * @hds: put heads here
+ * @secs: put sectors here
  *
- * Purpose : to determine the BIOS mapping used to create the partition
+ * Description: determine the BIOS mapping/geometry used to create the partition
  *      table, storing the results in *cyls, *hds, and *secs 
  *
- * Returns : -1 on failure, 0 on success.
- *
+ * Returns: -1 on failure, 0 on success.
  */
 
-int scsi_partsize(struct buffer_head *bh, unsigned long capacity,
+int scsi_partsize(unsigned char *buf, unsigned long capacity,
 	       unsigned int *cyls, unsigned int *hds, unsigned int *secs)
 {
-	struct partition *p, *largest = NULL;
+	struct partition *p = (struct partition *)buf, *largest = NULL;
 	int i, largest_cyl;
 	int cyl, ext_cyl, end_head, end_cyl, end_sector;
 	unsigned int logical_end, physical_end, ext_physical_end;
 
 
-	if (*(unsigned short *) (bh->b_data + 510) == 0xAA55) {
-		for (largest_cyl = -1, p = (struct partition *)
-		     (0x1BE + bh->b_data), i = 0; i < 4; ++i, ++p) {
+	if (*(unsigned short *) (buf + 64) == 0xAA55) {
+		for (largest_cyl = -1, i = 0; i < 4; ++i, ++p) {
 			if (!p->sys_ind)
 				continue;
 #ifdef DEBUG
@@ -158,6 +191,7 @@ int scsi_partsize(struct buffer_head *bh, unsigned long capacity,
 	}
 	return -1;
 }
+EXPORT_SYMBOL(scsi_partsize);
 
 /*
  * Function : static int setsize(unsigned long capacity,unsigned int *cyls,
@@ -173,7 +207,7 @@ int scsi_partsize(struct buffer_head *bh, unsigned long capacity,
  *
  * WORKING                                                    X3T9.2
  * DRAFT                                                        792D
- *
+ * see http://www.t10.org/ftp/t10/drafts/cam/cam-r12b.pdf
  *
  *                                                        Revision 6
  *                                                         10-MAR-94

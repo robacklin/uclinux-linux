@@ -14,6 +14,8 @@ LIBS=	-ldb
 clean-files:= ${GENSRCS} ${GENHDRS} $(YSRCS:.y=.output) $(PROG)
 # Override default kernel CFLAGS.  This is a userland app.
 AICASM_CFLAGS:= -I/usr/include -I.
+LEX= flex
+YACC= bison
 YFLAGS= -d
 
 NOMAN=	noman
@@ -40,6 +42,8 @@ aicdb.h:
 		echo "#include <db3/db_185.h>" > aicdb.h;	\
 	 elif [ -e "/usr/include/db2/db_185.h" ]; then		\
 		echo "#include <db2/db_185.h>" > aicdb.h;	\
+	 elif [ -e "/usr/include/db1/db_185.h" ]; then		\
+		echo "#include <db1/db_185.h>" > aicdb.h;	\
 	 elif [ -e "/usr/include/db/db_185.h" ]; then		\
 		echo "#include <db/db_185.h>" > aicdb.h;	\
 	 elif [ -e "/usr/include/db_185.h" ]; then		\
@@ -51,11 +55,19 @@ aicdb.h:
 clean:
 	rm -f $(clean-files)
 
+# Create a dependency chain in generated files
+# to avoid concurrent invocations of the single
+# rule that builds them all.
+aicasm_gram.c: aicasm_gram.h
 aicasm_gram.c aicasm_gram.h: aicasm_gram.y
 	$(YACC) $(YFLAGS) -b $(<:.y=) $<
 	mv $(<:.y=).tab.c $(<:.y=.c)
 	mv $(<:.y=).tab.h $(<:.y=.h)
 
+# Create a dependency chain in generated files
+# to avoid concurrent invocations of the single
+# rule that builds them all.
+aicasm_macro_gram.c: aicasm_macro_gram.h
 aicasm_macro_gram.c aicasm_macro_gram.h: aicasm_macro_gram.y
 	$(YACC) $(YFLAGS) -b $(<:.y=) -p mm $<
 	mv $(<:.y=).tab.c $(<:.y=.c)

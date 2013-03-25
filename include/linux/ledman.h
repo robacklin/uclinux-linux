@@ -11,6 +11,8 @@
  *	      LED patterns rely on these values
  */
 
+#include <linux/version.h>
+
 #define LEDMAN_ALL			0	/* special case, all LED's */
 
 #define LEDMAN_POWER		1
@@ -51,6 +53,14 @@
 
 #define LEDMAN_MAX_NAME		16
 
+/*
+ * aliases
+ */
+
+#define LEDMAN_ETH	LEDMAN_LAN1_RX
+#define LEDMAN_USB	LEDMAN_USB1_RX
+#define LEDMAN_COM	LEDMAN_COM1_RX
+
 /****************************************************************************/
 /*
  *	ioctl cmds
@@ -73,6 +83,8 @@
 
 #define LEDMAN_CMD_ALTBIT		0x8000	/* operate on alternate LED settings */
 
+#define LEDMAN_IOC_BITMASK	0x81ff	/* Mask of ioctl bits we use - above */
+
 /****************************************************************************/
 
 #define LEDMAN_MAJOR	126
@@ -93,11 +105,19 @@ extern void ledman_signalreset(void);
 #else
 
 #include	<fcntl.h>
+#include	<sys/ioctl.h>
+
+/*
+ * The command code is carefully chosen to not clash with any existing known
+ * ioctls, and so that we have the extra bits (which is 0x8000 and 0x0100)
+ * to use for commands defined above.
+ */
+#define	LEDMAN_IOC	'D'
 
 #define ledman_cmd(cmd, led) ({ \
 	int fd; \
 	if ((fd = open("/dev/ledman", O_RDWR)) != -1) { \
-		ioctl(fd, cmd, led); \
+		ioctl(fd, _IO(LEDMAN_IOC, cmd), led); \
 		close(fd); \
 	} \
 })

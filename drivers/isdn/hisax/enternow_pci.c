@@ -49,7 +49,7 @@
  *
  * Credits:
  * Programming the driver for Formula-n enter:now ISDN PCI and
- * neccessary the driver for the used Amd 7930 D-channel-controller
+ * necessary the driver for the used Amd 7930 D-channel-controller
  * was spnsored by Formula-n Europe AG.
  * Thanks to Karsten Keil and Petr Novak, who gave me support in
  * Hisax-specific questions.
@@ -60,13 +60,10 @@
  */
 
 
-#define __NO_VERSION__
-#include <linux/config.h>
 #include "hisax.h"
 #include "isac.h"
 #include "isdnl1.h"
 #include "amd7930_fn.h"
-#include "enternow.h"
 #include <linux/interrupt.h>
 #include <linux/ppp_defs.h>
 #include <linux/pci.h>
@@ -75,58 +72,72 @@
 
 
 
-const char *enternow_pci_rev = "$Revision: 1.1.2.1 $";
+static const char *enternow_pci_rev = "$Revision: 1.1.4.5 $";
+
+
+/* for PowerISDN PCI */
+#define TJ_AMD_IRQ                                              0x20
+#define TJ_LED1                                                 0x40
+#define TJ_LED2                                                 0x80
+
+
+/* The window to [the] AMD [chip]...
+ * From address hw.njet.base + TJ_AMD_PORT onwards, the AMD
+ * maps [consecutive/multiple] 8 bits into the TigerJet I/O space
+ * -> 0x01 of the AMD at hw.njet.base + 0C4 */
+#define TJ_AMD_PORT                                             0xC0
+
 
 
 /* *************************** I/O-Interface functions ************************************* */
 
 
 /* cs->readisac, macro rByteAMD */
-BYTE
-ReadByteAmd7930(struct IsdnCardState *cs, BYTE offset)
+static unsigned char
+ReadByteAmd7930(struct IsdnCardState *cs, unsigned char offset)
 {
-	/* direktes Register */
-	if(offset < 8)
-		return (InByte(cs->hw.njet.isac + 4*offset));
+	/* direct register */
+	if (offset < 8)
+		return (inb(cs->hw.njet.isac + 4 * offset));
 
-	/* indirektes Register */
+	/* indirect register */
 	else {
-		OutByte(cs->hw.njet.isac + 4*AMD_CR, offset);
-		return(InByte(cs->hw.njet.isac + 4*AMD_DR));
+		outb(offset, cs->hw.njet.isac + 4 * AMD_CR);
+		return (inb(cs->hw.njet.isac + 4 * AMD_DR));
 	}
 }
 
 /* cs->writeisac, macro wByteAMD */
-void
-WriteByteAmd7930(struct IsdnCardState *cs, BYTE offset, BYTE value)
+static void
+WriteByteAmd7930(struct IsdnCardState *cs, unsigned char offset, unsigned char value)
 {
-	/* direktes Register */
-	if(offset < 8)
-		OutByte(cs->hw.njet.isac + 4*offset, value);
+	/* direct register */
+	if (offset < 8)
+		outb(value, cs->hw.njet.isac + 4 * offset);
 
-	/* indirektes Register */
+	/* indirect register */
 	else {
-		OutByte(cs->hw.njet.isac + 4*AMD_CR, offset);
-		OutByte(cs->hw.njet.isac + 4*AMD_DR, value);
+		outb(offset, cs->hw.njet.isac + 4 * AMD_CR);
+		outb(value, cs->hw.njet.isac + 4 * AMD_DR);
 	}
 }
 
 
-void
-enpci_setIrqMask(struct IsdnCardState *cs, BYTE val) {
-        if (!val)
-	        OutByte(cs->hw.njet.base+NETJET_IRQMASK1, 0x00);
-        else
-	        OutByte(cs->hw.njet.base+NETJET_IRQMASK1, TJ_AMD_IRQ);
+static void
+enpci_setIrqMask(struct IsdnCardState *cs, unsigned char val) {
+	if (!val)
+		outb(0x00, cs->hw.njet.base + NETJET_IRQMASK1);
+	else
+		outb(TJ_AMD_IRQ, cs->hw.njet.base + NETJET_IRQMASK1);
 }
 
 
-static BYTE dummyrr(struct IsdnCardState *cs, int chan, BYTE off)
+static unsigned char dummyrr(struct IsdnCardState *cs, int chan, unsigned char off)
 {
-        return(5);
+	return (5);
 }
 
-static void dummywr(struct IsdnCardState *cs, int chan, BYTE off, BYTE value)
+static void dummywr(struct IsdnCardState *cs, int chan, unsigned char off, unsigned char value)
 {
 
 }
@@ -138,310 +149,276 @@ static void dummywr(struct IsdnCardState *cs, int chan, BYTE off, BYTE value)
 static void
 reset_enpci(struct IsdnCardState *cs)
 {
-	long flags;
-
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "enter:now PCI: reset");
 
-	save_flags(flags);
-	sti();
 	/* Reset on, (also for AMD) */
 	cs->hw.njet.ctrl_reg = 0x07;
-	OutByte(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	/* 80 ms delay */
-	schedule_timeout((80*HZ)/1000);
+	outb(cs->hw.njet.ctrl_reg, cs->hw.njet.base + NETJET_CTRL);
+	mdelay(20);
 	/* Reset off */
-	cs->hw.njet.ctrl_reg = 0x70;
-	OutByte(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	/* 80ms delay */
-	schedule_timeout((80*HZ)/1000);
-	restore_flags(flags);
+	cs->hw.njet.ctrl_reg = 0x30;
+	outb(cs->hw.njet.ctrl_reg, cs->hw.njet.base + NETJET_CTRL);
+	/* 20ms delay */
+	mdelay(20);
 	cs->hw.njet.auxd = 0;  // LED-status
 	cs->hw.njet.dmactrl = 0;
-	OutByte(cs->hw.njet.base + NETJET_AUXCTRL, ~TJ_AMD_IRQ);
-	OutByte(cs->hw.njet.base + NETJET_IRQMASK1, TJ_AMD_IRQ);
-	OutByte(cs->hw.njet.auxa, cs->hw.njet.auxd); // LED off
-
+	outb(~TJ_AMD_IRQ, cs->hw.njet.base + NETJET_AUXCTRL);
+	outb(TJ_AMD_IRQ, cs->hw.njet.base + NETJET_IRQMASK1);
+	outb(cs->hw.njet.auxd, cs->hw.njet.auxa); // LED off
 }
 
 
 static int
 enpci_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
-        BYTE *chan;
+	u_long flags;
+	unsigned char *chan;
 
 	if (cs->debug & L1_DEB_ISAC)
 		debugl1(cs, "enter:now PCI: card_msg: 0x%04X", mt);
 
-        switch (mt) {
-		case CARD_RESET:
-			reset_enpci(cs);
-                        Amd7930_init(cs);
-			break;
-		case CARD_RELEASE:
-			release_io_netjet(cs);
-			break;
-		case CARD_INIT:
-			inittiger(cs);
-			Amd7930_init(cs);
-			break;
-		case CARD_TEST:
-			break;
-                case MDL_ASSIGN:
-                        /* TEI assigned, LED1 on */
-                        cs->hw.njet.auxd = TJ_AMD_IRQ << 1;
-                        OutByte(cs->hw.njet.base + NETJET_AUXDATA, cs->hw.njet.auxd);
-                        break;
-                case MDL_REMOVE:
-                        /* TEI removed, LEDs off */
-	                cs->hw.njet.auxd = 0;
-                        OutByte(cs->hw.njet.base + NETJET_AUXDATA, 0x00);
-                        break;
-                case MDL_BC_ASSIGN:
-                        /* activate B-channel */
-                        chan = (BYTE *)arg;
+	switch (mt) {
+	case CARD_RESET:
+		spin_lock_irqsave(&cs->lock, flags);
+		reset_enpci(cs);
+		Amd7930_init(cs);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		break;
+	case CARD_RELEASE:
+		release_io_netjet(cs);
+		break;
+	case CARD_INIT:
+		reset_enpci(cs);
+		inittiger(cs);
+		/* irq must be on here */
+		Amd7930_init(cs);
+		break;
+	case CARD_TEST:
+		break;
+	case MDL_ASSIGN:
+		/* TEI assigned, LED1 on */
+		cs->hw.njet.auxd = TJ_AMD_IRQ << 1;
+		outb(cs->hw.njet.auxd, cs->hw.njet.base + NETJET_AUXDATA);
+		break;
+	case MDL_REMOVE:
+		/* TEI removed, LEDs off */
+		cs->hw.njet.auxd = 0;
+		outb(0x00, cs->hw.njet.base + NETJET_AUXDATA);
+		break;
+	case MDL_BC_ASSIGN:
+		/* activate B-channel */
+		chan = (unsigned char *)arg;
 
-                        if (cs->debug & L1_DEB_ISAC)
-		                debugl1(cs, "enter:now PCI: assign phys. BC %d in AMD LMR1", *chan);
+		if (cs->debug & L1_DEB_ISAC)
+			debugl1(cs, "enter:now PCI: assign phys. BC %d in AMD LMR1", *chan);
 
-                        cs->dc.amd7930.ph_command(cs, (cs->dc.amd7930.lmr1 | (*chan + 1)), "MDL_BC_ASSIGN");
-                        /* at least one b-channel in use, LED 2 on */
-                        cs->hw.njet.auxd |= TJ_AMD_IRQ << 2;
-                        OutByte(cs->hw.njet.base + NETJET_AUXDATA, cs->hw.njet.auxd);
-                        break;
-                case MDL_BC_RELEASE:
-                        /* deactivate B-channel */
-                        chan = (BYTE *)arg;
+		cs->dc.amd7930.ph_command(cs, (cs->dc.amd7930.lmr1 | (*chan + 1)), "MDL_BC_ASSIGN");
+		/* at least one b-channel in use, LED 2 on */
+		cs->hw.njet.auxd |= TJ_AMD_IRQ << 2;
+		outb(cs->hw.njet.auxd, cs->hw.njet.base + NETJET_AUXDATA);
+		break;
+	case MDL_BC_RELEASE:
+		/* deactivate B-channel */
+		chan = (unsigned char *)arg;
 
-                        if (cs->debug & L1_DEB_ISAC)
-		                debugl1(cs, "enter:now PCI: release phys. BC %d in Amd LMR1", *chan);
+		if (cs->debug & L1_DEB_ISAC)
+			debugl1(cs, "enter:now PCI: release phys. BC %d in Amd LMR1", *chan);
 
-                        cs->dc.amd7930.ph_command(cs, (cs->dc.amd7930.lmr1 & ~(*chan + 1)), "MDL_BC_RELEASE");
-                        /* no b-channel active -> LED2 off */
-                        if (!(cs->dc.amd7930.lmr1 & 3)) {
-                                cs->hw.njet.auxd &= ~(TJ_AMD_IRQ << 2);
-                                OutByte(cs->hw.njet.base + NETJET_AUXDATA, cs->hw.njet.auxd);
-                        }
-                        break;
-                default:
-                        break;
+		cs->dc.amd7930.ph_command(cs, (cs->dc.amd7930.lmr1 & ~(*chan + 1)), "MDL_BC_RELEASE");
+		/* no b-channel active -> LED2 off */
+		if (!(cs->dc.amd7930.lmr1 & 3)) {
+			cs->hw.njet.auxd &= ~(TJ_AMD_IRQ << 2);
+			outb(cs->hw.njet.auxd, cs->hw.njet.base + NETJET_AUXDATA);
+		}
+		break;
+	default:
+		break;
 
 	}
-	return(0);
+	return (0);
 }
 
-
-static void
-enpci_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+enpci_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
-	BYTE sval, ir;
-	long flags;
+	unsigned char s0val, s1val, ir;
+	u_long flags;
 
+	spin_lock_irqsave(&cs->lock, flags);
+	s1val = inb(cs->hw.njet.base + NETJET_IRQSTAT1);
 
-	if (!cs) {
-		printk(KERN_WARNING "enter:now PCI: Spurious interrupt!\n");
-		return;
-	}
-
-	sval = InByte(cs->hw.njet.base + NETJET_IRQSTAT1);
-
-        /* AMD threw an interrupt */
-	if (!(sval & TJ_AMD_IRQ)) {
-                /* read and clear interrupt-register */
+	/* AMD threw an interrupt */
+	if (!(s1val & TJ_AMD_IRQ)) {
+		/* read and clear interrupt-register */
 		ir = ReadByteAmd7930(cs, 0x00);
 		Amd7930_interrupt(cs, ir);
+		s1val = 1;
+	} else
+		s1val = 0;
+	s0val = inb(cs->hw.njet.base + NETJET_IRQSTAT0);
+	if ((s0val | s1val) == 0) { // shared IRQ
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return IRQ_NONE;
 	}
+	if (s0val)
+		outb(s0val, cs->hw.njet.base + NETJET_IRQSTAT0);
 
 	/* DMA-Interrupt: B-channel-stuff */
 	/* set bits in sval to indicate which page is free */
-
-	save_flags(flags);
-	cli();
-	/* set bits in sval to indicate which page is free */
 	if (inl(cs->hw.njet.base + NETJET_DMA_WRITE_ADR) <
-		inl(cs->hw.njet.base + NETJET_DMA_WRITE_IRQ))
+	    inl(cs->hw.njet.base + NETJET_DMA_WRITE_IRQ))
 		/* the 2nd write page is free */
-		sval = 0x08;
+		s0val = 0x08;
 	else	/* the 1st write page is free */
-		sval = 0x04;
+		s0val = 0x04;
 	if (inl(cs->hw.njet.base + NETJET_DMA_READ_ADR) <
-		inl(cs->hw.njet.base + NETJET_DMA_READ_IRQ))
+	    inl(cs->hw.njet.base + NETJET_DMA_READ_IRQ))
 		/* the 2nd read page is free */
-		sval = sval | 0x02;
+		s0val = s0val | 0x02;
 	else	/* the 1st read page is free */
-		sval = sval | 0x01;
-	if (sval != cs->hw.njet.last_is0) /* we have a DMA interrupt */
+		s0val = s0val | 0x01;
+	if (s0val != cs->hw.njet.last_is0) /* we have a DMA interrupt */
 	{
 		if (test_and_set_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags)) {
-			restore_flags(flags);
-			return;
+			spin_unlock_irqrestore(&cs->lock, flags);
+			return IRQ_HANDLED;
 		}
-		cs->hw.njet.irqstat0 = sval;
-		restore_flags(flags);
+		cs->hw.njet.irqstat0 = s0val;
 		if ((cs->hw.njet.irqstat0 & NETJET_IRQM0_READ) !=
-			(cs->hw.njet.last_is0 & NETJET_IRQM0_READ))
+		    (cs->hw.njet.last_is0 & NETJET_IRQM0_READ))
 			/* we have a read dma int */
 			read_tiger(cs);
 		if ((cs->hw.njet.irqstat0 & NETJET_IRQM0_WRITE) !=
-			(cs->hw.njet.last_is0 & NETJET_IRQM0_WRITE))
+		    (cs->hw.njet.last_is0 & NETJET_IRQM0_WRITE))
 			/* we have a write dma int */
 			write_tiger(cs);
 		test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
-	} else
-		restore_flags(flags);
+	}
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
-
-static struct pci_dev *dev_netjet __initdata = NULL;
-
-/* called by config.c */
-int __init
-setup_enternow_pci(struct IsdnCard *card)
+static int __devinit en_pci_probe(struct pci_dev *dev_netjet,
+				  struct IsdnCardState *cs)
 {
-	int bytecnt;
-	struct IsdnCardState *cs = card->cs;
-	char tmp[64];
-	long flags;
-
-#if CONFIG_PCI
-#ifdef __BIG_ENDIAN
-#error "not running on big endian machines now"
-#endif
-        strcpy(tmp, enternow_pci_rev);
-	printk(KERN_INFO "HiSax: Formula-n Europe AG enter:now ISDN PCI driver Rev. %s\n", HiSax_getrev(tmp));
-	if (cs->typ != ISDN_CTYPE_ENTERNOW)
-		return(0);
-	test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
-
-	for ( ;; )
-	{
-		if (!pci_present()) {
-			printk(KERN_ERR "enter:now PCI: no PCI bus present\n");
-			return(0);
-		}
-		if ((dev_netjet = pci_find_device(PCI_VENDOR_ID_TIGERJET,
-			PCI_DEVICE_ID_TIGERJET_300,  dev_netjet))) {
-			if (pci_enable_device(dev_netjet))
-				return(0);
-			cs->irq = dev_netjet->irq;
-			if (!cs->irq) {
-				printk(KERN_WARNING "enter:now PCI: No IRQ for PCI card found\n");
-				return(0);
-			}
-			cs->hw.njet.base = pci_resource_start(dev_netjet, 0);
-			if (!cs->hw.njet.base) {
-				printk(KERN_WARNING "enter:now PCI: No IO-Adr for PCI card found\n");
-				return(0);
-			}
-                        /* checks Sub-Vendor ID because system crashes with Traverse-Card */
-			if ((dev_netjet->subsystem_vendor != 0x55) ||
-				(dev_netjet->subsystem_device != 0x02)) {
-				printk(KERN_WARNING "enter:now: You tried to load this driver with an incompatible TigerJet-card\n");
-                                printk(KERN_WARNING "Use type=20 for Traverse NetJet PCI Card.\n");
-                                return(0);
-                        }
-		} else {
-                        printk(KERN_WARNING "enter:now PCI: No PCI card found\n");
-			return(0);
-		}
-
-		cs->hw.njet.auxa = cs->hw.njet.base + NETJET_AUXDATA;
-		cs->hw.njet.isac = cs->hw.njet.base + 0xC0; // Fenster zum AMD
-
-		save_flags(flags);
-		sti();
-
-		/* Reset an */
-		cs->hw.njet.ctrl_reg = 0x07;  // geändert von 0xff
-		OutByte(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		/* 50 ms Pause */
-		schedule_timeout((50*HZ)/1000);
-
-		cs->hw.njet.ctrl_reg = 0x30;  /* Reset Off and status read clear */
-		OutByte(cs->hw.njet.base + NETJET_CTRL, cs->hw.njet.ctrl_reg);
-
-		set_current_state(TASK_UNINTERRUPTIBLE);
-		schedule_timeout((10*HZ)/1000);	/* Timeout 10ms */
-
-		restore_flags(flags);
-
-		cs->hw.njet.auxd = 0x00; // war 0xc0
-		cs->hw.njet.dmactrl = 0;
-
-		OutByte(cs->hw.njet.base + NETJET_AUXCTRL, ~TJ_AMD_IRQ);
-		OutByte(cs->hw.njet.base + NETJET_IRQMASK1, TJ_AMD_IRQ);
-		OutByte(cs->hw.njet.auxa, cs->hw.njet.auxd);
-
-			   break;
+	if (pci_enable_device(dev_netjet))
+		return (0);
+	cs->irq = dev_netjet->irq;
+	if (!cs->irq) {
+		printk(KERN_WARNING "enter:now PCI: No IRQ for PCI card found\n");
+		return (0);
 	}
-#else
+	cs->hw.njet.base = pci_resource_start(dev_netjet, 0);
+	if (!cs->hw.njet.base) {
+		printk(KERN_WARNING "enter:now PCI: No IO-Adr for PCI card found\n");
+		return (0);
+	}
+	/* checks Sub-Vendor ID because system crashes with Traverse-Card */
+	if ((dev_netjet->subsystem_vendor != 0x55) ||
+	    (dev_netjet->subsystem_device != 0x02)) {
+		printk(KERN_WARNING "enter:now: You tried to load this driver with an incompatible TigerJet-card\n");
+		printk(KERN_WARNING "Use type=20 for Traverse NetJet PCI Card.\n");
+		return (0);
+	}
 
-	printk(KERN_WARNING "enter:now PCI: NO_PCI_BIOS\n");
-	printk(KERN_WARNING "enter:now PCI: unable to config Formula-n enter:now ISDN PCI ab\n");
-	return (0);
+	return (1);
+}
 
-#endif /* CONFIG_PCI */
+static void __devinit en_cs_init(struct IsdnCard *card,
+				 struct IsdnCardState *cs)
+{
+	cs->hw.njet.auxa = cs->hw.njet.base + NETJET_AUXDATA;
+	cs->hw.njet.isac = cs->hw.njet.base + 0xC0; // Fenster zum AMD
 
-	bytecnt = 256;
+	/* Reset an */
+	cs->hw.njet.ctrl_reg = 0x07;  // geÃ¤ndert von 0xff
+	outb(cs->hw.njet.ctrl_reg, cs->hw.njet.base + NETJET_CTRL);
+	/* 20 ms Pause */
+	mdelay(20);
+
+	cs->hw.njet.ctrl_reg = 0x30;  /* Reset Off and status read clear */
+	outb(cs->hw.njet.ctrl_reg, cs->hw.njet.base + NETJET_CTRL);
+	mdelay(10);
+
+	cs->hw.njet.auxd = 0x00; // war 0xc0
+	cs->hw.njet.dmactrl = 0;
+
+	outb(~TJ_AMD_IRQ, cs->hw.njet.base + NETJET_AUXCTRL);
+	outb(TJ_AMD_IRQ, cs->hw.njet.base + NETJET_IRQMASK1);
+	outb(cs->hw.njet.auxd, cs->hw.njet.auxa);
+}
+
+static int __devinit en_cs_init_rest(struct IsdnCard *card,
+				     struct IsdnCardState *cs)
+{
+	const int bytecnt = 256;
 
 	printk(KERN_INFO
-		"enter:now PCI: PCI card configured at 0x%lx IRQ %d\n",
-		cs->hw.njet.base, cs->irq);
-	if (check_region(cs->hw.njet.base, bytecnt)) {
+	       "enter:now PCI: PCI card configured at 0x%lx IRQ %d\n",
+	       cs->hw.njet.base, cs->irq);
+	if (!request_region(cs->hw.njet.base, bytecnt, "Fn_ISDN")) {
 		printk(KERN_WARNING
-			   "HiSax: %s config port %lx-%lx already in use\n",
-			   CardType[card->typ],
-			   cs->hw.njet.base,
-			   cs->hw.njet.base + bytecnt);
+		       "HiSax: enter:now config port %lx-%lx already in use\n",
+		       cs->hw.njet.base,
+		       cs->hw.njet.base + bytecnt);
 		return (0);
-	} else {
-		request_region(cs->hw.njet.base, bytecnt, "Fn_ISDN");
 	}
-	reset_enpci(cs);
-	cs->hw.njet.last_is0 = 0;
-        /* macro rByteAMD */
-        cs->readisac = &ReadByteAmd7930;
-        /* macro wByteAMD */
-        cs->writeisac = &WriteByteAmd7930;
-        cs->dc.amd7930.setIrqMask = &enpci_setIrqMask;
 
-        cs->BC_Read_Reg  = &dummyrr;
+	setup_Amd7930(cs);
+	cs->hw.njet.last_is0 = 0;
+	/* macro rByteAMD */
+	cs->readisac = &ReadByteAmd7930;
+	/* macro wByteAMD */
+	cs->writeisac = &WriteByteAmd7930;
+	cs->dc.amd7930.setIrqMask = &enpci_setIrqMask;
+
+	cs->BC_Read_Reg  = &dummyrr;
 	cs->BC_Write_Reg = &dummywr;
 	cs->BC_Send_Data = &netjet_fill_dma;
 	cs->cardmsg = &enpci_card_msg;
 	cs->irq_func = &enpci_interrupt;
-	cs->irq_flags |= SA_SHIRQ;
+	cs->irq_flags |= IRQF_SHARED;
 
-        return (1);
+	return (1);
 }
 
+static struct pci_dev *dev_netjet __devinitdata = NULL;
 
+/* called by config.c */
+int __devinit
+setup_enternow_pci(struct IsdnCard *card)
+{
+	int ret;
+	struct IsdnCardState *cs = card->cs;
+	char tmp[64];
 
+#ifdef __BIG_ENDIAN
+#error "not running on big endian machines now"
+#endif
 
+	strcpy(tmp, enternow_pci_rev);
+	printk(KERN_INFO "HiSax: Formula-n Europe AG enter:now ISDN PCI driver Rev. %s\n", HiSax_getrev(tmp));
+	if (cs->typ != ISDN_CTYPE_ENTERNOW)
+		return (0);
+	test_and_clear_bit(FLG_LOCK_ATOMIC, &cs->HW_Flags);
 
+	for (;;)
+	{
+		if ((dev_netjet = hisax_find_pci_device(PCI_VENDOR_ID_TIGERJET,
+							PCI_DEVICE_ID_TIGERJET_300,  dev_netjet))) {
+			ret = en_pci_probe(dev_netjet, cs);
+			if (!ret)
+				return (0);
+		} else {
+			printk(KERN_WARNING "enter:now PCI: No PCI card found\n");
+			return (0);
+		}
 
+		en_cs_init(card, cs);
+		break;
+	}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+	return en_cs_init_rest(card, cs);
+}

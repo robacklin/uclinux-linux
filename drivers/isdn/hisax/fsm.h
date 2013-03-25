@@ -1,11 +1,11 @@
-/* $Id: fsm.h,v 1.1.2.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: fsm.h,v 1.3.2.2 2001/09/23 22:24:47 kai Exp $
  *
  * Finite state machine
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  *              by Kai Germaschewski <kai.germaschewski@gmx.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -18,7 +18,7 @@
 
 struct FsmInst;
 
-typedef void (* FSMFNPTR)(struct FsmInst *, int, void *);
+typedef void (*FSMFNPTR)(struct FsmInst *, int, void *);
 
 struct Fsm {
 	FSMFNPTR *jumpmatrix;

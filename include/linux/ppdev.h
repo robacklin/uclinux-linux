@@ -1,5 +1,5 @@
 /*
- * linux/drivers/char/ppdev.h
+ * linux/include/linux/ppdev.h
  *
  * User-space parallel port device driver (header file).
  *
@@ -13,8 +13,6 @@
  * Added PPGETTIME/PPSETTIME, Fred Barnes, 1999
  * Added PPGETMODES/PPGETMODE/PPGETPHASE, Fred Barnes <frmb2@ukc.ac.uk>, 03/01/2001
  */
-
-#define PP_MAJOR	99
 
 #define PP_IOCTL	'p'
 

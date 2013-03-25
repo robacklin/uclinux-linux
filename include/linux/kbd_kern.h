@@ -1,12 +1,11 @@
 #ifndef _KBD_KERN_H
 #define _KBD_KERN_H
 
+#include <linux/tty.h>
 #include <linux/interrupt.h>
 #include <linux/keyboard.h>
 
 extern struct tasklet_struct keyboard_tasklet;
-
-extern int shift_state;
 
 extern char *func_table[MAX_NR_FUNC];
 extern char func_buf[];
@@ -42,17 +41,19 @@ struct kbd_struct {
 #define LED_SHOW_IOCTL 1        /* only change leds upon ioctl */
 #define LED_SHOW_MEM 2          /* `heartbeat': peek into memory */
 
-	unsigned char ledflagstate:3;	/* flags, not lights */
-	unsigned char default_ledflagstate:3;
+	unsigned char ledflagstate:4;	/* flags, not lights */
+	unsigned char default_ledflagstate:4;
 #define VC_SCROLLOCK	0	/* scroll-lock mode */
 #define VC_NUMLOCK	1	/* numeric lock mode */
 #define VC_CAPSLOCK	2	/* capslock mode */
+#define VC_KANALOCK	3	/* kanalock mode */
 
-	unsigned char kbdmode:2;	/* one 2-bit value */
+	unsigned char kbdmode:3;	/* one 3-bit value */
 #define VC_XLATE	0	/* translate keycodes using keymap */
 #define VC_MEDIUMRAW	1	/* medium raw (keycode) mode */
 #define VC_RAW		2	/* raw (scancode) mode */
 #define VC_UNICODE	3	/* Unicode mode */
+#define VC_OFF		4	/* disabled mode */
 
 	unsigned char modeflags:5;
 #define VC_APPLIC	0	/* application key mode */
@@ -62,8 +63,6 @@ struct kbd_struct {
 #define VC_META		4	/* 0 - meta, 1 - meta=prefix with ESC */
 };
 
-extern struct kbd_struct kbd_table[];
-
 extern int kbd_init(void);
 
 extern unsigned char getledstate(void);
@@ -72,11 +71,11 @@ extern void setledstate(struct kbd_struct *kbd, unsigned int led);
 extern int do_poke_blanked_console;
 
 extern void (*kbd_ledfunc)(unsigned int led);
-extern void kbd_refresh_leds(void);
 
-extern void set_console(int nr);
+extern int set_console(int nr);
 extern void schedule_console_callback(void);
 
+/* FIXME: review locking for vt.c callers */
 static inline void set_leds(void)
 {
 	tasklet_schedule(&keyboard_tasklet);
@@ -134,12 +133,12 @@ static inline void chg_vc_kbd_led(struct kbd_struct * kbd, int flag)
 
 #define U(x) ((x) ^ 0xf000)
 
+#define BRL_UC_ROW 0x2800
+
 /* keyboard.c */
 
 struct console;
 
-int getkeycode(unsigned int scancode);
-int setkeycode(unsigned int scancode, unsigned int keycode);
 void compute_shiftstate(void);
 
 /* defkeymap.c */
@@ -150,7 +149,12 @@ extern unsigned int keymap_count;
 
 static inline void con_schedule_flip(struct tty_struct *t)
 {
-	schedule_task(&t->flip.tqueue);
+	unsigned long flags;
+	spin_lock_irqsave(&t->buf.lock, flags);
+	if (t->buf.tail != NULL)
+		t->buf.tail->commit = t->buf.tail->used;
+	spin_unlock_irqrestore(&t->buf.lock, flags);
+	schedule_work(&t->buf.work);
 }
 
 #endif

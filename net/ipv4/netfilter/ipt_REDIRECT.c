@@ -1,4 +1,12 @@
 /* Redirect.  Simple mapping which alters dst to a local IP address. */
+/* (C) 1999-2001 Paul `Rusty' Russell
+ * (C) 2002-2006 Netfilter Core Team <coreteam@netfilter.org>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/types.h>
 #include <linux/ip.h>
 #include <linux/timer.h>
@@ -10,106 +18,93 @@
 #include <net/protocol.h>
 #include <net/checksum.h>
 #include <linux/netfilter_ipv4.h>
-#include <linux/netfilter_ipv4/ip_nat_rule.h>
+#include <linux/netfilter/x_tables.h>
+#include <net/netfilter/nf_nat_rule.h>
 
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Netfilter Core Team <coreteam@netfilter.org>");
+MODULE_DESCRIPTION("Xtables: Connection redirection to localhost");
 
 /* FIXME: Take multiple ranges --RR */
-static int
-redirect_check(const char *tablename,
-	       const struct ipt_entry *e,
-	       void *targinfo,
-	       unsigned int targinfosize,
-	       unsigned int hook_mask)
+static int redirect_tg_check(const struct xt_tgchk_param *par)
 {
-	const struct ip_nat_multi_range *mr = targinfo;
+	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
 
-	if (strcmp(tablename, "nat") != 0) {
-		DEBUGP("redirect_check: bad table `%s'.\n", table);
-		return 0;
-	}
-	if (targinfosize != IPT_ALIGN(sizeof(*mr))) {
-		DEBUGP("redirect_check: size %u.\n", targinfosize);
-		return 0;
-	}
-	if (hook_mask & ~((1 << NF_IP_PRE_ROUTING) | (1 << NF_IP_LOCAL_OUT))) {
-		DEBUGP("redirect_check: bad hooks %x.\n", hook_mask);
-		return 0;
-	}
-	if (mr->range[0].flags & IP_NAT_RANGE_MAP_IPS) {
-		DEBUGP("redirect_check: bad MAP_IPS.\n");
-		return 0;
+	if (mr->range[0].flags & NF_NAT_RANGE_MAP_IPS) {
+		pr_debug("bad MAP_IPS.\n");
+		return -EINVAL;
 	}
 	if (mr->rangesize != 1) {
-		DEBUGP("redirect_check: bad rangesize %u.\n", mr->rangesize);
-		return 0;
+		pr_debug("bad rangesize %u.\n", mr->rangesize);
+		return -EINVAL;
 	}
-	return 1;
+	return 0;
 }
 
 static unsigned int
-redirect_target(struct sk_buff **pskb,
-		unsigned int hooknum,
-		const struct net_device *in,
-		const struct net_device *out,
-		const void *targinfo,
-		void *userinfo)
+redirect_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	struct ip_conntrack *ct;
+	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
-	u_int32_t newdst;
-	const struct ip_nat_multi_range *mr = targinfo;
-	struct ip_nat_multi_range newrange;
+	__be32 newdst;
+	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
+	struct nf_nat_ipv4_range newrange;
 
-	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
-		     || hooknum == NF_IP_LOCAL_OUT);
+	NF_CT_ASSERT(par->hooknum == NF_INET_PRE_ROUTING ||
+		     par->hooknum == NF_INET_LOCAL_OUT);
 
-	ct = ip_conntrack_get(*pskb, &ctinfo);
-	IP_NF_ASSERT(ct && (ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED));
+	ct = nf_ct_get(skb, &ctinfo);
+	NF_CT_ASSERT(ct && (ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED));
 
 	/* Local packets: make them go to loopback */
-	if (hooknum == NF_IP_LOCAL_OUT)
+	if (par->hooknum == NF_INET_LOCAL_OUT)
 		newdst = htonl(0x7F000001);
 	else {
 		struct in_device *indev;
+		struct in_ifaddr *ifa;
 
-		/* Device might not have an associated in_device. */
-		indev = (struct in_device *)(*pskb)->dev->ip_ptr;
-		if (indev == NULL || indev->ifa_list == NULL)
+		newdst = 0;
+
+		rcu_read_lock();
+		indev = __in_dev_get_rcu(skb->dev);
+		if (indev && (ifa = indev->ifa_list))
+			newdst = ifa->ifa_local;
+		rcu_read_unlock();
+
+		if (!newdst)
 			return NF_DROP;
-
-		/* Grab first address on interface. */
-		newdst = indev->ifa_list->ifa_local;
 	}
 
 	/* Transfer from original range. */
-	newrange = ((struct ip_nat_multi_range)
-		{ 1, { { mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
-			 newdst, newdst,
-			 mr->range[0].min, mr->range[0].max } } });
+	newrange = ((struct nf_nat_ipv4_range)
+		{ mr->range[0].flags | NF_NAT_RANGE_MAP_IPS,
+		  newdst, newdst,
+		  mr->range[0].min, mr->range[0].max });
 
 	/* Hand modified range to generic setup. */
-	return ip_nat_setup_info(ct, &newrange, hooknum);
+	return nf_nat_setup_info(ct, &newrange, NF_NAT_MANIP_DST);
 }
 
-static struct ipt_target redirect_reg
-= { { NULL, NULL }, "REDIRECT", redirect_target, redirect_check, NULL,
-    THIS_MODULE };
+static struct xt_target redirect_tg_reg __read_mostly = {
+	.name		= "REDIRECT",
+	.family		= NFPROTO_IPV4,
+	.target		= redirect_tg,
+	.targetsize	= sizeof(struct nf_nat_ipv4_multi_range_compat),
+	.table		= "nat",
+	.hooks		= (1 << NF_INET_PRE_ROUTING) | (1 << NF_INET_LOCAL_OUT),
+	.checkentry	= redirect_tg_check,
+	.me		= THIS_MODULE,
+};
 
-static int __init init(void)
+static int __init redirect_tg_init(void)
 {
-	return ipt_register_target(&redirect_reg);
+	return xt_register_target(&redirect_tg_reg);
 }
 
-static void __exit fini(void)
+static void __exit redirect_tg_exit(void)
 {
-	ipt_unregister_target(&redirect_reg);
+	xt_unregister_target(&redirect_tg_reg);
 }
 
-module_init(init);
-module_exit(fini);
-MODULE_LICENSE("GPL");
+module_init(redirect_tg_init);
+module_exit(redirect_tg_exit);

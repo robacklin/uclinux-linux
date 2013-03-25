@@ -1,7 +1,6 @@
 		       Linux Joystick driver v2.0.0
-	       (c) 1996-2000 Vojtech Pavlik <vojtech@suse.cz>
+	       (c) 1996-2000 Vojtech Pavlik <vojtech@ucw.cz>
 			     Sponsored by SuSE
-	   $Id: joystick.txt,v 1.6 2001/06/05 09:57:01 vojtech Exp $
 ----------------------------------------------------------------------------
 
 0. Disclaimer
@@ -21,8 +20,8 @@ with this program; if not, write to the Free Software Foundation, Inc., 59
 Temple Place, Suite 330, Boston, MA 02111-1307 USA
 
   Should you need to contact me, the author, you can do so either by e-mail
-- mail your message to <vojtech@suse.cz>, or by paper mail: Vojtech Pavlik,
-Ucitelska 1576, Prague 8, 182 00 Czech Republic
+- mail your message to <vojtech@ucw.cz>, or by paper mail: Vojtech Pavlik,
+Simunkova 1594, Prague 8, 182 00 Czech Republic
 
   For your convenience, the GNU General Public License version 2 is included
 in the package: See the file COPYING.
@@ -39,7 +38,6 @@ them. Bug reports and success stories are also welcome.
 
   The input project website is at:
 
-	http://www.suse.cz/development/input/
 	http://atrey.karlin.mff.cuni.cz/~vojtech/input/
 
   There is also a mailing list for the driver at:
@@ -61,7 +59,7 @@ and install it before going on.
 
 2.2 Device nodes
 ~~~~~~~~~~~~~~~~
-For applications to be able to use the joysticks, in you don't use devfs,
+For applications to be able to use the joysticks,
 you'll have to manually create these nodes in /dev:
 
 cd /dev
@@ -111,7 +109,7 @@ your needs:
 	alias tty-ldisc-2 serport
 	alias char-major-13 input
 	above input joydev ns558 analog
-	options analog js=gameport
+	options analog map=gamepad,none,2btn
 
 2.5 Verifying that it works
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -182,10 +180,10 @@ they're basically souped up CHF sticks.
 
   For other joystick types (more/less axes, hats, and buttons) support
 you'll need to specify the types either on the kernel command line or on the
-module command line, when inserting analog.o into the kernel. The
+module command line, when inserting analog into the kernel. The
 parameters are:
 
-	js=type,type,type,....
+	analog.map=<type1>,<type2>,<type3>,....
 
   'type' is type of the joystick from the table below, defining joysticks
 present on gameports in the system, starting with gameport0, second 'type'
@@ -332,7 +330,7 @@ the USB documentation for how to setup an USB mouse.
   The TM DirectConnect (BSP) protocol is supported by the tmdc.c
 module. This includes, but is not limited to:
 
-* ThrustMaster Millenium 3D Inceptor
+* ThrustMaster Millennium 3D Interceptor
 * ThrustMaster 3D Rage Pad
 * ThrustMaster Fusion Digital Game Pad
 
@@ -404,7 +402,7 @@ for the port of the SoundFusion is supported by the cs461x.c module.
 ~~~~~~~~~~~~~~~~~~~~~~~~
   The Live! has a special PCI gameport, which, although it doesn't provide
 any "Enhanced" stuff like 4DWave and friends, is quite a bit faster than
-it's ISA counterparts. It also requires special support, hence the
+its ISA counterparts. It also requires special support, hence the
 emu10k1-gp.c module for it instead of the normal ns558.c one.
 
 3.15 SoundBlaster 64 and 128 - ES1370 and ES1371, ESS Solo1 and S3 SonicVibes
@@ -419,7 +417,7 @@ card.
   Amiga joysticks, connected to an Amiga, are supported by the amijoy.c
 driver. Since they can't be autodetected, the driver has a command line.
 
-	amijoy=a,b
+	amijoy.map=<a>,<b>
 
   a and b define the joysticks connected to the JOY0DAT and JOY1DAT ports of
 the Amiga.
@@ -503,15 +501,16 @@ and the /dev/input/jsX device should become usable.
 
 3.21 I-Force devices 
 ~~~~~~~~~~~~~~~~~~~~
-  All I-Force devices are supported by the iforce.c module. This includes:
+  All I-Force devices are supported by the iforce module. This includes:
 
 * AVB Mag Turbo Force
 * AVB Top Shot Pegasus
+* AVB Top Shot Force Feedback Racing Wheel
 * Logitech WingMan Force
-* Logitech WingMan Force 3D
 * Logitech WingMan Force Wheel 
-* Logitech WingMan Strike Force 3D
 * Guillemot Race Leader Force Feedback
+* Guillemot Force Feedback Racing Wheel
+* Thrustmaster Motor Sport GT
 
   To use it, you need to attach the serial port to the driver using the
 
@@ -524,6 +523,10 @@ command. After that the I-Force device will be detected, and the
 isn't needed.
 
   The I-Force driver now supports force feedback via the event interface.
+
+  Please note that Logitech WingMan *3D devices are _not_ supported by this
+module, rather by hid. Force feedback is not supported for those devices.
+Logitech gamepads are also hid devices.
 
 3.22 Gravis Stinger gamepad 
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

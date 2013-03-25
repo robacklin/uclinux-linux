@@ -5,18 +5,10 @@
 # Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
 #
 
-.S.s:
-	$(CPP) $(AFLAGS) -o $*.s $<
-.S.o:
-	$(CC) $(AFLAGS) -c -o $*.o $<
-
-all: dig.a
-
-O_TARGET := dig.a
-
 obj-y := setup.o
+ifeq ($(CONFIG_INTEL_IOMMU), y)
+obj-$(CONFIG_IA64_GENERIC) += machvec.o machvec_vtd.o
+else
 obj-$(CONFIG_IA64_GENERIC) += machvec.o
+endif
 
-clean::
-
-include $(TOPDIR)/Rules.make

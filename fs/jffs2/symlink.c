@@ -1,110 +1,67 @@
 /*
  * JFFS2 -- Journalling Flash File System, Version 2.
  *
- * Copyright (C) 2001, 2002 Red Hat, Inc.
+ * Copyright © 2001-2007 Red Hat, Inc.
  *
- * Created by David Woodhouse <dwmw2@cambridge.redhat.com>
+ * Created by David Woodhouse <dwmw2@infradead.org>
  *
- * The original JFFS, from which the design for JFFS2 was derived,
- * was designed and implemented by Axis Communications AB.
- *
- * The contents of this file are subject to the Red Hat eCos Public
- * License Version 1.1 (the "Licence"); you may not use this file
- * except in compliance with the Licence.  You may obtain a copy of
- * the Licence at http://www.redhat.com/
- *
- * Software distributed under the Licence is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied.
- * See the Licence for the specific language governing rights and
- * limitations under the Licence.
- *
- * The Original Code is JFFS2 - Journalling Flash File System, version 2
- *
- * Alternatively, the contents of this file may be used under the
- * terms of the GNU General Public License version 2 (the "GPL"), in
- * which case the provisions of the GPL are applicable instead of the
- * above.  If you wish to allow the use of your version of this file
- * only under the terms of the GPL and not to allow others to use your
- * version of this file under the RHEPL, indicate your decision by
- * deleting the provisions above and replace them with the notice and
- * other provisions required by the GPL.  If you do not delete the
- * provisions above, a recipient may use your version of this file
- * under either the RHEPL or the GPL.
- *
- * $Id: symlink.c,v 1.5.2.1 2002/01/15 10:39:06 dwmw2 Exp $
+ * For licensing information, see the file 'LICENCE' in this directory.
  *
  */
 
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/kernel.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
-#include <linux/jffs2.h>
+#include <linux/namei.h>
 #include "nodelist.h"
 
-int jffs2_readlink(struct dentry *dentry, char *buffer, int buflen);
-int jffs2_follow_link(struct dentry *dentry, struct nameidata *nd);
+static void *jffs2_follow_link(struct dentry *dentry, struct nameidata *nd);
 
-struct inode_operations jffs2_symlink_inode_operations =
-{	
-	readlink:	jffs2_readlink,
-	follow_link:	jffs2_follow_link,
-	setattr:	jffs2_setattr
+const struct inode_operations jffs2_symlink_inode_operations =
+{
+	.readlink =	generic_readlink,
+	.follow_link =	jffs2_follow_link,
+	.get_acl =	jffs2_get_acl,
+	.setattr =	jffs2_setattr,
+	.setxattr =	jffs2_setxattr,
+	.getxattr =	jffs2_getxattr,
+	.listxattr =	jffs2_listxattr,
+	.removexattr =	jffs2_removexattr
 };
 
-static char *jffs2_getlink(struct dentry *dentry)
+static void *jffs2_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
 	struct jffs2_inode_info *f = JFFS2_INODE_INFO(dentry->d_inode);
-	char *buf;
-	int ret;
+	char *p = (char *)f->target;
 
-	down(&f->sem);
-	if (!f->metadata) {
-		up(&f->sem);
-		printk(KERN_NOTICE "No metadata for symlink inode #%lu\n", dentry->d_inode->i_ino);
-		return ERR_PTR(-EINVAL);
+	/*
+	 * We don't acquire the f->sem mutex here since the only data we
+	 * use is f->target.
+	 *
+	 * 1. If we are here the inode has already built and f->target has
+	 * to point to the target path.
+	 * 2. Nobody uses f->target (if the inode is symlink's inode). The
+	 * exception is inode freeing function which frees f->target. But
+	 * it can't be called while we are here and before VFS has
+	 * stopped using our f->target string which we provide by means of
+	 * nd_set_link() call.
+	 */
+
+	if (!p) {
+		pr_err("%s(): can't find symlink target\n", __func__);
+		p = ERR_PTR(-EIO);
 	}
-	buf = kmalloc(f->metadata->size+1, GFP_USER);
-	if (!buf) {
-		up(&f->sem);
-		return ERR_PTR(-ENOMEM);
-	}
-	buf[f->metadata->size]=0;
+	jffs2_dbg(1, "%s(): target path is '%s'\n",
+		  __func__, (char *)f->target);
 
-	ret = jffs2_read_dnode(JFFS2_SB_INFO(dentry->d_inode->i_sb), f->metadata, buf, 0, f->metadata->size);
-	up(&f->sem);
-	if (ret) {
-		kfree(buf);
-		return ERR_PTR(ret);
-	}
-	return buf;
+	nd_set_link(nd, p);
 
-}
-int jffs2_readlink(struct dentry *dentry, char *buffer, int buflen)
-{
-	unsigned char *kbuf;
-	int ret;
-
-	kbuf = jffs2_getlink(dentry);
-	if (IS_ERR(kbuf))
-		return PTR_ERR(kbuf);
-
-	ret = vfs_readlink(dentry, buffer, buflen, kbuf);
-	kfree(kbuf);
-	return ret;
+	/*
+	 * We will unlock the f->sem mutex but VFS will use the f->target string. This is safe
+	 * since the only way that may cause f->target to be changed is iput() operation.
+	 * But VFS will not use f->target after iput() has been called.
+	 */
+	return NULL;
 }
 
-int jffs2_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	unsigned char *buf;
-	int ret;
-
-	buf = jffs2_getlink(dentry);
-
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
-
-	ret = vfs_follow_link(nd, buf);
-	kfree(buf);
-	return ret;
-}

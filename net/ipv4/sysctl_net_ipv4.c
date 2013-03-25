@@ -1,277 +1,872 @@
 /*
  * sysctl_net_ipv4.c: sysctl interface to net IPV4 subsystem.
  *
- * $Id: sysctl_net_ipv4.c,v 1.50 2001/10/20 00:00:11 davem Exp $
- *
  * Begun April 1, 1996, Mike Shaver.
  * Added /proc/sys/net/ipv4 directory entry (empty =) ). [MS]
  */
 
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/sysctl.h>
-#include <linux/config.h>
+#include <linux/igmp.h>
+#include <linux/inetdevice.h>
+#include <linux/seqlock.h>
+#include <linux/init.h>
+#include <linux/slab.h>
+#include <linux/nsproxy.h>
+#include <linux/swap.h>
 #include <net/snmp.h>
+#include <net/icmp.h>
 #include <net/ip.h>
 #include <net/route.h>
 #include <net/tcp.h>
+#include <net/udp.h>
+#include <net/cipso_ipv4.h>
+#include <net/inet_frag.h>
+#include <net/ping.h>
+#include <net/tcp_memcontrol.h>
 
-/* From af_inet.c */
-extern int sysctl_ip_nonlocal_bind;
-
-/* From icmp.c */
-extern int sysctl_icmp_echo_ignore_all;
-extern int sysctl_icmp_echo_ignore_broadcasts;
-extern int sysctl_icmp_ignore_bogus_error_responses;
-
-/* From ip_fragment.c */
-extern int sysctl_ipfrag_low_thresh;
-extern int sysctl_ipfrag_high_thresh; 
-extern int sysctl_ipfrag_time;
-extern int sysctl_ipfrag_secret_interval;
-
-/* From ip_output.c */
-extern int sysctl_ip_dynaddr;
-
-/* From icmp.c */
-extern int sysctl_icmp_ratelimit;
-extern int sysctl_icmp_ratemask;
-
-/* From igmp.c */
-extern int sysctl_igmp_max_memberships;
-extern int sysctl_igmp_max_msf;
-
-/* From inetpeer.c */
-extern int inet_peer_threshold;
-extern int inet_peer_minttl;
-extern int inet_peer_maxttl;
-extern int inet_peer_gc_mintime;
-extern int inet_peer_gc_maxtime;
-
-#ifdef CONFIG_SYSCTL
-static int tcp_retr1_max = 255; 
+static int zero;
+static int tcp_retr1_max = 255;
 static int ip_local_port_range_min[] = { 1, 1 };
 static int ip_local_port_range_max[] = { 65535, 65535 };
-#endif
+static int tcp_adv_win_scale_min = -31;
+static int tcp_adv_win_scale_max = 31;
+static int ip_ttl_min = 1;
+static int ip_ttl_max = 255;
+static int ip_ping_group_range_min[] = { 0, 0 };
+static int ip_ping_group_range_max[] = { GID_T_MAX, GID_T_MAX };
 
-/* From tcp_input.c */
-extern int sysctl_tcp_westwood;
-
-struct ipv4_config ipv4_config;
-
-extern ctl_table ipv4_route_table[];
-
-#ifdef CONFIG_SYSCTL
-
-static
-int ipv4_sysctl_forward(ctl_table *ctl, int write, struct file * filp,
-			void *buffer, size_t *lenp)
+/* Update system visible IP port range */
+static void set_local_port_range(int range[2])
 {
-	int val = ipv4_devconf.forwarding;
+	write_seqlock(&sysctl_local_ports.lock);
+	sysctl_local_ports.range[0] = range[0];
+	sysctl_local_ports.range[1] = range[1];
+	write_sequnlock(&sysctl_local_ports.lock);
+}
+
+/* Validate changes from /proc interface. */
+static int ipv4_local_port_range(ctl_table *table, int write,
+				 void __user *buffer,
+				 size_t *lenp, loff_t *ppos)
+{
 	int ret;
+	int range[2];
+	ctl_table tmp = {
+		.data = &range,
+		.maxlen = sizeof(range),
+		.mode = table->mode,
+		.extra1 = &ip_local_port_range_min,
+		.extra2 = &ip_local_port_range_max,
+	};
 
-	ret = proc_dointvec(ctl, write, filp, buffer, lenp);
+	inet_get_local_port_range(range, range + 1);
+	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
 
-	if (write && ipv4_devconf.forwarding != val)
-		inet_forward_change(ipv4_devconf.forwarding);
+	if (write && ret == 0) {
+		if (range[1] < range[0])
+			ret = -EINVAL;
+		else
+			set_local_port_range(range);
+	}
 
 	return ret;
 }
 
-static int ipv4_sysctl_forward_strategy(ctl_table *table, int *name, int nlen,
-			 void *oldval, size_t *oldlenp,
-			 void *newval, size_t newlen, 
-			 void **context)
+
+static void inet_get_ping_group_range_table(struct ctl_table *table, gid_t *low, gid_t *high)
 {
-	int new;
-	if (newlen != sizeof(int))
-		return -EINVAL;
-	if (get_user(new,(int *)newval))
-		return -EFAULT; 
-	if (new != ipv4_devconf.forwarding) 
-		inet_forward_change(new); 
-	return 0; /* caller does change again and handles handles oldval */ 
+	gid_t *data = table->data;
+	unsigned seq;
+	do {
+		seq = read_seqbegin(&sysctl_local_ports.lock);
+
+		*low = data[0];
+		*high = data[1];
+	} while (read_seqretry(&sysctl_local_ports.lock, seq));
 }
 
-ctl_table ipv4_table[] = {
-        {NET_IPV4_TCP_TIMESTAMPS, "tcp_timestamps",
-         &sysctl_tcp_timestamps, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_TCP_WINDOW_SCALING, "tcp_window_scaling",
-         &sysctl_tcp_window_scaling, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_TCP_SACK, "tcp_sack",
-         &sysctl_tcp_sack, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_TCP_RETRANS_COLLAPSE, "tcp_retrans_collapse",
-         &sysctl_tcp_retrans_collapse, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_FORWARD, "ip_forward",
-         &ipv4_devconf.forwarding, sizeof(int), 0644, NULL,
-         &ipv4_sysctl_forward,&ipv4_sysctl_forward_strategy},
-        {NET_IPV4_DEFAULT_TTL, "ip_default_ttl",
-         &sysctl_ip_default_ttl, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_AUTOCONFIG, "ip_autoconfig",
-         &ipv4_config.autoconfig, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_IPV4_NO_PMTU_DISC, "ip_no_pmtu_disc",
-         &ipv4_config.no_pmtu_disc, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-	{NET_IPV4_NONLOCAL_BIND, "ip_nonlocal_bind",
-	 &sysctl_ip_nonlocal_bind, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_IPV4_TCP_SYN_RETRIES, "tcp_syn_retries",
-	 &sysctl_tcp_syn_retries, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_SYNACK_RETRIES, "tcp_synack_retries",
-	 &sysctl_tcp_synack_retries, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_MAX_ORPHANS, "tcp_max_orphans",
-	 &sysctl_tcp_max_orphans, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_MAX_TW_BUCKETS, "tcp_max_tw_buckets",
-	 &sysctl_tcp_max_tw_buckets, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_IPFRAG_HIGH_THRESH, "ipfrag_high_thresh",
-	 &sysctl_ipfrag_high_thresh, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_IPFRAG_LOW_THRESH, "ipfrag_low_thresh",
-	 &sysctl_ipfrag_low_thresh, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_DYNADDR, "ip_dynaddr",
-	 &sysctl_ip_dynaddr, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_IPFRAG_TIME, "ipfrag_time",
-	 &sysctl_ipfrag_time, sizeof(int), 0644, NULL, &proc_dointvec_jiffies, 
-	 &sysctl_jiffies},
-	{NET_IPV4_TCP_KEEPALIVE_TIME, "tcp_keepalive_time",
-	 &sysctl_tcp_keepalive_time, sizeof(int), 0644, NULL, 
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_IPV4_TCP_KEEPALIVE_PROBES, "tcp_keepalive_probes",
-	 &sysctl_tcp_keepalive_probes, sizeof(int), 0644, NULL, 
-	 &proc_dointvec},
-	{NET_IPV4_TCP_KEEPALIVE_INTVL, "tcp_keepalive_intvl",
-	 &sysctl_tcp_keepalive_intvl, sizeof(int), 0644, NULL,
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_IPV4_TCP_RETRIES1, "tcp_retries1",
-	 &sysctl_tcp_retries1, sizeof(int), 0644, NULL, &proc_dointvec_minmax, 
-	 &sysctl_intvec, NULL, NULL, &tcp_retr1_max},
-	{NET_IPV4_TCP_RETRIES2, "tcp_retries2",
-	 &sysctl_tcp_retries2, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_TCP_FIN_TIMEOUT, "tcp_fin_timeout",
-	 &sysctl_tcp_fin_timeout, sizeof(int), 0644, NULL, 
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
+/* Update system visible IP port range */
+static void set_ping_group_range(struct ctl_table *table, gid_t range[2])
+{
+	gid_t *data = table->data;
+	write_seqlock(&sysctl_local_ports.lock);
+	data[0] = range[0];
+	data[1] = range[1];
+	write_sequnlock(&sysctl_local_ports.lock);
+}
+
+/* Validate changes from /proc interface. */
+static int ipv4_ping_group_range(ctl_table *table, int write,
+				 void __user *buffer,
+				 size_t *lenp, loff_t *ppos)
+{
+	int ret;
+	gid_t range[2];
+	ctl_table tmp = {
+		.data = &range,
+		.maxlen = sizeof(range),
+		.mode = table->mode,
+		.extra1 = &ip_ping_group_range_min,
+		.extra2 = &ip_ping_group_range_max,
+	};
+
+	inet_get_ping_group_range_table(table, range, range + 1);
+	ret = proc_dointvec_minmax(&tmp, write, buffer, lenp, ppos);
+
+	if (write && ret == 0)
+		set_ping_group_range(table, range);
+
+	return ret;
+}
+
+static int proc_tcp_congestion_control(ctl_table *ctl, int write,
+				       void __user *buffer, size_t *lenp, loff_t *ppos)
+{
+	char val[TCP_CA_NAME_MAX];
+	ctl_table tbl = {
+		.data = val,
+		.maxlen = TCP_CA_NAME_MAX,
+	};
+	int ret;
+
+	tcp_get_default_congestion_control(val);
+
+	ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
+	if (write && ret == 0)
+		ret = tcp_set_default_congestion_control(val);
+	return ret;
+}
+
+static int proc_tcp_available_congestion_control(ctl_table *ctl,
+						 int write,
+						 void __user *buffer, size_t *lenp,
+						 loff_t *ppos)
+{
+	ctl_table tbl = { .maxlen = TCP_CA_BUF_MAX, };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+	tcp_get_available_congestion_control(tbl.data, TCP_CA_BUF_MAX);
+	ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
+	kfree(tbl.data);
+	return ret;
+}
+
+static int proc_allowed_congestion_control(ctl_table *ctl,
+					   int write,
+					   void __user *buffer, size_t *lenp,
+					   loff_t *ppos)
+{
+	ctl_table tbl = { .maxlen = TCP_CA_BUF_MAX };
+	int ret;
+
+	tbl.data = kmalloc(tbl.maxlen, GFP_USER);
+	if (!tbl.data)
+		return -ENOMEM;
+
+	tcp_get_allowed_congestion_control(tbl.data, tbl.maxlen);
+	ret = proc_dostring(&tbl, write, buffer, lenp, ppos);
+	if (write && ret == 0)
+		ret = tcp_set_allowed_congestion_control(tbl.data);
+	kfree(tbl.data);
+	return ret;
+}
+
+static int ipv4_tcp_mem(ctl_table *ctl, int write,
+			   void __user *buffer, size_t *lenp,
+			   loff_t *ppos)
+{
+	int ret;
+	unsigned long vec[3];
+	struct net *net = current->nsproxy->net_ns;
+#ifdef CONFIG_CGROUP_MEM_RES_CTLR_KMEM
+	struct mem_cgroup *memcg;
+#endif
+
+	ctl_table tmp = {
+		.data = &vec,
+		.maxlen = sizeof(vec),
+		.mode = ctl->mode,
+	};
+
+	if (!write) {
+		ctl->data = &net->ipv4.sysctl_tcp_mem;
+		return proc_doulongvec_minmax(ctl, write, buffer, lenp, ppos);
+	}
+
+	ret = proc_doulongvec_minmax(&tmp, write, buffer, lenp, ppos);
+	if (ret)
+		return ret;
+
+#ifdef CONFIG_CGROUP_MEM_RES_CTLR_KMEM
+	rcu_read_lock();
+	memcg = mem_cgroup_from_task(current);
+
+	tcp_prot_mem(memcg, vec[0], 0);
+	tcp_prot_mem(memcg, vec[1], 1);
+	tcp_prot_mem(memcg, vec[2], 2);
+	rcu_read_unlock();
+#endif
+
+	net->ipv4.sysctl_tcp_mem[0] = vec[0];
+	net->ipv4.sysctl_tcp_mem[1] = vec[1];
+	net->ipv4.sysctl_tcp_mem[2] = vec[2];
+
+	return 0;
+}
+
+static struct ctl_table ipv4_table[] = {
+	{
+		.procname	= "tcp_timestamps",
+		.data		= &sysctl_tcp_timestamps,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_window_scaling",
+		.data		= &sysctl_tcp_window_scaling,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_sack",
+		.data		= &sysctl_tcp_sack,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_retrans_collapse",
+		.data		= &sysctl_tcp_retrans_collapse,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ip_default_ttl",
+		.data		= &sysctl_ip_default_ttl,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &ip_ttl_min,
+		.extra2		= &ip_ttl_max,
+	},
+	{
+		.procname	= "ip_no_pmtu_disc",
+		.data		= &ipv4_config.no_pmtu_disc,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ip_nonlocal_bind",
+		.data		= &sysctl_ip_nonlocal_bind,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_syn_retries",
+		.data		= &sysctl_tcp_syn_retries,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_synack_retries",
+		.data		= &sysctl_tcp_synack_retries,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_max_orphans",
+		.data		= &sysctl_tcp_max_orphans,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_max_tw_buckets",
+		.data		= &tcp_death_row.sysctl_max_tw_buckets,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ip_dynaddr",
+		.data		= &sysctl_ip_dynaddr,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_keepalive_time",
+		.data		= &sysctl_tcp_keepalive_time,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "tcp_keepalive_probes",
+		.data		= &sysctl_tcp_keepalive_probes,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_keepalive_intvl",
+		.data		= &sysctl_tcp_keepalive_intvl,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "tcp_retries1",
+		.data		= &sysctl_tcp_retries1,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra2		= &tcp_retr1_max
+	},
+	{
+		.procname	= "tcp_retries2",
+		.data		= &sysctl_tcp_retries2,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_fin_timeout",
+		.data		= &sysctl_tcp_fin_timeout,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
 #ifdef CONFIG_SYN_COOKIES
-	{NET_TCP_SYNCOOKIES, "tcp_syncookies",
-	 &sysctl_tcp_syncookies, sizeof(int), 0644, NULL, &proc_dointvec},
+	{
+		.procname	= "tcp_syncookies",
+		.data		= &sysctl_tcp_syncookies,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
 #endif
-	{NET_TCP_TW_RECYCLE, "tcp_tw_recycle",
-	 &sysctl_tcp_tw_recycle, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_ABORT_ON_OVERFLOW, "tcp_abort_on_overflow",
-	 &sysctl_tcp_abort_on_overflow, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_STDURG, "tcp_stdurg", &sysctl_tcp_stdurg,
-	 sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_RFC1337, "tcp_rfc1337", &sysctl_tcp_rfc1337,
-	 sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_MAX_SYN_BACKLOG, "tcp_max_syn_backlog", &sysctl_max_syn_backlog,
-	 sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_LOCAL_PORT_RANGE, "ip_local_port_range",
-	 &sysctl_local_port_range, sizeof(sysctl_local_port_range), 0644, 
-	 NULL, &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 ip_local_port_range_min, ip_local_port_range_max },
-	{NET_IPV4_ICMP_ECHO_IGNORE_ALL, "icmp_echo_ignore_all",
-	 &sysctl_icmp_echo_ignore_all, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_IPV4_ICMP_ECHO_IGNORE_BROADCASTS, "icmp_echo_ignore_broadcasts",
-	 &sysctl_icmp_echo_ignore_broadcasts, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_IPV4_ICMP_IGNORE_BOGUS_ERROR_RESPONSES, "icmp_ignore_bogus_error_responses",
-	 &sysctl_icmp_ignore_bogus_error_responses, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_IPV4_ROUTE, "route", NULL, 0, 0555, ipv4_route_table},
-#ifdef CONFIG_IP_MULTICAST
-	{NET_IPV4_IGMP_MAX_MEMBERSHIPS, "igmp_max_memberships",
-	 &sysctl_igmp_max_memberships, sizeof(int), 0644, NULL, &proc_dointvec},
+	{
+		.procname	= "tcp_tw_recycle",
+		.data		= &tcp_death_row.sysctl_tw_recycle,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_abort_on_overflow",
+		.data		= &sysctl_tcp_abort_on_overflow,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_stdurg",
+		.data		= &sysctl_tcp_stdurg,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_rfc1337",
+		.data		= &sysctl_tcp_rfc1337,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_max_syn_backlog",
+		.data		= &sysctl_max_syn_backlog,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ip_local_port_range",
+		.data		= &sysctl_local_ports.range,
+		.maxlen		= sizeof(sysctl_local_ports.range),
+		.mode		= 0644,
+		.proc_handler	= ipv4_local_port_range,
+	},
+	{
+		.procname	= "ip_local_reserved_ports",
+		.data		= NULL, /* initialized in sysctl_ipv4_init */
+		.maxlen		= 65536,
+		.mode		= 0644,
+		.proc_handler	= proc_do_large_bitmap,
+	},
+	{
+		.procname	= "igmp_max_memberships",
+		.data		= &sysctl_igmp_max_memberships,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "igmp_max_msf",
+		.data		= &sysctl_igmp_max_msf,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "inet_peer_threshold",
+		.data		= &inet_peer_threshold,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "inet_peer_minttl",
+		.data		= &inet_peer_minttl,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "inet_peer_maxttl",
+		.data		= &inet_peer_maxttl,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_jiffies,
+	},
+	{
+		.procname	= "tcp_orphan_retries",
+		.data		= &sysctl_tcp_orphan_retries,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_fack",
+		.data		= &sysctl_tcp_fack,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_reordering",
+		.data		= &sysctl_tcp_reordering,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_ecn",
+		.data		= &sysctl_tcp_ecn,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_dsack",
+		.data		= &sysctl_tcp_dsack,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_wmem",
+		.data		= &sysctl_tcp_wmem,
+		.maxlen		= sizeof(sysctl_tcp_wmem),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_rmem",
+		.data		= &sysctl_tcp_rmem,
+		.maxlen		= sizeof(sysctl_tcp_rmem),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_app_win",
+		.data		= &sysctl_tcp_app_win,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_adv_win_scale",
+		.data		= &sysctl_tcp_adv_win_scale,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &tcp_adv_win_scale_min,
+		.extra2		= &tcp_adv_win_scale_max,
+	},
+	{
+		.procname	= "tcp_tw_reuse",
+		.data		= &sysctl_tcp_tw_reuse,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_frto",
+		.data		= &sysctl_tcp_frto,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_frto_response",
+		.data		= &sysctl_tcp_frto_response,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_low_latency",
+		.data		= &sysctl_tcp_low_latency,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "tcp_no_metrics_save",
+		.data		= &sysctl_tcp_nometrics_save,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_moderate_rcvbuf",
+		.data		= &sysctl_tcp_moderate_rcvbuf,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_tso_win_divisor",
+		.data		= &sysctl_tcp_tso_win_divisor,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_congestion_control",
+		.mode		= 0644,
+		.maxlen		= TCP_CA_NAME_MAX,
+		.proc_handler	= proc_tcp_congestion_control,
+	},
+	{
+		.procname	= "tcp_abc",
+		.data		= &sysctl_tcp_abc,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_mtu_probing",
+		.data		= &sysctl_tcp_mtu_probing,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_base_mss",
+		.data		= &sysctl_tcp_base_mss,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_workaround_signed_windows",
+		.data		= &sysctl_tcp_workaround_signed_windows,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+#ifdef CONFIG_NET_DMA
+	{
+		.procname	= "tcp_dma_copybreak",
+		.data		= &sysctl_tcp_dma_copybreak,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
 #endif
-	{NET_IPV4_IGMP_MAX_MSF, "igmp_max_msf",
-	 &sysctl_igmp_max_msf, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_INET_PEER_THRESHOLD, "inet_peer_threshold",
-	 &inet_peer_threshold, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_INET_PEER_MINTTL, "inet_peer_minttl",
-	 &inet_peer_minttl, sizeof(int), 0644, NULL,
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_IPV4_INET_PEER_MAXTTL, "inet_peer_maxttl",
-	 &inet_peer_maxttl, sizeof(int), 0644, NULL,
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_IPV4_INET_PEER_GC_MINTIME, "inet_peer_gc_mintime",
-	 &inet_peer_gc_mintime, sizeof(int), 0644, NULL,
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_IPV4_INET_PEER_GC_MAXTIME, "inet_peer_gc_maxtime",
-	 &inet_peer_gc_maxtime, sizeof(int), 0644, NULL,
-	 &proc_dointvec_jiffies, &sysctl_jiffies},
-	{NET_TCP_ORPHAN_RETRIES, "tcp_orphan_retries",
-	 &sysctl_tcp_orphan_retries, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_FACK, "tcp_fack",
-	 &sysctl_tcp_fack, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_REORDERING, "tcp_reordering",
-	 &sysctl_tcp_reordering, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_ECN, "tcp_ecn",
-	 &sysctl_tcp_ecn, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_DSACK, "tcp_dsack",
-	 &sysctl_tcp_dsack, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_MEM, "tcp_mem",
-	 &sysctl_tcp_mem, sizeof(sysctl_tcp_mem), 0644, NULL, &proc_dointvec},
-	{NET_TCP_WMEM, "tcp_wmem",
-	 &sysctl_tcp_wmem, sizeof(sysctl_tcp_wmem), 0644, NULL, &proc_dointvec},
-	{NET_TCP_RMEM, "tcp_rmem",
-	 &sysctl_tcp_rmem, sizeof(sysctl_tcp_rmem), 0644, NULL, &proc_dointvec},
-	{NET_TCP_APP_WIN, "tcp_app_win",
-	 &sysctl_tcp_app_win, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_ADV_WIN_SCALE, "tcp_adv_win_scale",
-	 &sysctl_tcp_adv_win_scale, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_ICMP_RATELIMIT, "icmp_ratelimit",
-	 &sysctl_icmp_ratelimit, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_ICMP_RATEMASK, "icmp_ratemask",
-	 &sysctl_icmp_ratemask, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_TW_REUSE, "tcp_tw_reuse",
-	 &sysctl_tcp_tw_reuse, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_FRTO, "tcp_frto",
-	 &sysctl_tcp_frto, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_TCP_LOW_LATENCY, "tcp_low_latency",
-	 &sysctl_tcp_low_latency, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV4_IPFRAG_SECRET_INTERVAL, "ipfrag_secret_interval",
-	 &sysctl_ipfrag_secret_interval, sizeof(int), 0644, NULL, &proc_dointvec_jiffies, 
-	 &sysctl_jiffies},
-        {NET_TCP_WESTWOOD, "tcp_westwood",
-         &sysctl_tcp_westwood, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-        {NET_TCP_NO_METRICS_SAVE, "tcp_no_metrics_save",
-         &sysctl_tcp_nometrics_save, sizeof(int), 0644, NULL,
-         &proc_dointvec},
-	{NET_TCP_VEGAS, "tcp_vegas_cong_avoid",
-	 &sysctl_tcp_vegas_cong_avoid, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_VEGAS_ALPHA, "tcp_vegas_alpha",
-	 &sysctl_tcp_vegas_alpha, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_VEGAS_BETA, "tcp_vegas_beta",
-	 &sysctl_tcp_vegas_beta, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_VEGAS_GAMMA, "tcp_vegas_gamma",
-	 &sysctl_tcp_vegas_gamma, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_BIC, "tcp_bic",
-	 &sysctl_tcp_bic, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_BIC_FAST_CONVERGENCE, "tcp_bic_fast_convergence",
-	 &sysctl_tcp_bic_fast_convergence, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_BIC_LOW_WINDOW, "tcp_bic_low_window",
-	 &sysctl_tcp_bic_low_window, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
- 	{NET_TCP_DEFAULT_WIN_SCALE, "tcp_default_win_scale",
-	 &sysctl_tcp_default_win_scale, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
- 	{NET_TCP_MODERATE_RCVBUF, "tcp_moderate_rcvbuf",
-	 &sysctl_tcp_moderate_rcvbuf, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{NET_TCP_BIC_BETA, "tcp_bic_beta",
-	 &sysctl_tcp_bic_beta, sizeof(int), 0644, NULL,
-	 &proc_dointvec},
-	{0}
+	{
+		.procname	= "tcp_slow_start_after_idle",
+		.data		= &sysctl_tcp_slow_start_after_idle,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+#ifdef CONFIG_NETLABEL
+	{
+		.procname	= "cipso_cache_enable",
+		.data		= &cipso_v4_cache_enabled,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "cipso_cache_bucket_size",
+		.data		= &cipso_v4_cache_bucketsize,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "cipso_rbm_optfmt",
+		.data		= &cipso_v4_rbm_optfmt,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "cipso_rbm_strictvalid",
+		.data		= &cipso_v4_rbm_strictvalid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+#endif /* CONFIG_NETLABEL */
+	{
+		.procname	= "tcp_available_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0444,
+		.proc_handler   = proc_tcp_available_congestion_control,
+	},
+	{
+		.procname	= "tcp_allowed_congestion_control",
+		.maxlen		= TCP_CA_BUF_MAX,
+		.mode		= 0644,
+		.proc_handler   = proc_allowed_congestion_control,
+	},
+	{
+		.procname	= "tcp_max_ssthresh",
+		.data		= &sysctl_tcp_max_ssthresh,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "tcp_cookie_size",
+		.data		= &sysctl_tcp_cookie_size,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname       = "tcp_thin_linear_timeouts",
+		.data           = &sysctl_tcp_thin_linear_timeouts,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec
+	},
+        {
+		.procname       = "tcp_thin_dupack",
+		.data           = &sysctl_tcp_thin_dupack,
+		.maxlen         = sizeof(int),
+		.mode           = 0644,
+		.proc_handler   = proc_dointvec
+	},
+	{
+		.procname	= "udp_mem",
+		.data		= &sysctl_udp_mem,
+		.maxlen		= sizeof(sysctl_udp_mem),
+		.mode		= 0644,
+		.proc_handler	= proc_doulongvec_minmax,
+	},
+	{
+		.procname	= "udp_rmem_min",
+		.data		= &sysctl_udp_rmem_min,
+		.maxlen		= sizeof(sysctl_udp_rmem_min),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero
+	},
+	{
+		.procname	= "udp_wmem_min",
+		.data		= &sysctl_udp_wmem_min,
+		.maxlen		= sizeof(sysctl_udp_wmem_min),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &zero
+	},
+	{ }
 };
 
-#endif /* CONFIG_SYSCTL */
+static struct ctl_table ipv4_net_table[] = {
+	{
+		.procname	= "icmp_echo_ignore_all",
+		.data		= &init_net.ipv4.sysctl_icmp_echo_ignore_all,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "icmp_echo_ignore_broadcasts",
+		.data		= &init_net.ipv4.sysctl_icmp_echo_ignore_broadcasts,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "icmp_ignore_bogus_error_responses",
+		.data		= &init_net.ipv4.sysctl_icmp_ignore_bogus_error_responses,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "icmp_errors_use_inbound_ifaddr",
+		.data		= &init_net.ipv4.sysctl_icmp_errors_use_inbound_ifaddr,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "icmp_ratelimit",
+		.data		= &init_net.ipv4.sysctl_icmp_ratelimit,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_ms_jiffies,
+	},
+	{
+		.procname	= "icmp_ratemask",
+		.data		= &init_net.ipv4.sysctl_icmp_ratemask,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "rt_cache_rebuild_count",
+		.data		= &init_net.ipv4.sysctl_rt_cache_rebuild_count,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{
+		.procname	= "ping_group_range",
+		.data		= &init_net.ipv4.sysctl_ping_group_range,
+		.maxlen		= sizeof(init_net.ipv4.sysctl_ping_group_range),
+		.mode		= 0644,
+		.proc_handler	= ipv4_ping_group_range,
+	},
+	{
+		.procname	= "tcp_mem",
+		.maxlen		= sizeof(init_net.ipv4.sysctl_tcp_mem),
+		.mode		= 0644,
+		.proc_handler	= ipv4_tcp_mem,
+	},
+	{ }
+};
+
+struct ctl_path net_ipv4_ctl_path[] = {
+	{ .procname = "net", },
+	{ .procname = "ipv4", },
+	{ },
+};
+EXPORT_SYMBOL_GPL(net_ipv4_ctl_path);
+
+static __net_init int ipv4_sysctl_init_net(struct net *net)
+{
+	struct ctl_table *table;
+
+	table = ipv4_net_table;
+	if (!net_eq(net, &init_net)) {
+		table = kmemdup(table, sizeof(ipv4_net_table), GFP_KERNEL);
+		if (table == NULL)
+			goto err_alloc;
+
+		table[0].data =
+			&net->ipv4.sysctl_icmp_echo_ignore_all;
+		table[1].data =
+			&net->ipv4.sysctl_icmp_echo_ignore_broadcasts;
+		table[2].data =
+			&net->ipv4.sysctl_icmp_ignore_bogus_error_responses;
+		table[3].data =
+			&net->ipv4.sysctl_icmp_errors_use_inbound_ifaddr;
+		table[4].data =
+			&net->ipv4.sysctl_icmp_ratelimit;
+		table[5].data =
+			&net->ipv4.sysctl_icmp_ratemask;
+		table[6].data =
+			&net->ipv4.sysctl_rt_cache_rebuild_count;
+		table[7].data =
+			&net->ipv4.sysctl_ping_group_range;
+
+	}
+
+	/*
+	 * Sane defaults - nobody may create ping sockets.
+	 * Boot scripts should set this to distro-specific group.
+	 */
+	net->ipv4.sysctl_ping_group_range[0] = 1;
+	net->ipv4.sysctl_ping_group_range[1] = 0;
+
+	net->ipv4.sysctl_rt_cache_rebuild_count = 4;
+
+	tcp_init_mem(net);
+
+	net->ipv4.ipv4_hdr = register_net_sysctl_table(net,
+			net_ipv4_ctl_path, table);
+	if (net->ipv4.ipv4_hdr == NULL)
+		goto err_reg;
+
+	return 0;
+
+err_reg:
+	if (!net_eq(net, &init_net))
+		kfree(table);
+err_alloc:
+	return -ENOMEM;
+}
+
+static __net_exit void ipv4_sysctl_exit_net(struct net *net)
+{
+	struct ctl_table *table;
+
+	table = net->ipv4.ipv4_hdr->ctl_table_arg;
+	unregister_net_sysctl_table(net->ipv4.ipv4_hdr);
+	kfree(table);
+}
+
+static __net_initdata struct pernet_operations ipv4_sysctl_ops = {
+	.init = ipv4_sysctl_init_net,
+	.exit = ipv4_sysctl_exit_net,
+};
+
+static __init int sysctl_ipv4_init(void)
+{
+	struct ctl_table_header *hdr;
+	struct ctl_table *i;
+
+	for (i = ipv4_table; i->procname; i++) {
+		if (strcmp(i->procname, "ip_local_reserved_ports") == 0) {
+			i->data = sysctl_local_reserved_ports;
+			break;
+		}
+	}
+	if (!i->procname)
+		return -EINVAL;
+
+	hdr = register_sysctl_paths(net_ipv4_ctl_path, ipv4_table);
+	if (hdr == NULL)
+		return -ENOMEM;
+
+	if (register_pernet_subsys(&ipv4_sysctl_ops)) {
+		unregister_sysctl_table(hdr);
+		return -ENOMEM;
+	}
+
+	return 0;
+}
+
+__initcall(sysctl_ipv4_init);

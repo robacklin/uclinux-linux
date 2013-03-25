@@ -18,13 +18,12 @@
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/adb.h>
 #include <linux/cuda.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <asm/macintosh.h>
 #include <asm/macints.h>
-#include <asm/machw.h>
 #include <asm/mac_via.h>
 
 static volatile unsigned char *via;
@@ -62,10 +61,10 @@ static volatile unsigned char *via;
 
 #undef DEBUG_MACIISI_ADB
 
-static struct adb_request* current_req = NULL;
-static struct adb_request* last_req = NULL;
+static struct adb_request* current_req;
+static struct adb_request* last_req;
 static unsigned char maciisi_rbuf[16];
-static unsigned char *reply_ptr = NULL;
+static unsigned char *reply_ptr;
 static int data_index;
 static int reading_reply;
 static int reply_len;
@@ -83,8 +82,8 @@ static int maciisi_init(void);
 static int maciisi_send_request(struct adb_request* req, int sync);
 static void maciisi_sync(struct adb_request *req);
 static int maciisi_write(struct adb_request* req);
-static void maciisi_interrupt(int irq, void* arg, struct pt_regs* regs);
-static void maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs);
+static irqreturn_t maciisi_interrupt(int irq, void* arg);
+static void maciisi_input(unsigned char *buf, int nb);
 static int maciisi_init_via(void);
 static void maciisi_poll(void);
 static int maciisi_start(void);
@@ -123,8 +122,8 @@ maciisi_init(void)
 		return err;
 	}
 
-	if (request_irq(IRQ_MAC_ADB, maciisi_interrupt, IRQ_FLG_LOCK | IRQ_FLG_FAST, 
-			"ADB", maciisi_interrupt)) {
+	if (request_irq(IRQ_MAC_ADB, maciisi_interrupt, 0, "ADB",
+			maciisi_interrupt)) {
 		printk(KERN_ERR "maciisi_init: can't get irq %d\n", IRQ_MAC_ADB);
 		return -EAGAIN;
 	}
@@ -289,8 +288,26 @@ static void maciisi_sync(struct adb_request *req)
 	}
 	/* This could be BAD... when the ADB controller doesn't respond
 	 * for this long, it's probably not coming back :-( */
-	if(count >= 50) /* Hopefully shouldn't happen */
+	if (count > 50) /* Hopefully shouldn't happen */
 		printk(KERN_ERR "maciisi_send_request: poll timed out!\n");
+}
+
+int
+maciisi_request(struct adb_request *req, void (*done)(struct adb_request *),
+	    int nbytes, ...)
+{
+	va_list list;
+	int i;
+
+	req->nbytes = nbytes;
+	req->done = done;
+	req->reply_expected = 0;
+	va_start(list, nbytes);
+	for (i = 0; i < nbytes; i++)
+		req->data[i++] = va_arg(list, int);
+	va_end(list);
+
+	return maciisi_send_request(req, 1);
 }
 
 /* Enqueue a request, and run the queue if possible */
@@ -307,13 +324,12 @@ maciisi_write(struct adb_request* req)
 		req->complete = 1;
 		return -EINVAL;
 	}
-	req->next = 0;
+	req->next = NULL;
 	req->sent = 0;
 	req->complete = 0;
 	req->reply_len = 0;
 	
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	if (current_req) {
 		last_req->next = req;
@@ -327,7 +343,7 @@ maciisi_write(struct adb_request* req)
 		i = maciisi_start();
 		if(i != 0)
 		{
-			restore_flags(flags);
+			local_irq_restore(flags);
 			return i;
 		}
 	}
@@ -336,11 +352,11 @@ maciisi_write(struct adb_request* req)
 #ifdef DEBUG_MACIISI_ADB
 		printk(KERN_DEBUG "maciisi_write: would start, but state is %d\n", maciisi_state);
 #endif
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return -EBUSY;
 	}
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	return 0;
 }
@@ -401,22 +417,21 @@ maciisi_poll(void)
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	if (via[IFR] & SR_INT) {
-		maciisi_interrupt(0, 0, 0);
+		maciisi_interrupt(0, NULL);
 	}
 	else /* avoid calling this function too quickly in a loop */
 		udelay(ADB_DELAY);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 /* Shift register interrupt - this is *supposed* to mean that the
    register is either full or empty. In practice, I have no idea what
    it means :( */
-static void
-maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
+static irqreturn_t
+maciisi_interrupt(int irq, void* arg)
 {
 	int status;
 	struct adb_request *req;
@@ -426,8 +441,7 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 	int i;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	status = via[B] & (TIP|TREQ);
 #ifdef DEBUG_MACIISI_ADB
@@ -437,8 +451,8 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 	if (!(via[IFR] & SR_INT)) {
 		/* Shouldn't happen, we hope */
 		printk(KERN_ERR "maciisi_interrupt: called without interrupt flag set\n");
-		restore_flags(flags);
-		return;
+		local_irq_restore(flags);
+		return IRQ_NONE;
 	}
 
 	/* Clear the interrupt */
@@ -596,7 +610,7 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 			/* Obviously, we got it */
 			reading_reply = 0;
 		} else {
-			maciisi_input(maciisi_rbuf, reply_ptr - maciisi_rbuf, regs);
+			maciisi_input(maciisi_rbuf, reply_ptr - maciisi_rbuf);
 		}
 		maciisi_state = idle;
 		status = via[B] & (TIP|TREQ);
@@ -636,11 +650,12 @@ maciisi_interrupt(int irq, void* arg, struct pt_regs* regs)
 	default:
 		printk("maciisi_interrupt: unknown maciisi_state %d?\n", maciisi_state);
 	}
-	restore_flags(flags);
+	local_irq_restore(flags);
+	return IRQ_HANDLED;
 }
 
 static void
-maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs)
+maciisi_input(unsigned char *buf, int nb)
 {
 #ifdef DEBUG_MACIISI_ADB
     int i;
@@ -648,7 +663,7 @@ maciisi_input(unsigned char *buf, int nb, struct pt_regs *regs)
 
     switch (buf[0]) {
     case ADB_PACKET:
-	    adb_input(buf+2, nb-2, regs, buf[1] & 0x40);
+	    adb_input(buf+2, nb-2, buf[1] & 0x40);
 	    break;
     default:
 #ifdef DEBUG_MACIISI_ADB

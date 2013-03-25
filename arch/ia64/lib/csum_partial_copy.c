@@ -1,12 +1,13 @@
 /*
  * Network Checksum & Copy routine
  *
- * Copyright (C) 1999 Hewlett-Packard Co
- * Copyright (C) 1999 Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 1999, 2003-2004 Hewlett-Packard Co
+ *	Stephane Eranian <eranian@hpl.hp.com>
  *
  * Most of the code has been imported from Linux/Alpha
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/string.h>
 
@@ -103,9 +104,9 @@ out:
  */
 extern unsigned long do_csum(const unsigned char *, long);
 
-static unsigned int
-do_csum_partial_copy_from_user (const char *src, char *dst, int len,
-				unsigned int psum, int *errp)
+__wsum
+csum_partial_copy_from_user(const void __user *src, void *dst,
+				int len, __wsum psum, int *errp)
 {
 	unsigned long result;
 
@@ -121,41 +122,19 @@ do_csum_partial_copy_from_user (const char *src, char *dst, int len,
 	result = do_csum(dst, len);
 
 	/* add in old sum, and carry.. */
-	result += psum;
+	result += (__force u32)psum;
 	/* 32+c bits -> 32 bits */
 	result = (result & 0xffffffff) + (result >> 32);
-	return result;
+	return (__force __wsum)result;
 }
 
-unsigned int
-csum_partial_copy_from_user(const char *src, char *dst, int len,
-			    unsigned int sum, int *errp)
+EXPORT_SYMBOL(csum_partial_copy_from_user);
+
+__wsum
+csum_partial_copy_nocheck(const void *src, void *dst, int len, __wsum sum)
 {
-	if (!access_ok(src, len, VERIFY_READ)) {
-		*errp = -EFAULT;
-		memset(dst, 0, len);
-		return sum;
-	}
-
-	return do_csum_partial_copy_from_user(src, dst, len, sum, errp);
+	return csum_partial_copy_from_user((__force const void __user *)src,
+					   dst, len, sum, NULL);
 }
 
-unsigned int
-csum_partial_copy_nocheck(const char *src, char *dst, int len, unsigned int sum)
-{
-	return do_csum_partial_copy_from_user(src, dst, len, sum, NULL);
-}
-
-unsigned int
-csum_partial_copy (const char *src, char *dst, int len, unsigned int sum)
-{
-	unsigned int ret;
-	int error = 0;
-
-	ret = do_csum_partial_copy_from_user(src, dst, len, sum, &error);
-	if (error)
-		printk("csum_partial_copy_old(): tell mingo to convert me!\n");
-
-	return ret;
-}
-
+EXPORT_SYMBOL(csum_partial_copy_nocheck);

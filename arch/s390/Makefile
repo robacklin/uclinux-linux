@@ -1,4 +1,4 @@
-
+#
 # s390/Makefile
 #
 # This file is included by the global makefile so that you can add your own
@@ -13,59 +13,119 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-LD=$(CROSS_COMPILE)ld -m elf_s390
-CPP=$(CC) -E
-OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
-LDFLAGS=-e start
-ifeq ($(CONFIG_SHARED_KERNEL),y)
-LINKFLAGS =-T $(TOPDIR)/arch/s390/vmlinux-shared.lds $(LDFLAGS)
+ifndef CONFIG_64BIT
+LD_BFD		:= elf32-s390
+LDFLAGS		:= -m elf_s390
+KBUILD_CFLAGS	+= -m31
+KBUILD_AFLAGS	+= -m31
+UTS_MACHINE	:= s390
+STACK_SIZE	:= 8192
+CHECKFLAGS	+= -D__s390__ -msize-long
 else
-LINKFLAGS =-T $(TOPDIR)/arch/s390/vmlinux.lds $(LDFLAGS)
+LD_BFD		:= elf64-s390
+LDFLAGS		:= -m elf64_s390
+KBUILD_AFLAGS_MODULE += -fpic -D__PIC__
+KBUILD_CFLAGS_MODULE += -fpic -D__PIC__
+KBUILD_CFLAGS	+= -m64
+KBUILD_AFLAGS	+= -m64
+UTS_MACHINE	:= s390x
+STACK_SIZE	:= 16384
+CHECKFLAGS	+= -D__s390__ -D__s390x__
 endif
 
-CFLAGS_PIPE := -pipe
-CFLAGS_NSR  := -fno-strength-reduce
-CFLAGS := $(CFLAGS) $(CFLAGS_PIPE) $(CFLAGS_NSR)
+export LD_BFD
 
-HEAD := arch/s390/kernel/head.o arch/s390/kernel/init_task.o
+cflags-$(CONFIG_MARCH_G5)   += $(call cc-option,-march=g5)
+cflags-$(CONFIG_MARCH_Z900) += $(call cc-option,-march=z900)
+cflags-$(CONFIG_MARCH_Z990) += $(call cc-option,-march=z990)
+cflags-$(CONFIG_MARCH_Z9_109) += $(call cc-option,-march=z9-109)
+cflags-$(CONFIG_MARCH_Z10) += $(call cc-option,-march=z10)
+cflags-$(CONFIG_MARCH_Z196) += $(call cc-option,-march=z196)
 
-SUBDIRS := $(SUBDIRS) arch/s390/mm arch/s390/kernel arch/s390/lib \
-           drivers/s390 arch/s390/math-emu
-CORE_FILES := arch/s390/mm/mm.o arch/s390/kernel/kernel.o $(CORE_FILES)
-DRIVERS := $(DRIVERS) drivers/s390/io.o
-LIBS := $(TOPDIR)/arch/s390/lib/lib.a $(LIBS) $(TOPDIR)/arch/s390/lib/lib.a
+#KBUILD_IMAGE is necessary for make rpm
+KBUILD_IMAGE	:=arch/s390/boot/image
 
-ifeq ($(CONFIG_MATHEMU),y)
-  CORE_FILES := $(CORE_FILES) arch/s390/math-emu/math-emu.o
+#
+# Prevent tail-call optimizations, to get clearer backtraces:
+#
+cflags-$(CONFIG_FRAME_POINTER) += -fno-optimize-sibling-calls
+
+# old style option for packed stacks
+ifeq ($(call cc-option-yn,-mkernel-backchain),y)
+cflags-$(CONFIG_PACK_STACK)  += -mkernel-backchain -D__PACK_STACK
+aflags-$(CONFIG_PACK_STACK)  += -D__PACK_STACK
+cflags-$(CONFIG_SMALL_STACK) += -D__SMALL_STACK
+aflags-$(CONFIG_SMALL_STACK) += -D__SMALL_STACK
+ifdef CONFIG_SMALL_STACK
+STACK_SIZE := $(shell echo $$(($(STACK_SIZE)/2)) )
+endif
 endif
 
-all: image listing
+# new style option for packed stacks
+ifeq ($(call cc-option-yn,-mpacked-stack),y)
+cflags-$(CONFIG_PACK_STACK)  += -mpacked-stack -D__PACK_STACK
+aflags-$(CONFIG_PACK_STACK)  += -D__PACK_STACK
+cflags-$(CONFIG_SMALL_STACK) += -D__SMALL_STACK
+aflags-$(CONFIG_SMALL_STACK) += -D__SMALL_STACK
+ifdef CONFIG_SMALL_STACK
+STACK_SIZE := $(shell echo $$(($(STACK_SIZE)/2)) )
+endif
+endif
 
-listing: vmlinux
-	@$(MAKEBOOT) listing
+ifeq ($(call cc-option-yn,-mstack-size=8192 -mstack-guard=128),y)
+cflags-$(CONFIG_CHECK_STACK) += -mstack-size=$(STACK_SIZE)
+ifneq ($(call cc-option-yn,-mstack-size=8192),y)
+cflags-$(CONFIG_CHECK_STACK) += -mstack-guard=$(CONFIG_STACK_GUARD)
+endif
+endif
 
-arch/s390/kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/s390/kernel
+ifeq ($(call cc-option-yn,-mwarn-dynamicstack),y)
+cflags-$(CONFIG_WARN_DYNAMIC_STACK) += -mwarn-dynamicstack
+endif
 
-arch/s390/mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=arch/s390/mm
+KBUILD_CFLAGS	+= -mbackchain -msoft-float $(cflags-y)
+KBUILD_CFLAGS	+= -pipe -fno-strength-reduce -Wno-sign-compare
+KBUILD_AFLAGS	+= $(aflags-y)
 
-drivers/s390: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=drivers/s390
+OBJCOPYFLAGS	:= -O binary
 
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
+head-y		:= arch/s390/kernel/head.o
+head-y		+= arch/s390/kernel/$(if $(CONFIG_64BIT),head64.o,head31.o)
+head-y		+= arch/s390/kernel/init_task.o
 
-image: vmlinux 
-	@$(MAKEBOOT) image
+# See arch/s390/Kbuild for content of core part of the kernel
+core-y		+= arch/s390/
 
-archclean:
-	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
+libs-y		+= arch/s390/lib/
+drivers-y	+= drivers/s390/
 
-archmrproper:
+# must be linked after kernel
+drivers-$(CONFIG_OPROFILE)	+= arch/s390/oprofile/
 
-archdep:
-	@$(MAKEBOOT) dep
+boot		:= arch/s390/boot
+
+all: image bzImage
 
 install: vmlinux
-	@$(MAKEBOOT) BOOTIMAGE=image install
+	$(Q)$(MAKE) $(build)=$(boot) $@
+
+image bzImage: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+zfcpdump:
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+
+vdso_install:
+ifeq ($(CONFIG_64BIT),y)
+	$(Q)$(MAKE) $(build)=arch/$(ARCH)/kernel/vdso64 $@
+endif
+	$(Q)$(MAKE) $(build)=arch/$(ARCH)/kernel/vdso32 $@
+
+archclean:
+	$(Q)$(MAKE) $(clean)=$(boot)
+
+# Don't use tabs in echo arguments
+define archhelp
+  echo  '* image           - Kernel image for IPL ($(boot)/image)'
+  echo	'* bzImage         - Compressed kernel image for IPL ($(boot)/bzImage)'
+endef

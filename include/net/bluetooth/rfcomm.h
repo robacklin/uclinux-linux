@@ -1,5 +1,5 @@
-/* 
-   RFCOMM implementation for Linux Bluetooth stack (BlueZ).
+/*
+   RFCOMM implementation for Linux Bluetooth stack (BlueZ)
    Copyright (C) 2002 Maxim Krasnyansky <maxk@qualcomm.com>
    Copyright (C) 2002 Marcel Holtmann <marcel@holtmann.org>
 
@@ -11,23 +11,15 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
-
-/* 
-   RPN support    -    Dirk Husemann <hud@zurich.ibm.com>
-*/
-
-/*
- * $Id: rfcomm.h,v 1.31 2002/10/18 20:12:11 maxk Exp $
- */
 
 #ifndef __RFCOMM_H
 #define __RFCOMM_H
@@ -36,16 +28,18 @@
 
 #define RFCOMM_CONN_TIMEOUT (HZ * 30)
 #define RFCOMM_DISC_TIMEOUT (HZ * 20)
+#define RFCOMM_AUTH_TIMEOUT (HZ * 25)
+#define RFCOMM_IDLE_TIMEOUT (HZ * 2)
 
 #define RFCOMM_DEFAULT_MTU	127
 #define RFCOMM_DEFAULT_CREDITS	7
 
-#define RFCOMM_MAX_L2CAP_MTU	1024
+#define RFCOMM_MAX_L2CAP_MTU	1013
 #define RFCOMM_MAX_CREDITS	40
 
 #define RFCOMM_SKB_HEAD_RESERVE	8
 #define RFCOMM_SKB_TAIL_RESERVE	2
-#define RFCOMM_SKB_RESERVE	(RFCOMM_SKB_HEAD_RESERVE + RFCOMM_SKB_TAIL_RESERVE)
+#define RFCOMM_SKB_RESERVE  (RFCOMM_SKB_HEAD_RESERVE + RFCOMM_SKB_TAIL_RESERVE)
 
 #define RFCOMM_SABM	0x2f
 #define RFCOMM_DISC	0x43
@@ -87,9 +81,9 @@
 #define RFCOMM_RPN_STOP_15	1
 
 #define RFCOMM_RPN_PARITY_NONE	0x0
-#define RFCOMM_RPN_PARITY_ODD	0x4
-#define RFCOMM_RPN_PARITY_EVEN	0x5
-#define RFCOMM_RPN_PARITY_MARK	0x6
+#define RFCOMM_RPN_PARITY_ODD	0x1
+#define RFCOMM_RPN_PARITY_EVEN	0x3
+#define RFCOMM_RPN_PARITY_MARK	0x5
 #define RFCOMM_RPN_PARITY_SPACE	0x7
 
 #define RFCOMM_RPN_FLOW_NONE	0x00
@@ -111,30 +105,30 @@
 struct rfcomm_hdr {
 	u8 addr;
 	u8 ctrl;
-	u8 len;    // Actual size can be 2 bytes
-} __attribute__ ((packed));
+	u8 len;    /* Actual size can be 2 bytes */
+} __packed;
 
 struct rfcomm_cmd {
 	u8 addr;
 	u8 ctrl;
 	u8 len;
 	u8 fcs;
-} __attribute__ ((packed));
+} __packed;
 
 struct rfcomm_mcc {
 	u8 type;
 	u8 len;
-} __attribute__ ((packed));
+} __packed;
 
 struct rfcomm_pn {
 	u8  dlci;
 	u8  flow_ctrl;
 	u8  priority;
 	u8  ack_timer;
-	u16 mtu;
+	__le16 mtu;
 	u8  max_retrans;
 	u8  credits;
-} __attribute__ ((packed));
+} __packed;
 
 struct rfcomm_rpn {
 	u8  dlci;
@@ -143,24 +137,25 @@ struct rfcomm_rpn {
 	u8  flow_ctrl;
 	u8  xon_char;
 	u8  xoff_char;
-	u16 param_mask;
-} __attribute__ ((packed));
+	__le16 param_mask;
+} __packed;
 
 struct rfcomm_rls {
 	u8  dlci;
 	u8  status;
-} __attribute__ ((packed));
+} __packed;
 
 struct rfcomm_msc {
 	u8  dlci;
 	u8  v24_sig;
-} __attribute__ ((packed));
+} __packed;
 
 /* ---- Core structures, flags etc ---- */
 
 struct rfcomm_session {
 	struct list_head list;
 	struct socket   *sock;
+	struct timer_list timer;
 	unsigned long    state;
 	unsigned long    flags;
 	atomic_t         refcnt;
@@ -187,7 +182,12 @@ struct rfcomm_dlc {
 	u8            addr;
 	u8            priority;
 	u8            v24_sig;
+	u8            remote_v24_sig;
 	u8            mscex;
+	u8            out;
+	u8            sec_level;
+	u8            role_switch;
+	u32           defer_setup;
 
 	uint          mtu;
 	uint          cfc;
@@ -204,14 +204,16 @@ struct rfcomm_dlc {
 /* DLC and session flags */
 #define RFCOMM_RX_THROTTLED 0
 #define RFCOMM_TX_THROTTLED 1
-#define RFCOMM_MSC_PENDING  2
-#define RFCOMM_TIMED_OUT    3
+#define RFCOMM_TIMED_OUT    2
+#define RFCOMM_MSC_PENDING  3
+#define RFCOMM_SEC_PENDING  4
+#define RFCOMM_AUTH_PENDING 5
+#define RFCOMM_AUTH_ACCEPT  6
+#define RFCOMM_AUTH_REJECT  7
+#define RFCOMM_DEFER_SETUP  8
+#define RFCOMM_ENC_DROP     9
 
 /* Scheduling flags and events */
-#define RFCOMM_SCHED_STATE  0
-#define RFCOMM_SCHED_RX     1
-#define RFCOMM_SCHED_TX     2
-#define RFCOMM_SCHED_TIMEO  3
 #define RFCOMM_SCHED_WAKEUP 31
 
 /* MSC exchange flags */
@@ -224,32 +226,25 @@ struct rfcomm_dlc {
 #define RFCOMM_CFC_DISABLED 0
 #define RFCOMM_CFC_ENABLED  RFCOMM_MAX_CREDITS
 
-extern struct task_struct *rfcomm_thread;
-extern unsigned long rfcomm_event;
-
-static inline void rfcomm_schedule(uint event)
-{
-	if (!rfcomm_thread)
-		return;
-	set_bit(RFCOMM_SCHED_WAKEUP, &rfcomm_event);
-	wake_up_process(rfcomm_thread);
-}
-
-extern struct semaphore rfcomm_sem;
-#define rfcomm_lock()	down(&rfcomm_sem);
-#define rfcomm_unlock()	up(&rfcomm_sem);
+/* ---- RFCOMM SEND RPN ---- */
+int rfcomm_send_rpn(struct rfcomm_session *s, int cr, u8 dlci,
+			u8 bit_rate, u8 data_bits, u8 stop_bits,
+			u8 parity, u8 flow_ctrl_settings,
+			u8 xon_char, u8 xoff_char, u16 param_mask);
 
 /* ---- RFCOMM DLCs (channels) ---- */
-struct rfcomm_dlc *rfcomm_dlc_alloc(int prio);
+struct rfcomm_dlc *rfcomm_dlc_alloc(gfp_t prio);
 void rfcomm_dlc_free(struct rfcomm_dlc *d);
-int  rfcomm_dlc_open(struct rfcomm_dlc *d, bdaddr_t *src, bdaddr_t *dst, u8 channel);
+int  rfcomm_dlc_open(struct rfcomm_dlc *d, bdaddr_t *src, bdaddr_t *dst,
+								u8 channel);
 int  rfcomm_dlc_close(struct rfcomm_dlc *d, int reason);
 int  rfcomm_dlc_send(struct rfcomm_dlc *d, struct sk_buff *skb);
 int  rfcomm_dlc_set_modem_status(struct rfcomm_dlc *d, u8 v24_sig);
 int  rfcomm_dlc_get_modem_status(struct rfcomm_dlc *d, u8 *v24_sig);
+void rfcomm_dlc_accept(struct rfcomm_dlc *d);
 
-#define rfcomm_dlc_lock(d)	spin_lock(&d->lock)
-#define rfcomm_dlc_unlock(d)	spin_unlock(&d->lock)
+#define rfcomm_dlc_lock(d)     spin_lock(&d->lock)
+#define rfcomm_dlc_unlock(d)   spin_unlock(&d->lock)
 
 static inline void rfcomm_dlc_hold(struct rfcomm_dlc *d)
 {
@@ -262,8 +257,8 @@ static inline void rfcomm_dlc_put(struct rfcomm_dlc *d)
 		rfcomm_dlc_free(d);
 }
 
-extern void FASTCALL(__rfcomm_dlc_throttle(struct rfcomm_dlc *d));
-extern void FASTCALL(__rfcomm_dlc_unthrottle(struct rfcomm_dlc *d));
+extern void __rfcomm_dlc_throttle(struct rfcomm_dlc *d);
+extern void __rfcomm_dlc_unthrottle(struct rfcomm_dlc *d);
 
 static inline void rfcomm_dlc_throttle(struct rfcomm_dlc *d)
 {
@@ -278,45 +273,50 @@ static inline void rfcomm_dlc_unthrottle(struct rfcomm_dlc *d)
 }
 
 /* ---- RFCOMM sessions ---- */
-struct rfcomm_session *rfcomm_session_add(struct socket *sock, int state);
-struct rfcomm_session *rfcomm_session_get(bdaddr_t *src, bdaddr_t *dst);
-struct rfcomm_session *rfcomm_session_create(bdaddr_t *src, bdaddr_t *dst, int *err);
-void   rfcomm_session_del(struct rfcomm_session *s);
-void   rfcomm_session_close(struct rfcomm_session *s, int err);
-void   rfcomm_session_getaddr(struct rfcomm_session *s, bdaddr_t *src, bdaddr_t *dst);
+void   rfcomm_session_getaddr(struct rfcomm_session *s, bdaddr_t *src,
+								bdaddr_t *dst);
 
 static inline void rfcomm_session_hold(struct rfcomm_session *s)
 {
 	atomic_inc(&s->refcnt);
 }
 
-static inline void rfcomm_session_put(struct rfcomm_session *s)
-{
-	if (atomic_dec_and_test(&s->refcnt))
-		rfcomm_session_del(s);
-}
-
-/* ---- RFCOMM chechsum ---- */
-extern u8 rfcomm_crc_table[];
-
 /* ---- RFCOMM sockets ---- */
 struct sockaddr_rc {
-	sa_family_t rc_family;
-	bdaddr_t    rc_bdaddr;
-	u8          rc_channel;
+	sa_family_t	rc_family;
+	bdaddr_t	rc_bdaddr;
+	u8		rc_channel;
 };
 
-#define rfcomm_pi(sk)	((struct rfcomm_pinfo *) &sk->tp_pinfo)
+#define RFCOMM_CONNINFO	0x02
+struct rfcomm_conninfo {
+	__u16 hci_handle;
+	__u8  dev_class[3];
+};
+
+#define RFCOMM_LM	0x03
+#define RFCOMM_LM_MASTER	0x0001
+#define RFCOMM_LM_AUTH		0x0002
+#define RFCOMM_LM_ENCRYPT	0x0004
+#define RFCOMM_LM_TRUSTED	0x0008
+#define RFCOMM_LM_RELIABLE	0x0010
+#define RFCOMM_LM_SECURE	0x0020
+
+#define rfcomm_pi(sk) ((struct rfcomm_pinfo *) sk)
 
 struct rfcomm_pinfo {
-	struct rfcomm_dlc *dlc;
-	u8 channel;
+	struct bt_sock bt;
+	struct rfcomm_dlc   *dlc;
+	u8     channel;
+	u8     sec_level;
+	u8     role_switch;
 };
 
 int  rfcomm_init_sockets(void);
 void rfcomm_cleanup_sockets(void);
 
-int  rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc **d);
+int  rfcomm_connect_ind(struct rfcomm_session *s, u8 channel,
+							struct rfcomm_dlc **d);
 
 /* ---- RFCOMM TTY ---- */
 #define RFCOMM_MAX_DEV  256
@@ -327,10 +327,11 @@ int  rfcomm_connect_ind(struct rfcomm_session *s, u8 channel, struct rfcomm_dlc 
 #define RFCOMMGETDEVINFO	_IOR('R', 211, int)
 #define RFCOMMSTEALDLC		_IOW('R', 220, int)
 
-#define RFCOMM_REUSE_DLC	0
-#define RFCOMM_RELEASE_ONHUP	1
-#define RFCOMM_HANGUP_NOW	2
-#define RFCOMM_TTY_ATTACHED	3
+#define RFCOMM_REUSE_DLC      0
+#define RFCOMM_RELEASE_ONHUP  1
+#define RFCOMM_HANGUP_NOW     2
+#define RFCOMM_TTY_ATTACHED   3
+#define RFCOMM_TTY_RELEASED   4
 
 struct rfcomm_dev_req {
 	s16      dev_id;
@@ -354,8 +355,18 @@ struct rfcomm_dev_list_req {
 	struct   rfcomm_dev_info dev_info[0];
 };
 
-int  rfcomm_dev_ioctl(struct sock *sk, unsigned int cmd, unsigned long arg);
+int  rfcomm_dev_ioctl(struct sock *sk, unsigned int cmd, void __user *arg);
+
+#ifdef CONFIG_BT_RFCOMM_TTY
 int  rfcomm_init_ttys(void);
 void rfcomm_cleanup_ttys(void);
-
+#else
+static inline int rfcomm_init_ttys(void)
+{
+	return 0;
+}
+static inline void rfcomm_cleanup_ttys(void)
+{
+}
+#endif
 #endif /* __RFCOMM_H */

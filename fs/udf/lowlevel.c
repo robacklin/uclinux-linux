@@ -4,11 +4,6 @@
  * PURPOSE
  *  Low Level Device Routines for the UDF filesystem
  *
- * CONTACTS
- *	E-mail regarding any portion of the Linux UDF file system should be
- *	directed to the development team mailing list (run by majordomo):
- *		linux_udf@hpesjro.fc.hp.com
- *
  * COPYRIGHT
  *	This file is distributed under the terms of the GNU General Public
  *	License (GPL). Copies of the GPL can be obtained from:
@@ -27,64 +22,45 @@
 #include <linux/blkdev.h>
 #include <linux/cdrom.h>
 #include <asm/uaccess.h>
-#include <scsi/scsi.h>
 
-typedef struct scsi_device Scsi_Device;
-typedef struct scsi_cmnd   Scsi_Cmnd;
-
-#include <scsi/scsi_ioctl.h>
-
-#include <linux/udf_fs.h>
 #include "udf_sb.h"
 
-unsigned int 
-udf_get_last_session(struct super_block *sb)
+unsigned int udf_get_last_session(struct super_block *sb)
 {
 	struct cdrom_multisession ms_info;
 	unsigned int vol_desc_start;
 	struct block_device *bdev = sb->s_bdev;
 	int i;
 
-	vol_desc_start=0;
-	ms_info.addr_format=CDROM_LBA;
-	i = ioctl_by_bdev(bdev, CDROMMULTISESSION, (unsigned long) &ms_info);
+	vol_desc_start = 0;
+	ms_info.addr_format = CDROM_LBA;
+	i = ioctl_by_bdev(bdev, CDROMMULTISESSION, (unsigned long)&ms_info);
 
-#define WE_OBEY_THE_WRITTEN_STANDARDS 1
-
-	if (i == 0)
-	{
+	if (i == 0) {
 		udf_debug("XA disk: %s, vol_desc_start=%d\n",
-			(ms_info.xa_flag ? "yes" : "no"), ms_info.addr.lba);
-#if WE_OBEY_THE_WRITTEN_STANDARDS
+			  ms_info.xa_flag ? "yes" : "no", ms_info.addr.lba);
 		if (ms_info.xa_flag) /* necessary for a valid ms_info.addr */
-#endif
 			vol_desc_start = ms_info.addr.lba;
-	}
-	else
-	{
+	} else {
 		udf_debug("CDROMMULTISESSION not supported: rc=%d\n", i);
 	}
 	return vol_desc_start;
 }
 
-unsigned long
-udf_get_last_block(struct super_block *sb)
+unsigned long udf_get_last_block(struct super_block *sb)
 {
 	struct block_device *bdev = sb->s_bdev;
-	int ret;
 	unsigned long lblock = 0;
 
-	ret = ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock);
+	/*
+	 * ioctl failed or returned obviously bogus value?
+	 * Try using the device size...
+	 */
+	if (ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock) ||
+	    lblock == 0)
+		lblock = bdev->bd_inode->i_size >> sb->s_blocksize_bits;
 
-	if (ret) /* Hard Disk */
-	{
-		ret = ioctl_by_bdev(bdev, BLKGETSIZE, (unsigned long) &lblock);
-
-		if (!ret && lblock != 0x7FFFFFFF)
-			lblock = ((512 * lblock) / sb->s_blocksize);
-	}
-
-	if (!ret && lblock)
+	if (lblock)
 		return lblock - 1;
 	else
 		return 0;

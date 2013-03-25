@@ -7,14 +7,26 @@
  *
  * Copyright (c) 2001 port GmbH Halle/Saale
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can4linux.h,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
  *
  *
  * modification history
  * --------------------
- * $Log: can4linux.h,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -35,9 +47,9 @@
 
 /**
 * \file can.h
-* \author Heinz-Jürgen Oertel, port GmbH
+* \author Heinz-Jrgen Oertel, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
 * can4linux interface definitions
 *
@@ -49,7 +61,6 @@
 #ifndef __CAN_H
 #define __CAN_H
 
-#define CAN4LINUXVERSION 0x0302 /*(Version 3.2)*/
 
 #ifndef __KERNEL__
 #include <sys/time.h>
@@ -124,7 +135,7 @@ typedef struct Config_par {
  IOCTL generic CAN controller status request parameter structure */
 typedef struct CanStatusPar { 
     unsigned int baud;			/**< actual bit rate */
-    unsigned int status;		/**< CAN controller status register */
+    unsigned long status;		/**< CAN controller status register */
     unsigned int error_warning_limit;	/**< the error warning limit */
     unsigned int rx_errors;		/**< content of RX error counter */
     unsigned int tx_errors;		/**< content of TX error counter */

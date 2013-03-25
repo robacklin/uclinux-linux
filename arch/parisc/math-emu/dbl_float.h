@@ -16,13 +16,13 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 #ifdef __NO_PA_HDRS
     PA header file -- do not include this header file for non-PA builds.
 #endif
 
-/* 32-bit word grabing functions */
+/* 32-bit word grabbing functions */
 #define Dbl_firstword(value) Dallp1(value)
 #define Dbl_secondword(value) Dallp2(value)
 #define Dbl_thirdword(value) dummy_location
@@ -37,7 +37,7 @@
 #define Dbl_allp1(object) Dallp1(object)
 #define Dbl_allp2(object) Dallp2(object)
 
-/* dbl_and_signs ands the sign bits of each argument and puts the result
+/* dbl_and_signs ANDs the sign bits of each argument and puts the result
  * into the first argument. dbl_or_signs ors those same sign bits */
 #define Dbl_and_signs( src1dst, src2)		\
     Dallp1(src1dst) = (Dallp1(src2)|~((unsigned int)1<<31)) & Dallp1(src1dst)

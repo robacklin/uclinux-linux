@@ -1,49 +1,41 @@
 /*
- *	ROSE release 003
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	ROSE 001	Jonathan(G4KLX)	Cloned from nr_subr.c
- *	ROSE 002	Jonathan(G4KLX)	Centralised disconnect processing.
- *	ROSE 003	Jonathan(G4KLX)	Added use count to neighbours.
+ * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <net/tcp_states.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <net/rose.h>
+
+static int rose_create_facilities(unsigned char *buffer, struct rose_sock *rose);
 
 /*
  *	This routine purges all of the queues of frames.
  */
 void rose_clear_queues(struct sock *sk)
 {
-	skb_queue_purge(&sk->write_queue);
-	skb_queue_purge(&sk->protinfo.rose->ack_queue);
+	skb_queue_purge(&sk->sk_write_queue);
+	skb_queue_purge(&rose_sk(sk)->ack_queue);
 }
 
 /*
@@ -54,15 +46,16 @@ void rose_clear_queues(struct sock *sk)
 void rose_frames_acked(struct sock *sk, unsigned short nr)
 {
 	struct sk_buff *skb;
+	struct rose_sock *rose = rose_sk(sk);
 
 	/*
 	 * Remove all the ack-ed frames from the ack queue.
 	 */
-	if (sk->protinfo.rose->va != nr) {
-		while (skb_peek(&sk->protinfo.rose->ack_queue) != NULL && sk->protinfo.rose->va != nr) {
-			skb = skb_dequeue(&sk->protinfo.rose->ack_queue);
+	if (rose->va != nr) {
+		while (skb_peek(&rose->ack_queue) != NULL && rose->va != nr) {
+			skb = skb_dequeue(&rose->ack_queue);
 			kfree_skb(skb);
-			sk->protinfo.rose->va = (sk->protinfo.rose->va + 1) % ROSE_MODULUS;
+			rose->va = (rose->va + 1) % ROSE_MODULUS;
 		}
 	}
 }
@@ -76,11 +69,11 @@ void rose_requeue_frames(struct sock *sk)
 	 * up by rose_kick. This arrangement handles the possibility of an
 	 * empty output queue.
 	 */
-	while ((skb = skb_dequeue(&sk->protinfo.rose->ack_queue)) != NULL) {
+	while ((skb = skb_dequeue(&rose_sk(sk)->ack_queue)) != NULL) {
 		if (skb_prev == NULL)
-			skb_queue_head(&sk->write_queue, skb);
+			skb_queue_head(&sk->sk_write_queue, skb);
 		else
-			skb_append(skb_prev, skb);
+			skb_append(skb_prev, skb, &sk->sk_write_queue);
 		skb_prev = skb;
 	}
 }
@@ -91,61 +84,43 @@ void rose_requeue_frames(struct sock *sk)
  */
 int rose_validate_nr(struct sock *sk, unsigned short nr)
 {
-	unsigned short vc = sk->protinfo.rose->va;
+	struct rose_sock *rose = rose_sk(sk);
+	unsigned short vc = rose->va;
 
-	while (vc != sk->protinfo.rose->vs) {
+	while (vc != rose->vs) {
 		if (nr == vc) return 1;
 		vc = (vc + 1) % ROSE_MODULUS;
 	}
 
-	if (nr == sk->protinfo.rose->vs) return 1;
-
-	return 0;
+	return nr == rose->vs;
 }
 
-/* 
+/*
  *  This routine is called when the packet layer internally generates a
  *  control frame.
  */
 void rose_write_internal(struct sock *sk, int frametype)
 {
+	struct rose_sock *rose = rose_sk(sk);
 	struct sk_buff *skb;
 	unsigned char  *dptr;
 	unsigned char  lci1, lci2;
 	char buffer[100];
 	int len, faclen = 0;
-	int ax25_header_len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + 1;
 
-	len = ax25_header_len + ROSE_MIN_LEN;
-	
+	len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN + 1;
+
 	switch (frametype) {
-		case ROSE_CALL_REQUEST:
-			len   += 1 + ROSE_ADDR_LEN + ROSE_ADDR_LEN;
-			faclen = rose_create_facilities(buffer, sk->protinfo.rose);
-			len   += faclen;
-			break;
-		case ROSE_CALL_ACCEPTED:
-		case ROSE_RESET_REQUEST:
-			len   += 2;
-			break;
-		case ROSE_CLEAR_REQUEST:
-			len   += 3;
-			/* facilities */
-			faclen = 3 + 2 + AX25_ADDR_LEN + 3 + ROSE_ADDR_LEN;
-			dptr = buffer;
-			*dptr++ = faclen-1;	/* Facilities length */
-			*dptr++ = 0;
-			*dptr++ = FAC_NATIONAL;
-			*dptr++ = FAC_NATIONAL_FAIL_CALL;
-			*dptr++ = AX25_ADDR_LEN;
-			memcpy(dptr, &rose_callsign, AX25_ADDR_LEN);
-			dptr += AX25_ADDR_LEN;
-			*dptr++ = FAC_NATIONAL_FAIL_ADD;
-			*dptr++ = ROSE_ADDR_LEN + 1;
-			*dptr++ = ROSE_ADDR_LEN * 2;
-			memcpy(dptr, &sk->protinfo.rose->source_addr, ROSE_ADDR_LEN);
-			len   += faclen;
-			break;
+	case ROSE_CALL_REQUEST:
+		len   += 1 + ROSE_ADDR_LEN + ROSE_ADDR_LEN;
+		faclen = rose_create_facilities(buffer, rose);
+		len   += faclen;
+		break;
+	case ROSE_CALL_ACCEPTED:
+	case ROSE_CLEAR_REQUEST:
+	case ROSE_RESET_REQUEST:
+		len   += 2;
+		break;
 	}
 
 	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
@@ -154,77 +129,73 @@ void rose_write_internal(struct sock *sk, int frametype)
 	/*
 	 *	Space for AX.25 header and PID.
 	 */
-	skb_reserve(skb, ax25_header_len);
-	
-	dptr = skb_put(skb, len - ax25_header_len);
+	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + 1);
 
-	lci1 = (sk->protinfo.rose->lci >> 8) & 0x0F;
-	lci2 = (sk->protinfo.rose->lci >> 0) & 0xFF;
+	dptr = skb_put(skb, skb_tailroom(skb));
+
+	lci1 = (rose->lci >> 8) & 0x0F;
+	lci2 = (rose->lci >> 0) & 0xFF;
 
 	switch (frametype) {
+	case ROSE_CALL_REQUEST:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr++ = frametype;
+		*dptr++ = ROSE_CALL_REQ_ADDR_LEN_VAL;
+		memcpy(dptr, &rose->dest_addr,  ROSE_ADDR_LEN);
+		dptr   += ROSE_ADDR_LEN;
+		memcpy(dptr, &rose->source_addr, ROSE_ADDR_LEN);
+		dptr   += ROSE_ADDR_LEN;
+		memcpy(dptr, buffer, faclen);
+		dptr   += faclen;
+		break;
 
-		case ROSE_CALL_REQUEST:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr++ = frametype;
-			*dptr++ = 0xAA;
-			memcpy(dptr, &sk->protinfo.rose->dest_addr,  ROSE_ADDR_LEN);
-			dptr   += ROSE_ADDR_LEN;
-			memcpy(dptr, &sk->protinfo.rose->source_addr, ROSE_ADDR_LEN);
-			dptr   += ROSE_ADDR_LEN;
-			memcpy(dptr, buffer, faclen);
-			dptr   += faclen;
-			break;
+	case ROSE_CALL_ACCEPTED:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr++ = frametype;
+		*dptr++ = 0x00;		/* Address length */
+		*dptr++ = 0;		/* Facilities length */
+		break;
 
-		case ROSE_CALL_ACCEPTED:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr++ = frametype;
-			*dptr++ = 0x00;		/* Address length */
-			*dptr++ = 0;		/* Facilities length */
-			break;
+	case ROSE_CLEAR_REQUEST:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr++ = frametype;
+		*dptr++ = rose->cause;
+		*dptr++ = rose->diagnostic;
+		break;
 
-		case ROSE_CLEAR_REQUEST:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr++ = frametype;
-			*dptr++ = sk->protinfo.rose->cause;
-			*dptr++ = sk->protinfo.rose->diagnostic;
-			*dptr++ = 0x00;		/* Address length */
-			memcpy(dptr, buffer, faclen);
-			dptr   += faclen;
-			break;
+	case ROSE_RESET_REQUEST:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr++ = frametype;
+		*dptr++ = ROSE_DTE_ORIGINATED;
+		*dptr++ = 0;
+		break;
 
-		case ROSE_RESET_REQUEST:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr++ = frametype;
-			*dptr++ = ROSE_DTE_ORIGINATED;
-			*dptr++ = 0;
-			break;
+	case ROSE_RR:
+	case ROSE_RNR:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr   = frametype;
+		*dptr++ |= (rose->vr << 5) & 0xE0;
+		break;
 
-		case ROSE_RR:
-		case ROSE_RNR:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr   = frametype;
-			*dptr++ |= (sk->protinfo.rose->vr << 5) & 0xE0;
-			break;
+	case ROSE_CLEAR_CONFIRMATION:
+	case ROSE_RESET_CONFIRMATION:
+		*dptr++ = ROSE_GFI | lci1;
+		*dptr++ = lci2;
+		*dptr++  = frametype;
+		break;
 
-		case ROSE_CLEAR_CONFIRMATION:
-		case ROSE_RESET_CONFIRMATION:
-			*dptr++ = ROSE_GFI | lci1;
-			*dptr++ = lci2;
-			*dptr++  = frametype;
-			break;
-
-		default:
-			printk(KERN_ERR "ROSE: rose_write_internal - invalid frametype %02X\n", frametype);
-			kfree_skb(skb);
-			return;
+	default:
+		printk(KERN_ERR "ROSE: rose_write_internal - invalid frametype %02X\n", frametype);
+		kfree_skb(skb);
+		return;
 	}
 
-	rose_transmit_link(skb, sk->protinfo.rose->neighbour);
+	rose_transmit_link(skb, rose->neighbour);
 }
 
 int rose_decode(struct sk_buff *skb, int *ns, int *nr, int *q, int *d, int *m)
@@ -236,15 +207,15 @@ int rose_decode(struct sk_buff *skb, int *ns, int *nr, int *q, int *d, int *m)
 	*ns = *nr = *q = *d = *m = 0;
 
 	switch (frame[2]) {
-		case ROSE_CALL_REQUEST:
-		case ROSE_CALL_ACCEPTED:
-		case ROSE_CLEAR_REQUEST:
-		case ROSE_CLEAR_CONFIRMATION:
-		case ROSE_RESET_REQUEST:
-		case ROSE_RESET_CONFIRMATION:
-			return frame[2];
-		default:
-			break;
+	case ROSE_CALL_REQUEST:
+	case ROSE_CALL_ACCEPTED:
+	case ROSE_CLEAR_REQUEST:
+	case ROSE_CLEAR_CONFIRMATION:
+	case ROSE_RESET_REQUEST:
+	case ROSE_RESET_CONFIRMATION:
+		return frame[2];
+	default:
+		break;
 	}
 
 	if ((frame[2] & 0x1F) == ROSE_RR  ||
@@ -273,61 +244,86 @@ static int rose_parse_national(unsigned char *p, struct rose_facilities_struct *
 
 	do {
 		switch (*p & 0xC0) {
-			case 0x00:
-				p   += 2;
-				n   += 2;
-				len -= 2;
-				break;
+		case 0x00:
+			if (len < 2)
+				return -1;
+			p   += 2;
+			n   += 2;
+			len -= 2;
+			break;
 
-			case 0x40:
-				if (*p == FAC_NATIONAL_RAND)
-					facilities->rand = ((p[1] << 8) & 0xFF00) + ((p[2] << 0) & 0x00FF);
-				p   += 3;
-				n   += 3;
-				len -= 3;
-				break;
+		case 0x40:
+			if (len < 3)
+				return -1;
+			if (*p == FAC_NATIONAL_RAND)
+				facilities->rand = ((p[1] << 8) & 0xFF00) + ((p[2] << 0) & 0x00FF);
+			p   += 3;
+			n   += 3;
+			len -= 3;
+			break;
 
-			case 0x80:
-				p   += 4;
-				n   += 4;
-				len -= 4;
-				break;
+		case 0x80:
+			if (len < 4)
+				return -1;
+			p   += 4;
+			n   += 4;
+			len -= 4;
+			break;
 
-			case 0xC0:
-				l = p[1];
-				if (*p == FAC_NATIONAL_DEST_DIGI) {
-					if (!fac_national_digis_received) {
-						memcpy(&facilities->source_digis[0], p + 2, AX25_ADDR_LEN);
-						facilities->source_ndigis = 1;
+		case 0xC0:
+			if (len < 2)
+				return -1;
+			l = p[1];
+			if (len < 2 + l)
+				return -1;
+			if (*p == FAC_NATIONAL_DEST_DIGI) {
+				if (!fac_national_digis_received) {
+					if (l < AX25_ADDR_LEN)
+						return -1;
+					memcpy(&facilities->source_digis[0], p + 2, AX25_ADDR_LEN);
+					facilities->source_ndigis = 1;
+				}
+			}
+			else if (*p == FAC_NATIONAL_SRC_DIGI) {
+				if (!fac_national_digis_received) {
+					if (l < AX25_ADDR_LEN)
+						return -1;
+					memcpy(&facilities->dest_digis[0], p + 2, AX25_ADDR_LEN);
+					facilities->dest_ndigis = 1;
+				}
+			}
+			else if (*p == FAC_NATIONAL_FAIL_CALL) {
+				if (l < AX25_ADDR_LEN)
+					return -1;
+				memcpy(&facilities->fail_call, p + 2, AX25_ADDR_LEN);
+			}
+			else if (*p == FAC_NATIONAL_FAIL_ADD) {
+				if (l < 1 + ROSE_ADDR_LEN)
+					return -1;
+				memcpy(&facilities->fail_addr, p + 3, ROSE_ADDR_LEN);
+			}
+			else if (*p == FAC_NATIONAL_DIGIS) {
+				if (l % AX25_ADDR_LEN)
+					return -1;
+				fac_national_digis_received = 1;
+				facilities->source_ndigis = 0;
+				facilities->dest_ndigis   = 0;
+				for (pt = p + 2, lg = 0 ; lg < l ; pt += AX25_ADDR_LEN, lg += AX25_ADDR_LEN) {
+					if (pt[6] & AX25_HBIT) {
+						if (facilities->dest_ndigis >= ROSE_MAX_DIGIS)
+							return -1;
+						memcpy(&facilities->dest_digis[facilities->dest_ndigis++], pt, AX25_ADDR_LEN);
+					} else {
+						if (facilities->source_ndigis >= ROSE_MAX_DIGIS)
+							return -1;
+						memcpy(&facilities->source_digis[facilities->source_ndigis++], pt, AX25_ADDR_LEN);
 					}
 				}
-				else if (*p == FAC_NATIONAL_SRC_DIGI) {
-					if (!fac_national_digis_received) {
-						memcpy(&facilities->dest_digis[0], p + 2, AX25_ADDR_LEN);
-						facilities->dest_ndigis = 1;
-					}
-				}
-				else if (*p == FAC_NATIONAL_FAIL_CALL) {
-					memcpy(&facilities->fail_call, p + 2, AX25_ADDR_LEN);
-				}
-				else if (*p == FAC_NATIONAL_FAIL_ADD) {
-					memcpy(&facilities->fail_addr, p + 3, ROSE_ADDR_LEN);
-				}
-				else if (*p == FAC_NATIONAL_DIGIS) {
-					fac_national_digis_received = 1;
-					facilities->source_ndigis = 0;
-					facilities->dest_ndigis   = 0;
-					for (pt = p + 2, lg = 0 ; lg < l ; pt += AX25_ADDR_LEN, lg += AX25_ADDR_LEN) {
-						if (pt[6] & AX25_HBIT)
-							memcpy(&facilities->dest_digis[facilities->dest_ndigis++], pt, AX25_ADDR_LEN);
-						else
-							memcpy(&facilities->source_digis[facilities->source_ndigis++], pt, AX25_ADDR_LEN);
-					}
-				}
-				p   += l + 2;
-				n   += l + 2;
-				len -= l + 2;
-				break;
+			}
+			p   += l + 2;
+			n   += l + 2;
+			len -= l + 2;
+			break;
 		}
 	} while (*p != 0x00 && len > 0);
 
@@ -341,92 +337,106 @@ static int rose_parse_ccitt(unsigned char *p, struct rose_facilities_struct *fac
 
 	do {
 		switch (*p & 0xC0) {
-			case 0x00:
-				p   += 2;
-				n   += 2;
-				len -= 2;
-				break;
+		case 0x00:
+			if (len < 2)
+				return -1;
+			p   += 2;
+			n   += 2;
+			len -= 2;
+			break;
 
-			case 0x40:
-				p   += 3;
-				n   += 3;
-				len -= 3;
-				break;
+		case 0x40:
+			if (len < 3)
+				return -1;
+			p   += 3;
+			n   += 3;
+			len -= 3;
+			break;
 
-			case 0x80:
-				p   += 4;
-				n   += 4;
-				len -= 4;
-				break;
+		case 0x80:
+			if (len < 4)
+				return -1;
+			p   += 4;
+			n   += 4;
+			len -= 4;
+			break;
 
-			case 0xC0:
-				l = p[1];
-				if (*p == FAC_CCITT_DEST_NSAP) {
-					memcpy(&facilities->source_addr, p + 7, ROSE_ADDR_LEN);
-					memcpy(callsign, p + 12,   l - 10);
-					callsign[l - 10] = '\0';
-					facilities->source_call = *asc2ax(callsign);
-				}
-				if (*p == FAC_CCITT_SRC_NSAP) {
-					memcpy(&facilities->dest_addr, p + 7, ROSE_ADDR_LEN);
-					memcpy(callsign, p + 12, l - 10);
-					callsign[l - 10] = '\0';
-					facilities->dest_call = *asc2ax(callsign);
-				}
-				p   += l + 2;
-				n   += l + 2;
-				len -= l + 2;
-				break;
+		case 0xC0:
+			if (len < 2)
+				return -1;
+			l = p[1];
+
+			/* Prevent overflows*/
+			if (l < 10 || l > 20)
+				return -1;
+
+			if (*p == FAC_CCITT_DEST_NSAP) {
+				memcpy(&facilities->source_addr, p + 7, ROSE_ADDR_LEN);
+				memcpy(callsign, p + 12,   l - 10);
+				callsign[l - 10] = '\0';
+				asc2ax(&facilities->source_call, callsign);
+			}
+			if (*p == FAC_CCITT_SRC_NSAP) {
+				memcpy(&facilities->dest_addr, p + 7, ROSE_ADDR_LEN);
+				memcpy(callsign, p + 12, l - 10);
+				callsign[l - 10] = '\0';
+				asc2ax(&facilities->dest_call, callsign);
+			}
+			p   += l + 2;
+			n   += l + 2;
+			len -= l + 2;
+			break;
 		}
 	} while (*p != 0x00 && len > 0);
 
 	return n;
 }
 
-int rose_parse_facilities(unsigned char *p, struct rose_facilities_struct *facilities)
+int rose_parse_facilities(unsigned char *p, unsigned packet_len,
+	struct rose_facilities_struct *facilities)
 {
 	int facilities_len, len;
 
 	facilities_len = *p++;
 
-	if (facilities_len == 0)
+	if (facilities_len == 0 || (unsigned)facilities_len > packet_len)
 		return 0;
 
-	while (facilities_len > 0) {
-		if (*p == 0x00) {
-			facilities_len--;
-			p++;
+	while (facilities_len >= 3 && *p == 0x00) {
+		facilities_len--;
+		p++;
 
-			switch (*p) {
-				case FAC_NATIONAL:		/* National */
-					len = rose_parse_national(p + 1, facilities, facilities_len - 1);
-					facilities_len -= len + 1;
-					p += len + 1;
-					break;
+		switch (*p) {
+		case FAC_NATIONAL:		/* National */
+			len = rose_parse_national(p + 1, facilities, facilities_len - 1);
+			break;
 
-				case FAC_CCITT:		/* CCITT */
-					len = rose_parse_ccitt(p + 1, facilities, facilities_len - 1);
-					facilities_len -= len + 1;
-					p += len + 1;
-					break;
+		case FAC_CCITT:		/* CCITT */
+			len = rose_parse_ccitt(p + 1, facilities, facilities_len - 1);
+			break;
 
-				default:
-					printk(KERN_DEBUG "ROSE: rose_parse_facilities - unknown facilities family %02X\n", *p);
-					facilities_len--;
-					p++;
-					break;
-			}
+		default:
+			printk(KERN_DEBUG "ROSE: rose_parse_facilities - unknown facilities family %02X\n", *p);
+			len = 1;
+			break;
 		}
-		else break;	/* Error in facilities format */
+
+		if (len < 0)
+			return 0;
+		if (WARN_ON(len >= facilities_len))
+			return 0;
+		facilities_len -= len + 1;
+		p += len + 1;
 	}
 
-	return 1;
+	return facilities_len == 0;
 }
 
-int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
+static int rose_create_facilities(unsigned char *buffer, struct rose_sock *rose)
 {
 	unsigned char *p = buffer + 1;
 	char *callsign;
+	char buf[11];
 	int len, nb;
 
 	/* National Facilities */
@@ -483,7 +493,7 @@ int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 	*p++ = FAC_CCITT_DEST_NSAP;
 
-	callsign = ax2asc(&rose->dest_call);
+	callsign = ax2asc(buf, &rose->dest_call);
 
 	*p++ = strlen(callsign) + 10;
 	*p++ = (strlen(callsign) + 9) * 2;		/* ??? */
@@ -498,7 +508,7 @@ int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 	*p++ = FAC_CCITT_SRC_NSAP;
 
-	callsign = ax2asc(&rose->source_call);
+	callsign = ax2asc(buf, &rose->source_call);
 
 	*p++ = strlen(callsign) + 10;
 	*p++ = (strlen(callsign) + 9) * 2;		/* ??? */
@@ -519,26 +529,28 @@ int rose_create_facilities(unsigned char *buffer, rose_cb *rose)
 
 void rose_disconnect(struct sock *sk, int reason, int cause, int diagnostic)
 {
+	struct rose_sock *rose = rose_sk(sk);
+
 	rose_stop_timer(sk);
 	rose_stop_idletimer(sk);
 
 	rose_clear_queues(sk);
 
-	sk->protinfo.rose->lci   = 0;
-	sk->protinfo.rose->state = ROSE_STATE_0;
+	rose->lci   = 0;
+	rose->state = ROSE_STATE_0;
 
 	if (cause != -1)
-		sk->protinfo.rose->cause = cause;
+		rose->cause = cause;
 
 	if (diagnostic != -1)
-		sk->protinfo.rose->diagnostic = diagnostic;
+		rose->diagnostic = diagnostic;
 
-	sk->state     = TCP_CLOSE;
-	sk->err       = reason;
-	sk->shutdown |= SEND_SHUTDOWN;
+	sk->sk_state     = TCP_CLOSE;
+	sk->sk_err       = reason;
+	sk->sk_shutdown |= SEND_SHUTDOWN;
 
-	if (!sk->dead)
-		sk->state_change(sk);
-
-	sk->dead  = 1;
+	if (!sock_flag(sk, SOCK_DEAD)) {
+		sk->sk_state_change(sk);
+		sock_set_flag(sk, SOCK_DEAD);
+	}
 }

@@ -2,13 +2,10 @@
 # Makefile for the Ethernet Bonding driver
 #
 
-O_TARGET := bonding.o
+obj-$(CONFIG_BONDING) += bonding.o
 
-obj-y	 := bond_main.o \
-            bond_3ad.o  \
-	    bond_alb.o
+bonding-objs := bond_main.o bond_3ad.o bond_alb.o bond_sysfs.o bond_debugfs.o
 
-obj-m	 := $(O_TARGET)
-
-include $(TOPDIR)/Rules.make
+proc-$(CONFIG_PROC_FS) += bond_procfs.o
+bonding-objs += $(proc-y)
 

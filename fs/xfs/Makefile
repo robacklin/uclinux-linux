@@ -1,134 +1,103 @@
 #
-# Copyright (c) 2000-2004 Silicon Graphics, Inc.  All Rights Reserved.
+# Copyright (c) 2000-2005 Silicon Graphics, Inc.
+# All Rights Reserved.
 #
-# This program is free software; you can redistribute it and/or modify it
-# under the terms of version 2 of the GNU General Public License as
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License as
 # published by the Free Software Foundation.
 #
-# This program is distributed in the hope that it would be useful, but
-# WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# This program is distributed in the hope that it would be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
 #
-# Further, this software is distributed without any warranty that it is
-# free of the rightful claim of any third person regarding infringement
-# or the like.  Any license provided herein, whether implied or
-# otherwise, applies only to this software file.  Patent licenses, if
-# any, provided herein do not apply to combinations of this program with
-# other software, or any other product whatsoever.
-#
-# You should have received a copy of the GNU General Public License along
-# with this program; if not, write the Free Software Foundation, Inc., 59
-# Temple Place - Suite 330, Boston MA 02111-1307, USA.
-#
-# Contact information: Silicon Graphics, Inc., 1600 Amphitheatre Pkwy,
-# Mountain View, CA  94043, or:
-#
-# http://www.sgi.com
-#
-# For further information regarding this notice, see:
-#
-# http://oss.sgi.com/projects/GenInfo/SGIGPLNoticeExplan/
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write the Free Software Foundation,
+# Inc.,  51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 #
 
-EXTRA_CFLAGS +=  -I. -I linux-2.4 -funsigned-char
+ccflags-y += -I$(src)			# needed for trace events
 
-ifeq ($(CONFIG_XFS_DEBUG),y)
-	EXTRA_CFLAGS += -g -DSTATIC="" -DDEBUG
-	EXTRA_CFLAGS += -DPAGEBUF_LOCK_TRACKING
-endif
-ifeq ($(CONFIG_XFS_TRACE),y)
-	EXTRA_CFLAGS += -DXFS_ALLOC_TRACE
-	EXTRA_CFLAGS += -DXFS_ATTR_TRACE
-	EXTRA_CFLAGS += -DXFS_BLI_TRACE
-	EXTRA_CFLAGS += -DXFS_BMAP_TRACE
-	EXTRA_CFLAGS += -DXFS_BMBT_TRACE
-	EXTRA_CFLAGS += -DXFS_DIR_TRACE
-	EXTRA_CFLAGS += -DXFS_DQUOT_TRACE
-	EXTRA_CFLAGS += -DXFS_ILOCK_TRACE
-	EXTRA_CFLAGS += -DXFS_LOG_TRACE
-	EXTRA_CFLAGS += -DXFS_RW_TRACE
-	EXTRA_CFLAGS += -DXFS_DIR2_TRACE
-	EXTRA_CFLAGS += -DPAGEBUF_TRACE
-	# EXTRA_CFLAGS += -DXFS_VNODE_TRACE
-endif
+ccflags-$(CONFIG_XFS_DEBUG) += -g
 
-O_TARGET			:= xfs.o
-obj-m				:= $(O_TARGET)
+obj-$(CONFIG_XFS_FS)		+= xfs.o
 
-obj-$(CONFIG_XFS_RT)		+= xfs_rtalloc.o
-obj-$(CONFIG_XFS_POSIX_ACL)	+= xfs_acl.o
+# this one should be compiled first, as the tracing macros can easily blow up
+xfs-y				+= xfs_trace.o
 
-obj-$(CONFIG_XFS_TRACE)		+= xfs_dir2_trace.o
+# highlevel code
+xfs-y				+= xfs_aops.o \
+				   xfs_bit.o \
+				   xfs_buf.o \
+				   xfs_dfrag.o \
+				   xfs_discard.o \
+				   xfs_error.o \
+				   xfs_export.o \
+				   xfs_file.o \
+				   xfs_filestream.o \
+				   xfs_fsops.o \
+				   xfs_fs_subr.o \
+				   xfs_globals.o \
+				   xfs_iget.o \
+				   xfs_ioctl.o \
+				   xfs_iomap.o \
+				   xfs_iops.o \
+				   xfs_itable.o \
+				   xfs_message.o \
+				   xfs_mru_cache.o \
+				   xfs_super.o \
+				   xfs_sync.o \
+				   xfs_xattr.o \
+				   xfs_rename.o \
+				   xfs_rw.o \
+				   xfs_utils.o \
+				   xfs_vnodeops.o \
+				   kmem.o \
+				   uuid.o
 
-obj-y				+= xfs_alloc.o \
+# code shared with libxfs
+xfs-y				+= xfs_alloc.o \
 				   xfs_alloc_btree.o \
 				   xfs_attr.o \
 				   xfs_attr_leaf.o \
-				   xfs_behavior.o \
-				   xfs_bit.o \
 				   xfs_bmap.o \
 				   xfs_bmap_btree.o \
 				   xfs_btree.o \
-				   xfs_buf_item.o \
 				   xfs_da_btree.o \
-				   xfs_dir.o \
 				   xfs_dir2.o \
 				   xfs_dir2_block.o \
 				   xfs_dir2_data.o \
 				   xfs_dir2_leaf.o \
 				   xfs_dir2_node.o \
 				   xfs_dir2_sf.o \
-				   xfs_dir_leaf.o \
-				   xfs_error.o \
-				   xfs_extfree_item.o \
-				   xfs_fsops.o \
 				   xfs_ialloc.o \
 				   xfs_ialloc_btree.o \
-				   xfs_iget.o \
 				   xfs_inode.o \
-				   xfs_inode_item.o \
-				   xfs_iocore.o \
-				   xfs_iomap.o \
-				   xfs_itable.o \
-				   xfs_dfrag.o \
-				   xfs_log.o \
 				   xfs_log_recover.o \
-				   xfs_macros.o \
 				   xfs_mount.o \
-				   xfs_rename.o \
-				   xfs_trans.o \
+				   xfs_trans.o
+
+# low-level transaction/log code
+xfs-y				+= xfs_log.o \
+				   xfs_log_cil.o \
+				   xfs_buf_item.o \
+				   xfs_extfree_item.o \
+				   xfs_inode_item.o \
 				   xfs_trans_ail.o \
 				   xfs_trans_buf.o \
 				   xfs_trans_extfree.o \
 				   xfs_trans_inode.o \
-				   xfs_trans_item.o \
-				   xfs_utils.o \
-				   xfs_vfsops.o \
-				   xfs_vnodeops.o \
-				   xfs_refcache.o \
-				   xfs_rw.o \
-				   xfs_dmops.o \
-				   xfs_qmops.o
 
-# Objects not built in this directory
-obj-y				+= linux-2.4/linux_xfs.o \
-				   support/support_xfs.o
-
-subdir-$(CONFIG_XFS_FS)		+= linux-2.4 support
-
-ifeq ($(CONFIG_XFS_DMAPI),y)
-  subdir-$(CONFIG_XFS_FS)	+= dmapi
-  obj-y				+= dmapi/xfs_dmapi.o
-endif
-
-ifeq ($(CONFIG_XFS_QUOTA),y)
-  subdir-$(CONFIG_XFS_FS)	+= quota
-  obj-y				+= quota/xfs_quota.o
-endif
-
-include $(TOPDIR)/Rules.make
-
-# This is really nasty, but Rules.make was never designed for multi directory
-# modules.  Keith Owens.
-
-xfs.o: $(patsubst %,_modsubdir_%,$(subdir-m))
+# optional features
+xfs-$(CONFIG_XFS_QUOTA)		+= xfs_dquot.o \
+				   xfs_dquot_item.o \
+				   xfs_trans_dquot.o \
+				   xfs_qm_syscalls.o \
+				   xfs_qm_bhv.o \
+				   xfs_qm.o \
+				   xfs_quotaops.o
+xfs-$(CONFIG_XFS_RT)		+= xfs_rtalloc.o
+xfs-$(CONFIG_XFS_POSIX_ACL)	+= xfs_acl.o
+xfs-$(CONFIG_PROC_FS)		+= xfs_stats.o
+xfs-$(CONFIG_SYSCTL)		+= xfs_sysctl.o
+xfs-$(CONFIG_COMPAT)		+= xfs_ioctl32.o

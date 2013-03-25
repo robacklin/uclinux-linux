@@ -1,7 +1,7 @@
 #include <asm/lasat/head.h>
 
 	.text
-	.section .text.start, "ax"
+	.section .text..start, "ax"
 	.set noreorder
 	.set mips3
 
@@ -27,5 +27,5 @@ reldate:
 	.word	TIMESTAMP
 
 	.org	0x50
-release:	
+release:
 	.string VERSION

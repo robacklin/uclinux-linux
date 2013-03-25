@@ -8,20 +8,19 @@
  * Code common to all LCA core logic chips.
  */
 
-#include <linux/kernel.h>
+#define __EXTERN_INLINE inline
+#include <asm/io.h>
+#include <asm/core_lca.h>
+#undef __EXTERN_INLINE
+
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/tty.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
+#include <asm/irq_regs.h>
 #include <asm/smp.h>
-
-#define __EXTERN_INLINE inline
-#include <asm/io.h>
-#include <asm/core_lca.h>
-#undef __EXTERN_INLINE
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -99,11 +98,11 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr)
 {
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	if (bus == 0) {
 		int device = device_fn >> 3;
@@ -132,9 +131,9 @@ conf_read(unsigned long addr)
 	unsigned long flags, code, stat0;
 	unsigned int value;
 
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
-	/* Reset status register to avoid loosing errors.  */
+	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vulp)LCA_IOC_STAT0;
 	*(vulp)LCA_IOC_STAT0 = stat0;
 	mb();
@@ -160,7 +159,7 @@ conf_read(unsigned long addr)
 
 		value = 0xffffffff;
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	return value;
 }
 
@@ -169,9 +168,9 @@ conf_write(unsigned long addr, unsigned int value)
 {
 	unsigned long flags, code, stat0;
 
-	__save_and_cli(flags);	/* avoid getting hit by machine check */
+	local_irq_save(flags);	/* avoid getting hit by machine check */
 
-	/* Reset status register to avoid loosing errors.  */
+	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vulp)LCA_IOC_STAT0;
 	*(vulp)LCA_IOC_STAT0 = stat0;
 	mb();
@@ -195,87 +194,47 @@ conf_write(unsigned long addr, unsigned int value)
 		/* Reset machine check. */
 		wrmces(0x7);
 	}
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static int
-lca_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+lca_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		int size, u32 *value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + LCA_CONF;
-	*value = conf_read(addr) >> ((where & 3) * 8);
+	shift = (where & 3) * 8;
+	mask = (size - 1) * 8;
+	addr = (pci_addr << 5) + mask + LCA_CONF;
+	*value = conf_read(addr) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-lca_read_config_word(struct pci_dev *dev, int where, u16 *value)
+lca_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		 u32 value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 
-	if (mk_conf_addr(dev, where, &pci_addr))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + LCA_CONF;
-	*value = conf_read(addr) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-lca_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-
-	if (mk_conf_addr(dev, where, &pci_addr))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + LCA_CONF;
-	*value = conf_read(addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-lca_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-
-	if (mk_conf_addr(dev, where, &pci_addr))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + LCA_CONF;
 	conf_write(addr, value << ((where & 3) * 8));
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-lca_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return lca_write_config(dev, where, value, 0x00);
-}
-
-static int
-lca_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return lca_write_config(dev, where, value, 0x08);
-}
-
-static int
-lca_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return lca_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops lca_pci_ops = 
 {
-	read_byte:	lca_read_config_byte,
-	read_word:	lca_read_config_word,
-	read_dword:	lca_read_config_dword,
-	write_byte:	lca_write_config_byte,
-	write_word:	lca_write_config_word,
-	write_dword:	lca_write_config_dword
+	.read =		lca_read_config,
+	.write =	lca_write_config,
 };
 
 void
@@ -428,8 +387,7 @@ ioc_error(__u32 stat0, __u32 stat1)
 }
 
 void
-lca_machine_check(unsigned long vector, unsigned long la_ptr,
-		  struct pt_regs *regs)
+lca_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	const char * reason;
 	union el_lca el;
@@ -439,7 +397,7 @@ lca_machine_check(unsigned long vector, unsigned long la_ptr,
 	wrmces(rdmces());	/* reset machine check pending flag */
 
 	printk(KERN_CRIT "LCA machine check: vector=%#lx pc=%#lx code=%#x\n",
-	       vector, regs->pc, (unsigned int) el.c->code);
+	       vector, get_irq_regs()->pc, (unsigned int) el.c->code);
 
 	/*
 	 * The first quadword after the common header always seems to
@@ -500,8 +458,8 @@ lca_machine_check(unsigned long vector, unsigned long la_ptr,
 	}
 
 	/* Dump the logout area to give all info.  */
-#if DEBUG_MCHECK > 1
-	{
+#ifdef CONFIG_VERBOSE_MCHECK
+	if (alpha_verbose_mcheck > 1) {
 		unsigned long * ptr = (unsigned long *) la_ptr;
 		long i;
 		for (i = 0; i < el.c->size / sizeof(long); i += 2) {
@@ -509,7 +467,7 @@ lca_machine_check(unsigned long vector, unsigned long la_ptr,
 			       i*sizeof(long), ptr[i], ptr[i+1]);
 		}
 	}
-#endif
+#endif /* CONFIG_VERBOSE_MCHECK */
 }
 
 /*

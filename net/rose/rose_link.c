@@ -1,36 +1,27 @@
 /*
- *	ROSE release 003
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	ROSE 001	Jonathan(G4KLX)	Cloned from rose_timer.c
- *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
+ * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
+#include <linux/slab.h>
 #include <net/ax25.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
-#include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
@@ -40,24 +31,29 @@
 static void rose_ftimer_expiry(unsigned long);
 static void rose_t0timer_expiry(unsigned long);
 
+static void rose_transmit_restart_confirmation(struct rose_neigh *neigh);
+static void rose_transmit_restart_request(struct rose_neigh *neigh);
+
 void rose_start_ftimer(struct rose_neigh *neigh)
 {
 	del_timer(&neigh->ftimer);
 
 	neigh->ftimer.data     = (unsigned long)neigh;
 	neigh->ftimer.function = &rose_ftimer_expiry;
-	neigh->ftimer.expires  = jiffies + sysctl_rose_link_fail_timeout;
+	neigh->ftimer.expires  =
+		jiffies + msecs_to_jiffies(sysctl_rose_link_fail_timeout);
 
 	add_timer(&neigh->ftimer);
 }
 
-void rose_start_t0timer(struct rose_neigh *neigh)
+static void rose_start_t0timer(struct rose_neigh *neigh)
 {
 	del_timer(&neigh->t0timer);
 
 	neigh->t0timer.data     = (unsigned long)neigh;
 	neigh->t0timer.function = &rose_t0timer_expiry;
-	neigh->t0timer.expires  = jiffies + sysctl_rose_restart_request_timeout;
+	neigh->t0timer.expires  =
+		jiffies + msecs_to_jiffies(sysctl_rose_restart_request_timeout);
 
 	add_timer(&neigh->t0timer);
 }
@@ -77,7 +73,7 @@ int rose_ftimer_running(struct rose_neigh *neigh)
 	return timer_pending(&neigh->ftimer);
 }
 
-int rose_t0timer_running(struct rose_neigh *neigh)
+static int rose_t0timer_running(struct rose_neigh *neigh)
 {
 	return timer_pending(&neigh->t0timer);
 }
@@ -105,15 +101,19 @@ static void rose_t0timer_expiry(unsigned long param)
 static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
 {
 	ax25_address *rose_call;
+	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
 		rose_call = (ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 
+	ax25s = neigh->ax25;
 	neigh->ax25 = ax25_send_frame(skb, 260, rose_call, &neigh->callsign, neigh->digipeat, neigh->dev);
+	if (ax25s)
+		ax25_cb_put(ax25s);
 
-	return (neigh->ax25 != NULL);
+	return neigh->ax25 != NULL;
 }
 
 /*
@@ -124,15 +124,19 @@ static int rose_send_frame(struct sk_buff *skb, struct rose_neigh *neigh)
 static int rose_link_up(struct rose_neigh *neigh)
 {
 	ax25_address *rose_call;
+	ax25_cb *ax25s;
 
 	if (ax25cmp(&rose_callsign, &null_ax25_address) == 0)
 		rose_call = (ax25_address *)neigh->dev->dev_addr;
 	else
 		rose_call = &rose_callsign;
 
+	ax25s = neigh->ax25;
 	neigh->ax25 = ax25_find_cb(rose_call, &neigh->callsign, neigh->digipeat, neigh->dev);
+	if (ax25s)
+		ax25_cb_put(ax25s);
 
-	return (neigh->ax25 != NULL);
+	return neigh->ax25 != NULL;
 }
 
 /*
@@ -143,25 +147,25 @@ void rose_link_rx_restart(struct sk_buff *skb, struct rose_neigh *neigh, unsigne
 	struct sk_buff *skbn;
 
 	switch (frametype) {
-		case ROSE_RESTART_REQUEST:
-			rose_stop_t0timer(neigh);
-			neigh->restarted = 1;
-			neigh->dce_mode  = (skb->data[3] == ROSE_DTE_ORIGINATED);
-			rose_transmit_restart_confirmation(neigh);
-			break;
+	case ROSE_RESTART_REQUEST:
+		rose_stop_t0timer(neigh);
+		neigh->restarted = 1;
+		neigh->dce_mode  = (skb->data[3] == ROSE_DTE_ORIGINATED);
+		rose_transmit_restart_confirmation(neigh);
+		break;
 
-		case ROSE_RESTART_CONFIRMATION:
-			rose_stop_t0timer(neigh);
-			neigh->restarted = 1;
-			break;
+	case ROSE_RESTART_CONFIRMATION:
+		rose_stop_t0timer(neigh);
+		neigh->restarted = 1;
+		break;
 
-		case ROSE_DIAGNOSTIC:
-			printk(KERN_WARNING "ROSE: received diagnostic #%d - %02X %02X %02X\n", skb->data[3], skb->data[4], skb->data[5], skb->data[6]);
-			break;
+	case ROSE_DIAGNOSTIC:
+		printk(KERN_WARNING "ROSE: received diagnostic #%d - %02X %02X %02X\n", skb->data[3], skb->data[4], skb->data[5], skb->data[6]);
+		break;
 
-		default:
-			printk(KERN_WARNING "ROSE: received unknown %02X with LCI 000\n", frametype);
-			break;
+	default:
+		printk(KERN_WARNING "ROSE: received unknown %02X with LCI 000\n", frametype);
+		break;
 	}
 
 	if (neigh->restarted) {
@@ -174,7 +178,7 @@ void rose_link_rx_restart(struct sk_buff *skb, struct rose_neigh *neigh, unsigne
 /*
  *	This routine is called when a Restart Request is needed
  */
-void rose_transmit_restart_request(struct rose_neigh *neigh)
+static void rose_transmit_restart_request(struct rose_neigh *neigh)
 {
 	struct sk_buff *skb;
 	unsigned char *dptr;
@@ -203,7 +207,7 @@ void rose_transmit_restart_request(struct rose_neigh *neigh)
 /*
  * This routine is called when a Restart Confirmation is needed
  */
-void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
+static void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
 {
 	struct sk_buff *skb;
 	unsigned char *dptr;
@@ -228,34 +232,6 @@ void rose_transmit_restart_confirmation(struct rose_neigh *neigh)
 }
 
 /*
- * This routine is called when a Diagnostic is required.
- */
-void rose_transmit_diagnostic(struct rose_neigh *neigh, unsigned char diag)
-{
-	struct sk_buff *skb;
-	unsigned char *dptr;
-	int len;
-
-	len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN + 2;
-
-	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
-		return;
-
-	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN);
-
-	dptr = skb_put(skb, ROSE_MIN_LEN + 2);
-
-	*dptr++ = AX25_P_ROSE;
-	*dptr++ = ROSE_GFI;
-	*dptr++ = 0x00;
-	*dptr++ = ROSE_DIAGNOSTIC;
-	*dptr++ = diag;
-
-	if (!rose_send_frame(skb, neigh))
-		kfree_skb(skb);
-}
-
-/*
  * This routine is called when a Clear Request is needed outside of the context
  * of a connected socket.
  */
@@ -264,21 +240,15 @@ void rose_transmit_clear_request(struct rose_neigh *neigh, unsigned int lci, uns
 	struct sk_buff *skb;
 	unsigned char *dptr;
 	int len;
-	struct net_device *first;
-	int faclen = 0;
 
 	len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN + 3;
 
-	first = rose_dev_first();
-	if (first)
-		faclen = 6 + AX25_ADDR_LEN + 3 + ROSE_ADDR_LEN;
-	
-	if ((skb = alloc_skb(len + faclen, GFP_ATOMIC)) == NULL)
+	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
 		return;
 
 	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN);
 
-	dptr = skb_put(skb, ROSE_MIN_LEN + 3 + faclen);
+	dptr = skb_put(skb, ROSE_MIN_LEN + 3);
 
 	*dptr++ = AX25_P_ROSE;
 	*dptr++ = ((lci >> 8) & 0x0F) | ROSE_GFI;
@@ -287,21 +257,6 @@ void rose_transmit_clear_request(struct rose_neigh *neigh, unsigned int lci, uns
 	*dptr++ = cause;
 	*dptr++ = diagnostic;
 
-	if (first) {	
-		*dptr++ = 0x00;		/* Address length */
-		*dptr++ = 4 + AX25_ADDR_LEN + 3 + ROSE_ADDR_LEN; /* Facilities length */
-		*dptr++ = 0;
-		*dptr++ = FAC_NATIONAL;
-		*dptr++ = FAC_NATIONAL_FAIL_CALL;
-		*dptr++ = AX25_ADDR_LEN;
-		memcpy(dptr, &rose_callsign, AX25_ADDR_LEN);
-		dptr += AX25_ADDR_LEN;
-		*dptr++ = FAC_NATIONAL_FAIL_ADD;
-		*dptr++ = ROSE_ADDR_LEN + 1;
-		*dptr++ = ROSE_ADDR_LEN * 2;
-		memcpy(dptr, first->dev_addr, ROSE_ADDR_LEN);
-	}
-
 	if (!rose_send_frame(skb, neigh))
 		kfree_skb(skb);
 }
@@ -309,13 +264,6 @@ void rose_transmit_clear_request(struct rose_neigh *neigh, unsigned int lci, uns
 void rose_transmit_link(struct sk_buff *skb, struct rose_neigh *neigh)
 {
 	unsigned char *dptr;
-
-#if 0
-	if (call_fw_firewall(PF_ROSE, skb->dev, skb->data, NULL, &skb) != FW_ACCEPT) {
-		kfree_skb(skb);
-		return;
-	}
-#endif
 
 	if (neigh->loopback) {
 		rose_loopback_queue(skb, neigh);

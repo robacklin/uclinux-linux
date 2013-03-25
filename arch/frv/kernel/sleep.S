@@ -1,7 +1,7 @@
-/* entry.S: FR-V entry
+/* sleep.S: power saving mode entry
  *
  * Copyright (C) 2004 Red Hat, Inc. All Rights Reserved.
- * Written by David Woodhouse (dwmw2@redhat.com)
+ * Written by David Woodhouse (dwmw2@infradead.org)
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -11,7 +11,6 @@
  */
 
 #include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/setup.h>
 #include <asm/segment.h>
@@ -31,8 +30,7 @@
 #define FR4XX_DSTS_OFFSET	-8		/* Offset from DRCN to DSTS */
 #define FR4XX_SDRAMC_DSTS_SSI	0x00000001	/* indicates that the SDRAM is in self-refresh mode */
 
-
-        .file		"sleep.S"
+#define SDRAMC_DRCN_SR	0x00000001	/* transition SDRAM into self-refresh mode */
 
 	.section	.bss
 	.balign		8
@@ -74,7 +72,7 @@ frv_cpu_suspend:
 
 	# store the return address from sleep in GR14, and its complement in GR13 as a check
 	li		__ramboot_resume,gr14
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	# Resume via RAMBOOT# will turn MMU off, so bootloader needs a physical address.
 	sethi.p		%hi(__page_offset),gr13
 	setlo		%lo(__page_offset),gr13
@@ -91,7 +89,7 @@ frv_cpu_suspend:
 	or		gr3,gr4,gr3
 	movgs		gr3,hsr0
 	or		gr3,gr8,gr7	// add the sleep bits for later
-	
+
 	li		#__icache_lock_start,gr3
 	li		#__icache_lock_end,gr4
 1:	icpl		gr3,gr0,#1
@@ -114,7 +112,7 @@ frv_cpu_suspend:
 	li		FR4XX_SDRAMC_DSTS_SSI,gr5
 	li		FR4XX_DSTS_OFFSET,gr6
 	bra		__icache_lock_start
-1:	
+1:
 	# FR5xx
 	li		__addr_FR55X_DRCN,gr4
 	li		FR55X_SDRAMC_DSTS_SSI,gr5
@@ -136,7 +134,7 @@ __icache_lock_start:
 	#----------------------------------------------------
 	# put SDRAM in self-refresh mode
 	#----------------------------------------------------
-	
+
 	# Flush all data in the cache using the DCEF instruction.
 	dcef		@(gr0,gr0),#1
 
@@ -147,7 +145,7 @@ __icache_lock_start:
 
 	# put the SDRAM into self-refresh mode
 	ld              @(gr4,gr0),gr11
-	ori		gr11,#1,gr11
+	ori		gr11,#SDRAMC_DRCN_SR,gr11
 	st		gr11,@(gr4,gr0)
 	membar
 
@@ -159,7 +157,7 @@ __icache_lock_start:
 	#  Set the GPIO register so that the IRQ[3:0] pins become valid, as required.
 	#  Set the clock mode (CLKC register) as required.
 	#     - At this time, also set the CLKC register P0 bit.
-	
+
 	# Set the HSR0 register PDM field.
 	movgs		gr7,hsr0
 
@@ -169,12 +167,12 @@ __icache_lock_start:
 	.endr
 
 #if 0 // Fujitsu recommend to skip this and will update docs.
-	#      Release the interrupt mask setting of the MASK register of the 
+	#      Release the interrupt mask setting of the MASK register of the
 	#      interrupt controller if necessary.
 	sti		gr10,@(gr9,#0)
 	membar
 #endif
-		
+
 	# Set the PSR register ET bit to 1 to enable interrupts.
 	movgs		gr8,psr
 
@@ -191,14 +189,14 @@ __icache_lock_start:
 	# wake SDRAM from self-refresh mode
 	#----------------------------------------------------
 	ld              @(gr4,gr0),gr11
-	andi		gr11,#~1,gr11
+	andi		gr11,#~SDRAMC_DRCN_SR,gr11
 	st		gr11,@(gr4,gr0)
 	membar
-2:	
+2:
 	ld		@(gr4,gr6),gr11	// Wait for it to come back...
 	andcc		gr11,gr5,gr0,icc0
 	bne		icc0,0,2b
-	
+
 	# wait for the SDRAM to stabilise
 	li		0x0100000,gr3
 3:	subicc		gr3,#1,gr3,icc0
@@ -210,30 +208,30 @@ __icache_lock_end:
 	.size		__icache_lock_start, .-__icache_lock_start
 
 	# Fall-through to the RAMBOOT# wakeup path
-	
+
 ###############################################################################
 #
 #  resume from suspend re-entry point reached via RAMBOOT# and bootloader
 #
 ###############################################################################
 __ramboot_resume:
-	
+
 	#----------------------------------------------------
 	# restore hsr0, psr, isr, and leave saved lr in gr7
 	#----------------------------------------------------
 	li		__sleep_save_area,gr11
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		hsr0,gr4
 	sethi.p		%hi(HSR0_EXMMU),gr3
 	setlo		%lo(HSR0_EXMMU),gr3
 	andcc		gr3,gr4,gr0,icc0
 	bne		icc0,#0,2f
-	
+
 	# need to use physical address
 	sethi.p		%hi(__page_offset),gr3
 	setlo		%lo(__page_offset),gr3
 	sub		gr11,gr3,gr11
-	
+
 	# flush all tlb entries
 	setlos		#64,gr4
 	setlos.p	#PAGE_SIZE,gr5
@@ -253,19 +251,19 @@ __ramboot_resume:
 	or		gr4,gr5,gr5
 
 	movsg		cxnr,gr13
-	or		gr4,gr13,gr4	
+	or		gr4,gr13,gr4
 
 	movgs		gr4,iamlr1			; mapped from real address 0
 	movgs		gr5,iampr1			; cached kernel memory at 0x00000000
 2:
 #endif
 
-	lddi		@(gr11,#0),gr4 ; hsr0, psr 
+	lddi		@(gr11,#0),gr4 ; hsr0, psr
 	lddi		@(gr11,#8),gr6 ; isr, lr
 	movgs		gr4,hsr0
 	bar
-	
-#ifndef CONFIG_UCLINUX
+
+#ifdef CONFIG_MMU
 	sethi.p		%hi(1f),gr11
 	setlo		%lo(1f),gr11
 	jmpl		@(gr11,gr0)
@@ -274,7 +272,7 @@ __ramboot_resume:
 #endif
 	movgs		gr5,psr
 	movgs		gr6,isr
-	
+
 	#----------------------------------------------------
 	# unlock the icache which was locked before going to sleep
 	#----------------------------------------------------
@@ -314,7 +312,7 @@ frv_cpu_core_sleep:
 
 	.balign L1_CACHE_BYTES
 __core_sleep_icache_lock_start:
-	
+
 	# (1) Set the PSR register ET bit to 0 to disable interrupts.
 	movsg		psr,gr8
 	andi.p		gr8,#~(PSR_PIL),gr8
@@ -322,7 +320,7 @@ __core_sleep_icache_lock_start:
 	movgs		gr4,psr
 
 #if 0 // Fujitsu recommend to skip this and will update docs.
-	# (2) Set '1' to all bits in the MASK register of the interrupt 
+	# (2) Set '1' to all bits in the MASK register of the interrupt
 	#     controller and mask interrupts.
 	sethi.p		%hi(__addr_MASK),gr9
 	setlo		%lo(__addr_MASK),gr9
@@ -351,12 +349,12 @@ __core_sleep_icache_lock_start:
 	.endr
 
 #if 0 // Fujitsu recommend to skip this and will update docs.
-	# (9) Release the interrupt mask setting of the MASK register of the 
+	# (9) Release the interrupt mask setting of the MASK register of the
 	#     interrupt controller if necessary.
 	sti		gr10,@(gr9,#0)
 	membar
 #endif
-		
+
 	# (10) Set the PSR register ET bit to 1 to enable interrupts.
 	movgs		gr8,psr
 
@@ -371,5 +369,5 @@ __core_sleep_icache_lock_end:
 	bhi		icc0,#0,1b
 
 	bralr
-		
+
 	.size		frv_cpu_core_sleep, .-frv_cpu_core_sleep

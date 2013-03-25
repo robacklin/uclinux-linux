@@ -8,17 +8,29 @@
  * for more details.
  * 
  * Copyright (c) 2001 port GmbH Halle/Saale
- * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
+ * (c) 2001 Heinz-Jrgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_core.c,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
  *
  *
  * modification history
  * --------------------
- * $Log: can_core.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -40,9 +52,9 @@
 
 /**
 * \file can_core.c
-* \author Heinz-Jürgen Oertel, port GmbH
+* \author Heinz-Jrgen Oertel, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
 * Contains the code for module initialization.
 * The functions herein are never called directly by the user
@@ -193,15 +205,10 @@ erstellt
 */
 
 #include "can_defs.h"
-/* #include <linux/version.h> */
-
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 
-
-
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("H.-J. Oertel <oe@port.de>");
 MODULE_DESCRIPTION("CAN fieldbus driver");
 
 
@@ -209,8 +216,7 @@ char kernel_version[] = UTS_RELEASE;
 
 int IRQ_requested[MAX_CHANNELS];
 int Can_minors[MAX_CHANNELS];			/* used as IRQ dev_id */
-#define LDDK_USE_REGISTER 1
-#ifdef LDDK_USE_REGISTER
+#if LDDK_USE_REGISTER
     int Can_major = Can_MAJOR; 
 #endif
 
@@ -248,9 +254,8 @@ struct file_operations can_fops = {
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 
-
 /* int init_module(void) */
-int can_init(void)
+static int __init can_init(void)
 {
 int i;
 #if LDDK_USE_BLKREQUEST
@@ -258,21 +263,18 @@ int i;
 #endif
 
   DBGin("init_module");
-#ifdef LDDK_USE_REGISTER
-    if( register_chrdev(Can_major, "Can", &can_fops) ) {
+#ifdef CONFIG_DEVFS_FS
+    devfs_mk_cdev (MKDEV(Can_MAJOR, 0), S_IRUSR | S_IWUSR | S_IFCHR, "can0", 0);			
+#endif
+#if LDDK_USE_REGISTER
+    if( register_chrdev(Can_major, "can", &can_fops) ) {
 	  printk("can't get Major %d\n", Can_major);
       return(-EIO);
     }
-  
-
 #endif
     {
-	printk(__CAN_TYPE__ "CAN Driver " VERSION " (c) " __DATE__  " " __TIME__ "\n");
-	printk(" H.J. Oertel (oe@port.de)\n");
-	/* printk(" C.Schroeter (clausi@chemie.fu-berlin.de), H.D. Stich\n");  */
-	    
+	printk(__CAN_TYPE__ "CAN Driver " VERSION " (c) " __DATE__  " " __TIME__ "\n");	    
     }
-
     /*
     initialize the variables layed down in /proc/sys/Can
     */
@@ -286,16 +288,61 @@ int i;
 	IRQ_requested[i] = 0;
 	Can_minors[i]    = i;		/* used as IRQ dev_id */
 
-#if defined(MCF5282)
+#if defined(CONFIG_FIRE_ENGINE)
 	/* we have a really fixed address here */
-	Base[i] = (MCF_MBAR + 0x1c0000);
+	Base[i] = (MCF_MBAR + 0xa000 + CAN_MODULE*(0x0800));
 	/* Because the MCF FlexCAN is using more then 1 Interrupt vector,
 	 * what should be specified here ?
 	 * For information purpose let's only specify  the first used here
 	 */
+	IRQ[i] = 64 + ISC_CANn_MBOR(CAN_MODULE);
+#endif
+
+#if defined(CONFIG_M528x)
+	Base[i] = (MCF_MBAR + 0x1c0000);
 	IRQ[i] = 136;
 #endif
 
+#if defined(CONFIG_M532x)
+	/* we have a really fixed address here */
+	Base[i] = MCF_FLEXCAN_BASEADDR(CAN_MODULE);
+	/* Because the MCF FlexCAN is using more then 1 Interrupt vector,
+	 * what should be specified here ?
+	 * For information purpose let's only specify  the first used here
+	 */
+	IRQ[i] = 128;
+
+	/* Enable GPIO pins for CANTX, CANRX */
+#if defined(CONFIG_M5329EVB)
+	/* On Freescale 5329 EVB CAN pins are muxed with I2C pins */
+	MCF_GPIO_PAR_FECI2C &= 0xF0;
+	MCF_GPIO_PAR_FECI2C |= MCF_GPIO_PAR_FECI2C_PAR_SDA(0x2) | MCF_GPIO_PAR_FECI2C_PAR_SCL(0x2);
+#elif defined(CONFIG_UC532X) || defined(CONFIG_UC53281EVM)
+#ifdef CONFIG_PAR_LCDDATA_FOR_CAN
+	/* we may use these pins for CAN signal */
+	MCF_GPIO_PAR_LCDDATA &= 0x0F;
+	MCF_GPIO_PAR_LCDDATA |= MCF_GPIO_PAR_LCDDATA_PAR_LD17(0x2) | MCF_GPIO_PAR_LCDDATA_PAR_LD16(0x2);
+#else
+	MCF_GPIO_PAR_FECI2C &= 0xF0;
+	MCF_GPIO_PAR_FECI2C |= MCF_GPIO_PAR_FECI2C_PAR_SDA(0x2) | MCF_GPIO_PAR_FECI2C_PAR_SCL(0x2);
+#endif
+#else
+	/* Could be changed for other boards. Depends on board design */
+	MCF_GPIO_PDDR_SSI = 0;
+	MCF_GPIO_PAR_SSI = MCF_GPIO_PAR_SSI_PAR_RXD(0x1) | MCF_GPIO_PAR_SSI_PAR_TXD(0x1);
+#endif
+#endif
+
+#if defined(CONFIG_M5253EVB)
+	/* we have a really fixed address here */
+	Base[i] = MCF_FLEXCAN_BASEADDR(i);
+	/* Because the MCF FlexCAN is using more then 1 Interrupt vector,
+	 * what should be specified here ?
+	 * For information purpose let's only specify  the first used here
+	 */
+	IRQ[i] = 128 + i;
+#endif
+	
 #if defined(CCPC104)
         pc104_irqsetup();
         IRQ[i]           = 67;          /* The only possible vector on CTRLink's 5282 CPU */
@@ -327,20 +374,24 @@ int i;
     /* The only possible interrupt could be IRQ4 on the PC104 Board */
     Can_sysctl_table[SYSCTL_IRQ - 1].mode = 0444;
 #endif
-#if defined(MCF5282)
+#if defined(CONFIG_FIRE_ENGINE)
     Can_sysctl_table[SYSCTL_BASE - 1].mode = 0444;
 #endif
 
-/* #if LDDK_USE_PROCINFO */
+#if defined(CONFIG_M532x) || defined(CONFIG_M5253) || defined(CONFIG_M528x)
+    Can_sysctl_table[SYSCTL_BASE - 1].mode = 0444;
+#endif
+
+#if LDDK_USE_PROCINFO
 /* #error procinfo */
-    /* register_procinfo(); */
-/* #endif */
-/* #if LDDK_USE_SYSCTL */
+     register_procinfo();
+#endif
+#if LDDK_USE_SYSCTL
     register_systables();
-/* #endif */
+#endif 
 
 #if LDDK_USE_BLKREQUEST
-    blk_dev[Can_major].request_fn = Can_request ;
+    blk_dev[Can_major].request_fn = Can_request;
 #endif
 
     DBGout();
@@ -348,27 +399,15 @@ int i;
 }
 
 /* void cleanup_module(void) */
-void can_exit(void)
+static void __exit can_exit(void)
 {
     DBGin("cleanup_module");
-#ifndef MODULE
-    if (MOD_IN_USE) {
-      printk("Can : device busy, remove delayed\n");
-    }
-    /* printk("CAN: removed successfully \n"); */
-#endif
-	
 
 #if LDDK_USE_BLKREQUEST
     blk_dev[Can_major].request_fn = NULL ;
 #endif
-#ifdef LDDK_USE_REGISTER
-    if( unregister_chrdev(Can_major, "Can") != 0 ){
-        printk("can't unregister Can, device busy \n");
-    } else {
-        printk("Can successfully removed\n");
-    }
-
+#if LDDK_USE_REGISTER
+    unregister_chrdev(Can_major, "can");
 #endif
 #if LDDK_USE_PROCINFO
     unregister_procinfo();
@@ -382,7 +421,7 @@ void can_exit(void)
 
 module_init(can_init);
 module_exit(can_exit);
-EXPORT_NO_SYMBOLS;
+
 
 
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */

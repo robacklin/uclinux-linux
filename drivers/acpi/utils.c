@@ -1,5 +1,5 @@
 /*
- *  acpi_utils.c - ACPI Utility Functions ($Revision: 8 $)
+ *  acpi_utils.c - ACPI Utility Functions ($Revision: 10 $)
  *
  *  Copyright (C) 2001, 2002 Andy Grover <andrew.grover@intel.com>
  *  Copyright (C) 2001, 2002 Paul Diefenbaugh <paul.s.diefenbaugh@intel.com>
@@ -25,80 +25,82 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/types.h>
 #include <acpi/acpi_bus.h>
 #include <acpi/acpi_drivers.h>
 
+#include "internal.h"
 
 #define _COMPONENT		ACPI_BUS_COMPONENT
-ACPI_MODULE_NAME		("acpi_utils")
-
+ACPI_MODULE_NAME("utils");
 
 /* --------------------------------------------------------------------------
                             Object Evaluation Helpers
    -------------------------------------------------------------------------- */
-
+static void
+acpi_util_eval_error(acpi_handle h, acpi_string p, acpi_status s)
+{
 #ifdef ACPI_DEBUG_OUTPUT
-#define acpi_util_eval_error(h,p,s) {\
-	char prefix[80] = {'\0'};\
-	struct acpi_buffer buffer = {sizeof(prefix), prefix};\
-	acpi_get_name(h, ACPI_FULL_PATHNAME, &buffer);\
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Evaluate [%s.%s]: %s\n",\
-		(char *) prefix, p, acpi_format_exception(s))); }
+	char prefix[80] = {'\0'};
+	struct acpi_buffer buffer = {sizeof(prefix), prefix};
+	acpi_get_name(h, ACPI_FULL_PATHNAME, &buffer);
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Evaluate [%s.%s]: %s\n",
+		(char *) prefix, p, acpi_format_exception(s)));
 #else
-#define acpi_util_eval_error(h,p,s)
+	return;
 #endif
-
+}
 
 acpi_status
-acpi_extract_package (
-	union acpi_object	*package,
-	struct acpi_buffer	*format,
-	struct acpi_buffer	*buffer)
+acpi_extract_package(union acpi_object *package,
+		     struct acpi_buffer *format, struct acpi_buffer *buffer)
 {
-	u32			size_required = 0;
-	u32			tail_offset = 0;
-	char			*format_string = NULL;
-	u32			format_count = 0;
-	u32			i = 0;
-	u8			*head = NULL;
-	u8			*tail = NULL;
+	u32 size_required = 0;
+	u32 tail_offset = 0;
+	char *format_string = NULL;
+	u32 format_count = 0;
+	u32 i = 0;
+	u8 *head = NULL;
+	u8 *tail = NULL;
 
-	ACPI_FUNCTION_TRACE("acpi_extract_package");
 
-	if (!package || (package->type != ACPI_TYPE_PACKAGE) || (package->package.count < 1)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid 'package' argument\n"));
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+	if (!package || (package->type != ACPI_TYPE_PACKAGE)
+	    || (package->package.count < 1)) {
+		printk(KERN_WARNING PREFIX "Invalid package argument\n");
+		return AE_BAD_PARAMETER;
 	}
 
 	if (!format || !format->pointer || (format->length < 1)) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid 'format' argument\n"));
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+		printk(KERN_WARNING PREFIX "Invalid format argument\n");
+		return AE_BAD_PARAMETER;
 	}
 
 	if (!buffer) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid 'buffer' argument\n"));
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+		printk(KERN_WARNING PREFIX "Invalid buffer argument\n");
+		return AE_BAD_PARAMETER;
 	}
 
-	format_count = (format->length/sizeof(char)) - 1;
+	format_count = (format->length / sizeof(char)) - 1;
 	if (format_count > package->package.count) {
-		ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Format specifies more objects [%d] than exist in package [%d].", format_count, package->package.count));
-		return_ACPI_STATUS(AE_BAD_DATA);
+		printk(KERN_WARNING PREFIX "Format specifies more objects [%d]"
+			      " than exist in package [%d].\n",
+			      format_count, package->package.count);
+		return AE_BAD_DATA;
 	}
 
-	format_string = (char*)format->pointer;
+	format_string = format->pointer;
 
 	/*
 	 * Calculate size_required.
 	 */
-	for (i=0; i<format_count; i++) {
+	for (i = 0; i < format_count; i++) {
 
 		union acpi_object *element = &(package->package.elements[i]);
 
 		if (!element) {
-			return_ACPI_STATUS(AE_BAD_DATA);
+			return AE_BAD_DATA;
 		}
 
 		switch (element->type) {
@@ -106,16 +108,21 @@ acpi_extract_package (
 		case ACPI_TYPE_INTEGER:
 			switch (format_string[i]) {
 			case 'N':
-				size_required += sizeof(acpi_integer);
-				tail_offset += sizeof(acpi_integer);
+				size_required += sizeof(u64);
+				tail_offset += sizeof(u64);
 				break;
 			case 'S':
-				size_required += sizeof(char*) + sizeof(acpi_integer) + sizeof(char);
-				tail_offset += sizeof(char*);
+				size_required +=
+				    sizeof(char *) + sizeof(u64) +
+				    sizeof(char);
+				tail_offset += sizeof(char *);
 				break;
 			default:
-				ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid package element [%d]: got number, expecing [%c].\n", i, format_string[i]));
-				return_ACPI_STATUS(AE_BAD_DATA);
+				printk(KERN_WARNING PREFIX "Invalid package element"
+					      " [%d]: got number, expecing"
+					      " [%c]\n",
+					      i, format_string[i]);
+				return AE_BAD_DATA;
 				break;
 			}
 			break;
@@ -124,25 +131,35 @@ acpi_extract_package (
 		case ACPI_TYPE_BUFFER:
 			switch (format_string[i]) {
 			case 'S':
-				size_required += sizeof(char*) + (element->string.length * sizeof(char)) + sizeof(char);
-				tail_offset += sizeof(char*);
+				size_required +=
+				    sizeof(char *) +
+				    (element->string.length * sizeof(char)) +
+				    sizeof(char);
+				tail_offset += sizeof(char *);
 				break;
 			case 'B':
-				size_required += sizeof(u8*) + (element->buffer.length * sizeof(u8));
-				tail_offset += sizeof(u8*);
+				size_required +=
+				    sizeof(u8 *) +
+				    (element->buffer.length * sizeof(u8));
+				tail_offset += sizeof(u8 *);
 				break;
 			default:
-				ACPI_DEBUG_PRINT((ACPI_DB_WARN, "Invalid package element [%d] got string/buffer, expecing [%c].\n", i, format_string[i]));
-				return_ACPI_STATUS(AE_BAD_DATA);
+				printk(KERN_WARNING PREFIX "Invalid package element"
+					      " [%d] got string/buffer,"
+					      " expecing [%c]\n",
+					      i, format_string[i]);
+				return AE_BAD_DATA;
 				break;
 			}
 			break;
 
 		case ACPI_TYPE_PACKAGE:
 		default:
-			ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Found unsupported element at index=%d\n", i));
+			ACPI_DEBUG_PRINT((ACPI_DB_INFO,
+					  "Found unsupported element at index=%d\n",
+					  i));
 			/* TBD: handle nested packages... */
-			return_ACPI_STATUS(AE_SUPPORT);
+			return AE_SUPPORT;
 			break;
 		}
 	}
@@ -152,10 +169,9 @@ acpi_extract_package (
 	 */
 	if (buffer->length < size_required) {
 		buffer->length = size_required;
-		return_ACPI_STATUS(AE_BUFFER_OVERFLOW);
-	}
-	else if (buffer->length != size_required || !buffer->pointer) {
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+		return AE_BUFFER_OVERFLOW;
+	} else if (buffer->length != size_required || !buffer->pointer) {
+		return AE_BAD_PARAMETER;
 	}
 
 	head = buffer->pointer;
@@ -164,13 +180,13 @@ acpi_extract_package (
 	/*
 	 * Extract package data.
 	 */
-	for (i=0; i<format_count; i++) {
+	for (i = 0; i < format_count; i++) {
 
 		u8 **pointer = NULL;
 		union acpi_object *element = &(package->package.elements[i]);
 
 		if (!element) {
-			return_ACPI_STATUS(AE_BAD_DATA);
+			return AE_BAD_DATA;
 		}
 
 		switch (element->type) {
@@ -178,15 +194,17 @@ acpi_extract_package (
 		case ACPI_TYPE_INTEGER:
 			switch (format_string[i]) {
 			case 'N':
-				*((acpi_integer*)head) = element->integer.value;
-				head += sizeof(acpi_integer);
+				*((u64 *) head) =
+				    element->integer.value;
+				head += sizeof(u64);
 				break;
 			case 'S':
-				pointer = (u8**)head;
+				pointer = (u8 **) head;
 				*pointer = tail;
-				*((acpi_integer*)tail) = element->integer.value;
-				head += sizeof(acpi_integer*);
-				tail += sizeof(acpi_integer);
+				*((u64 *) tail) =
+				    element->integer.value;
+				head += sizeof(u64 *);
+				tail += sizeof(u64);
 				/* NULL terminate string */
 				*tail = (char)0;
 				tail += sizeof(char);
@@ -201,20 +219,22 @@ acpi_extract_package (
 		case ACPI_TYPE_BUFFER:
 			switch (format_string[i]) {
 			case 'S':
-				pointer = (u8**)head;
+				pointer = (u8 **) head;
 				*pointer = tail;
-				memcpy(tail, element->string.pointer, element->string.length);
-				head += sizeof(char*);
+				memcpy(tail, element->string.pointer,
+				       element->string.length);
+				head += sizeof(char *);
 				tail += element->string.length * sizeof(char);
 				/* NULL terminate string */
 				*tail = (char)0;
 				tail += sizeof(char);
 				break;
 			case 'B':
-				pointer = (u8**)head;
+				pointer = (u8 **) head;
 				*pointer = tail;
-				memcpy(tail, element->buffer.pointer, element->buffer.length);
-				head += sizeof(u8*);
+				memcpy(tail, element->buffer.pointer,
+				       element->buffer.length);
+				head += sizeof(u8 *);
 				tail += element->buffer.length * sizeof(u8);
 				break;
 			default:
@@ -231,112 +251,60 @@ acpi_extract_package (
 		}
 	}
 
-	return_ACPI_STATUS(AE_OK);
+	return AE_OK;
 }
 
+EXPORT_SYMBOL(acpi_extract_package);
 
 acpi_status
-acpi_evaluate_integer (
-	acpi_handle		handle,
-	acpi_string		pathname,
-	struct acpi_object_list	*arguments,
-	unsigned long		*data)
+acpi_evaluate_integer(acpi_handle handle,
+		      acpi_string pathname,
+		      struct acpi_object_list *arguments, unsigned long long *data)
 {
-	acpi_status             status = AE_OK;
-	union acpi_object	element;
-	struct acpi_buffer	buffer = {sizeof(union acpi_object), &element};
-
-	ACPI_FUNCTION_TRACE("acpi_evaluate_integer");
+	acpi_status status = AE_OK;
+	union acpi_object element;
+	struct acpi_buffer buffer = { 0, NULL };
 
 	if (!data)
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+		return AE_BAD_PARAMETER;
 
+	buffer.length = sizeof(union acpi_object);
+	buffer.pointer = &element;
 	status = acpi_evaluate_object(handle, pathname, arguments, &buffer);
 	if (ACPI_FAILURE(status)) {
 		acpi_util_eval_error(handle, pathname, status);
-		return_ACPI_STATUS(status);
+		return status;
 	}
 
 	if (element.type != ACPI_TYPE_INTEGER) {
 		acpi_util_eval_error(handle, pathname, AE_BAD_DATA);
-		return_ACPI_STATUS(AE_BAD_DATA);
+		return AE_BAD_DATA;
 	}
 
 	*data = element.integer.value;
 
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%lu]\n", *data));
+	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%llu]\n", *data));
 
-	return_ACPI_STATUS(AE_OK);
+	return AE_OK;
 }
 
-
-#if 0
-acpi_status
-acpi_evaluate_string (
-	acpi_handle		handle,
-	acpi_string		pathname,
-	acpi_object_list	*arguments,
-	acpi_string		*data)
-{
-	acpi_status             status = AE_OK;
-	acpi_object             *element = NULL;
-	acpi_buffer		buffer = {ACPI_ALLOCATE_BUFFER, NULL};
-
-	ACPI_FUNCTION_TRACE("acpi_evaluate_string");
-
-	if (!data)
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
-
-	status = acpi_evaluate_object(handle, pathname, arguments, &buffer);
-	if (ACPI_FAILURE(status)) {
-		acpi_util_eval_error(handle, pathname, status);
-		return_ACPI_STATUS(status);
-	}
-
-	element = (acpi_object *) buffer.pointer;
-
-	if ((element->type != ACPI_TYPE_STRING) 
-		|| (element->type != ACPI_TYPE_BUFFER)
-		|| !element->string.length) {
-		acpi_util_eval_error(handle, pathname, AE_BAD_DATA);
-		return_ACPI_STATUS(AE_BAD_DATA);
-	}
-
-	*data = kmalloc(element->string.length + 1, GFP_KERNEL);
-	if (!data) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, "Memory allocation error\n"));
-		return_VALUE(-ENOMEM);
-	}
-	memset(*data, 0, element->string.length + 1);
-
-	memcpy(*data, element->string.pointer, element->string.length);
-
-	ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Return value [%s]\n", *data));
-
-	acpi_os_free(buffer.pointer);
-
-	return_ACPI_STATUS(AE_OK);
-}
-#endif
-
+EXPORT_SYMBOL(acpi_evaluate_integer);
 
 acpi_status
-acpi_evaluate_reference (
-	acpi_handle		handle,
-	acpi_string		pathname,
-	struct acpi_object_list	*arguments,
-	struct acpi_handle_list	*list)
+acpi_evaluate_reference(acpi_handle handle,
+			acpi_string pathname,
+			struct acpi_object_list *arguments,
+			struct acpi_handle_list *list)
 {
-	acpi_status		status = AE_OK;
-	union acpi_object	*package = NULL;
-	union acpi_object	*element = NULL;
-	struct acpi_buffer	buffer = {ACPI_ALLOCATE_BUFFER, NULL};
-	u32			i = 0;
+	acpi_status status = AE_OK;
+	union acpi_object *package = NULL;
+	union acpi_object *element = NULL;
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	u32 i = 0;
 
-	ACPI_FUNCTION_TRACE("acpi_evaluate_reference");
 
 	if (!list) {
-		return_ACPI_STATUS(AE_BAD_PARAMETER);
+		return AE_BAD_PARAMETER;
 	}
 
 	/* Evaluate object. */
@@ -345,28 +313,25 @@ acpi_evaluate_reference (
 	if (ACPI_FAILURE(status))
 		goto end;
 
-	package = (union acpi_object *) buffer.pointer;
+	package = buffer.pointer;
 
 	if ((buffer.length == 0) || !package) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
-			"No return object (len %X ptr %p)\n", 
-			buffer.length, package));
+		printk(KERN_ERR PREFIX "No return object (len %X ptr %p)\n",
+			    (unsigned)buffer.length, package);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
 	}
 	if (package->type != ACPI_TYPE_PACKAGE) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
-			"Expecting a [Package], found type %X\n", 
-			package->type));
+		printk(KERN_ERR PREFIX "Expecting a [Package], found type %X\n",
+			    package->type);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
 	}
 	if (!package->package.count) {
-		ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
-			"[Package] has zero elements (%p)\n", 
-			package));
+		printk(KERN_ERR PREFIX "[Package] has zero elements (%p)\n",
+			    package);
 		status = AE_BAD_DATA;
 		acpi_util_eval_error(handle, pathname, status);
 		goto end;
@@ -383,31 +348,37 @@ acpi_evaluate_reference (
 
 		element = &(package->package.elements[i]);
 
-		if (element->type != ACPI_TYPE_ANY) {
+		if (element->type != ACPI_TYPE_LOCAL_REFERENCE) {
 			status = AE_BAD_DATA;
-			ACPI_DEBUG_PRINT((ACPI_DB_ERROR, 
-				"Expecting a [Reference] package element, found type %X\n",
-				element->type));
+			printk(KERN_ERR PREFIX
+				    "Expecting a [Reference] package element, found type %X\n",
+				    element->type);
 			acpi_util_eval_error(handle, pathname, status);
 			break;
 		}
 
+		if (!element->reference.handle) {
+			printk(KERN_WARNING PREFIX "Invalid reference in"
+			       " package %s\n", pathname);
+			status = AE_NULL_ENTRY;
+			break;
+		}
 		/* Get the  acpi_handle. */
 
 		list->handles[i] = element->reference.handle;
 		ACPI_DEBUG_PRINT((ACPI_DB_INFO, "Found reference [%p]\n",
-			list->handles[i]));
+				  list->handles[i]));
 	}
 
-end:
+      end:
 	if (ACPI_FAILURE(status)) {
 		list->count = 0;
 		//kfree(list->handles);
 	}
 
-	acpi_os_free(buffer.pointer);
+	kfree(buffer.pointer);
 
-	return_ACPI_STATUS(status);
+	return status;
 }
 
-
+EXPORT_SYMBOL(acpi_evaluate_reference);

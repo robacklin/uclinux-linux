@@ -1,4 +1,4 @@
-/* $Id: parport_ieee1284.c,v 1.4 1997/10/19 21:37:21 philip Exp $
+/*
  * IEEE-1284 implementation for parport.
  *
  * Authors: Phil Blundell <philb@gnu.org>
@@ -16,12 +16,14 @@
  * Various hacks, Fred Barnes <frmb2@ukc.ac.uk>, 04/2000
  */
 
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/threads.h>
 #include <linux/parport.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
+#include <linux/sched.h>
 
 #undef DEBUG /* undef me for production */
 
@@ -37,7 +39,7 @@
 
 /* Make parport_wait_peripheral wake up.
  * It will be useful to call this from an interrupt handler. */
-void parport_ieee1284_wakeup (struct parport *port)
+static void parport_ieee1284_wakeup (struct parport *port)
 {
 	up (&port->physport->ieee1284.irq);
 }
@@ -58,10 +60,10 @@ static void timeout_waiting_on_port (unsigned long cookie)
  *	set to zero, it returns immediately.
  *
  *	If an interrupt occurs before the timeout period elapses, this
- *	function returns one immediately.  If it times out, it returns
- *	a value greater than zero.  An error code less than zero
- *	indicates an error (most likely a pending signal), and the
- *	calling code should finish what it's doing as soon as it can.
+ *	function returns zero immediately.  If it times out, it returns
+ *	one.  An error code less than zero indicates an error (most
+ *	likely a pending signal), and the calling code should finish
+ *	what it's doing as soon as it can.
  */
 
 int parport_wait_event (struct parport *port, signed long timeout)
@@ -74,7 +76,7 @@ int parport_wait_event (struct parport *port, signed long timeout)
 		   semaphore. */
 		return 1;
 
-	init_timer (&timer);
+	init_timer_on_stack(&timer);
 	timer.expires = jiffies + timeout;
 	timer.function = timeout_waiting_on_port;
 	port_from_cookie[port->number % PARPORT_MAX] = port;
@@ -82,9 +84,11 @@ int parport_wait_event (struct parport *port, signed long timeout)
 
 	add_timer (&timer);
 	ret = down_interruptible (&port->physport->ieee1284.irq);
-	if (!del_timer (&timer) && !ret)
+	if (!del_timer_sync(&timer) && !ret)
 		/* Timed out. */
 		ret = 1;
+
+	destroy_timer_on_stack(&timer);
 
 	return ret;
 }
@@ -107,7 +111,7 @@ int parport_wait_event (struct parport *port, signed long timeout)
  *
  *	If the status lines take on the desired values before the
  *	timeout period elapses, parport_poll_peripheral() returns zero
- *	immediately.  A zero return value greater than zero indicates
+ *	immediately.  A return value greater than zero indicates
  *	a timeout.  An error code (less than zero) indicates an error,
  *	most likely a signal that arrived, and the caller should
  *	finish what it is doing as soon as possible.
@@ -128,7 +132,7 @@ int parport_poll_peripheral(struct parport *port,
 			return 0;
 		if (signal_pending (current))
 			return -EINTR;
-		if (current->need_resched)
+		if (need_resched())
 			break;
 		if (i >= 2)
 			udelay (5);
@@ -168,7 +172,7 @@ int parport_wait_peripheral(struct parport *port,
 {
 	int ret;
 	int usec;
-	long deadline;
+	unsigned long deadline;
 	unsigned char status;
 
 	usec = port->physport->spintime; /* usecs of fast polling */
@@ -193,16 +197,14 @@ int parport_wait_peripheral(struct parport *port,
 		return 1;
 
 	/* 40ms of slow polling. */
-	deadline = jiffies + (HZ + 24) / 25;
+	deadline = jiffies + msecs_to_jiffies(40);
 	while (time_before (jiffies, deadline)) {
-		int ret;
-
 		if (signal_pending (current))
 			return -EINTR;
 
 		/* Wait for 10ms (or until an interrupt occurs if
 		 * the handler is set) */
-		if ((ret = parport_wait_event (port, (HZ + 99) / 100)) < 0)
+		if ((ret = parport_wait_event (port, msecs_to_jiffies(10))) < 0)
 			return ret;
 
 		status = parport_read_status (port);
@@ -213,8 +215,7 @@ int parport_wait_peripheral(struct parport *port,
 			/* parport_wait_event didn't time out, but the
 			 * peripheral wasn't actually ready either.
 			 * Wait for another 10ms. */
-			__set_current_state (TASK_INTERRUPTIBLE);
-			schedule_timeout ((HZ+ 99) / 100);
+			schedule_timeout_interruptible(msecs_to_jiffies(10));
 		}
 	}
 
@@ -354,7 +355,7 @@ int parport_negotiate (struct parport *port, int mode)
 		return 0;
 	}
 
-	/* Go to compability forward idle mode */
+	/* Go to compatibility forward idle mode */
 	if (port->ieee1284.mode != IEEE1284_MODE_COMPAT)
 		parport_ieee1284_terminate (port);
 
@@ -570,7 +571,7 @@ static int parport_ieee1284_ack_data_avail (struct parport *port)
 #endif /* IEEE1284 support */
 
 /* Handle an interrupt. */
-void parport_ieee1284_interrupt (int which, void *handle, struct pt_regs *regs)
+void parport_ieee1284_interrupt (void *handle)
 {
 	struct parport *port = handle;
 	parport_ieee1284_wakeup (port);
@@ -804,3 +805,13 @@ long parport_set_timeout (struct pardevice *dev, long inactivity)
 
 	return old;
 }
+
+/* Exported symbols for modules. */
+
+EXPORT_SYMBOL(parport_negotiate);
+EXPORT_SYMBOL(parport_write);
+EXPORT_SYMBOL(parport_read);
+EXPORT_SYMBOL(parport_wait_peripheral);
+EXPORT_SYMBOL(parport_wait_event);
+EXPORT_SYMBOL(parport_set_timeout);
+EXPORT_SYMBOL(parport_ieee1284_interrupt);

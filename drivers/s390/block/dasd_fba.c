@@ -1,518 +1,631 @@
-/* 
+/*
  * File...........: linux/drivers/s390/block/dasd_fba.c
  * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
  * Bugreports.to..: <Linux390@de.ibm.com>
- * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
- *
- * $Revision: 1.50 $
- *
- * History of changes
- *          fixed partition handling and HDIO_GETGEO
+ * Copyright IBM Corp. 1999, 2009
  */
 
-#include <linux/config.h>
+#define KMSG_COMPONENT "dasd-fba"
+
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <asm/debug.h>
 
 #include <linux/slab.h>
-#include <linux/hdreg.h>	/* HDIO_GETGEO                      */
-#include <linux/blk.h>
+#include <linux/hdreg.h>	/* HDIO_GETGEO			    */
+#include <linux/bio.h>
+#include <linux/module.h>
+#include <linux/init.h>
 
-#include <asm/ccwcache.h>
 #include <asm/idals.h>
 #include <asm/ebcdic.h>
 #include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/s390dyn.h>
+#include <asm/ccwdev.h>
 
 #include "dasd_int.h"
 #include "dasd_fba.h"
-#include "dasd_3370_erp.h"
-#include "dasd_9336_erp.h"
 
 #ifdef PRINTK_HEADER
 #undef PRINTK_HEADER
 #endif				/* PRINTK_HEADER */
-#define PRINTK_HEADER DASD_NAME"(fba):"
+#define PRINTK_HEADER "dasd(fba):"
 
 #define DASD_FBA_CCW_WRITE 0x41
 #define DASD_FBA_CCW_READ 0x42
 #define DASD_FBA_CCW_LOCATE 0x43
 #define DASD_FBA_CCW_DEFINE_EXTENT 0x63
 
-#ifdef MODULE
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,12))
 MODULE_LICENSE("GPL");
-#endif
-#endif
 
-dasd_discipline_t dasd_fba_discipline;
+static struct dasd_discipline dasd_fba_discipline;
 
-typedef struct
-    dasd_fba_private_t {
-	dasd_fba_characteristics_t rdc_data;
-} dasd_fba_private_t;
-
-#ifdef CONFIG_DASD_DYNAMIC
-static
-devreg_t dasd_fba_known_devices[] = {
-	{
-	      ci: { hc: {ctype:0x6310, dtype:0x9336}},
-	      flag:(DEVREG_MATCH_CU_TYPE |
-                    DEVREG_MATCH_DEV_TYPE | DEVREG_TYPE_DEVCHARS),
-              oper_func:dasd_oper_handler
-        },
-	{
-                ci: { hc: {ctype:0x3880, dtype:0x3370}},
-                flag:(DEVREG_MATCH_CU_TYPE |
-                      DEVREG_MATCH_DEV_TYPE | DEVREG_TYPE_DEVCHARS),
-                oper_func:dasd_oper_handler
-        }
+struct dasd_fba_private {
+	struct dasd_fba_characteristics rdc_data;
 };
-#endif
-static inline int
-define_extent (ccw1_t * ccw, DE_fba_data_t * DE_data, int rw,
-	       int blksize, int beg, int nr, ccw_req_t* cqr,
-               dasd_device_t* device)
+
+static struct ccw_device_id dasd_fba_ids[] = {
+	{ CCW_DEVICE_DEVTYPE (0x6310, 0, 0x9336, 0), .driver_info = 0x1},
+	{ CCW_DEVICE_DEVTYPE (0x3880, 0, 0x3370, 0), .driver_info = 0x2},
+	{ /* end of list */ },
+};
+
+MODULE_DEVICE_TABLE(ccw, dasd_fba_ids);
+
+static struct ccw_driver dasd_fba_driver; /* see below */
+static int
+dasd_fba_probe(struct ccw_device *cdev)
 {
-        int rc=0;
-	memset (DE_data, 0, sizeof (DE_fba_data_t));
+	return dasd_generic_probe(cdev, &dasd_fba_discipline);
+}
+
+static int
+dasd_fba_set_online(struct ccw_device *cdev)
+{
+	return dasd_generic_set_online(cdev, &dasd_fba_discipline);
+}
+
+static struct ccw_driver dasd_fba_driver = {
+	.driver = {
+		.name	= "dasd-fba",
+		.owner	= THIS_MODULE,
+	},
+	.ids         = dasd_fba_ids,
+	.probe       = dasd_fba_probe,
+	.remove      = dasd_generic_remove,
+	.set_offline = dasd_generic_set_offline,
+	.set_online  = dasd_fba_set_online,
+	.notify      = dasd_generic_notify,
+	.path_event  = dasd_generic_path_event,
+	.freeze      = dasd_generic_pm_freeze,
+	.thaw	     = dasd_generic_restore_device,
+	.restore     = dasd_generic_restore_device,
+	.int_class   = IOINT_DAS,
+};
+
+static void
+define_extent(struct ccw1 * ccw, struct DE_fba_data *data, int rw,
+	      int blksize, int beg, int nr)
+{
 	ccw->cmd_code = DASD_FBA_CCW_DEFINE_EXTENT;
+	ccw->flags = 0;
 	ccw->count = 16;
-	if ((rc=dasd_set_normalized_cda (ccw, __pa (DE_data), cqr, device)))
-                return rc;
+	ccw->cda = (__u32) __pa(data);
+	memset(data, 0, sizeof (struct DE_fba_data));
 	if (rw == WRITE)
-		(DE_data->mask).perm = 0x0;
+		(data->mask).perm = 0x0;
 	else if (rw == READ)
-		(DE_data->mask).perm = 0x1;
+		(data->mask).perm = 0x1;
 	else
-		DE_data->mask.perm = 0x2;
-	DE_data->blk_size = blksize;
-	DE_data->ext_loc = beg;
-	DE_data->ext_end = nr - 1;
-        return rc;
+		data->mask.perm = 0x2;
+	data->blk_size = blksize;
+	data->ext_loc = beg;
+	data->ext_end = nr - 1;
 }
 
-static inline void
-locate_record (ccw1_t * ccw, LO_fba_data_t * LO_data, int rw, int block_nr,
-	       int block_ct, ccw_req_t* cqr, dasd_device_t* device)
+static void
+locate_record(struct ccw1 * ccw, struct LO_fba_data *data, int rw,
+	      int block_nr, int block_ct)
 {
-	memset (LO_data, 0, sizeof (LO_fba_data_t));
 	ccw->cmd_code = DASD_FBA_CCW_LOCATE;
+	ccw->flags = 0;
 	ccw->count = 8;
-	dasd_set_normalized_cda (ccw, __pa (LO_data), cqr, device);
+	ccw->cda = (__u32) __pa(data);
+	memset(data, 0, sizeof (struct LO_fba_data));
 	if (rw == WRITE)
-		LO_data->operation.cmd = 0x5;
+		data->operation.cmd = 0x5;
 	else if (rw == READ)
-		LO_data->operation.cmd = 0x6;
+		data->operation.cmd = 0x6;
 	else
-		LO_data->operation.cmd = 0x8;
-	LO_data->blk_nr = block_nr;
-	LO_data->blk_ct = block_ct;
+		data->operation.cmd = 0x8;
+	data->blk_nr = block_nr;
+	data->blk_ct = block_ct;
 }
 
 static int
-dasd_fba_id_check (s390_dev_info_t * info)
+dasd_fba_check_characteristics(struct dasd_device *device)
 {
-	if (info->sid_data.cu_type == 0x3880)
-		if (info->sid_data.dev_type == 0x3370)
-			return 0;
-	if (info->sid_data.cu_type == 0x6310)
-		if (info->sid_data.dev_type == 0x9336)
-			return 0;
-	return -ENODEV;
-}
+	struct dasd_block *block;
+	struct dasd_fba_private *private;
+	struct ccw_device *cdev = device->cdev;
+	int rc;
+	int readonly;
 
-static int
-dasd_fba_check_characteristics (struct dasd_device_t *device)
-{
-	int rc = -ENODEV;
-	void *rdc_data;
-	dasd_fba_private_t *private;
-
-	if (device == NULL) {
-
-		MESSAGE (KERN_WARNING, "%s",
-                         "Null device pointer passed to characteristics "
-                         "checker");
-
-                return -ENODEV;
+	private = (struct dasd_fba_private *) device->private;
+	if (!private) {
+		private = kzalloc(sizeof(*private), GFP_KERNEL | GFP_DMA);
+		if (!private) {
+			dev_warn(&device->cdev->dev,
+				 "Allocating memory for private DASD "
+				 "data failed\n");
+			return -ENOMEM;
+		}
+		device->private = (void *) private;
+	} else {
+		memset(private, 0, sizeof(*private));
 	}
-	device->private = kmalloc (sizeof (dasd_fba_private_t), GFP_KERNEL);
-
-	if (device->private == NULL) {
-
-		MESSAGE (KERN_WARNING, "%s",
-			"memory allocation failed for private data");
-
-                rc = -ENOMEM;
-                goto fail;
+	block = dasd_alloc_block();
+	if (IS_ERR(block)) {
+		DBF_EVENT_DEVID(DBF_WARNING, cdev, "%s", "could not allocate "
+				"dasd block structure");
+		device->private = NULL;
+		kfree(private);
+		return PTR_ERR(block);
 	}
-	private = (dasd_fba_private_t *) device->private;
-	rdc_data = (void *) &(private->rdc_data);
-	rc = read_dev_chars (device->devinfo.irq, &rdc_data, 32);
+	device->block = block;
+	block->base = device;
 
+	/* Read Device Characteristics */
+	rc = dasd_generic_read_dev_chars(device, DASD_FBA_MAGIC,
+					 &private->rdc_data, 32);
 	if (rc) {
-
-		MESSAGE (KERN_WARNING,
-			"Read device characteristics returned error %d", 
-                         rc);
-
-                goto fail;
+		DBF_EVENT_DEVID(DBF_WARNING, cdev, "Read device "
+				"characteristics returned error %d", rc);
+		device->block = NULL;
+		dasd_free_block(block);
+		device->private = NULL;
+		kfree(private);
+		return rc;
 	}
 
-	DEV_MESSAGE (KERN_INFO, device,
-                     "%04X/%02X(CU:%04X/%02X) %dMB at(%d B/blk)",
-                     device->devinfo.sid_data.dev_type,
-                     device->devinfo.sid_data.dev_model,
-                     device->devinfo.sid_data.cu_type,
-                     device->devinfo.sid_data.cu_model,
-                     ((private->rdc_data.blk_bdsa *
-                       (private->rdc_data.blk_size >> 9)) >> 11),
-                     private->rdc_data.blk_size);
+	device->default_expires = DASD_EXPIRES;
+	device->path_data.opm = LPM_ANYPATH;
 
-        goto out;
- fail:
-        if ( rc ) {
-                kfree(device->private);
-                device->private = NULL;
-        }
-        
- out:
-	return rc;
+	readonly = dasd_device_is_ro(device);
+	if (readonly)
+		set_bit(DASD_FLAG_DEVICE_RO, &device->flags);
+
+	dev_info(&device->cdev->dev,
+		 "New FBA DASD %04X/%02X (CU %04X/%02X) with %d MB "
+		 "and %d B/blk%s\n",
+		 cdev->id.dev_type,
+		 cdev->id.dev_model,
+		 cdev->id.cu_type,
+		 cdev->id.cu_model,
+		 ((private->rdc_data.blk_bdsa *
+		   (private->rdc_data.blk_size >> 9)) >> 11),
+		 private->rdc_data.blk_size,
+		 readonly ? ", read-only device" : "");
+	return 0;
 }
 
-static int
-dasd_fba_do_analysis (struct dasd_device_t *device)
+static int dasd_fba_do_analysis(struct dasd_block *block)
 {
-	int rc = 0;
-	int sb;
-	dasd_fba_private_t *private = (dasd_fba_private_t *) device->private;
-	int bs = private->rdc_data.blk_size;
+	struct dasd_fba_private *private;
+	int sb, rc;
 
-	memset (&(device->sizes), 0, sizeof (dasd_sizes_t));
-	switch (bs) {
-	case 512:
-	case 1024:
-	case 2048:
-	case 4096:
-		device->sizes.bp_block = bs;
-		break;
-	default:
-
-		DEV_MESSAGE (KERN_INFO, device,
-                             "unknown blocksize %d",
-                             bs);
-
-		return -EMEDIUMTYPE;
+	private = (struct dasd_fba_private *) block->base->private;
+	rc = dasd_check_blocksize(private->rdc_data.blk_size);
+	if (rc) {
+		DBF_DEV_EVENT(DBF_WARNING, block->base, "unknown blocksize %d",
+			    private->rdc_data.blk_size);
+		return rc;
 	}
-	device->sizes.s2b_shift = 0;	/* bits to shift 512 to get a block */
-	for (sb = 512; sb < bs; sb = sb << 1)
-		device->sizes.s2b_shift++;
-
-	device->sizes.blocks = (private->rdc_data.blk_bdsa);
-	device->sizes.pt_block = 1;
-
-	return rc;
+	block->blocks = private->rdc_data.blk_bdsa;
+	block->bp_block = private->rdc_data.blk_size;
+	block->s2b_shift = 0;	/* bits to shift 512 to get a block */
+	for (sb = 512; sb < private->rdc_data.blk_size; sb = sb << 1)
+		block->s2b_shift++;
+	return 0;
 }
 
-static int
-dasd_fba_fill_geometry (struct dasd_device_t *device, struct hd_geometry *geo)
+static int dasd_fba_fill_geometry(struct dasd_block *block,
+				  struct hd_geometry *geo)
 {
-	int rc = 0;
-	unsigned long sectors = device->sizes.blocks << device->sizes.s2b_shift;
-	unsigned long tracks = sectors >> 6;
-	unsigned long cyls = tracks >> 4;
-
-	switch (device->sizes.bp_block) {
-	case 512:
-	case 1024:
-	case 2048:
-	case 4096:
-		break;
-	default:
+	if (dasd_check_blocksize(block->bp_block) != 0)
 		return -EINVAL;
-	}
-	geo->cylinders = cyls;
+	geo->cylinders = (block->blocks << block->s2b_shift) >> 10;
 	geo->heads = 16;
-	geo->sectors = 128 >> device->sizes.s2b_shift;
-	return rc;
+	geo->sectors = 128 >> block->s2b_shift;
+	return 0;
 }
 
-static dasd_era_t
-dasd_fba_examine_error (ccw_req_t * cqr, devstat_t * stat)
-{
-	dasd_device_t *device = (dasd_device_t *) cqr->device;
-	if (stat->cstat == 0x00 &&
-	    stat->dstat == (DEV_STAT_CHN_END | DEV_STAT_DEV_END))
-		    return dasd_era_none;
-
-	switch (device->devinfo.sid_data.dev_model) {
-	case 0x3370:
-		return dasd_3370_erp_examine (cqr, stat);
-	case 0x9336:
-		return dasd_9336_erp_examine (cqr, stat);
-	default:
-		return dasd_era_recover;
-	}
-}
-
-static dasd_erp_action_fn_t
-dasd_fba_erp_action (ccw_req_t * cqr)
+static dasd_erp_fn_t
+dasd_fba_erp_action(struct dasd_ccw_req * cqr)
 {
 	return dasd_default_erp_action;
 }
 
-static dasd_erp_postaction_fn_t
-dasd_fba_erp_postaction (ccw_req_t * cqr)
+static dasd_erp_fn_t
+dasd_fba_erp_postaction(struct dasd_ccw_req * cqr)
 {
 	if (cqr->function == dasd_default_erp_action)
 		return dasd_default_erp_postaction;
 
-	MESSAGE (KERN_WARNING,
-                 "unknown ERP action %p", 
-                 cqr->function);
-
+	DBF_DEV_EVENT(DBF_WARNING, cqr->startdev, "unknown ERP action %p",
+		    cqr->function);
 	return NULL;
 }
 
-static ccw_req_t *
-dasd_fba_build_cp_from_req (dasd_device_t * device, struct request *req)
+static void dasd_fba_check_for_device_change(struct dasd_device *device,
+					     struct dasd_ccw_req *cqr,
+					     struct irb *irb)
 {
-	ccw_req_t *rw_cp = NULL;
-	int rw_cmd;
-	int bhct, i = 0;
-	long size;
-	ccw1_t *ccw;
-	DE_fba_data_t *DE_data;
-	LO_fba_data_t *LO_data;
-	struct buffer_head *bh;
-	dasd_fba_private_t *private = (dasd_fba_private_t *) device->private;
-	int byt_per_blk = device->sizes.bp_block;
-        unsigned long reloc_sector = req->sector + 
-                device->major_info->gendisk.part[MINOR (req->rq_dev)].start_sect;
-        
-	if (req->cmd == READ) {
-		rw_cmd = DASD_FBA_CCW_READ;
-	} else if (req->cmd == WRITE) {
-		rw_cmd = DASD_FBA_CCW_WRITE;
-	} else {
+	char mask;
 
-		MESSAGE (KERN_ERR,
-                         "Unknown command %d\n", 
-                         req->cmd);
+	/* first of all check for state change pending interrupt */
+	mask = DEV_STAT_ATTENTION | DEV_STAT_DEV_END | DEV_STAT_UNIT_EXCEP;
+	if ((irb->scsw.cmd.dstat & mask) == mask)
+		dasd_generic_handle_state_change(device);
+};
 
+static struct dasd_ccw_req *dasd_fba_build_cp(struct dasd_device * memdev,
+					      struct dasd_block *block,
+					      struct request *req)
+{
+	struct dasd_fba_private *private;
+	unsigned long *idaws;
+	struct LO_fba_data *LO_data;
+	struct dasd_ccw_req *cqr;
+	struct ccw1 *ccw;
+	struct req_iterator iter;
+	struct bio_vec *bv;
+	char *dst;
+	int count, cidaw, cplength, datasize;
+	sector_t recid, first_rec, last_rec;
+	unsigned int blksize, off;
+	unsigned char cmd;
+
+	private = (struct dasd_fba_private *) block->base->private;
+	if (rq_data_dir(req) == READ) {
+		cmd = DASD_FBA_CCW_READ;
+	} else if (rq_data_dir(req) == WRITE) {
+		cmd = DASD_FBA_CCW_WRITE;
+	} else
 		return ERR_PTR(-EINVAL);
+	blksize = block->bp_block;
+	/* Calculate record id of first and last block. */
+	first_rec = blk_rq_pos(req) >> block->s2b_shift;
+	last_rec =
+		(blk_rq_pos(req) + blk_rq_sectors(req) - 1) >> block->s2b_shift;
+	/* Check struct bio and count the number of blocks for the request. */
+	count = 0;
+	cidaw = 0;
+	rq_for_each_segment(bv, req, iter) {
+		if (bv->bv_len & (blksize - 1))
+			/* Fba can only do full blocks. */
+			return ERR_PTR(-EINVAL);
+		count += bv->bv_len >> (block->s2b_shift + 9);
+#if defined(CONFIG_64BIT)
+		if (idal_is_needed (page_address(bv->bv_page), bv->bv_len))
+			cidaw += bv->bv_len / blksize;
+#endif
 	}
-	/* Build the request */
-	/* count hs to prevent errors, when bh smaller than block */
-        bh = req -> bh;
-	bhct = 0;
-        while ( bh != NULL ) {
-                if (bh->b_size < byt_per_blk) {
-                        BUG();
-                }
-                bhct += bh->b_size >> (device->sizes.s2b_shift+9);
-                bh = bh->b_reqnext;
-        }
-        
-        if (private->rdc_data.mode.bits.data_chain) {
-                rw_cp = dasd_alloc_request (dasd_fba_discipline.name,
-                                            2 + bhct,
-                                            sizeof (DE_fba_data_t) +
-                                            sizeof (LO_fba_data_t),
-                                            device);
-        } else {
-                rw_cp = dasd_alloc_request (dasd_fba_discipline.name,
-                                            1 + 2 * bhct,
-                                            sizeof (DE_fba_data_t) +
-                                            bhct * sizeof (LO_fba_data_t),
-                                            device);
-        }
-	if (!rw_cp) {
-		return ERR_PTR(-ENOMEM);
+	/* Paranoia. */
+	if (count != last_rec - first_rec + 1)
+		return ERR_PTR(-EINVAL);
+	/* 1x define extent + 1x locate record + number of blocks */
+	cplength = 2 + count;
+	/* 1x define extent + 1x locate record */
+	datasize = sizeof(struct DE_fba_data) + sizeof(struct LO_fba_data) +
+		cidaw * sizeof(unsigned long);
+	/*
+	 * Find out number of additional locate record ccws if the device
+	 * can't do data chaining.
+	 */
+	if (private->rdc_data.mode.bits.data_chain == 0) {
+		cplength += count - 1;
+		datasize += (count - 1)*sizeof(struct LO_fba_data);
 	}
-	DE_data = rw_cp->data;
-	LO_data = rw_cp->data + sizeof (DE_fba_data_t);
-	ccw = rw_cp->cpaddr;
-
-	if (define_extent (ccw, DE_data, req->cmd, byt_per_blk,
-                           reloc_sector, req->nr_sectors, rw_cp, device)) {
-                goto clear_rw_cp;
-        }
-	ccw->flags |= CCW_FLAG_CC;
-        ccw ++;
-        locate_record (ccw, LO_data, req->cmd, 0, 
-                       private->rdc_data.mode.bits.data_chain ? bhct : 1, rw_cp, device);
-        if (ccw->cda == 0) {
-                goto clear_rw_cp;
-        }
-        ccw->flags |= CCW_FLAG_CC;
-        
-        bh = req -> bh;
-        i = 0;
-        while ( bh != NULL ) {
-                for (size = 0; size < bh->b_size; size += byt_per_blk) {
-                        ccw ++;
-                        ccw->cmd_code = rw_cmd;
-                        ccw->count = byt_per_blk;
-                        if (dasd_set_normalized_cda (ccw,__pa (bh->b_data + size), rw_cp, device)) {
-                                goto clear_rw_cp;
-                        }
-                        if (private->rdc_data.mode.bits.data_chain) {
-                                ccw->flags |= CCW_FLAG_DC;
-                        } else {
-                                ccw->flags |= CCW_FLAG_CC;
-                        }
-                }
-                bh = bh->b_reqnext;
-                if ( bh != NULL &&
-                     !(private->rdc_data.mode.bits.data_chain)) {
-                        ccw++;
-                        i++;
-                        LO_data++;
-                        locate_record (ccw, LO_data, req->cmd, i, 1, rw_cp, device);
-                        if (ccw->cda == 0) {
-                                goto clear_rw_cp;
-                        }
-                        ccw->flags |= CCW_FLAG_CC;
-                }
-        }
-	ccw->flags &= ~(CCW_FLAG_DC | CCW_FLAG_CC);
-
-	rw_cp->device = device;
-	rw_cp->expires = 5 * TOD_MIN;		/* 5 minutes */
-	rw_cp->req = req;
-	check_then_set (&rw_cp->status, CQR_STATUS_EMPTY, CQR_STATUS_FILLED);
-        goto out;
- clear_rw_cp:
-        dasd_free_request (rw_cp, device);
-        rw_cp = NULL;
- out:
-	return rw_cp;
+	/* Allocate the ccw request. */
+	cqr = dasd_smalloc_request(DASD_FBA_MAGIC, cplength, datasize, memdev);
+	if (IS_ERR(cqr))
+		return cqr;
+	ccw = cqr->cpaddr;
+	/* First ccw is define extent. */
+	define_extent(ccw++, cqr->data, rq_data_dir(req),
+		      block->bp_block, blk_rq_pos(req), blk_rq_sectors(req));
+	/* Build locate_record + read/write ccws. */
+	idaws = (unsigned long *) (cqr->data + sizeof(struct DE_fba_data));
+	LO_data = (struct LO_fba_data *) (idaws + cidaw);
+	/* Locate record for all blocks for smart devices. */
+	if (private->rdc_data.mode.bits.data_chain != 0) {
+		ccw[-1].flags |= CCW_FLAG_CC;
+		locate_record(ccw++, LO_data++, rq_data_dir(req), 0, count);
+	}
+	recid = first_rec;
+	rq_for_each_segment(bv, req, iter) {
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		if (dasd_page_cache) {
+			char *copy = kmem_cache_alloc(dasd_page_cache,
+						      GFP_DMA | __GFP_NOWARN);
+			if (copy && rq_data_dir(req) == WRITE)
+				memcpy(copy + bv->bv_offset, dst, bv->bv_len);
+			if (copy)
+				dst = copy + bv->bv_offset;
+		}
+		for (off = 0; off < bv->bv_len; off += blksize) {
+			/* Locate record for stupid devices. */
+			if (private->rdc_data.mode.bits.data_chain == 0) {
+				ccw[-1].flags |= CCW_FLAG_CC;
+				locate_record(ccw, LO_data++,
+					      rq_data_dir(req),
+					      recid - first_rec, 1);
+				ccw->flags = CCW_FLAG_CC;
+				ccw++;
+			} else {
+				if (recid > first_rec)
+					ccw[-1].flags |= CCW_FLAG_DC;
+				else
+					ccw[-1].flags |= CCW_FLAG_CC;
+			}
+			ccw->cmd_code = cmd;
+			ccw->count = block->bp_block;
+			if (idal_is_needed(dst, blksize)) {
+				ccw->cda = (__u32)(addr_t) idaws;
+				ccw->flags = CCW_FLAG_IDA;
+				idaws = idal_create_words(idaws, dst, blksize);
+			} else {
+				ccw->cda = (__u32)(addr_t) dst;
+				ccw->flags = 0;
+			}
+			ccw++;
+			dst += blksize;
+			recid++;
+		}
+	}
+	if (blk_noretry_request(req) ||
+	    block->base->features & DASD_FEATURE_FAILFAST)
+		set_bit(DASD_CQR_FLAGS_FAILFAST, &cqr->flags);
+	cqr->startdev = memdev;
+	cqr->memdev = memdev;
+	cqr->block = block;
+	cqr->expires = memdev->default_expires * HZ;	/* default 5 minutes */
+	cqr->retries = 32;
+	cqr->buildclk = get_clock();
+	cqr->status = DASD_CQR_FILLED;
+	return cqr;
 }
 
 static int
-dasd_fba_fill_info (dasd_device_t * device, dasd_information2_t * info)
+dasd_fba_free_cp(struct dasd_ccw_req *cqr, struct request *req)
 {
-	int rc = 0;
+	struct dasd_fba_private *private;
+	struct ccw1 *ccw;
+	struct req_iterator iter;
+	struct bio_vec *bv;
+	char *dst, *cda;
+	unsigned int blksize, off;
+	int status;
+
+	if (!dasd_page_cache)
+		goto out;
+	private = (struct dasd_fba_private *) cqr->block->base->private;
+	blksize = cqr->block->bp_block;
+	ccw = cqr->cpaddr;
+	/* Skip over define extent & locate record. */
+	ccw++;
+	if (private->rdc_data.mode.bits.data_chain != 0)
+		ccw++;
+	rq_for_each_segment(bv, req, iter) {
+		dst = page_address(bv->bv_page) + bv->bv_offset;
+		for (off = 0; off < bv->bv_len; off += blksize) {
+			/* Skip locate record. */
+			if (private->rdc_data.mode.bits.data_chain == 0)
+				ccw++;
+			if (dst) {
+				if (ccw->flags & CCW_FLAG_IDA)
+					cda = *((char **)((addr_t) ccw->cda));
+				else
+					cda = (char *)((addr_t) ccw->cda);
+				if (dst != cda) {
+					if (rq_data_dir(req) == READ)
+						memcpy(dst, cda, bv->bv_len);
+					kmem_cache_free(dasd_page_cache,
+					    (void *)((addr_t)cda & PAGE_MASK));
+				}
+				dst = NULL;
+			}
+			ccw++;
+		}
+	}
+out:
+	status = cqr->status == DASD_CQR_DONE;
+	dasd_sfree_request(cqr, cqr->memdev);
+	return status;
+}
+
+static void dasd_fba_handle_terminated_request(struct dasd_ccw_req *cqr)
+{
+	cqr->status = DASD_CQR_FILLED;
+};
+
+static int
+dasd_fba_fill_info(struct dasd_device * device,
+		   struct dasd_information2_t * info)
+{
 	info->label_block = 1;
 	info->FBA_layout = 1;
 	info->format = DASD_FORMAT_LDL;
-	info->characteristics_size = sizeof (dasd_fba_characteristics_t);
-	memcpy (info->characteristics,
-		&((dasd_fba_private_t *) device->private)->rdc_data,
-		sizeof (dasd_fba_characteristics_t));
+	info->characteristics_size = sizeof(struct dasd_fba_characteristics);
+	memcpy(info->characteristics,
+	       &((struct dasd_fba_private *) device->private)->rdc_data,
+	       sizeof (struct dasd_fba_characteristics));
 	info->confdata_size = 0;
-	return rc;
+	return 0;
 }
 
-
-dasd_discipline_t dasd_fba_discipline = {
-        owner: THIS_MODULE,
-	name:"FBA ",
-	ebcname:"FBA ",
-	max_blocks:((PAGE_SIZE >> 1) / sizeof (ccw1_t) - 1),
-	id_check:dasd_fba_id_check,
-	check_characteristics:dasd_fba_check_characteristics,
-	do_analysis:dasd_fba_do_analysis,
-	fill_geometry:dasd_fba_fill_geometry,
-	start_IO:dasd_start_IO,
-	term_IO:dasd_term_IO,
-	examine_error:dasd_fba_examine_error,
-	erp_action:dasd_fba_erp_action,
-	erp_postaction:dasd_fba_erp_postaction,
-	build_cp_from_req:dasd_fba_build_cp_from_req,
-	int_handler:dasd_int_handler,
-	fill_info:dasd_fba_fill_info,
-	list:LIST_HEAD_INIT(dasd_fba_discipline.list),
-};
-
-int
-dasd_fba_init (void)
+static void
+dasd_fba_dump_sense_dbf(struct dasd_device *device, struct irb *irb,
+			char *reason)
 {
-	int rc = 0;
+	u64 *sense;
 
-	MESSAGE (KERN_INFO,
-                 "%s discipline initializing", 
-                 dasd_fba_discipline.name);
-
-	ASCEBC (dasd_fba_discipline.ebcname, 4);
-	dasd_discipline_add (&dasd_fba_discipline);
-#ifdef CONFIG_DASD_DYNAMIC
-	{
-		int i;
-		for (i = 0;
-		     i < sizeof (dasd_fba_known_devices) / sizeof (devreg_t);
-		     i++) {
-
-			MESSAGE (KERN_INFO,
-                                 "We are interested in: "
-                                 "Dev %04X/%02X @ CU %04X/%02x",
-                                 dasd_fba_known_devices[i].ci.hc.dtype,
-                                 dasd_fba_known_devices[i].ci.hc.dmode,
-                                 dasd_fba_known_devices[i].ci.hc.ctype,
-                                 dasd_fba_known_devices[i].ci.hc.cmode);
-
-			s390_device_register (&dasd_fba_known_devices[i]);
-		}
+	sense = (u64 *) dasd_get_sense(irb);
+	if (sense) {
+		DBF_DEV_EVENT(DBF_EMERG, device,
+			      "%s: %s %02x%02x%02x %016llx %016llx %016llx "
+			      "%016llx", reason,
+			      scsw_is_tm(&irb->scsw) ? "t" : "c",
+			      scsw_cc(&irb->scsw), scsw_cstat(&irb->scsw),
+			      scsw_dstat(&irb->scsw), sense[0], sense[1],
+			      sense[2], sense[3]);
+	} else {
+		DBF_DEV_EVENT(DBF_EMERG, device, "%s",
+			      "SORRY - NO VALID SENSE AVAILABLE\n");
 	}
-#endif				/* CONFIG_DASD_DYNAMIC */
-        return rc;
 }
 
-void
-dasd_fba_cleanup( void ) {
 
-        MESSAGE (KERN_INFO,
-                 "%s discipline cleaning up", 
-                 dasd_fba_discipline.name);
-
-#ifdef CONFIG_DASD_DYNAMIC
-        {
-	int i;
-        for ( i=0; i<sizeof(dasd_fba_known_devices)/sizeof(devreg_t); i++) {
-                s390_device_unregister(&dasd_fba_known_devices[i]);
-        }
-        }
-#endif /* CONFIG_DASD_DYNAMIC */
-        dasd_discipline_del(&dasd_fba_discipline);
-}
-
-#ifdef MODULE
-int
-init_module (void)
+static void
+dasd_fba_dump_sense(struct dasd_device *device, struct dasd_ccw_req * req,
+		    struct irb *irb)
 {
-	int rc = 0;
-	rc = dasd_fba_init ();
-	return rc;
-}
+	char *page;
+	struct ccw1 *act, *end, *last;
+	int len, sl, sct, count;
 
-void
-cleanup_module (void)
-{
-	dasd_fba_cleanup ();
-	return;
-}
-#endif
+	page = (char *) get_zeroed_page(GFP_ATOMIC);
+	if (page == NULL) {
+		DBF_DEV_EVENT(DBF_WARNING, device, "%s",
+			    "No memory to dump sense data");
+		return;
+	}
+	len = sprintf(page, KERN_ERR PRINTK_HEADER
+		      " I/O status report for device %s:\n",
+		      dev_name(&device->cdev->dev));
+	len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+		       " in req: %p CS: 0x%02X DS: 0x%02X\n", req,
+		       irb->scsw.cmd.cstat, irb->scsw.cmd.dstat);
+	len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+		       " device %s: Failing CCW: %p\n",
+		       dev_name(&device->cdev->dev),
+		       (void *) (addr_t) irb->scsw.cmd.cpa);
+	if (irb->esw.esw0.erw.cons) {
+		for (sl = 0; sl < 4; sl++) {
+			len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+				       " Sense(hex) %2d-%2d:",
+				       (8 * sl), ((8 * sl) + 7));
 
+			for (sct = 0; sct < 8; sct++) {
+				len += sprintf(page + len, " %02x",
+					       irb->ecw[8 * sl + sct]);
+			}
+			len += sprintf(page + len, "\n");
+		}
+	} else {
+	        len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+			       " SORRY - NO VALID SENSE AVAILABLE\n");
+	}
+	printk(KERN_ERR "%s", page);
+
+	/* dump the Channel Program */
+	/* print first CCWs (maximum 8) */
+	act = req->cpaddr;
+        for (last = act; last->flags & (CCW_FLAG_CC | CCW_FLAG_DC); last++);
+	end = min(act + 8, last);
+	len = sprintf(page, KERN_ERR PRINTK_HEADER
+		      " Related CP in req: %p\n", req);
+	while (act <= end) {
+		len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+			       " CCW %p: %08X %08X DAT:",
+			       act, ((int *) act)[0], ((int *) act)[1]);
+		for (count = 0; count < 32 && count < act->count;
+		     count += sizeof(int))
+			len += sprintf(page + len, " %08X",
+				       ((int *) (addr_t) act->cda)
+				       [(count>>2)]);
+		len += sprintf(page + len, "\n");
+		act++;
+	}
+	printk(KERN_ERR "%s", page);
+
+
+	/* print failing CCW area */
+	len = 0;
+	if (act <  ((struct ccw1 *)(addr_t) irb->scsw.cmd.cpa) - 2) {
+		act = ((struct ccw1 *)(addr_t) irb->scsw.cmd.cpa) - 2;
+		len += sprintf(page + len, KERN_ERR PRINTK_HEADER "......\n");
+	}
+	end = min((struct ccw1 *)(addr_t) irb->scsw.cmd.cpa + 2, last);
+	while (act <= end) {
+		len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+			       " CCW %p: %08X %08X DAT:",
+			       act, ((int *) act)[0], ((int *) act)[1]);
+		for (count = 0; count < 32 && count < act->count;
+		     count += sizeof(int))
+			len += sprintf(page + len, " %08X",
+				       ((int *) (addr_t) act->cda)
+				       [(count>>2)]);
+		len += sprintf(page + len, "\n");
+		act++;
+	}
+
+	/* print last CCWs */
+	if (act <  last - 2) {
+		act = last - 2;
+		len += sprintf(page + len, KERN_ERR PRINTK_HEADER "......\n");
+	}
+	while (act <= last) {
+		len += sprintf(page + len, KERN_ERR PRINTK_HEADER
+			       " CCW %p: %08X %08X DAT:",
+			       act, ((int *) act)[0], ((int *) act)[1]);
+		for (count = 0; count < 32 && count < act->count;
+		     count += sizeof(int))
+			len += sprintf(page + len, " %08X",
+				       ((int *) (addr_t) act->cda)
+				       [(count>>2)]);
+		len += sprintf(page + len, "\n");
+		act++;
+	}
+	if (len > 0)
+		printk(KERN_ERR "%s", page);
+	free_page((unsigned long) page);
+}
 
 /*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4 
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
+ * max_blocks is dependent on the amount of storage that is available
+ * in the static io buffer for each device. Currently each device has
+ * 8192 bytes (=2 pages). For 64 bit one dasd_mchunkt_t structure has
+ * 24 bytes, the struct dasd_ccw_req has 136 bytes and each block can use
+ * up to 16 bytes (8 for the ccw and 8 for the idal pointer). In
+ * addition we have one define extent ccw + 16 bytes of data and a
+ * locate record ccw for each block (stupid devices!) + 16 bytes of data.
+ * That makes:
+ * (8192 - 24 - 136 - 8 - 16) / 40 = 200.2 blocks at maximum.
+ * We want to fit two into the available memory so that we can immediately
+ * start the next request if one finishes off. That makes 100.1 blocks
+ * for one request. Give a little safety and the result is 96.
  */
+static struct dasd_discipline dasd_fba_discipline = {
+	.owner = THIS_MODULE,
+	.name = "FBA ",
+	.ebcname = "FBA ",
+	.max_blocks = 96,
+	.check_device = dasd_fba_check_characteristics,
+	.do_analysis = dasd_fba_do_analysis,
+	.verify_path = dasd_generic_verify_path,
+	.fill_geometry = dasd_fba_fill_geometry,
+	.start_IO = dasd_start_IO,
+	.term_IO = dasd_term_IO,
+	.handle_terminated_request = dasd_fba_handle_terminated_request,
+	.erp_action = dasd_fba_erp_action,
+	.erp_postaction = dasd_fba_erp_postaction,
+	.check_for_device_change = dasd_fba_check_for_device_change,
+	.build_cp = dasd_fba_build_cp,
+	.free_cp = dasd_fba_free_cp,
+	.dump_sense = dasd_fba_dump_sense,
+	.dump_sense_dbf = dasd_fba_dump_sense_dbf,
+	.fill_info = dasd_fba_fill_info,
+};
+
+static int __init
+dasd_fba_init(void)
+{
+	int ret;
+
+	ASCEBC(dasd_fba_discipline.ebcname, 4);
+	ret = ccw_driver_register(&dasd_fba_driver);
+	if (!ret)
+		wait_for_device_probe();
+
+	return ret;
+}
+
+static void __exit
+dasd_fba_cleanup(void)
+{
+	ccw_driver_unregister(&dasd_fba_driver);
+}
+
+module_init(dasd_fba_init);
+module_exit(dasd_fba_cleanup);

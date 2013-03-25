@@ -9,9 +9,9 @@
 #include <linux/sched.h>
 
 #include <asm/addrspace.h>
-#include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/branch.h>
+#include <asm/irq_regs.h>
 #include <asm/sgi/mc.h>
 #include <asm/sgi/hpc3.h>
 #include <asm/sgi/ioc.h>
@@ -65,7 +65,7 @@ static void print_buserr(void)
 			cpu_err_stat & SGIMC_CSTAT_BAD_DATA ? "BAD_DATA " : "",
 			cpu_err_addr);
 	if (gio_err_stat & GIO_ERRMASK)
-		printk(KERN_ERR "GIO error 0x%x:<%s%s%s%s%s%s%s%s> @ 0x08%x\n",
+		printk(KERN_ERR "GIO error 0x%x:<%s%s%s%s%s%s%s%s> @ 0x%08x\n",
 			gio_err_stat,
 			gio_err_stat & SGIMC_GSTAT_RD ? "RD " : "",
 			gio_err_stat & SGIMC_GSTAT_WR ? "WR " : "",
@@ -85,9 +85,10 @@ static void print_buserr(void)
  * and then clear the interrupt when this happens.
  */
 
-void ip22_be_interrupt(int irq, struct pt_regs *regs)
+void ip22_be_interrupt(int irq)
 {
 	const int field = 2 * sizeof(unsigned long);
+	struct pt_regs *regs = get_irq_regs();
 
 	save_and_clear_buserr();
 	print_buserr();

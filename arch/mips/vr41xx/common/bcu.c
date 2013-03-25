@@ -1,52 +1,43 @@
 /*
- * FILE NAME
- *	arch/mips/vr41xx/common/bcu.c
+ *  bcu.c, Bus Control Unit routines for the NEC VR4100 series.
  *
- * BRIEF MODULE DESCRIPTION
- *	Bus Control Unit routines for the NEC VR4100 series.
+ *  Copyright (C) 2002  MontaVista Software Inc.
+ *    Author: Yoichi Yuasa <source@mvista.com>
+ *  Copyright (C) 2003-2005  Yoichi Yuasa <yuasa@linux-mips.org>
  *
- * Author: Yoichi Yuasa
- *         yyuasa@mvista.com or source@mvista.com
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by
+ *  the Free Software Foundation; either version 2 of the License, or
+ *  (at your option) any later version.
  *
- * Copyright 2002 MontaVista Software Inc.
+ *  This program is distributed in the hope that it will be useful,
+ *  but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *  GNU General Public License for more details.
  *
- *  This program is free software; you can redistribute it and/or modify it
- *  under the terms of the GNU General Public License as published by the
- *  Free Software Foundation; either version 2 of the License, or (at your
- *  option) any later version.
- *
- *  THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED
- *  WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
- *  MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- *  IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
- *  OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- *  ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR
- *  TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
- *  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- *  You should have received a copy of the GNU General Public License along
- *  with this program; if not, write to the Free Software Foundation, Inc.,
- *  675 Mass Ave, Cambridge, MA 02139, USA.
+ *  You should have received a copy of the GNU General Public License
+ *  along with this program; if not, write to the Free Software
+ *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * Changes:
- *  MontaVista Software Inc. <yyuasa@mvista.com> or <source@mvista.com>
+ *  MontaVista Software Inc. <source@mvista.com>
  *  - New creation, NEC VR4122 and VR4131 are supported.
  *  - Added support for NEC VR4111 and VR4121.
  *
- *  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *  Yoichi Yuasa <yuasa@linux-mips.org>
  *  - Added support for NEC VR4133.
  */
-#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/smp.h>
 #include <linux/types.h>
 
 #include <asm/cpu.h>
 #include <asm/io.h>
 
-#define CLKSPEEDREG_TYPE1	KSEG1ADDR(0x0b000014)
-#define CLKSPEEDREG_TYPE2	KSEG1ADDR(0x0f000014)
+#define CLKSPEEDREG_TYPE1	(void __iomem *)KSEG1ADDR(0x0b000014)
+#define CLKSPEEDREG_TYPE2	(void __iomem *)KSEG1ADDR(0x0f000014)
  #define CLKSP(x)		((x) & 0x001f)
  #define CLKSP_VR4133(x)	((x) & 0x0007)
 
@@ -68,14 +59,18 @@ unsigned long vr41xx_get_vtclock_frequency(void)
 	return vr41xx_vtclock;
 }
 
+EXPORT_SYMBOL_GPL(vr41xx_get_vtclock_frequency);
+
 unsigned long vr41xx_get_tclock_frequency(void)
 {
 	return vr41xx_tclock;
 }
 
+EXPORT_SYMBOL_GPL(vr41xx_get_tclock_frequency);
+
 static inline uint16_t read_clkspeed(void)
 {
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_VR4111:
 	case CPU_VR4121: return readw(CLKSPEEDREG_TYPE1);
 	case CPU_VR4122:
@@ -93,7 +88,7 @@ static inline unsigned long calculate_pclock(uint16_t clkspeed)
 {
 	unsigned long pclock = 0;
 
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_VR4111:
 	case CPU_VR4121:
 		pclock = 18432000 * 64;
@@ -143,7 +138,7 @@ static inline unsigned long calculate_vtclock(uint16_t clkspeed, unsigned long p
 {
 	unsigned long vtclock = 0;
 
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_VR4111:
 		/* The NEC VR4111 doesn't have the VTClock. */
 		break;
@@ -185,14 +180,14 @@ static inline unsigned long calculate_tclock(uint16_t clkspeed, unsigned long pc
 {
 	unsigned long tclock = 0;
 
-	switch (current_cpu_data.cputype) {
+	switch (current_cpu_type()) {
 	case CPU_VR4111:
 		if (!(clkspeed & DIV2B))
-        		tclock = pclock / 2;
+			tclock = pclock / 2;
 		else if (!(clkspeed & DIV3B))
-        		tclock = pclock / 3;
+			tclock = pclock / 3;
 		else if (!(clkspeed & DIV4B))
-        		tclock = pclock / 4;
+			tclock = pclock / 4;
 		break;
 	case CPU_VR4121:
 		tclock = pclock / DIVT(clkspeed);
@@ -212,7 +207,7 @@ static inline unsigned long calculate_tclock(uint16_t clkspeed, unsigned long pc
 	return tclock;
 }
 
-void __init vr41xx_bcu_init(void)
+void vr41xx_calculate_clock_frequency(void)
 {
 	unsigned long pclock;
 	uint16_t clkspeed;
@@ -223,3 +218,5 @@ void __init vr41xx_bcu_init(void)
 	vr41xx_vtclock = calculate_vtclock(clkspeed, pclock);
 	vr41xx_tclock = calculate_tclock(clkspeed, pclock, vr41xx_vtclock);
 }
+
+EXPORT_SYMBOL_GPL(vr41xx_calculate_clock_frequency);

@@ -42,7 +42,9 @@
 #include <linux/types.h>
 #include <linux/time.h>
 #include <linux/timer.h>
+#if defined(__hppa__)
 #include <asm/hardware.h>
+#endif
 
 
 /* No 4X status reads take longer than this (in usec).
@@ -69,6 +71,7 @@ typedef struct {
 	  struct semaphore *semaphore;	/* Semaphore to sleep on. */
 	} act;
 } hp_sdc_transaction;
+int __hp_sdc_enqueue_transaction(hp_sdc_transaction *this);
 int hp_sdc_enqueue_transaction(hp_sdc_transaction *this);
 int hp_sdc_dequeue_transaction(hp_sdc_transaction *this);
 
@@ -98,7 +101,7 @@ int hp_sdc_dequeue_transaction(hp_sdc_transaction *this);
 #define HP_SDC_STATUS_REG	0x40	/* Data from an i8042 register */
 #define HP_SDC_STATUS_HILCMD    0x50	/* Command from HIL MLC */
 #define HP_SDC_STATUS_HILDATA   0x60	/* Data from HIL MLC */
-#define HP_SDC_STATUS_PUP	0x70	/* Sucessful power-up self test */
+#define HP_SDC_STATUS_PUP	0x70	/* Successful power-up self test */
 #define HP_SDC_STATUS_KCOOKED	0x80	/* Key from cooked kbd */
 #define HP_SDC_STATUS_KRPG	0xc0	/* Key from Repeat Gen */
 #define HP_SDC_STATUS_KMOD_SUP	0x10	/* Shift key is up */
@@ -281,9 +284,11 @@ typedef struct {
 	struct timeval	rtv;		/* Time when current read started */
 	int		wcurr;		/* Current write transact in process */
 
-#ifdef __hppa__
-	struct parisc_device	*dev;
 	int		dev_err;	/* carries status from registration */
+#if defined(__hppa__)
+	struct parisc_device	*dev;
+#elif defined(__mc68000__)
+	void		*dev;
 #else
 #error No support for device registration on this arch yet.
 #endif

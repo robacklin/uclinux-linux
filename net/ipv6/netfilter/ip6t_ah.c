@@ -1,207 +1,121 @@
 /* Kernel module to match AH parameters. */
+
+/* (C) 2001-2002 Andras Kis-Szabo <kisza@sch.bme.hu>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/types.h>
 #include <net/checksum.h>
 #include <net/ipv6.h>
 
+#include <linux/netfilter/x_tables.h>
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_ah.h>
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("IPv6 AH match");
+MODULE_DESCRIPTION("Xtables: IPv6 IPsec-AH match");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
+/* Returns 1 if the spi is matched by the range, 0 otherwise */
+static inline bool
+spi_match(u_int32_t min, u_int32_t max, u_int32_t spi, bool invert)
+{
+	bool r;
 
-struct ahhdr {
-       __u8    nexthdr;
-       __u8    hdrlen;
-       __u16   reserved;
-       __u32   spi;
+	pr_debug("spi_match:%c 0x%x <= 0x%x <= 0x%x\n",
+		 invert ? '!' : ' ', min, spi, max);
+	r = (spi >= min && spi <= max) ^ invert;
+	pr_debug(" result %s\n", r ? "PASS" : "FAILED");
+	return r;
+}
+
+static bool ah_mt6(const struct sk_buff *skb, struct xt_action_param *par)
+{
+	struct ip_auth_hdr _ah;
+	const struct ip_auth_hdr *ah;
+	const struct ip6t_ah *ahinfo = par->matchinfo;
+	unsigned int ptr;
+	unsigned int hdrlen = 0;
+	int err;
+
+	err = ipv6_find_hdr(skb, &ptr, NEXTHDR_AUTH, NULL);
+	if (err < 0) {
+		if (err != -ENOENT)
+			par->hotdrop = true;
+		return false;
+	}
+
+	ah = skb_header_pointer(skb, ptr, sizeof(_ah), &_ah);
+	if (ah == NULL) {
+		par->hotdrop = true;
+		return false;
+	}
+
+	hdrlen = (ah->hdrlen + 2) << 2;
+
+	pr_debug("IPv6 AH LEN %u %u ", hdrlen, ah->hdrlen);
+	pr_debug("RES %04X ", ah->reserved);
+	pr_debug("SPI %u %08X\n", ntohl(ah->spi), ntohl(ah->spi));
+
+	pr_debug("IPv6 AH spi %02X ",
+		 spi_match(ahinfo->spis[0], ahinfo->spis[1],
+			   ntohl(ah->spi),
+			   !!(ahinfo->invflags & IP6T_AH_INV_SPI)));
+	pr_debug("len %02X %04X %02X ",
+		 ahinfo->hdrlen, hdrlen,
+		 (!ahinfo->hdrlen ||
+		  (ahinfo->hdrlen == hdrlen) ^
+		  !!(ahinfo->invflags & IP6T_AH_INV_LEN)));
+	pr_debug("res %02X %04X %02X\n",
+		 ahinfo->hdrres, ah->reserved,
+		 !(ahinfo->hdrres && ah->reserved));
+
+	return (ah != NULL) &&
+		spi_match(ahinfo->spis[0], ahinfo->spis[1],
+			  ntohl(ah->spi),
+			  !!(ahinfo->invflags & IP6T_AH_INV_SPI)) &&
+		(!ahinfo->hdrlen ||
+		 (ahinfo->hdrlen == hdrlen) ^
+		 !!(ahinfo->invflags & IP6T_AH_INV_LEN)) &&
+		!(ahinfo->hdrres && ah->reserved);
+}
+
+static int ah_mt6_check(const struct xt_mtchk_param *par)
+{
+	const struct ip6t_ah *ahinfo = par->matchinfo;
+
+	if (ahinfo->invflags & ~IP6T_AH_INV_MASK) {
+		pr_debug("unknown flags %X\n", ahinfo->invflags);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static struct xt_match ah_mt6_reg __read_mostly = {
+	.name		= "ah",
+	.family		= NFPROTO_IPV6,
+	.match		= ah_mt6,
+	.matchsize	= sizeof(struct ip6t_ah),
+	.checkentry	= ah_mt6_check,
+	.me		= THIS_MODULE,
 };
 
-/* Returns 1 if the spi is matched by the range, 0 otherwise */
-static inline int
-spi_match(u_int32_t min, u_int32_t max, u_int32_t spi, int invert)
+static int __init ah_mt6_init(void)
 {
-       int r=0;
-       DEBUGP("ah spi_match:%c 0x%x <= 0x%x <= 0x%x",invert? '!':' ',
-              min,spi,max);
-       r=(spi >= min && spi <= max) ^ invert;
-       DEBUGP(" result %s\n",r? "PASS\n" : "FAILED\n");
-       return r;
+	return xt_register_match(&ah_mt6_reg);
 }
 
-static int
-match(const struct sk_buff *skb,
-      const struct net_device *in,
-      const struct net_device *out,
-      const void *matchinfo,
-      int offset,
-      const void *protohdr,
-      u_int16_t datalen,
-      int *hotdrop)
+static void __exit ah_mt6_exit(void)
 {
-       struct ahhdr *ah = NULL;
-       const struct ip6t_ah *ahinfo = matchinfo;
-       unsigned int temp;
-       int len;
-       u8 nexthdr;
-       unsigned int ptr;
-       unsigned int hdrlen = 0;
-
-       /*DEBUGP("IPv6 AH entered\n");*/
-       /* if (opt->auth == 0) return 0;
-       * It does not filled on output */
-
-       /* type of the 1st exthdr */
-       nexthdr = skb->nh.ipv6h->nexthdr;
-       /* pointer to the 1st exthdr */
-       ptr = sizeof(struct ipv6hdr);
-       /* available length */
-       len = skb->len - ptr;
-       temp = 0;
-
-        while (ipv6_ext_hdr(nexthdr)) {
-               struct ipv6_opt_hdr *hdr;
-
-              DEBUGP("ipv6_ah header iteration \n");
-
-              /* Is there enough space for the next ext header? */
-                if (len < (int)sizeof(struct ipv6_opt_hdr))
-                        return 0;
-              /* No more exthdr -> evaluate */
-                if (nexthdr == NEXTHDR_NONE) {
-                     break;
-              }
-              /* ESP -> evaluate */
-                if (nexthdr == NEXTHDR_ESP) {
-                     break;
-              }
-
-              hdr=skb->data+ptr;
-
-              /* Calculate the header length */
-                if (nexthdr == NEXTHDR_FRAGMENT) {
-                        hdrlen = 8;
-                } else if (nexthdr == NEXTHDR_AUTH)
-                        hdrlen = (hdr->hdrlen+2)<<2;
-                else
-                        hdrlen = ipv6_optlen(hdr);
-
-              /* AH -> evaluate */
-                if (nexthdr == NEXTHDR_AUTH) {
-                     temp |= MASK_AH;
-                     break;
-              }
-
-
-              /* set the flag */
-              switch (nexthdr){
-                     case NEXTHDR_HOP:
-                     case NEXTHDR_ROUTING:
-                     case NEXTHDR_FRAGMENT:
-                     case NEXTHDR_AUTH:
-                     case NEXTHDR_DEST:
-                            break;
-                     default:
-                            DEBUGP("ipv6_ah match: unknown nextheader %u\n",nexthdr);
-                            return 0;
-                            break;
-              }
-
-                nexthdr = hdr->nexthdr;
-                len -= hdrlen;
-                ptr += hdrlen;
-		if ( ptr > skb->len ) {
-			DEBUGP("ipv6_ah: new pointer too large! \n");
-			break;
-		}
-        }
-
-       /* AH header not found */
-       if ( temp != MASK_AH ) return 0;
-
-       if (len < (int)sizeof(struct ahhdr)){
-	       *hotdrop = 1;
-       		return 0;
-       }
-
-       ah = (struct ahhdr *) (skb->data + ptr);
-
-       DEBUGP("IPv6 AH LEN %u %u ", hdrlen, ah->hdrlen);
-       DEBUGP("RES %04X ", ah->reserved);
-       DEBUGP("SPI %u %08X\n", ntohl(ah->spi), ntohl(ah->spi));
-
-       DEBUGP("IPv6 AH spi %02X ",
-       		(spi_match(ahinfo->spis[0], ahinfo->spis[1],
-                           ntohl(ah->spi),
-                           !!(ahinfo->invflags & IP6T_AH_INV_SPI))));
-       DEBUGP("len %02X %04X %02X ",
-       		ahinfo->hdrlen, hdrlen,
-       		(!ahinfo->hdrlen ||
-                           (ahinfo->hdrlen == hdrlen) ^
-                           !!(ahinfo->invflags & IP6T_AH_INV_LEN)));
-       DEBUGP("res %02X %04X %02X\n", 
-       		ahinfo->hdrres, ah->reserved,
-       		!(ahinfo->hdrres && ah->reserved));
-
-       return (ah != NULL)
-              &&
-              (spi_match(ahinfo->spis[0], ahinfo->spis[1],
-                           ntohl(ah->spi),
-                           !!(ahinfo->invflags & IP6T_AH_INV_SPI)))
-              &&
-              (!ahinfo->hdrlen ||
-                           (ahinfo->hdrlen == hdrlen) ^
-                           !!(ahinfo->invflags & IP6T_AH_INV_LEN))
-              &&
-              !(ahinfo->hdrres && ah->reserved);
+	xt_unregister_match(&ah_mt6_reg);
 }
 
-/* Called when user tries to insert an entry of this type. */
-static int
-checkentry(const char *tablename,
-          const struct ip6t_ip6 *ip,
-          void *matchinfo,
-          unsigned int matchinfosize,
-          unsigned int hook_mask)
-{
-       const struct ip6t_ah *ahinfo = matchinfo;
-
-       if (matchinfosize != IP6T_ALIGN(sizeof(struct ip6t_ah))) {
-              DEBUGP("ip6t_ah: matchsize %u != %u\n",
-                      matchinfosize, IP6T_ALIGN(sizeof(struct ip6t_ah)));
-              return 0;
-       }
-       if (ahinfo->invflags & ~IP6T_AH_INV_MASK) {
-              DEBUGP("ip6t_ah: unknown flags %X\n",
-                      ahinfo->invflags);
-              return 0;
-       }
-
-       return 1;
-}
-
-static struct ip6t_match ah_match
-= { { NULL, NULL }, "ah", &match, &checkentry, NULL, THIS_MODULE };
-
-static int __init init(void)
-{
-       return ip6t_register_match(&ah_match);
-}
-
-static void __exit cleanup(void)
-{
-       ip6t_unregister_match(&ah_match);
-}
-
-module_init(init);
-module_exit(cleanup);
+module_init(ah_mt6_init);
+module_exit(ah_mt6_exit);

@@ -1,19 +1,31 @@
 /*
  * SMP boot-related support
  *
- * Copyright (C) 1998-2003 Hewlett-Packard Co
+ * Copyright (C) 1998-2003, 2005 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 2001, 2004-2005 Intel Corp
+ * 	Rohit Seth <rohit.seth@intel.com>
+ * 	Suresh Siddha <suresh.b.siddha@intel.com>
+ * 	Gordon Jin <gordon.jin@intel.com>
+ *	Ashok Raj  <ashok.raj@intel.com>
  *
  * 01/05/16 Rohit Seth <rohit.seth@intel.com>	Moved SMP booting functions from smp.c to here.
  * 01/04/27 David Mosberger <davidm@hpl.hp.com>	Added ITC synching code.
+ * 02/07/31 David Mosberger <davidm@hpl.hp.com>	Switch over to hotplug-CPU boot-sequence.
+ *						smp_boot_cpus()/smp_commence() is replaced by
+ *						smp_prepare_cpus()/__cpu_up()/smp_cpus_done().
+ * 04/06/21 Ashok Raj		<ashok.raj@intel.com> Added CPU Hotplug Support
+ * 04/12/26 Jin Gordon <gordon.jin@intel.com>
+ * 04/12/26 Rohit Seth <rohit.seth@intel.com>
+ *						Add multi-threading and multi-core detection
+ * 05/01/30 Suresh Siddha <suresh.b.siddha@intel.com>
+ *						Setup cpu_sibling_map and cpu_core_map
  */
 
-
-#define __KERNEL_SYSCALLS__
-
-#include <linux/config.h>
-
+#include <linux/module.h>
+#include <linux/acpi.h>
 #include <linux/bootmem.h>
+#include <linux/cpu.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
@@ -21,13 +33,14 @@
 #include <linux/kernel.h>
 #include <linux/kernel_stat.h>
 #include <linux/mm.h>
+#include <linux/notifier.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/spinlock.h>
 #include <linux/efi.h>
+#include <linux/percpu.h>
+#include <linux/bitops.h>
 
-#include <asm/atomic.h>
-#include <asm/bitops.h>
+#include <linux/atomic.h>
 #include <asm/cache.h>
 #include <asm/current.h>
 #include <asm/delay.h>
@@ -36,13 +49,15 @@
 #include <asm/machvec.h>
 #include <asm/mca.h>
 #include <asm/page.h>
+#include <asm/paravirt.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
 #include <asm/sal.h>
-#include <asm/system.h>
+#include <asm/tlbflush.h>
 #include <asm/unistd.h>
+#include <asm/sn/arch.h>
 
 #define SMP_DEBUG 0
 
@@ -52,45 +67,82 @@
 #define Dprintk(x...)
 #endif
 
+#ifdef CONFIG_HOTPLUG_CPU
+#ifdef CONFIG_PERMIT_BSP_REMOVE
+#define bsp_remove_ok	1
+#else
+#define bsp_remove_ok	0
+#endif
+
+/*
+ * Store all idle threads, this can be reused instead of creating
+ * a new thread. Also avoids complicated thread destroy functionality
+ * for idle threads.
+ */
+struct task_struct *idle_thread_array[NR_CPUS];
+
+/*
+ * Global array allocated for NR_CPUS at boot time
+ */
+struct sal_to_os_boot sal_boot_rendez_state[NR_CPUS];
+
+/*
+ * start_ap in head.S uses this to store current booting cpu
+ * info.
+ */
+struct sal_to_os_boot *sal_state_for_booting_cpu = &sal_boot_rendez_state[0];
+
+#define set_brendez_area(x) (sal_state_for_booting_cpu = &sal_boot_rendez_state[(x)]);
+
+#define get_idle_for_cpu(x)		(idle_thread_array[(x)])
+#define set_idle_for_cpu(x,p)	(idle_thread_array[(x)] = (p))
+
+#else
+
+#define get_idle_for_cpu(x)		(NULL)
+#define set_idle_for_cpu(x,p)
+#define set_brendez_area(x)
+#endif
+
 
 /*
  * ITC synchronization related stuff:
  */
-#define MASTER	0
+#define MASTER	(0)
 #define SLAVE	(SMP_CACHE_BYTES/8)
 
 #define NUM_ROUNDS	64	/* magic value */
 #define NUM_ITERS	5	/* likewise */
 
-static spinlock_t itc_sync_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(itc_sync_lock);
 static volatile unsigned long go[SLAVE + 1];
 
 #define DEBUG_ITC_SYNC	0
 
-extern void __init calibrate_delay (void);
 extern void start_ap (void);
 extern unsigned long ia64_iobase;
 
-int cpucount;
+struct task_struct *task_for_booting_cpu;
 
-/* Setup configured maximum number of CPUs to activate */
-static int max_cpus = -1;
+/*
+ * State for each CPU
+ */
+DEFINE_PER_CPU(int, cpu_state);
 
-/* Total count of live CPUs */
-int smp_num_cpus = 1;
+cpumask_t cpu_core_map[NR_CPUS] __cacheline_aligned;
+EXPORT_SYMBOL(cpu_core_map);
+DEFINE_PER_CPU_SHARED_ALIGNED(cpumask_t, cpu_sibling_map);
+EXPORT_PER_CPU_SYMBOL(cpu_sibling_map);
 
-/* Bitmask of currently online CPUs */
-volatile unsigned long cpu_online_map;
+int smp_num_siblings = 1;
 
 /* which logical CPU number maps to which CPU (physical APIC ID) */
 volatile int ia64_cpu_to_sapicid[NR_CPUS];
+EXPORT_SYMBOL(ia64_cpu_to_sapicid);
 
-static volatile unsigned long cpu_callin_map;
+static volatile cpumask_t cpu_callin_map;
 
 struct smp_boot_data smp_boot_data __initdata;
-
-/* Set when the idlers are all forked */
-int smp_threads_ready;
 
 unsigned long ap_wakeup_vector = -1; /* External Int use to wakeup APs */
 
@@ -98,43 +150,57 @@ char __initdata no_int_routing;
 
 unsigned char smp_int_redirect; /* are INT and IPI redirectable by the chipset? */
 
-/*
- * Setup routine for controlling SMP activation
- *
- * Command-line option of "nosmp" or "maxcpus=0" will disable SMP
- * activation entirely (the MPS table probe still happens, though).
- *
- * Command-line option of "maxcpus=<NUM>", where <NUM> is an integer
- * greater than 0, limits the maximum number of CPUs activated in
- * SMP mode to <NUM>.
- */
+#ifdef CONFIG_FORCE_CPEI_RETARGET
+#define CPEI_OVERRIDE_DEFAULT	(1)
+#else
+#define CPEI_OVERRIDE_DEFAULT	(0)
+#endif
+
+unsigned int force_cpei_retarget = CPEI_OVERRIDE_DEFAULT;
 
 static int __init
-nosmp (char *str)
+cmdl_force_cpei(char *str)
 {
-	max_cpus = 0;
+	int value=0;
+
+	get_option (&str, &value);
+	force_cpei_retarget = value;
+
 	return 1;
 }
 
-__setup("nosmp", nosmp);
-
-static int __init
-maxcpus (char *str)
-{
-	get_option(&str, &max_cpus);
-	return 1;
-}
-
-__setup("maxcpus=", maxcpus);
+__setup("force_cpei=", cmdl_force_cpei);
 
 static int __init
 nointroute (char *str)
 {
 	no_int_routing = 1;
+	printk ("no_int_routing on\n");
 	return 1;
 }
 
 __setup("nointroute", nointroute);
+
+static void fix_b0_for_bsp(void)
+{
+#ifdef CONFIG_HOTPLUG_CPU
+	int cpuid;
+	static int fix_bsp_b0 = 1;
+
+	cpuid = smp_processor_id();
+
+	/*
+	 * Cache the b0 value on the first AP that comes up
+	 */
+	if (!(fix_bsp_b0 && cpuid))
+		return;
+
+	sal_boot_rendez_state[0].br[0] = sal_boot_rendez_state[cpuid].br[0];
+	printk ("Fixed BSP b0 value from CPU %d\n", cpuid);
+
+	fix_bsp_b0 = 0;
+#endif
+}
 
 void
 sync_master (void *arg)
@@ -146,7 +212,8 @@ sync_master (void *arg)
 	local_irq_save(flags);
 	{
 		for (i = 0; i < NUM_ROUNDS*NUM_ITERS; ++i) {
-			while (!go[MASTER]);
+			while (!go[MASTER])
+				cpu_relax();
 			go[MASTER] = 0;
 			go[SLAVE] = ia64_get_itc();
 		}
@@ -169,7 +236,8 @@ get_delta (long *rt, long *master)
 	for (i = 0; i < NUM_ITERS; ++i) {
 		t0 = ia64_get_itc();
 		go[MASTER] = 1;
-		while (!(tm = go[SLAVE]));
+		while (!(tm = go[SLAVE]))
+			cpu_relax();
 		go[SLAVE] = 0;
 		t1 = ia64_get_itc();
 
@@ -233,14 +301,23 @@ ia64_sync_itc (unsigned int master)
 	} t[NUM_ROUNDS];
 #endif
 
+	/*
+	 * Make sure local timer ticks are disabled while we sync.  If
+	 * they were enabled, we'd have to worry about nasty issues
+	 * like setting the ITC ahead of (or a long time before) the
+	 * next scheduled tick.
+	 */
+	BUG_ON((ia64_get_itv() & (1 << 16)) == 0);
+
 	go[MASTER] = 1;
 
-	if (smp_call_function_single(master, sync_master, NULL, 1, 0) < 0) {
+	if (smp_call_function_single(master, sync_master, NULL, 0) < 0) {
 		printk(KERN_ERR "sync_itc: failed to get attention of CPU %u!\n", master);
 		return;
 	}
 
-	while (go[MASTER]);	/* wait for master to be ready */
+	while (go[MASTER])
+		cpu_relax();	/* wait for master to be ready */
 
 	spin_lock_irqsave(&itc_sync_lock, flags);
 	{
@@ -283,44 +360,18 @@ ia64_sync_itc (unsigned int master)
 /*
  * Ideally sets up per-cpu profiling hooks.  Doesn't do much now...
  */
-static inline void __init
+static inline void __devinit
 smp_setup_percpu_timer (void)
 {
-	local_cpu_data->prof_counter = 1;
-	local_cpu_data->prof_multiplier = 1;
 }
 
-/*
- * Architecture specific routine called by the kernel just before init is
- * fired off. This allows the BP to have everything in order [we hope].
- * At the end of this all the APs will hit the system scheduling and off
- * we go. Each AP will jump through the kernel
- * init into idle(). At this point the scheduler will one day take over
- * and give them jobs to do. smp_callin is a standard routine
- * we use to track CPUs as they power up.
- */
-
-static volatile atomic_t smp_commenced = ATOMIC_INIT(0);
-
-void __init
-smp_commence (void)
-{
-	/*
-	 * Lets the callins below out of their loop.
-	 */
-	Dprintk("Setting commenced=1, go go go\n");
-
-	wmb();
-	atomic_set(&smp_commenced,1);
-}
-
-
-static void __init
+static void __cpuinit
 smp_callin (void)
 {
-	int cpuid, phys_id;
+	int cpuid, phys_id, itc_master;
+	struct cpuinfo_ia64 *last_cpuinfo, *this_cpuinfo;
 	extern void ia64_init_itm(void);
-	extern void ia64_cpu_local_tick(void);
+	extern volatile int time_keeper_id;
 
 #ifdef CONFIG_PERFMON
 	extern void pfm_init_percpu(void);
@@ -328,36 +379,41 @@ smp_callin (void)
 
 	cpuid = smp_processor_id();
 	phys_id = hard_smp_processor_id();
+	itc_master = time_keeper_id;
 
-	if (test_and_set_bit(cpuid, &cpu_online_map)) {
+	if (cpu_online(cpuid)) {
 		printk(KERN_ERR "huh, phys CPU#0x%x, CPU#0x%x already present??\n",
 		       phys_id, cpuid);
 		BUG();
 	}
 
+	fix_b0_for_bsp();
+
+	/*
+	 * numa_node_id() works after this.
+	 */
+	set_numa_node(cpu_to_node_map[cpuid]);
+	set_numa_mem(local_memory_node(cpu_to_node_map[cpuid]));
+
+	ipi_call_lock_irq();
+	spin_lock(&vector_lock);
+	/* Setup the per cpu irq handling data structures */
+	__setup_vector_irq(cpuid);
+	notify_cpu_starting(cpuid);
+	set_cpu_online(cpuid, true);
+	per_cpu(cpu_state, cpuid) = CPU_ONLINE;
+	spin_unlock(&vector_lock);
+	ipi_call_unlock_irq();
+
 	smp_setup_percpu_timer();
 
-	/*
-	 * Get our bogomips.
-	 */
-	ia64_init_itm();
-
-	/*
-	 * Set I/O port base per CPU
-	 */
-	ia64_set_kr(IA64_KR_IO_BASE, __pa(ia64_iobase));
-
-#ifdef CONFIG_IA64_MCA
-	ia64_mca_cmc_vector_setup();	/* Setup vector on AP & enable */
-#endif
+	ia64_mca_cmc_vector_setup();	/* Setup vector on AP */
 
 #ifdef CONFIG_PERFMON
 	pfm_init_percpu();
 #endif
 
 	local_irq_enable();
-	calibrate_delay();
-	local_cpu_data->loops_per_jiffy = loops_per_jiffy;
 
 	if (!(sal_platform_features & IA64_SAL_PLATFORM_FEATURE_ITC_DRIFT)) {
 		/*
@@ -366,23 +422,35 @@ smp_callin (void)
 		 * calls spin_unlock_bh(), which calls spin_unlock_bh(), which calls
 		 * local_bh_enable(), which bugs out if irqs are not enabled...
 		 */
-		Dprintk("Going to syncup ITC with BP.\n");
-		ia64_sync_itc(0);
-
-		/*
-		 * Make sure we didn't sync the itc ahead of the next
-		 * timer interrupt, if so, just reset it.
-		 */
-		if (time_after(ia64_get_itc(),local_cpu_data->itm_next)) {
-			Dprintk("oops, jumped a timer.\n");
-			ia64_cpu_local_tick();
-		}
+		Dprintk("Going to syncup ITC with ITC Master.\n");
+		ia64_sync_itc(itc_master);
 	}
+
+	/*
+	 * Get our bogomips.
+	 */
+	ia64_init_itm();
+
+	/*
+	 * Delay calibration can be skipped if new processor is identical to the
+	 * previous processor.
+	 */
+	last_cpuinfo = cpu_data(cpuid - 1);
+	this_cpuinfo = local_cpu_data;
+	if (last_cpuinfo->itc_freq != this_cpuinfo->itc_freq ||
+	    last_cpuinfo->proc_freq != this_cpuinfo->proc_freq ||
+	    last_cpuinfo->features != this_cpuinfo->features ||
+	    last_cpuinfo->revision != this_cpuinfo->revision ||
+	    last_cpuinfo->family != this_cpuinfo->family ||
+	    last_cpuinfo->archrev != this_cpuinfo->archrev ||
+	    last_cpuinfo->model != this_cpuinfo->model)
+		calibrate_delay();
+	local_cpu_data->loops_per_jiffy = loops_per_jiffy;
 
 	/*
 	 * Allow the master to continue.
 	 */
-	set_bit(cpuid, &cpu_callin_map);
+	cpu_set(cpuid, cpu_callin_map);
 	Dprintk("Stack on CPU %d at about %p\n",cpuid, &cpuid);
 }
 
@@ -390,65 +458,79 @@ smp_callin (void)
 /*
  * Activate a secondary processor.  head.S calls this.
  */
-int __init
+int __cpuinit
 start_secondary (void *unused)
 {
-	extern int cpu_idle (void);
-
+	/* Early console may use I/O ports */
+	ia64_set_kr(IA64_KR_IO_BASE, __pa(ia64_iobase));
+#ifndef CONFIG_PRINTK_TIME
 	Dprintk("start_secondary: starting CPU 0x%x\n", hard_smp_processor_id());
+#endif
 	efi_map_pal_code();
 	cpu_init();
+	preempt_disable();
 	smp_callin();
-	Dprintk("CPU %d is set to go.\n", smp_processor_id());
-	while (!atomic_read(&smp_commenced))
-		;
 
-	Dprintk("CPU %d is starting idle.\n", smp_processor_id());
-	return cpu_idle();
+	cpu_idle();
+	return 0;
 }
 
-static int __init
-fork_by_hand (void)
+struct pt_regs * __cpuinit idle_regs(struct pt_regs *regs)
 {
-	/*
-	 * don't care about the eip and regs settings since we'll never reschedule the
-	 * forked task.
-	 */
-	return do_fork(CLONE_VM|CLONE_PID, 0, 0, 0);
+	return NULL;
 }
 
-static void __init
-do_boot_cpu (int sapicid)
-{
+struct create_idle {
+	struct work_struct work;
 	struct task_struct *idle;
-	int timeout, cpu;
+	struct completion done;
+	int cpu;
+};
 
-	cpu = ++cpucount;
+void __cpuinit
+do_fork_idle(struct work_struct *work)
+{
+	struct create_idle *c_idle =
+		container_of(work, struct create_idle, work);
+
+	c_idle->idle = fork_idle(c_idle->cpu);
+	complete(&c_idle->done);
+}
+
+static int __cpuinit
+do_boot_cpu (int sapicid, int cpu)
+{
+	int timeout;
+	struct create_idle c_idle = {
+		.work = __WORK_INITIALIZER(c_idle.work, do_fork_idle),
+		.cpu	= cpu,
+		.done	= COMPLETION_INITIALIZER(c_idle.done),
+	};
+
 	/*
 	 * We can't use kernel_thread since we must avoid to
 	 * reschedule the child.
 	 */
-	if (fork_by_hand() < 0)
+ 	c_idle.idle = get_idle_for_cpu(cpu);
+ 	if (c_idle.idle) {
+		init_idle(c_idle.idle, cpu);
+ 		goto do_rest;
+	}
+
+	schedule_work(&c_idle.work);
+	wait_for_completion(&c_idle.done);
+
+	if (IS_ERR(c_idle.idle))
 		panic("failed fork for CPU %d", cpu);
 
-	/*
-	 * We remove it from the pidhash and the runqueue
-	 * once we got the process:
-	 */
-	idle = init_task.prev_task;
-	if (!idle)
-		panic("No idle process for CPU %d", cpu);
+	set_idle_for_cpu(cpu, c_idle.idle);
 
-	task_set_cpu(idle, cpu);	/* we schedule the first task manually */
-
-	ia64_cpu_to_sapicid[cpu] = sapicid;
-
-	del_from_runqueue(idle);
-	unhash_process(idle);
-	init_tasks[cpu] = idle;
+do_rest:
+	task_for_booting_cpu = c_idle.idle;
 
 	Dprintk("Sending wakeup vector %lu to AP 0x%x/0x%x.\n", ap_wakeup_vector, cpu, sapicid);
 
+	set_brendez_area(cpu);
 	platform_send_ipi(cpu, ap_wakeup_vector, IA64_IPI_DM_INT, 0);
 
 	/*
@@ -456,19 +538,55 @@ do_boot_cpu (int sapicid)
 	 */
 	Dprintk("Waiting on callin_map ...");
 	for (timeout = 0; timeout < 100000; timeout++) {
-		if (test_bit(cpu, &cpu_callin_map))
+		if (cpu_isset(cpu, cpu_callin_map))
 			break;  /* It has booted */
 		udelay(100);
 	}
 	Dprintk("\n");
 
-	if (test_bit(cpu, &cpu_callin_map)) {
-		/* number CPUs logically, starting from 1 (BSP is 0) */
-		printk(KERN_INFO "CPU%d: CPU has booted.\n", cpu);
-	} else {
+	if (!cpu_isset(cpu, cpu_callin_map)) {
 		printk(KERN_ERR "Processor 0x%x/0x%x is stuck.\n", cpu, sapicid);
 		ia64_cpu_to_sapicid[cpu] = -1;
-		cpucount--;
+		set_cpu_online(cpu, false);  /* was set in smp_callin() */
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static int __init
+decay (char *str)
+{
+	int ticks;
+	get_option (&str, &ticks);
+	return 1;
+}
+
+__setup("decay=", decay);
+
+/*
+ * Initialize the logical CPU number to SAPICID mapping
+ */
+void __init
+smp_build_cpu_map (void)
+{
+	int sapicid, cpu, i;
+	int boot_cpu_id = hard_smp_processor_id();
+
+	for (cpu = 0; cpu < NR_CPUS; cpu++) {
+		ia64_cpu_to_sapicid[cpu] = -1;
+	}
+
+	ia64_cpu_to_sapicid[0] = boot_cpu_id;
+	init_cpu_present(cpumask_of(0));
+	set_cpu_possible(0, true);
+	for (cpu = 1, i = 0; i < smp_boot_data.cpu_count; i++) {
+		sapicid = smp_boot_data.cpu_phys_id[i];
+		if (sapicid == boot_cpu_id)
+			continue;
+		set_cpu_present(cpu, true);
+		set_cpu_possible(cpu, true);
+		ia64_cpu_to_sapicid[cpu] = sapicid;
+		cpu++;
 	}
 }
 
@@ -476,90 +594,241 @@ do_boot_cpu (int sapicid)
  * Cycle through the APs sending Wakeup IPIs to boot each.
  */
 void __init
-smp_boot_cpus (void)
+smp_prepare_cpus (unsigned int max_cpus)
 {
-	int sapicid, cpu;
 	int boot_cpu_id = hard_smp_processor_id();
 
 	/*
-	 * Initialize the logical to physical CPU number mapping
-	 * and the per-CPU profiling counter/multiplier
+	 * Initialize the per-CPU profiling counter/multiplier
 	 */
 
-	for (cpu = 0; cpu < NR_CPUS; cpu++)
-		ia64_cpu_to_sapicid[cpu] = -1;
 	smp_setup_percpu_timer();
 
-	/*
-	 * We have the boot CPU online for sure.
-	 */
-	set_bit(0, &cpu_online_map);
-	set_bit(0, &cpu_callin_map);
+	cpu_set(0, cpu_callin_map);
 
 	local_cpu_data->loops_per_jiffy = loops_per_jiffy;
 	ia64_cpu_to_sapicid[0] = boot_cpu_id;
 
 	printk(KERN_INFO "Boot processor id 0x%x/0x%x\n", 0, boot_cpu_id);
 
-	global_irq_holder = 0;
-	current->processor = 0;
-	init_idle();
+	current_thread_info()->cpu = 0;
 
 	/*
 	 * If SMP should be disabled, then really disable it!
 	 */
-	if (!max_cpus || (max_cpus < -1)) {
+	if (!max_cpus) {
 		printk(KERN_INFO "SMP mode deactivated.\n");
-		cpu_online_map =  1;
-		smp_num_cpus = 1;
-		goto smp_done;
+		init_cpu_online(cpumask_of(0));
+		init_cpu_present(cpumask_of(0));
+		init_cpu_possible(cpumask_of(0));
+		return;
 	}
-	if  (max_cpus != -1)
-		printk(KERN_INFO "Limiting CPUs to %d\n", max_cpus);
+}
 
-	if (smp_boot_data.cpu_count > 1) {
+void __devinit smp_prepare_boot_cpu(void)
+{
+	set_cpu_online(smp_processor_id(), true);
+	cpu_set(smp_processor_id(), cpu_callin_map);
+	set_numa_node(cpu_to_node_map[smp_processor_id()]);
+	per_cpu(cpu_state, smp_processor_id()) = CPU_ONLINE;
+	paravirt_post_smp_prepare_boot_cpu();
+}
 
-		printk(KERN_INFO "SMP: starting up secondaries.\n");
+#ifdef CONFIG_HOTPLUG_CPU
+static inline void
+clear_cpu_sibling_map(int cpu)
+{
+	int i;
 
-		for (cpu = 0; cpu < smp_boot_data.cpu_count; cpu++) {
+	for_each_cpu_mask(i, per_cpu(cpu_sibling_map, cpu))
+		cpu_clear(cpu, per_cpu(cpu_sibling_map, i));
+	for_each_cpu_mask(i, cpu_core_map[cpu])
+		cpu_clear(cpu, cpu_core_map[i]);
+
+	per_cpu(cpu_sibling_map, cpu) = cpu_core_map[cpu] = CPU_MASK_NONE;
+}
+
+static void
+remove_siblinginfo(int cpu)
+{
+	int last = 0;
+
+	if (cpu_data(cpu)->threads_per_core == 1 &&
+	    cpu_data(cpu)->cores_per_socket == 1) {
+		cpu_clear(cpu, cpu_core_map[cpu]);
+		cpu_clear(cpu, per_cpu(cpu_sibling_map, cpu));
+		return;
+	}
+
+	last = (cpus_weight(cpu_core_map[cpu]) == 1 ? 1 : 0);
+
+	/* remove it from all sibling map's */
+	clear_cpu_sibling_map(cpu);
+}
+
+extern void fixup_irqs(void);
+
+int migrate_platform_irqs(unsigned int cpu)
+{
+	int new_cpei_cpu;
+	struct irq_data *data = NULL;
+	const struct cpumask *mask;
+	int 		retval = 0;
+
+	/*
+	 * dont permit CPEI target to removed.
+	 */
+	if (cpe_vector > 0 && is_cpu_cpei_target(cpu)) {
+		printk ("CPU (%d) is CPEI Target\n", cpu);
+		if (can_cpei_retarget()) {
 			/*
-			 * Don't even attempt to start the boot CPU!
+			 * Now re-target the CPEI to a different processor
 			 */
-			sapicid = smp_boot_data.cpu_phys_id[cpu];
-			if ((sapicid == -1) || (sapicid == hard_smp_processor_id()))
-				continue;
-
-			if ((max_cpus > 0) && (cpucount + 1 >= max_cpus))
-				break;
-
-			do_boot_cpu(sapicid);
+			new_cpei_cpu = cpumask_any(cpu_online_mask);
+			mask = cpumask_of(new_cpei_cpu);
+			set_cpei_target_cpu(new_cpei_cpu);
+			data = irq_get_irq_data(ia64_cpe_irq);
+			/*
+			 * Switch for now, immediately, we need to do fake intr
+			 * as other interrupts, but need to study CPEI behaviour with
+			 * polling before making changes.
+			 */
+			if (data && data->chip) {
+				data->chip->irq_disable(data);
+				data->chip->irq_set_affinity(data, mask, false);
+				data->chip->irq_enable(data);
+				printk ("Re-targeting CPEI to cpu %d\n", new_cpei_cpu);
+			}
 		}
-
-		smp_num_cpus = cpucount + 1;
-
-		/*
-		 * Allow the user to impress friends.
-		 */
-
-		printk("Before bogomips.\n");
-		if (!cpucount) {
-			printk(KERN_WARNING "Warning: only one processor found.\n");
-		} else {
-			unsigned long bogosum = 0;
-  			for (cpu = 0; cpu < NR_CPUS; cpu++)
-				if (cpu_online_map & (1UL << cpu))
-					bogosum += cpu_data(cpu)->loops_per_jiffy;
-
-			printk(KERN_INFO "Total of %d processors activated (%lu.%02lu BogoMIPS).\n",
-			       cpucount + 1, bogosum/(500000/HZ), (bogosum/(5000/HZ))%100);
+		if (!data) {
+			printk ("Unable to retarget CPEI, offline cpu [%d] failed\n", cpu);
+			retval = -EBUSY;
 		}
 	}
-  smp_done:
-	;
+	return retval;
+}
+
+/* must be called with cpucontrol mutex held */
+int __cpu_disable(void)
+{
+	int cpu = smp_processor_id();
+
+	/*
+	 * dont permit boot processor for now
+	 */
+	if (cpu == 0 && !bsp_remove_ok) {
+		printk ("Your platform does not support removal of BSP\n");
+		return (-EBUSY);
+	}
+
+	if (ia64_platform_is("sn2")) {
+		if (!sn_cpu_disable_allowed(cpu))
+			return -EBUSY;
+	}
+
+	set_cpu_online(cpu, false);
+
+	if (migrate_platform_irqs(cpu)) {
+		set_cpu_online(cpu, true);
+		return -EBUSY;
+	}
+
+	remove_siblinginfo(cpu);
+	fixup_irqs();
+	local_flush_tlb_all();
+	cpu_clear(cpu, cpu_callin_map);
+	return 0;
+}
+
+void __cpu_die(unsigned int cpu)
+{
+	unsigned int i;
+
+	for (i = 0; i < 100; i++) {
+		/* They ack this in play_dead by setting CPU_DEAD */
+		if (per_cpu(cpu_state, cpu) == CPU_DEAD)
+		{
+			printk ("CPU %d is now offline\n", cpu);
+			return;
+		}
+		msleep(100);
+	}
+ 	printk(KERN_ERR "CPU %u didn't die...\n", cpu);
+}
+#endif /* CONFIG_HOTPLUG_CPU */
+
+void
+smp_cpus_done (unsigned int dummy)
+{
+	int cpu;
+	unsigned long bogosum = 0;
+
+	/*
+	 * Allow the user to impress friends.
+	 */
+
+	for_each_online_cpu(cpu) {
+		bogosum += cpu_data(cpu)->loops_per_jiffy;
+	}
+
+	printk(KERN_INFO "Total of %d processors activated (%lu.%02lu BogoMIPS).\n",
+	       (int)num_online_cpus(), bogosum/(500000/HZ), (bogosum/(5000/HZ))%100);
+}
+
+static inline void __devinit
+set_cpu_sibling_map(int cpu)
+{
+	int i;
+
+	for_each_online_cpu(i) {
+		if ((cpu_data(cpu)->socket_id == cpu_data(i)->socket_id)) {
+			cpu_set(i, cpu_core_map[cpu]);
+			cpu_set(cpu, cpu_core_map[i]);
+			if (cpu_data(cpu)->core_id == cpu_data(i)->core_id) {
+				cpu_set(i, per_cpu(cpu_sibling_map, cpu));
+				cpu_set(cpu, per_cpu(cpu_sibling_map, i));
+			}
+		}
+	}
+}
+
+int __cpuinit
+__cpu_up (unsigned int cpu)
+{
+	int ret;
+	int sapicid;
+
+	sapicid = ia64_cpu_to_sapicid[cpu];
+	if (sapicid == -1)
+		return -EINVAL;
+
+	/*
+	 * Already booted cpu? not valid anymore since we dont
+	 * do idle loop tightspin anymore.
+	 */
+	if (cpu_isset(cpu, cpu_callin_map))
+		return -EINVAL;
+
+	per_cpu(cpu_state, cpu) = CPU_UP_PREPARE;
+	/* Processor goes to start_secondary(), sets online flag */
+	ret = do_boot_cpu(sapicid, cpu);
+	if (ret < 0)
+		return ret;
+
+	if (cpu_data(cpu)->threads_per_core == 1 &&
+	    cpu_data(cpu)->cores_per_socket == 1) {
+		cpu_set(cpu, per_cpu(cpu_sibling_map, cpu));
+		cpu_set(cpu, cpu_core_map[cpu]);
+		return 0;
+	}
+
+	set_cpu_sibling_map(cpu);
+
+	return 0;
 }
 
 /*
- * Assume that CPU's have been discovered by some platform-dependent interface.  For
+ * Assume that CPUs have been discovered by some platform-dependent interface.  For
  * SoftSDV/Lion, that would be ACPI.
  *
  * Setup of the IPI irq handler is done in irq.c:init_IRQ_SMP().
@@ -573,38 +842,82 @@ init_smp_config(void)
 	} *ap_startup;
 	long sal_ret;
 
-	/* Tell SAL where to drop the AP's.  */
+	/* Tell SAL where to drop the APs.  */
 	ap_startup = (struct fptr *) start_ap;
 	sal_ret = ia64_sal_set_vectors(SAL_VECTOR_OS_BOOT_RENDEZ,
-				      ia64_tpa(ap_startup->fp), ia64_tpa(ap_startup->gp), 0, 0, 0, 0);
-	if (sal_ret < 0) {
-		printk(KERN_ERR "SMP: Can't set SAL AP Boot Rendezvous: %s\n     Forcing UP mode\n",
+				       ia64_tpa(ap_startup->fp), ia64_tpa(ap_startup->gp), 0, 0, 0, 0);
+	if (sal_ret < 0)
+		printk(KERN_ERR "SMP: Can't set SAL AP Boot Rendezvous: %s\n",
 		       ia64_sal_strerror(sal_ret));
-		max_cpus = 0;
-		smp_num_cpus = 1;
-	}
 }
 
 /*
- * Initialize the logical CPU number to SAPICID mapping
+ * identify_siblings(cpu) gets called from identify_cpu. This populates the 
+ * information related to logical execution units in per_cpu_data structure.
  */
-void __init
-smp_build_cpu_map (void)
+void __devinit
+identify_siblings(struct cpuinfo_ia64 *c)
 {
-	int sapicid, cpu, i;
-	int boot_cpu_id = hard_smp_processor_id();
+	long status;
+	u16 pltid;
+	pal_logical_to_physical_t info;
 
-	for (cpu = 0; cpu < NR_CPUS; cpu++)
-		ia64_cpu_to_sapicid[cpu] = -1;
+	status = ia64_pal_logical_to_phys(-1, &info);
+	if (status != PAL_STATUS_SUCCESS) {
+		if (status != PAL_STATUS_UNIMPLEMENTED) {
+			printk(KERN_ERR
+				"ia64_pal_logical_to_phys failed with %ld\n",
+				status);
+			return;
+		}
 
-	ia64_cpu_to_sapicid[0] = boot_cpu_id;
-
-	for (cpu = 1, i = 0; i < smp_boot_data.cpu_count; i++) {
-		sapicid = smp_boot_data.cpu_phys_id[i];
-		if (sapicid == boot_cpu_id)
-			continue;
-		ia64_cpu_to_sapicid[cpu] = sapicid;
-		cpu++;
+		info.overview_ppid = 0;
+		info.overview_cpp  = 1;
+		info.overview_tpc  = 1;
 	}
+
+	status = ia64_sal_physical_id_info(&pltid);
+	if (status != PAL_STATUS_SUCCESS) {
+		if (status != PAL_STATUS_UNIMPLEMENTED)
+			printk(KERN_ERR
+				"ia64_sal_pltid failed with %ld\n",
+				status);
+		return;
+	}
+
+	c->socket_id =  (pltid << 8) | info.overview_ppid;
+
+	if (info.overview_cpp == 1 && info.overview_tpc == 1)
+		return;
+
+	c->cores_per_socket = info.overview_cpp;
+	c->threads_per_core = info.overview_tpc;
+	c->num_log = info.overview_num_log;
+
+	c->core_id = info.log1_cid;
+	c->thread_id = info.log1_tid;
 }
 
+/*
+ * returns non zero, if multi-threading is enabled
+ * on at least one physical package. Due to hotplug cpu
+ * and (maxcpus=), all threads may not necessarily be enabled
+ * even though the processor supports multi-threading.
+ */
+int is_multithreading_enabled(void)
+{
+	int i, j;
+
+	for_each_present_cpu(i) {
+		for_each_present_cpu(j) {
+			if (j == i)
+				continue;
+			if ((cpu_data(j)->socket_id == cpu_data(i)->socket_id)) {
+				if (cpu_data(j)->core_id == cpu_data(i)->core_id)
+					return 1;
+			}
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(is_multithreading_enabled);

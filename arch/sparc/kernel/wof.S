@@ -1,10 +1,9 @@
-/* $Id: wof.S,v 1.40 2000/01/08 16:38:18 anton Exp $
+/*
  * wof.S: Sparc window overflow handler.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/contregs.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
@@ -13,6 +12,7 @@
 #include <asm/asi.h>
 #include <asm/winmacro.h>
 #include <asm/asmmacro.h>
+#include <asm/thread_info.h>
 
 /* WARNING: This routine is hairy and _very_ complicated, but it
  *          must be as fast as possible as it handles the allocation
@@ -62,7 +62,7 @@ spnwin_patch3_7win:	and	%twin_tmp, 0x7f, %twin_tmp
 	 * andcc %l0, PSR_PS, %g0
 	 */
 
-	/* Datum current->thread.uwinmask contains at all times a bitmask
+	/* Datum current_thread_info->uwinmask contains at all times a bitmask
 	 * where if any user windows are active, at least one bit will
 	 * be set in to mask.  If no user windows are active, the bitmask
 	 * will be all zeroes.
@@ -96,10 +96,10 @@ spnwin_patch2:	and	%glob_tmp, 0xff, %glob_tmp
 	 save	%g0, %g0, %g0				! Go where saving will occur
 	
 	/* See if any user windows are active in the set. */
-	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %twin_tmp	! grab win mask
+	ld	[%curptr + TI_UWINMASK], %twin_tmp	! grab win mask
 	orcc	%g0, %twin_tmp, %g0			! check for set bits
 	bne	spwin_exist_uwins			! yep, there are some
-	 andn	%twin_tmp, %glob_tmp, %twin_tmp		! compute new umask
+	 andn	%twin_tmp, %glob_tmp, %twin_tmp		! compute new uwinmask
 
 	/* Save into the window which must be saved and do it.
 	 * Basically if we are here, this means that we trapped
@@ -139,7 +139,7 @@ spwin_exist_uwins:
 	 * But first, store the new user window mask calculated
 	 * above.
 	 */
-	st	%twin_tmp, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
+	st	%twin_tmp, [%curptr + TI_UWINMASK]
 	save	%g0, %g0, %g0		! Go to where the saving will occur
 
 spwin_fromuser:
@@ -163,8 +163,8 @@ spwin_fromuser:
 	 * the label 'spwin_user_stack_is_bolixed' which will take
 	 * care of things at that point.
 	 */
-				.globl	C_LABEL(spwin_mmu_patchme)
-C_LABEL(spwin_mmu_patchme):	b	C_LABEL(spwin_sun4c_stackchk)
+	.globl	spwin_mmu_patchme
+spwin_mmu_patchme:	b	spwin_sun4c_stackchk
 				 andcc	%sp, 0x7, %g0
 
 spwin_good_ustack:
@@ -212,15 +212,15 @@ spwin_user_stack_is_bolixed:
 	/* Oh well, throw this one window into the per-task window
 	 * buffer, the first one.
 	 */
-	st	%sp, [%curptr + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
-	STORE_WINDOW(curptr + AOFF_task_thread + AOFF_thread_reg_window)
+	st	%sp, [%curptr + TI_RWIN_SPTRS]
+	STORE_WINDOW(curptr + TI_REG_WINDOW)
 	restore	%g0, %g0, %g0
 
 	/* LOCATION: Trap Window */
 
 	/* Back in the trap window, update winbuffer save count. */
-	mov	1, %glob_tmp
-	st	%glob_tmp, [%curptr + AOFF_task_thread + AOFF_thread_w_saved]
+	mov	1, %twin_tmp
+	st	%twin_tmp, [%curptr + TI_W_SAVED]
 
 		/* Compute new user window mask.  What we are basically
 		 * doing is taking two windows, the invalid one at trap
@@ -232,9 +232,9 @@ spwin_user_stack_is_bolixed:
 		or	%twin_tmp, %t_wim, %twin_tmp
 		not	%twin_tmp
 spnwin_patch3:	and	%twin_tmp, 0xff, %twin_tmp	! patched on 7win Sparcs
-		st	%twin_tmp, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
+		st	%twin_tmp, [%curptr + TI_UWINMASK]
 
-#define STACK_OFFSET (TASK_UNION_SIZE - TRACEREG_SZ - STACKFRAME_SZ)
+#define STACK_OFFSET (THREAD_SIZE - TRACEREG_SZ - STACKFRAME_SZ)
 
 	sethi	%hi(STACK_OFFSET), %sp
 	or	%sp, %lo(STACK_OFFSET), %sp
@@ -247,12 +247,12 @@ spnwin_patch3:	and	%twin_tmp, 0xff, %twin_tmp	! patched on 7win Sparcs
 
 	sethi	%hi(STACK_OFFSET), %g6
 	or	%g6, %lo(STACK_OFFSET), %g6
-	sub	%sp, %g6, %g6
+	sub	%sp, %g6, %g6		! curptr
 
 	/* Turn on traps and call c-code to deal with it. */
 	wr	%t_psr, PSR_ET, %psr
 	nop
-	call	C_LABEL(window_overflow_fault)
+	call	window_overflow_fault
 	 nop
 
 	/* Return from trap if C-code actually fixes things, if it
@@ -306,8 +306,7 @@ spwin_bad_ustack_from_kernel:
  * As noted above %curptr cannot be touched by this routine at all.
  */
 
-	.globl	C_LABEL(spwin_sun4c_stackchk)
-C_LABEL(spwin_sun4c_stackchk):
+spwin_sun4c_stackchk:
 	/* LOCATION: Window to be saved on the stack */
 
 	/* See if the stack is in the address space hole but first,
@@ -378,8 +377,8 @@ spwin_sun4c_onepage:
 	 * works for all current v8/srmmu implementations, we'll
 	 * see...
 	 */
-	.globl	C_LABEL(spwin_srmmu_stackchk)
-C_LABEL(spwin_srmmu_stackchk):
+	.globl	spwin_srmmu_stackchk
+spwin_srmmu_stackchk:
 	/* LOCATION: Window to be saved on the stack */
 
 	/* Because of SMP concerns and speed we play a trick.

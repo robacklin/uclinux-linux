@@ -8,7 +8,6 @@
  * Code supporting the Sable, Sable-Gamma, and Lynx systems.
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -17,20 +16,20 @@
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_t2.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
 #include "pci_impl.h"
 #include "machvec_impl.h"
 
-spinlock_t sable_lynx_irq_lock = SPIN_LOCK_UNLOCKED;
+DEFINE_SPINLOCK(sable_lynx_irq_lock);
 
 typedef struct irq_swizzle_struct
 {
@@ -47,7 +46,7 @@ typedef struct irq_swizzle_struct
 
 static irq_swizzle_t *sable_lynx_irq_swizzle;
 
-static void sable_lynx_init_irq(int nr_irqs);
+static void sable_lynx_init_irq(int nr_of_irqs);
 
 #if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SABLE)
 
@@ -194,7 +193,7 @@ sable_init_irq(void)
  */
 
 static int __init
-sable_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+sable_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[9][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -208,7 +207,7 @@ sable_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{ 32+3,  32+3,  32+3,  32+3,  32+3},  /* IdSel 7,  slot 1 */
 		{ 32+4,  32+4,  32+4,  32+4,  32+4}   /* IdSel 8,  slot 2 */
 	};
-	const long min_idsel = 0, max_idsel = 8, irqs_per_slot = 5;
+	long min_idsel = 0, max_idsel = 8, irqs_per_slot = 5;
 	return COMMON_TABLE_LOOKUP;
 }
 #endif /* defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SABLE) */
@@ -376,7 +375,7 @@ lynx_init_irq(void)
  */
 
 static int __init
-lynx_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+lynx_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	static char irq_tab[19][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -425,7 +424,7 @@ lynx_swizzle(struct pci_dev *dev, u8 *pinp)
 				slot = PCI_SLOT(dev->devfn) + 11;
 				break;
 			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn)) ;
+			pin = pci_swizzle_interrupt_pin(dev, pin);
 
 			/* Move up the chain of bridges.  */
 			dev = dev->bus->self;
@@ -443,57 +442,43 @@ lynx_swizzle(struct pci_dev *dev, u8 *pinp)
 /* GENERIC irq routines */
 
 static inline void
-sable_lynx_enable_irq(unsigned int irq)
+sable_lynx_enable_irq(struct irq_data *d)
 {
 	unsigned long bit, mask;
 
-	bit = sable_lynx_irq_swizzle->irq_to_mask[irq];
+	bit = sable_lynx_irq_swizzle->irq_to_mask[d->irq];
 	spin_lock(&sable_lynx_irq_lock);
 	mask = sable_lynx_irq_swizzle->shadow_mask &= ~(1UL << bit);
 	sable_lynx_irq_swizzle->update_irq_hw(bit, mask);
 	spin_unlock(&sable_lynx_irq_lock);
 #if 0
-	printk("%s: mask 0x%lx bit 0x%x irq 0x%x\n",
-	       __FUNCTION__, mask, bit, irq);
+	printk("%s: mask 0x%lx bit 0x%lx irq 0x%x\n",
+	       __func__, mask, bit, irq);
 #endif
 }
 
 static void
-sable_lynx_disable_irq(unsigned int irq)
+sable_lynx_disable_irq(struct irq_data *d)
 {
 	unsigned long bit, mask;
 
-	bit = sable_lynx_irq_swizzle->irq_to_mask[irq];
+	bit = sable_lynx_irq_swizzle->irq_to_mask[d->irq];
 	spin_lock(&sable_lynx_irq_lock);
 	mask = sable_lynx_irq_swizzle->shadow_mask |= 1UL << bit;
 	sable_lynx_irq_swizzle->update_irq_hw(bit, mask);
 	spin_unlock(&sable_lynx_irq_lock);
 #if 0
-	printk("%s: mask 0x%lx bit 0x%x irq 0x%x\n",
-	       __FUNCTION__, mask, bit, irq);
+	printk("%s: mask 0x%lx bit 0x%lx irq 0x%x\n",
+	       __func__, mask, bit, irq);
 #endif
 }
 
-static unsigned int
-sable_lynx_startup_irq(unsigned int irq)
-{
-	sable_lynx_enable_irq(irq);
-	return 0;
-}
-
 static void
-sable_lynx_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		sable_lynx_enable_irq(irq);
-}
-
-static void
-sable_lynx_mask_and_ack_irq(unsigned int irq)
+sable_lynx_mask_and_ack_irq(struct irq_data *d)
 {
 	unsigned long bit, mask;
 
-	bit = sable_lynx_irq_swizzle->irq_to_mask[irq];
+	bit = sable_lynx_irq_swizzle->irq_to_mask[d->irq];
 	spin_lock(&sable_lynx_irq_lock);
 	mask = sable_lynx_irq_swizzle->shadow_mask |= 1UL << bit;
 	sable_lynx_irq_swizzle->update_irq_hw(bit, mask);
@@ -501,18 +486,15 @@ sable_lynx_mask_and_ack_irq(unsigned int irq)
 	spin_unlock(&sable_lynx_irq_lock);
 }
 
-static struct hw_interrupt_type sable_lynx_irq_type = {
-	typename:	"SABLE/LYNX",
-	startup:	sable_lynx_startup_irq,
-	shutdown:	sable_lynx_disable_irq,
-	enable:		sable_lynx_enable_irq,
-	disable:	sable_lynx_disable_irq,
-	ack:		sable_lynx_mask_and_ack_irq,
-	end:		sable_lynx_end_irq,
+static struct irq_chip sable_lynx_irq_type = {
+	.name		= "SABLE/LYNX",
+	.irq_unmask	= sable_lynx_enable_irq,
+	.irq_mask	= sable_lynx_disable_irq,
+	.irq_mask_ack	= sable_lynx_mask_and_ack_irq,
 };
 
 static void 
-sable_lynx_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+sable_lynx_srm_device_interrupt(unsigned long vector)
 {
 	/* Note that the vector reported by the SRM PALcode corresponds
 	   to the interrupt mask bits, but we have to manage via the
@@ -524,21 +506,22 @@ sable_lynx_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	irq = sable_lynx_irq_swizzle->mask_to_irq[bit];
 #if 0
 	printk("%s: vector 0x%lx bit 0x%x irq 0x%x\n",
-	       __FUNCTION__, vector, bit, irq);
+	       __func__, vector, bit, irq);
 #endif
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
-sable_lynx_init_irq(int nr_irqs)
+sable_lynx_init_irq(int nr_of_irqs)
 {
 	long i;
 
-	for (i = 0; i < nr_irqs; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &sable_lynx_irq_type;
+	for (i = 0; i < nr_of_irqs; ++i) {
+		irq_set_chip_and_handler(i, &sable_lynx_irq_type,
+					 handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
-	
+
 	common_init_isa_dma();
 }
 
@@ -561,29 +544,28 @@ sable_lynx_init_pci(void)
 #undef GAMMA_BIAS
 #define GAMMA_BIAS 0
 struct alpha_machine_vector sable_mv __initmv = {
-	vector_name:		"Sable",
+	.vector_name		= "Sable",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_T2_IO,
-	DO_T2_BUS,
-	machine_check:		t2_machine_check,
-	max_dma_address:	ALPHA_SABLE_MAX_DMA_ADDRESS,
-	min_io_address:		EISA_DEFAULT_IO_BASE,
-	min_mem_address:	T2_DEFAULT_MEM_BASE,
+	.machine_check		= t2_machine_check,
+	.max_isa_dma_address	= ALPHA_SABLE_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= EISA_DEFAULT_IO_BASE,
+	.min_mem_address	= T2_DEFAULT_MEM_BASE,
 
-	nr_irqs:		40,
-	device_interrupt:	sable_lynx_srm_device_interrupt,
+	.nr_irqs		= 40,
+	.device_interrupt	= sable_lynx_srm_device_interrupt,
 
-	init_arch:		t2_init_arch,
-	init_irq:		sable_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		sable_lynx_init_pci,
-	kill_arch:		t2_kill_arch,
-	pci_map_irq:		sable_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= t2_init_arch,
+	.init_irq		= sable_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= sable_lynx_init_pci,
+	.kill_arch		= t2_kill_arch,
+	.pci_map_irq		= sable_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { t2: {
-	    gamma_bias:		0
+	.sys = { .t2 = {
+	    .gamma_bias		= 0
 	} }
 };
 ALIAS_MV(sable)
@@ -594,29 +576,28 @@ ALIAS_MV(sable)
 #undef GAMMA_BIAS
 #define GAMMA_BIAS _GAMMA_BIAS
 struct alpha_machine_vector sable_gamma_mv __initmv = {
-	vector_name:		"Sable-Gamma",
+	.vector_name		= "Sable-Gamma",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_T2_IO,
-	DO_T2_BUS,
-	machine_check:		t2_machine_check,
-	max_dma_address:	ALPHA_SABLE_MAX_DMA_ADDRESS,
-	min_io_address:		EISA_DEFAULT_IO_BASE,
-	min_mem_address:	T2_DEFAULT_MEM_BASE,
+	.machine_check		= t2_machine_check,
+	.max_isa_dma_address	= ALPHA_SABLE_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= EISA_DEFAULT_IO_BASE,
+	.min_mem_address	= T2_DEFAULT_MEM_BASE,
 
-	nr_irqs:		40,
-	device_interrupt:	sable_lynx_srm_device_interrupt,
+	.nr_irqs		= 40,
+	.device_interrupt	= sable_lynx_srm_device_interrupt,
 
-	init_arch:		t2_init_arch,
-	init_irq:		sable_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		sable_lynx_init_pci,
-	kill_arch:		t2_kill_arch,
-	pci_map_irq:		sable_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= t2_init_arch,
+	.init_irq		= sable_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= sable_lynx_init_pci,
+	.kill_arch		= t2_kill_arch,
+	.pci_map_irq		= sable_map_irq,
+	.pci_swizzle		= common_swizzle,
 
-	sys: { t2: {
-	    gamma_bias:		_GAMMA_BIAS
+	.sys = { .t2 = {
+	    .gamma_bias		= _GAMMA_BIAS
 	} }
 };
 ALIAS_MV(sable_gamma)
@@ -626,29 +607,28 @@ ALIAS_MV(sable_gamma)
 #undef GAMMA_BIAS
 #define GAMMA_BIAS _GAMMA_BIAS
 struct alpha_machine_vector lynx_mv __initmv = {
-	vector_name:		"Lynx",
+	.vector_name		= "Lynx",
 	DO_EV4_MMU,
 	DO_DEFAULT_RTC,
 	DO_T2_IO,
-	DO_T2_BUS,
-	machine_check:		t2_machine_check,
-	max_dma_address:	ALPHA_SABLE_MAX_DMA_ADDRESS,
-	min_io_address:		EISA_DEFAULT_IO_BASE,
-	min_mem_address:	T2_DEFAULT_MEM_BASE,
+	.machine_check		= t2_machine_check,
+	.max_isa_dma_address	= ALPHA_SABLE_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= EISA_DEFAULT_IO_BASE,
+	.min_mem_address	= T2_DEFAULT_MEM_BASE,
 
-	nr_irqs:		64,
-	device_interrupt:	sable_lynx_srm_device_interrupt,
+	.nr_irqs		= 64,
+	.device_interrupt	= sable_lynx_srm_device_interrupt,
 
-	init_arch:		t2_init_arch,
-	init_irq:		lynx_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		sable_lynx_init_pci,
-	kill_arch:		t2_kill_arch,
-	pci_map_irq:		lynx_map_irq,
-	pci_swizzle:		lynx_swizzle,
+	.init_arch		= t2_init_arch,
+	.init_irq		= lynx_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= sable_lynx_init_pci,
+	.kill_arch		= t2_kill_arch,
+	.pci_map_irq		= lynx_map_irq,
+	.pci_swizzle		= lynx_swizzle,
 
-	sys: { t2: {
-	    gamma_bias:		_GAMMA_BIAS
+	.sys = { .t2 = {
+	    .gamma_bias		= _GAMMA_BIAS
 	} }
 };
 ALIAS_MV(lynx)

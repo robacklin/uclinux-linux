@@ -1,25 +1,21 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-
-USE_STANDARD_AS_RULE := true
-EXTRA_LDFLAGS		+= --no-warn-mismatch
-
-O_TARGET		:= ep93xx.o 
-
-# Object file lists.
-
-obj-y			:= arch.o irq.o mm.o time.o ssp.o dma_ep93xx.o pcmcia_io.o
+obj-y			:= core.o clock.o
 obj-m			:=
 obj-n			:=
 obj-			:=
 
-export-objs		:= pcipool.o
+obj-$(CONFIG_EP93XX_DMA)	+= dma.o
 
-obj-$(CONFIG_EP93XX_CRUNCH) += crunch.o
-obj-$(CONFIG_KGDB_SERIAL) += kgdb-serial.o
+obj-$(CONFIG_CRUNCH)		+= crunch.o crunch-bits.o
+AFLAGS_crunch-bits.o		:= -Wa,-mcpu=ep9312
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_MACH_ADSSPHERE)	+= adssphere.o
+obj-$(CONFIG_MACH_EDB93XX)	+= edb93xx.o
+obj-$(CONFIG_MACH_GESBC9312)	+= gesbc9312.o
+obj-$(CONFIG_MACH_MICRO9)	+= micro9.o
+obj-$(CONFIG_MACH_SIM_ONE)	+= simone.o
+obj-$(CONFIG_MACH_SNAPPER_CL15)	+= snappercl15.o
+obj-$(CONFIG_MACH_TS72XX)	+= ts72xx.o
+obj-$(CONFIG_MACH_VISION_EP9307)+= vision_ep9307.o

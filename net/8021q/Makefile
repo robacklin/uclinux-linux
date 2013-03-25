@@ -1,15 +1,10 @@
 #
 # Makefile for the Linux VLAN layer.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
+obj-$(subst m,y,$(CONFIG_VLAN_8021Q))	+= vlan_core.o
+obj-$(CONFIG_VLAN_8021Q)		+= 8021q.o
 
-O_TARGET := 8021q.o
+8021q-y					:= vlan.o vlan_dev.o vlan_netlink.o
+8021q-$(CONFIG_VLAN_8021Q_GVRP)		+= vlan_gvrp.o
+8021q-$(CONFIG_PROC_FS)			+= vlanproc.o
 
-obj-y := vlan.o vlanproc.o vlan_dev.o
-obj-m := $(O_TARGET)
-
-include $(TOPDIR)/Rules.make

@@ -10,20 +10,32 @@
  *	overhauled to use key registration
  *	based upon discusions in irc://irc.openprojects.net/#kernelnewbies
  */
-#ifndef __LINUX_SYSRQ_H__
-#define __LINUX_SYSRQ_H__
 
-#include <linux/config.h>
+#ifndef _LINUX_SYSRQ_H
+#define _LINUX_SYSRQ_H
 
-struct pt_regs;
-struct kbd_struct;
-struct tty_struct;
+#include <linux/errno.h>
+#include <linux/types.h>
+
+/* Enable/disable SYSRQ support by default (0==no, 1==yes). */
+#define SYSRQ_DEFAULT_ENABLE	1
+
+/* Possible values of bitmask for enabling sysrq functions */
+/* 0x0001 is reserved for enable everything */
+#define SYSRQ_ENABLE_LOG	0x0002
+#define SYSRQ_ENABLE_KEYBOARD	0x0004
+#define SYSRQ_ENABLE_DUMP	0x0008
+#define SYSRQ_ENABLE_SYNC	0x0010
+#define SYSRQ_ENABLE_REMOUNT	0x0020
+#define SYSRQ_ENABLE_SIGNAL	0x0040
+#define SYSRQ_ENABLE_BOOT	0x0080
+#define SYSRQ_ENABLE_RTNICE	0x0100
 
 struct sysrq_key_op {
-	void (*handler)(int, struct pt_regs *,
-			struct kbd_struct *, struct tty_struct *);
+	void (*handler)(int);
 	char *help_msg;
 	char *action_msg;
+	int enable_mask;
 };
 
 #ifdef CONFIG_MAGIC_SYSRQ
@@ -33,91 +45,34 @@ struct sysrq_key_op {
  * are available -- else NULL's).
  */
 
-void handle_sysrq(int, struct pt_regs *,
-		struct kbd_struct *, struct tty_struct *);
+void handle_sysrq(int key);
+void __handle_sysrq(int key, bool check_mask);
+int register_sysrq_key(int key, struct sysrq_key_op *op);
+int unregister_sysrq_key(int key, struct sysrq_key_op *op);
+struct sysrq_key_op *__sysrq_get_key_op(int key);
 
-
-/* 
- * Nonlocking version of handle sysrq, used by sysrq handlers that need to
- * call sysrq handlers
- */
-
-void __handle_sysrq_nolock(int, struct pt_regs *,
-                struct kbd_struct *, struct tty_struct *);
-
-
-
-/*
- * Sysrq registration manipulation functions
- */
-
-void __sysrq_lock_table (void);
-void __sysrq_unlock_table (void);
-struct sysrq_key_op *__sysrq_get_key_op (int key);
-void __sysrq_put_key_op (int key, struct sysrq_key_op *op_p);
-
-extern __inline__ int
-__sysrq_swap_key_ops_nolock(int key, struct sysrq_key_op *insert_op_p,
-				struct sysrq_key_op *remove_op_p)
-{
-	int retval;
-	if (__sysrq_get_key_op(key) == remove_op_p) {
-		__sysrq_put_key_op(key, insert_op_p);
-		retval = 0;
-	} else {
-                retval = -1;
-	}
-	return retval;
-}
-
-extern __inline__ int
-__sysrq_swap_key_ops(int key, struct sysrq_key_op *insert_op_p,
-				struct sysrq_key_op *remove_op_p) {
-	int retval;
-	__sysrq_lock_table();
-	retval = __sysrq_swap_key_ops_nolock(key, insert_op_p, remove_op_p);
-	__sysrq_unlock_table();
-	return retval;
-}
-	
-static inline int register_sysrq_key(int key, struct sysrq_key_op *op_p)
-{
-	return __sysrq_swap_key_ops(key, op_p, NULL);
-}
-
-static inline int unregister_sysrq_key(int key, struct sysrq_key_op *op_p)
-{
-	return __sysrq_swap_key_ops(key, NULL, op_p);
-}
+int sysrq_toggle_support(int enable_mask);
 
 #else
 
-static inline int __reterr(void)
+static inline void handle_sysrq(int key)
+{
+}
+
+static inline void __handle_sysrq(int key, bool check_mask)
+{
+}
+
+static inline int register_sysrq_key(int key, struct sysrq_key_op *op)
 {
 	return -EINVAL;
 }
 
-#define register_sysrq_key(ig,nore) __reterr()
-#define unregister_sysrq_key(ig,nore) __reterr()
+static inline int unregister_sysrq_key(int key, struct sysrq_key_op *op)
+{
+	return -EINVAL;
+}
 
 #endif
 
-
-/* Deferred actions */
-
-extern volatile int emergency_sync_scheduled;
-
-#define EMERG_SYNC 1
-#define EMERG_REMOUNT 2
-
-void do_emergency_sync(void);
-
-#ifdef CONFIG_MAGIC_SYSRQ
-#define CHECK_EMERGENCY_SYNC			\
-	if (emergency_sync_scheduled)		\
-		do_emergency_sync();
-#else
-#define CHECK_EMERGENCY_SYNC
-#endif
-
-#endif /* __LINUX_SYSRQ_H__ */
+#endif /* _LINUX_SYSRQ_H */

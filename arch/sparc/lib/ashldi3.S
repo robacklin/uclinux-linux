@@ -1,16 +1,14 @@
-/* $Id: ashldi3.S,v 1.2 1999/11/19 04:11:46 davem Exp $
+/*
  * ashldi3.S:	GCC emits these for certain drivers playing
  *		with long longs.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
  */
 
-#include <asm/cprefix.h>
-
 	.text
 	.align	4
-	.globl	C_LABEL(__ashldi3)
-C_LABEL(__ashldi3):
+	.globl	__ashldi3
+__ashldi3:
 	cmp	%o2, 0
 	be	9f
 	 mov	0x20, %g2

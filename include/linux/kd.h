@@ -1,6 +1,7 @@
 #ifndef _LINUX_KD_H
 #define _LINUX_KD_H
 #include <linux/types.h>
+#include <linux/compiler.h>
 
 /* 0x4B is 'K', to avoid collision with termios and vt */
 
@@ -12,7 +13,7 @@
 struct consolefontdesc {
 	unsigned short charcount;	/* characters in font (256 or 512) */
 	unsigned short charheight;	/* scan lines per character (1-32) */
-	char *chardata;			/* font data in expanded form */
+	char __user *chardata;		/* font data in expanded form */
 };
 
 #define PIO_FONTRESET   0x4B6D	/* reset to default font */
@@ -63,7 +64,7 @@ struct unipair {
 };
 struct unimapdesc {
 	unsigned short entry_ct;
-	struct unipair *entries;
+	struct unipair __user *entries;
 };
 #define PIO_UNIMAP	0x4B67	/* put unicode-to-font mapping in kernel */
 #define PIO_UNIMAPCLR	0x4B68	/* clear table, possibly advise hash algorithm */
@@ -80,6 +81,7 @@ struct unimapinit {
 #define		K_XLATE		0x01
 #define		K_MEDIUMRAW	0x02
 #define		K_UNICODE	0x03
+#define		K_OFF		0x04
 #define KDGKBMODE	0x4B44	/* gets current keyboard mode */
 #define KDSKBMODE	0x4B45	/* sets current keyboard mode */
 
@@ -124,6 +126,16 @@ struct kbdiacrs {
 #define KDGKBDIACR      0x4B4A  /* read kernel accent table */
 #define KDSKBDIACR      0x4B4B  /* write kernel accent table */
 
+struct kbdiacruc {
+	unsigned int diacr, base, result;
+};
+struct kbdiacrsuc {
+        unsigned int kb_cnt;    /* number of entries in following array */
+	struct kbdiacruc kbdiacruc[256];    /* MAX_DIACR from keyboard.h */
+};
+#define KDGKBDIACRUC    0x4BFA  /* read kernel accent table - UCS */
+#define KDSKBDIACRUC    0x4BFB  /* write kernel accent table - UCS */
+
 struct kbkeycode {
 	unsigned int scancode, keycode;
 };
@@ -134,7 +146,8 @@ struct kbkeycode {
 
 struct kbd_repeat {
 	int delay;	/* in msec; <= 0: don't change */
-	int rate;	/* in msec; <= 0: don't change */
+	int period;	/* in msec; <= 0: don't change */
+			/* earlier this field was misnamed "rate" */
 };
 
 #define KDKBDREP        0x4B52  /* set keyboard delay/repeat rate;
@@ -145,6 +158,12 @@ struct kbd_repeat {
 struct console_font_op {
 	unsigned int op;	/* operation code KD_FONT_OP_* */
 	unsigned int flags;	/* KD_FONT_FLAG_* */
+	unsigned int width, height;	/* font size */
+	unsigned int charcount;
+	unsigned char __user *data;	/* font data with height fixed to 32 */
+};
+
+struct console_font {
 	unsigned int width, height;	/* font size */
 	unsigned int charcount;
 	unsigned char *data;	/* font data with height fixed to 32 */

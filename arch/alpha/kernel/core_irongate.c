@@ -9,23 +9,22 @@
  * Code common to all IRONGATE core logic chips.
  */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/sched.h>
-#include <linux/init.h>
-
-#include <asm/ptrace.h>
-#include <asm/system.h>
-#include <asm/pci.h>
-#include <asm/hwrpb.h>
-
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_irongate.h>
 #undef __EXTERN_INLINE
 
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/init.h>
+#include <linux/initrd.h>
 #include <linux/bootmem.h>
+
+#include <asm/ptrace.h>
+#include <asm/pci.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -80,12 +79,11 @@ igcsr32 *IronECC;
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	DBG_CFG(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x, "
 		 "pci_addr=0x%p, type1=0x%p)\n",
@@ -102,98 +100,65 @@ mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
 }
 
 static int
-irongate_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+irongate_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		     int size, u32 *value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	*value = __kernel_ldbu(*(vucp)addr);
+	switch (size) {
+	case 1:
+		*value = __kernel_ldbu(*(vucp)addr);
+		break;
+	case 2:
+		*value = __kernel_ldwu(*(vusp)addr);
+		break;
+	case 4:
+		*value = *(vuip)addr;
+		break;
+	}
+
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int
-irongate_read_config_word(struct pci_dev *dev, int where, u16 *value)
+irongate_write_config(struct pci_bus *bus, unsigned int devfn, int where,
+		      int size, u32 value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	*value = __kernel_ldwu(*(vusp)addr);
+	switch (size) {
+	case 1:
+		__kernel_stb(value, *(vucp)addr);
+		mb();
+		__kernel_ldbu(*(vucp)addr);
+		break;
+	case 2:
+		__kernel_stw(value, *(vusp)addr);
+		mb();
+		__kernel_ldwu(*(vusp)addr);
+		break;
+	case 4:
+		*(vuip)addr = value;
+		mb();
+		*(vuip)addr;
+		break;
+	}
+
 	return PCIBIOS_SUCCESSFUL;
 }
-
-static int
-irongate_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	*value = *(vuip)addr;
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-irongate_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	__kernel_stb(value, *(vucp)addr);
-	mb();
-	__kernel_ldbu(*(vucp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-irongate_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	__kernel_stw(value, *(vusp)addr);
-	mb();
-	__kernel_ldwu(*(vusp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-irongate_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	*(vuip)addr = value;
-	mb();
-	*(vuip)addr;
-	return PCIBIOS_SUCCESSFUL;
-}
-
 
 struct pci_ops irongate_pci_ops =
 {
-	read_byte:	irongate_read_config_byte,
-	read_word:	irongate_read_config_word,
-	read_dword:	irongate_read_config_dword,
-	write_byte:	irongate_write_config_byte,
-	write_word:	irongate_write_config_word,
-	write_dword:	irongate_write_config_dword
+	.read =		irongate_read_config,
+	.write =	irongate_write_config,
 };
 
 int
@@ -268,14 +233,16 @@ albacore_init_arch(void)
 			unsigned long size;
 
 			size = initrd_end - initrd_start;
-			free_bootmem(__pa(initrd_start), PAGE_ALIGN(size));
+			free_bootmem_node(NODE_DATA(0), __pa(initrd_start),
+					  PAGE_ALIGN(size));
 			if (!move_initrd(pci_mem))
 				printk("irongate_init_arch: initrd too big "
 				       "(%ldK)\ndisabling initrd\n",
 				       size / 1024);
 		}
 #endif
-		reserve_bootmem(pci_mem, memtop - pci_mem);
+		reserve_bootmem_node(NODE_DATA(0), pci_mem, memtop -
+				pci_mem, BOOTMEM_DEFAULT);
 		printk("irongate_init_arch: temporarily reserving "
 			"region %08lx-%08lx for PCI\n", pci_mem, memtop - 1);
 	}
@@ -321,9 +288,9 @@ irongate_init_arch(void)
 	hose->sparse_mem_base = 0;
 	hose->sparse_io_base = 0;
 	hose->dense_mem_base
-	  = (IRONGATE_MEM & 0xffffffffff) | 0x80000000000;
+	  = (IRONGATE_MEM & 0xffffffffffUL) | 0x80000000000UL;
 	hose->dense_io_base
-	  = (IRONGATE_IO & 0xffffffffff) | 0x80000000000;
+	  = (IRONGATE_IO & 0xffffffffffUL) | 0x80000000000UL;
 
 	hose->sg_isa = hose->sg_pci = NULL;
 	__direct_map_base = 0;
@@ -336,6 +303,7 @@ irongate_init_arch(void)
 #include <linux/vmalloc.h>
 #include <linux/agp_backend.h>
 #include <linux/agpgart.h>
+#include <linux/export.h>
 #include <asm/pgalloc.h>
 
 #define GET_PAGE_DIR_OFF(addr) (addr >> 22)
@@ -344,7 +312,7 @@ irongate_init_arch(void)
 #define GET_GATT_OFF(addr) ((addr & 0x003ff000) >> 12) 
 #define GET_GATT(addr) (gatt_pages[GET_PAGE_DIR_IDX(addr)])
 
-unsigned long
+void __iomem *
 irongate_ioremap(unsigned long addr, unsigned long size)
 {
 	struct vm_struct *area;
@@ -354,7 +322,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	unsigned long gart_bus_addr;
 
 	if (!alpha_agpgart_size)
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 
 	gart_bus_addr = (unsigned long)IRONGATE0->bar0 &
 			PCI_BASE_ADDRESS_MEM_MASK; 
@@ -373,7 +341,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 		/*
 		 * Not found - assume legacy ioremap
 		 */
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 	} while(0);
 
 	mmio_regs = (u32 *)(((unsigned long)IRONGATE0->bar1 &
@@ -387,7 +355,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	if (addr & ~PAGE_MASK) {
 		printk("AGP ioremap failed... addr not page aligned (0x%lx)\n",
 		       addr);
-		return addr + IRONGATE_MEM;
+		return (void __iomem *)(addr + IRONGATE_MEM);
 	}
 	last = addr + size - 1;
 	size = PAGE_ALIGN(last) - addr;
@@ -412,7 +380,7 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	 * Map it
 	 */
 	area = get_vm_area(size, VM_IOREMAP);
-	if (!area) return (unsigned long)NULL;
+	if (!area) return NULL;
 
 	for(baddr = addr, vaddr = (unsigned long)area->addr; 
 	    baddr <= last; 
@@ -421,11 +389,11 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 		cur_gatt = phys_to_virt(GET_GATT(baddr) & ~1);
 		pte = cur_gatt[GET_GATT_OFF(baddr)] & ~1;
 
-		if (__alpha_remap_area_pages(VMALLOC_VMADDR(vaddr), 
+		if (__alpha_remap_area_pages(vaddr,
 					     pte, PAGE_SIZE, 0)) {
 			printk("AGP ioremap: FAILED to map...\n");
 			vfree(area->addr);
-			return (unsigned long)NULL;
+			return NULL;
 		}
 	}
 
@@ -436,13 +404,17 @@ irongate_ioremap(unsigned long addr, unsigned long size)
 	printk("irongate_ioremap(0x%lx, 0x%lx) returning 0x%lx\n",
 	       addr, size, vaddr);
 #endif
-	return vaddr;
+	return (void __iomem *)vaddr;
 }
+EXPORT_SYMBOL(irongate_ioremap);
 
 void
-irongate_iounmap(unsigned long addr)
+irongate_iounmap(volatile void __iomem *xaddr)
 {
+	unsigned long addr = (unsigned long) xaddr;
 	if (((long)addr >> 41) == -2)
 		return;	/* kseg map, nothing to do */
-	if (addr) return vfree((void *)(PAGE_MASK & addr)); 
+	if (addr)
+		return vfree((void *)(PAGE_MASK & addr)); 
 }
+EXPORT_SYMBOL(irongate_iounmap);

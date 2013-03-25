@@ -2,19 +2,19 @@ S390 Debug Feature
 ==================
 
 files: arch/s390/kernel/debug.c
-       include/asm-s390/debug.h
+       arch/s390/include/asm/debug.h
 
 Description:
 ------------
 The goal of this feature is to provide a kernel debug logging API 
 where log records can be stored efficiently in memory, where each component 
-(e.g. device drivers) can have one seperate debug log.
+(e.g. device drivers) can have one separate debug log.
 One purpose of this is to inspect the debug logs after a production system crash
 in order to analyze the reason for the crash.
-If the system still runs but only a subcomponent which uses dbf failes,
-it is possible to look at the debug logs on a live system via the Linux proc
-filesystem.
-The debug feature may also very usefull for kernel and driver development.
+If the system still runs but only a subcomponent which uses dbf fails,
+it is possible to look at the debug logs on a live system via the Linux
+debugfs filesystem.
+The debug feature may also very useful for kernel and driver development.
 
 Design:
 -------
@@ -36,7 +36,7 @@ switches to the next debug area. This is done in order to be sure
 that the records which describe the origin of the exception are not
 overwritten when a wrap around for the current area occurs.
 
-The debug areas itselve are also ordered in form of a ring buffer. 
+The debug areas themselves are also ordered in form of a ring buffer.
 When an exception is thrown in the last debug area, the following debug 
 entries are then written again in the very first area.
 
@@ -52,41 +52,60 @@ Each debug entry contains the following data:
 - Flag, if entry is an exception or not
 
 The debug logs can be inspected in a live system through entries in
-the proc-filesystem. Under the path /proc/s390dbf there is 
+the debugfs-filesystem. Under the toplevel directory "s390dbf" there is
 a directory for each registered component, which is named like the
-corresponding component.
+corresponding component. The debugfs normally should be mounted to
+/sys/kernel/debug therefore the debug feature can be accessed under
+/sys/kernel/debug/s390dbf.
 
 The content of the directories are files which represent different views
 to the debug log. Each component can decide which views should be
 used through registering them with the function debug_register_view().
 Predefined views for hex/ascii, sprintf and raw binary data are provided.
 It is also possible to define other views. The content of
-a view can be inspected simply by reading the corresponding proc file.
+a view can be inspected simply by reading the corresponding debugfs file.
 
-All debug logs have an an actual debug level (range from 0 to 6).
+All debug logs have an actual debug level (range from 0 to 6).
 The default level is 3. Event and Exception functions have a 'level'
 parameter. Only debug entries with a level that is lower or equal
-than the actual level are written to the log. This means that high 
-priority log entries should have a low level value whereas low priority
-entries should have a high one. 
-The actual debug level can be changed with the help of the proc-filesystem 
-through writing a number string "x" to the 'level' proc file which is
+than the actual level are written to the log. This means, when
+writing events, high priority log entries should have a low level
+value whereas low priority entries should have a high one.
+The actual debug level can be changed with the help of the debugfs-filesystem
+through writing a number string "x" to the 'level' debugfs file which is
 provided for every debug log. Debugging can be switched off completely
-by using "-" on the 'level' proc file.
+by using "-" on the 'level' debugfs file.
 
 Example:
 
-> echo "-" > /proc/s390dbf/dasd/level
+> echo "-" > /sys/kernel/debug/s390dbf/dasd/level
+
+It is also possible to deactivate the debug feature globally for every
+debug log. You can change the behavior using  2 sysctl parameters in
+/proc/sys/s390dbf:
+There are currently 2 possible triggers, which stop the debug feature
+globally. The first possibility is to use the "debug_active" sysctl. If
+set to 1 the debug feature is running. If "debug_active" is set to 0 the
+debug feature is turned off.
+The second trigger which stops the debug feature is a kernel oops.
+That prevents the debug feature from overwriting debug information that
+happened before the oops. After an oops you can reactivate the debug feature
+by piping 1 to /proc/sys/s390dbf/debug_active. Nevertheless, its not
+suggested to use an oopsed kernel in a production environment.
+If you want to disallow the deactivation of the debug feature, you can use
+the "debug_stoppable" sysctl. If you set "debug_stoppable" to 0 the debug
+feature cannot be stopped. If the debug feature is already stopped, it
+will stay deactivated.
 
 Kernel Interfaces:
 ------------------
 
 ----------------------------------------------------------------------------
-debug_info_t *debug_register(char *name, int pages_index, int nr_areas,
+debug_info_t *debug_register(char *name, int pages, int nr_areas,
                              int buf_size);
 
-Parameter:    name:        Name of debug log (e.g. used for proc entry) 
-              pages_index: 2^pages_index pages will be allocated per area
+Parameter:    name:        Name of debug log (e.g. used for debugfs entry)
+              pages:       number of pages, which will be allocated per area
               nr_areas:    number of debug areas
               buf_size:    size of data area in each debug entry
 
@@ -95,6 +114,27 @@ Return Value: Handle for generated debug area
 
 Description:  Allocates memory for a debug log     
               Must not be called within an interrupt handler 
+
+----------------------------------------------------------------------------
+debug_info_t *debug_register_mode(char *name, int pages, int nr_areas,
+				  int buf_size, mode_t mode, uid_t uid,
+				  gid_t gid);
+
+Parameter:    name:	   Name of debug log (e.g. used for debugfs entry)
+	      pages:	   Number of pages, which will be allocated per area
+	      nr_areas:    Number of debug areas
+	      buf_size:    Size of data area in each debug entry
+	      mode:	   File mode for debugfs files. E.g. S_IRWXUGO
+	      uid:	   User ID for debugfs files. Currently only 0 is
+			   supported.
+	      gid:	   Group ID for debugfs files. Currently only 0 is
+			   supported.
+
+Return Value: Handle for generated debug area
+	      NULL if register failed
+
+Description:  Allocates memory for a debug log
+	      Must not be called within an interrupt handler
 
 ---------------------------------------------------------------------------
 void debug_unregister (debug_info_t * id);
@@ -115,6 +155,17 @@ Parameter:     id:        handle for debug log
 Return Value:  none 
 
 Description:   Sets new actual debug level if new_level is valid. 
+
+---------------------------------------------------------------------------
+void debug_stop_all(void);
+
+Parameter:     none
+
+Return Value:  none
+
+Description:   stops the debug feature if stopping is allowed. Currently
+               used in case of a kernel oops.
+
 ---------------------------------------------------------------------------
 debug_entry_t* debug_event (debug_info_t* id, int level, void* data, 
                             int length);
@@ -242,7 +293,7 @@ Parameter:     id:    handle for debug log
 Return Value:  0  : ok 
                < 0: Error 
 
-Description:   registers new debug view and creates proc dir entry 
+Description:   registers new debug view and creates debugfs dir entry
 
 ---------------------------------------------------------------------------
 int debug_unregister_view (debug_info_t * id, struct debug_view *view); 
@@ -253,7 +304,7 @@ Parameter:     id:    handle for debug log
 Return Value:  0  : ok 
                < 0: Error 
 
-Description:   unregisters debug view and removes proc dir entry 
+Description:   unregisters debug view and removes debugfs dir entry
 
 
 
@@ -271,16 +322,16 @@ Examples
  * hex_ascii- + raw-view Example
  */
 
-#include <linux/module.h>
+#include <linux/init.h>
 #include <asm/debug.h>
 
 static debug_info_t* debug_info;
 
-int init_module(void)
+static int init(void)
 {
     /* register 4 debug areas with one page each and 4 byte data field */
 
-    debug_info = debug_register ("test", 0, 4, 4 );
+    debug_info = debug_register ("test", 1, 4, 4 );
     debug_register_view(debug_info,&debug_hex_ascii_view);
     debug_register_view(debug_info,&debug_raw_view);
 
@@ -291,10 +342,13 @@ int init_module(void)
     return 0;
 }
 
-void cleanup_module(void)
+static void cleanup(void)
 {
     debug_unregister (debug_info);
 }
+
+module_init(init);
+module_exit(cleanup);
 
 ---------------------------------------------------------------------------
 
@@ -302,17 +356,17 @@ void cleanup_module(void)
  * sprintf-view Example
  */
 
-#include <linux/module.h>
+#include <linux/init.h>
 #include <asm/debug.h>
 
 static debug_info_t* debug_info;
 
-int init_module(void)
+static int init(void)
 {
     /* register 4 debug areas with one page each and data field for */
     /* format string pointer + 2 varargs (= 3 * sizeof(long))       */
 
-    debug_info = debug_register ("test", 0, 4, sizeof(long) * 3);
+    debug_info = debug_register ("test", 1, 4, sizeof(long) * 3);
     debug_register_view(debug_info,&debug_sprintf_view);
 
     debug_sprintf_event(debug_info, 2 , "first event in %s:%i\n",__FILE__,__LINE__);
@@ -321,23 +375,26 @@ int init_module(void)
     return 0;
 }
 
-void cleanup_module(void)
+static void cleanup(void)
 {
     debug_unregister (debug_info);
 }
 
+module_init(init);
+module_exit(cleanup);
 
 
-ProcFS Interface
+
+Debugfs Interface
 ----------------
 Views to the debug logs can be investigated through reading the corresponding 
-proc-files:
+debugfs-files:
 
 Example:
 
-> ls /proc/s390dbf/dasd
-flush  hex_ascii  level      raw 
-> cat /proc/s390dbf/dasd/hex_ascii | sort +1
+> ls /sys/kernel/debug/s390dbf/dasd
+flush  hex_ascii  level pages raw
+> cat /sys/kernel/debug/s390dbf/dasd/hex_ascii | sort +1
 00 00974733272:680099 2 - 02 0006ad7e  07 ea 4a 90 | ....
 00 00974733272:682210 2 - 02 0006ade6  46 52 45 45 | FREE
 00 00974733272:682213 2 - 02 0006adf6  07 ea 4a 90 | ....
@@ -357,25 +414,45 @@ Changing the debug level
 Example:
 
 
-> cat /proc/s390dbf/dasd/level
+> cat /sys/kernel/debug/s390dbf/dasd/level
 3
-> echo "5" > /proc/s390dbf/dasd/level
-> cat /proc/s390dbf/dasd/level
+> echo "5" > /sys/kernel/debug/s390dbf/dasd/level
+> cat /sys/kernel/debug/s390dbf/dasd/level
 5
 
 Flushing debug areas
 --------------------
 Debug areas can be flushed with piping the number of the desired
-area (0...n) to the proc file "flush". When using "-" all debug areas
+area (0...n) to the debugfs file "flush". When using "-" all debug areas
 are flushed.
 
 Examples:
 
 1. Flush debug area 0:
-> echo "0" > /proc/s390dbf/dasd/flush  
+> echo "0" > /sys/kernel/debug/s390dbf/dasd/flush
 
 2. Flush all debug areas:
-> echo "-" > /proc/s390dbf/dasd/flush
+> echo "-" > /sys/kernel/debug/s390dbf/dasd/flush
+
+Changing the size of debug areas
+------------------------------------
+It is possible the change the size of debug areas through piping
+the number of pages to the debugfs file "pages". The resize request will
+also flush the debug areas.
+
+Example:
+
+Define 4 pages for the debug areas of debug feature "dasd":
+> echo "4" > /sys/kernel/debug/s390dbf/dasd/pages
+
+Stooping the debug feature
+--------------------------
+Example:
+
+1. Check if stopping is allowed
+> cat /proc/sys/s390dbf/debug_stoppable
+2. Stop debug feature
+> echo 0 > /proc/sys/s390dbf/debug_active
 
 lcrash Interface
 ----------------
@@ -412,12 +489,19 @@ The hex_ascii view shows the data field in hex and ascii representation
 The raw view returns a bytestream as the debug areas are stored in memory.
 
 The sprintf view formats the debug entries in the same way as the sprintf
-function would do. The sprintf event/expection fuctions write to the 
+function would do. The sprintf event/exception functions write to the
 debug entry a pointer to the format string (size = sizeof(long)) 
 and for each vararg a long value. So e.g. for a debug entry with a format 
 string plus two varargs one would need to allocate a (3 * sizeof(long)) 
 byte data area in the debug_register() function.
 
+IMPORTANT: Using "%s" in sprintf event functions is dangerous. You can only
+use "%s" in the sprintf event functions, if the memory for the passed string is
+available as long as the debug feature exists. The reason behind this is that
+due to performance considerations only a pointer to the string is stored in
+the debug feature. If you log a string that is freed afterwards, you will get
+an OOPS when inspecting the debug feature, because then the debug feature will
+access the already freed memory.
 
 NOTE: If using the sprintf view do NOT use other event/exception functions
 than the sprintf-event and -exception functions.
@@ -448,7 +532,7 @@ Defining views
 --------------
 
 Views are specified with the 'debug_view' structure. There are defined
-callback functions which are used for reading and writing the proc files:
+callback functions which are used for reading and writing the debugfs files:
 
 struct debug_view {
         char name[DEBUG_MAX_PROCF_LEN];  
@@ -482,7 +566,7 @@ typedef int (debug_input_proc_t) (debug_info_t* id,
 The "private_data" member can be used as pointer to view specific data.
 It is not used by the debug feature itself.
 
-The output when reading a debug-proc file is structured like this:
+The output when reading a debugfs file is structured like this:
 
 "prolog_proc output"
 
@@ -491,16 +575,16 @@ The output when reading a debug-proc file is structured like this:
 "header_proc output 3"  "format_proc output 3"
 ...
 
-When a view is read from the proc fs, the Debug Feature calls the 
+When a view is read from the debugfs, the Debug Feature calls the
 'prolog_proc' once for writing the prolog.
 Then 'header_proc' and 'format_proc' are called for each 
 existing debug entry.
 
 The input_proc can be used to implement functionality when it is written to 
-the view (e.g. like with 'echo "0" > /proc/s390dbf/dasd/level).
+the view (e.g. like with 'echo "0" > /sys/kernel/debug/s390dbf/dasd/level).
 
 For header_proc there can be used the default function
-debug_dflt_header_fn() which is defined in in debug.h.
+debug_dflt_header_fn() which is defined in debug.h.
 and which produces the same header output as the predefined views.
 E.g:
 00 00964419409:440761 2 - 00 88023ec
@@ -559,7 +643,7 @@ debug_info = debug_register ("test", 0, 4, 4 ));
 debug_register_view(debug_info, &debug_test_view);
 for(i = 0; i < 10; i ++) debug_int_event(debug_info, 1, i);
 
-> cat /proc/s390dbf/test/myview
+> cat /sys/kernel/debug/s390dbf/test/myview
 00 00964419734:611402 1 - 00 88042ca   This error...........
 00 00964419734:611405 1 - 00 88042ca   That error...........
 00 00964419734:611408 1 - 00 88042ca   Problem..............

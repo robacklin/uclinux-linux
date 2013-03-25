@@ -24,7 +24,7 @@ This driver is rather simple to use. Select Y to Token Ring adapter support
 in the kernel configuration. A choice for SysKonnect Token Ring adapters will
 appear. This drives supports all SysKonnect ISA and PCI adapters. Choose this
 option. I personally recommend compiling the driver as a module (M), but if you
-you would like to compile it staticly answer Y instead.
+you would like to compile it statically answer Y instead.
 
 This driver supports multiple adapters without the need to load multiple copies
 of the driver. You should be able to load up to 7 adapters without any kernel
@@ -71,24 +71,24 @@ Below find attached the setting for the SK NET TR 4/16 ISA adapters
   CHAPTER 1     LOCATION OF DIP-SWITCH
   ==============================================================
 
-UÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄ¿
-şUÄÄÄÄÄÄ¿                         UÄÄÄÄÄ¿            UÄÄÄ¿         ş
-şAÄÄÄÄÄÄU                      W1 AÄÄÄÄÄU     UÄÄÄÄ¿ ş   ş         ş
-şUÄÄÄÄÄÄ¿                                     ş    ş ş   ş      UÄÄÅ¿
-şAÄÄÄÄÄÄU              UÄÄÄÄÄÄÄÄÄÄÄ¿          AÄÄÄÄU ş   ş      ş  şş
-şUÄÄÄÄÄÄ¿              ş           ş          UÄÄÄ¿  AÄÄÄU      AÄÄÅU
-şAÄÄÄÄÄÄU              ş TMS380C26 ş          ş   ş                ş
-şUÄÄÄÄÄÄ¿              ş           ş          AÄÄÄU                AÄ¿
-şAÄÄÄÄÄÄU              ş           ş                               ş ş
-ş                      AÄÄÄÄÄÄÄÄÄÄÄU                               ş ş
-ş                                                                  ş ş
-ş                                                                  AÄU
-ş                                                                  ş
-ş                                                                  ş
-ş                                                                  ş
-ş                                                                  ş
-AÄÄÄÄÄÄÄÄÄÄÄÄAÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄAÄÄAÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄAÄÄÄÄÄÄÄÄÄU
-             AÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄU  AÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄU
+UÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Â¿
+Ã¾UÃ„Ã„Ã„Ã„Ã„Ã„Â¿                         UÃ„Ã„Ã„Ã„Ã„Â¿            UÃ„Ã„Ã„Â¿         Ã¾
+Ã¾AÃ„Ã„Ã„Ã„Ã„Ã„U                      W1 AÃ„Ã„Ã„Ã„Ã„U     UÃ„Ã„Ã„Ã„Â¿ Ã¾   Ã¾         Ã¾
+Ã¾UÃ„Ã„Ã„Ã„Ã„Ã„Â¿                                     Ã¾    Ã¾ Ã¾   Ã¾      UÃ„Ã„Ã…Â¿
+Ã¾AÃ„Ã„Ã„Ã„Ã„Ã„U              UÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Â¿          AÃ„Ã„Ã„Ã„U Ã¾   Ã¾      Ã¾  Ã¾Ã¾
+Ã¾UÃ„Ã„Ã„Ã„Ã„Ã„Â¿              Ã¾           Ã¾          UÃ„Ã„Ã„Â¿  AÃ„Ã„Ã„U      AÃ„Ã„Ã…U
+Ã¾AÃ„Ã„Ã„Ã„Ã„Ã„U              Ã¾ TMS380C26 Ã¾          Ã¾   Ã¾                Ã¾
+Ã¾UÃ„Ã„Ã„Ã„Ã„Ã„Â¿              Ã¾           Ã¾          AÃ„Ã„Ã„U                AÃ„Â¿
+Ã¾AÃ„Ã„Ã„Ã„Ã„Ã„U              Ã¾           Ã¾                               Ã¾ Ã¾
+Ã¾                      AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„U                               Ã¾ Ã¾
+Ã¾                                                                  Ã¾ Ã¾
+Ã¾                                                                  AÃ„U
+Ã¾                                                                  Ã¾
+Ã¾                                                                  Ã¾
+Ã¾                                                                  Ã¾
+Ã¾                                                                  Ã¾
+AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„AÃ„Ã„AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„U
+             AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„U  AÃ„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„Ã„U
 
   ==============================================================
   CHAPTER 2     DEFAULT SETTINGS
@@ -108,9 +108,9 @@ AÄÄÄÄÄÄÄÄÄÄÄÄAÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄAÄÄAÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄÄAÄÄÄÄÄÄÄÄÄU
   CHAPTER 3     DIP SWITCH W1 DESCRIPTION
   ==============================================================
 
-      UÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄ¿  ON
-      ş 1 ş 2 ş 3 ş 4 ş 5 ş 6 ş 7 ş 8 ş
-      AÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄAÄÄÄU  OFF
+      UÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„Â¿  ON
+      Ã¾ 1 Ã¾ 2 Ã¾ 3 Ã¾ 4 Ã¾ 5 Ã¾ 6 Ã¾ 7 Ã¾ 8 Ã¾
+      AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„AÃ„Ã„Ã„U  OFF
       |AD | BootROM Addr. |  I/O      |
       +-+-+-------+-------+-----+-----+
         |         |             |

@@ -2,15 +2,17 @@
  * PCBIT-D device driver definitions
  *
  * Copyright (C) 1996 Universidade de Lisboa
- * 
- * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
- * This software may be used and distributed according to the terms of 
+ * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ *
+ * This software may be used and distributed according to the terms of
  * the GNU General Public License, incorporated herein by reference.
  */
 
 #ifndef PCBIT_H
 #define PCBIT_H
+
+#include <linux/workqueue.h>
 
 #define MAX_PCBIT_CARDS 4
 
@@ -30,32 +32,32 @@ struct pcbit_chan {
 	unsigned short r_refnum;
 	unsigned short fsm_state;
 	struct timer_list fsm_timer;
-#ifdef  BLOCK_TIMER
+#ifdef BLOCK_TIMER
 	struct timer_list block_timer;
 #endif
 };
 
 struct msn_entry {
 	char *msn;
-	struct msn_entry * next;
+	struct msn_entry *next;
 };
 
 struct pcbit_dev {
 	/* board */
 
-	volatile unsigned char* sh_mem;		/* RDP address	*/
+	volatile unsigned char __iomem *sh_mem;		/* RDP address	*/
 	unsigned long ph_mem;
 	unsigned int irq;
 	unsigned int id;
-	unsigned int interrupt;			/* set during interrupt 
+	unsigned int interrupt;			/* set during interrupt
 						   processing */
-	
+	spinlock_t lock;
 	/* isdn4linux */
 
-	struct msn_entry * msn_list;		/* ISDN address list */
-	
-	isdn_if * dev_if;
-	
+	struct msn_entry *msn_list;		/* ISDN address list */
+
+	isdn_if *dev_if;
+
 	ushort ll_hdrlen;
 	ushort hl_hdrlen;
 
@@ -72,13 +74,13 @@ struct pcbit_dev {
 
 	struct timer_list error_recover_timer;
 
-	struct tq_struct qdelivery;
+	struct work_struct qdelivery;
 
 	u_char w_busy;
 	u_char r_busy;
 
-	volatile unsigned char *readptr;
-	volatile unsigned char *writeptr;
+	volatile unsigned char __iomem *readptr;
+	volatile unsigned char __iomem *writeptr;
 
 	ushort loadptr;
 
@@ -87,17 +89,17 @@ struct pcbit_dev {
 	unsigned char send_seq;
 	unsigned char rcv_seq;
 	unsigned char unack_seq;
-  
+
 	unsigned short free;
 
 	/* channels */
 
 	struct pcbit_chan *b1;
-	struct pcbit_chan *b2;  
+	struct pcbit_chan *b2;
 };
 
-#define STATS_TIMER (10*HZ)
-#define ERRTIME     (HZ/10)
+#define STATS_TIMER (10 * HZ)
+#define ERRTIME     (HZ / 10)
 
 /* MRU */
 #define MAXBUFSIZE  1534
@@ -105,7 +107,7 @@ struct pcbit_dev {
 
 #define STATBUF_LEN 2048
 /*
- * 
+ *
  */
 
 #endif /* __KERNEL__ */
@@ -163,5 +165,13 @@ struct pcbit_ioctl {
 #define L2_STARTING 4
 #define L2_RUNNING  5
 #define L2_ERROR    6
+
+void pcbit_deliver(struct work_struct *work);
+int pcbit_init_dev(int board, int mem_base, int irq);
+void pcbit_terminate(int board);
+void pcbit_l3_receive(struct pcbit_dev *dev, ulong msg, struct sk_buff *skb,
+		      ushort hdr_len, ushort refnum);
+void pcbit_state_change(struct pcbit_dev *dev, struct pcbit_chan *chan,
+			unsigned short i, unsigned short ev, unsigned short f);
 
 #endif

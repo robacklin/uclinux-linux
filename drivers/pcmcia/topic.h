@@ -31,20 +31,7 @@
 #ifndef _LINUX_TOPIC_H
 #define _LINUX_TOPIC_H
 
-#ifndef PCI_VENDOR_ID_TOSHIBA
-#define PCI_VENDOR_ID_TOSHIBA		0x1179
-#endif
-#ifndef PCI_DEVICE_ID_TOSHIBA_TOPIC95_A
-#define PCI_DEVICE_ID_TOSHIBA_TOPIC95_A	0x0603
-#endif
-#ifndef PCI_DEVICE_ID_TOSHIBA_TOPIC95_B
-#define PCI_DEVICE_ID_TOSHIBA_TOPIC95_B	0x060a
-#endif
-#ifndef PCI_DEVICE_ID_TOSHIBA_TOPIC97
-#define PCI_DEVICE_ID_TOSHIBA_TOPIC97	0x060f
-#endif
-
-/* Register definitions for Toshiba ToPIC95 controllers */
+/* Register definitions for Toshiba ToPIC95/97/100 controllers */
 
 #define TOPIC_SOCKET_CONTROL		0x0090	/* 32 bit */
 #define  TOPIC_SCR_IRQSEL		0x00000001
@@ -92,5 +79,74 @@
 #define  TOPIC97_RCR_RI_DISABLE		0x00000004
 #define  TOPIC97_RCR_CAUDIO_OFF		0x00000002
 #define  TOPIC_RCR_CAUDIO_INVERT	0x00000001
+
+#define TOPIC97_MISC1			0x00ad  /* 8bit */
+#define  TOPIC97_MISC1_CLOCKRUN_ENABLE	0x80
+#define  TOPIC97_MISC1_CLOCKRUN_MODE	0x40
+#define  TOPIC97_MISC1_DETECT_REQ_ENA	0x10
+#define  TOPIC97_MISC1_SCK_CLEAR_DIS	0x04
+#define  TOPIC97_MISC1_R2_LOW_ENABLE	0x10
+
+#define TOPIC97_MISC2			0x00ae  /* 8 bit */
+#define  TOPIC97_MISC2_SPWRCLK_MASK	0x70
+#define  TOPIC97_MISC2_SPWRMOD		0x08
+#define  TOPIC97_MISC2_SPWR_ENABLE	0x04
+#define  TOPIC97_MISC2_ZV_MODE		0x02
+#define  TOPIC97_MISC2_ZV_ENABLE	0x01
+
+#define TOPIC97_ZOOM_VIDEO_CONTROL	0x009c  /* 8 bit */
+#define  TOPIC97_ZV_CONTROL_ENABLE	0x01
+
+#define TOPIC97_AUDIO_VIDEO_SWITCH	0x003c  /* 8 bit */
+#define  TOPIC97_AVS_AUDIO_CONTROL	0x02
+#define  TOPIC97_AVS_VIDEO_CONTROL	0x01
+
+#define TOPIC_EXCA_IF_CONTROL		0x3e	/* 8 bit */
+#define TOPIC_EXCA_IFC_33V_ENA		0x01
+
+static void topic97_zoom_video(struct pcmcia_socket *sock, int onoff)
+{
+	struct yenta_socket *socket = container_of(sock, struct yenta_socket, socket);
+	u8 reg_zv, reg;
+
+	reg_zv = config_readb(socket, TOPIC97_ZOOM_VIDEO_CONTROL);
+	if (onoff) {
+		reg_zv |= TOPIC97_ZV_CONTROL_ENABLE;
+		config_writeb(socket, TOPIC97_ZOOM_VIDEO_CONTROL, reg_zv);
+
+		reg = config_readb(socket, TOPIC97_AUDIO_VIDEO_SWITCH);
+		reg |= TOPIC97_AVS_AUDIO_CONTROL | TOPIC97_AVS_VIDEO_CONTROL;
+		config_writeb(socket, TOPIC97_AUDIO_VIDEO_SWITCH, reg);
+	} else {
+		reg_zv &= ~TOPIC97_ZV_CONTROL_ENABLE;
+		config_writeb(socket, TOPIC97_ZOOM_VIDEO_CONTROL, reg_zv);
+
+		reg = config_readb(socket, TOPIC97_AUDIO_VIDEO_SWITCH);
+		reg &= ~(TOPIC97_AVS_AUDIO_CONTROL | TOPIC97_AVS_VIDEO_CONTROL);
+		config_writeb(socket, TOPIC97_AUDIO_VIDEO_SWITCH, reg);
+	}
+}
+
+static int topic97_override(struct yenta_socket *socket)
+{
+	/* ToPIC97/100 support ZV */
+	socket->socket.zoom_video = topic97_zoom_video;
+	return 0;
+}
+
+
+static int topic95_override(struct yenta_socket *socket)
+{
+	u8 fctrl;
+
+	/* enable 3.3V support for 16bit cards */
+	fctrl = exca_readb(socket, TOPIC_EXCA_IF_CONTROL);
+	exca_writeb(socket, TOPIC_EXCA_IF_CONTROL, fctrl | TOPIC_EXCA_IFC_33V_ENA);
+
+	/* tell yenta to use exca registers to power 16bit cards */
+	socket->flags |= YENTA_16BIT_POWER_EXCA | YENTA_16BIT_POWER_DF;
+
+	return 0;
+}
 
 #endif /* _LINUX_TOPIC_H */

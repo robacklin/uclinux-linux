@@ -2,10 +2,8 @@
  * SMC 37C93X initialization code
  */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/delay.h>
@@ -81,7 +79,6 @@
 static unsigned long __init SMCConfigState(unsigned long baseAddr)
 {
 	unsigned char devId;
-	unsigned char devRev;
 
 	unsigned long configPort;
 	unsigned long indexPort;
@@ -102,7 +99,7 @@ static unsigned long __init SMCConfigState(unsigned long baseAddr)
 		devId = inb(dataPort);
 		if (devId == VALID_DEVICE_ID) {
 			outb(DEVICE_REV, indexPort);
-			devRev = inb(dataPort);
+			/* unsigned char devRev = */ inb(dataPort);
 			break;
 		}
 		else
@@ -243,7 +240,7 @@ int __init SMC93x_Init(void)
 	unsigned long SMCUltraBase;
 	unsigned long flags;
 
-	__save_and_cli(flags);
+	local_irq_save(flags);
 	if ((SMCUltraBase = SMCDetectUltraIO()) != 0UL) {
 #if SMC_DEBUG
 		SMCReportDeviceStatus(SMCUltraBase);
@@ -264,13 +261,13 @@ int __init SMC93x_Init(void)
 		SMCReportDeviceStatus(SMCUltraBase);
 #endif
 		SMCRunState(SMCUltraBase);
-		__restore_flags(flags);
+		local_irq_restore(flags);
 		printk("SMC FDC37C93X Ultra I/O Controller found @ 0x%lx\n",
 		       SMCUltraBase);
 		return 1;
 	}
 	else {
-		__restore_flags(flags);
+		local_irq_restore(flags);
 		DBG_DEVS(("No SMC FDC37C93X Ultra I/O Controller found\n"));
 		return 0;
 	}

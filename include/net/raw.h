@@ -18,25 +18,58 @@
 #define _RAW_H
 
 
+#include <net/protocol.h>
+#include <linux/icmp.h>
+
 extern struct proto raw_prot;
 
+void raw_icmp_error(struct sk_buff *, int, u32);
+int raw_local_deliver(struct sk_buff *, int);
 
-extern void 	raw_err(struct sock *, struct sk_buff *, u32 info);
 extern int 	raw_rcv(struct sock *, struct sk_buff *);
 
-/* Note: v4 ICMP wants to get at this stuff, if you change the
- *       hashing mechanism, make sure you update icmp.c as well.
- */
-#define RAWV4_HTABLE_SIZE	MAX_INET_PROTOS
-extern struct sock *raw_v4_htable[RAWV4_HTABLE_SIZE];
+#define RAW_HTABLE_SIZE	MAX_INET_PROTOS
 
-extern rwlock_t raw_v4_lock;
+struct raw_hashinfo {
+	rwlock_t lock;
+	struct hlist_head ht[RAW_HTABLE_SIZE];
+};
 
+#ifdef CONFIG_PROC_FS
+extern int  raw_proc_init(void);
+extern void raw_proc_exit(void);
 
-extern struct sock *__raw_v4_lookup(struct sock *sk, unsigned short num,
-				    unsigned long raddr, unsigned long laddr,
-				    int dif);
+struct raw_iter_state {
+	struct seq_net_private p;
+	int bucket;
+	struct raw_hashinfo *h;
+};
 
-extern struct sock *raw_v4_input(struct sk_buff *skb, struct iphdr *iph, int hash);
+static inline struct raw_iter_state *raw_seq_private(struct seq_file *seq)
+{
+	return seq->private;
+}
+void *raw_seq_start(struct seq_file *seq, loff_t *pos);
+void *raw_seq_next(struct seq_file *seq, void *v, loff_t *pos);
+void raw_seq_stop(struct seq_file *seq, void *v);
+int raw_seq_open(struct inode *ino, struct file *file,
+		 struct raw_hashinfo *h, const struct seq_operations *ops);
+
+#endif
+
+void raw_hash_sk(struct sock *sk);
+void raw_unhash_sk(struct sock *sk);
+
+struct raw_sock {
+	/* inet_sock has to be the first member */
+	struct inet_sock   inet;
+	struct icmp_filter filter;
+	u32		   ipmr_table;
+};
+
+static inline struct raw_sock *raw_sk(const struct sock *sk)
+{
+	return (struct raw_sock *)sk;
+}
 
 #endif	/* _RAW_H */

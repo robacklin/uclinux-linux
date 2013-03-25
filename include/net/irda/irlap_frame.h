@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1997-1999 Dag Brattli <dagb@cs.uit.no>,
  *     All Rights Reserved.
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -35,8 +36,10 @@
 #include <linux/skbuff.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irlap.h>
-#include <net/irda/qos.h>
+
+/* A few forward declarations (to make compiler happy) */
+struct irlap_cb;
+struct discovery_t;
 
 /* Frame types and templates */
 #define INVALID   0xff
@@ -71,48 +74,76 @@
 
 #define PF_BIT    0x10 /* Poll/final bit */
 
+/* Some IrLAP field lengths */
+/*
+ * Only baud rate triplet is 4 bytes (PV can be 2 bytes).
+ * All others params (7) are 3 bytes, so that's 7*3 + 1*4 bytes.
+ */
+#define IRLAP_NEGOCIATION_PARAMS_LEN 25
+#define IRLAP_DISCOVERY_INFO_LEN     32
+
+struct disc_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
 struct xid_frame {
 	__u8  caddr; /* Connection address */
 	__u8  control;
 	__u8  ident; /* Should always be XID_FORMAT */ 
-	__u32 saddr; /* Source device address */
-	__u32 daddr; /* Destination device address */
+	__le32 saddr; /* Source device address */
+	__le32 daddr; /* Destination device address */
 	__u8  flags; /* Discovery flags */
 	__u8  slotnr;
 	__u8  version;
-} PACK;
+} __packed;
 
 struct test_frame {
 	__u8 caddr;          /* Connection address */
 	__u8 control;
-	__u32 saddr;         /* Source device address */
-	__u32 daddr;         /* Destination device address */
-} PACK;
+	__le32 saddr;         /* Source device address */
+	__le32 daddr;         /* Destination device address */
+} __packed;
 
 struct ua_frame {
 	__u8 caddr;
 	__u8 control;
+	__le32 saddr; /* Source device address */
+	__le32 daddr; /* Dest device address */
+} __packed;
 
-	__u32 saddr; /* Source device address */
-	__u32 daddr; /* Dest device address */
-} PACK;
-	
+struct dm_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
+struct rd_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
+struct rr_frame {
+	__u8 caddr;          /* Connection address */
+	__u8 control;
+} __packed;
+
 struct i_frame {
 	__u8 caddr;
 	__u8 control;
-} PACK;
+} __packed;
 
 struct snrm_frame {
 	__u8  caddr;
 	__u8  control;
-	__u32 saddr;
-	__u32 daddr;
+	__le32 saddr;
+	__le32 daddr;
 	__u8  ncaddr;
-} PACK;
+} __packed;
 
 void irlap_queue_xmit(struct irlap_cb *self, struct sk_buff *skb);
 void irlap_send_discovery_xid_frame(struct irlap_cb *, int S, __u8 s, 
-				    __u8 command, discovery_t *discovery);
+				    __u8 command,
+				    struct discovery_t *discovery);
 void irlap_send_snrm_frame(struct irlap_cb *, struct qos_info *);
 void irlap_send_test_frame(struct irlap_cb *self, __u8 caddr, __u32 daddr, 
 			   struct sk_buff *cmd);
@@ -129,7 +160,6 @@ void irlap_send_data_secondary_final(struct irlap_cb *, struct sk_buff *);
 void irlap_resend_rejected_frames(struct irlap_cb *, int command);
 void irlap_resend_rejected_frame(struct irlap_cb *self, int command);
 
-void irlap_send_i_frame(struct irlap_cb *, struct sk_buff *, int command);
 void irlap_send_ui_frame(struct irlap_cb *self, struct sk_buff *skb,
 			 __u8 caddr, int command);
 

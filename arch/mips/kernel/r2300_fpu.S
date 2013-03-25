@@ -6,7 +6,7 @@
  * Copyright (C) 1996, 1998 by Ralf Baechle
  *
  * Multi-arch abstraction and asm macros for easier reading:
- * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
+ * Copyright (C) 1996 David S. Miller (davem@davemloft.net)
  *
  * Further modifications to make this work:
  * Copyright (c) 1998 Harald Koerfgen
@@ -15,7 +15,7 @@
 #include <asm/errno.h>
 #include <asm/fpregdef.h>
 #include <asm/mipsregs.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/regdef.h>
 
 #define EX(a,b)							\

@@ -1,8 +1,8 @@
-/* SCTP kernel reference Implementation
+/* SCTP kernel implementation
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
  *
- * This file is part of the SCTP kernel reference Implementation
+ * This file is part of the SCTP kernel implementation
  *
  * These functions implement the SCTP primitive functions from Section 10.
  *
@@ -10,13 +10,13 @@
  * functions--this file is the functions which populate the struct proto
  * for SCTP which is the BOTTOM of the sockets interface.
  *
- * The SCTP reference implementation is free software;
+ * This SCTP implementation is free software;
  * you can redistribute it and/or modify it under the terms of
  * the GNU General Public License as published by
  * the Free Software Foundation; either version 2, or (at your option)
  * any later version.
  *
- * The SCTP reference implementation is distributed in the hope that it
+ * This SCTP implementation is distributed in the hope that it
  * will be useful, but WITHOUT ANY WARRANTY; without even the implied
  *                 ************************
  * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
@@ -50,6 +50,7 @@
 #include <linux/socket.h>
 #include <linux/ip.h>
 #include <linux/time.h> /* For struct timeval */
+#include <linux/gfp.h>
 #include <net/sock.h>
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
@@ -70,7 +71,7 @@ int sctp_primitive_ ## name(struct sctp_association *asoc, \
 	\
 	error = sctp_do_sm(event_type, subtype, state, ep, asoc, \
 			   arg, GFP_KERNEL); \
- 	return error; \
+	return error; \
 }
 
 /* 10.1 ULP-to-SCTP
@@ -207,7 +208,7 @@ DECLARE_PRIMITIVE(REQUESTHEARTBEAT);
 
 /* ADDIP
 * 3.1.1 Address Configuration Change Chunk (ASCONF)
-* 
+*
 * This chunk is used to communicate to the remote endpoint one of the
 * configuration change requests that MUST be acknowledged.  The
 * information carried in the ASCONF Chunk uses the form of a

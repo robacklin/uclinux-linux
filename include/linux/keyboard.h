@@ -8,6 +8,7 @@
 #define KG_ALT		3
 #define KG_ALTGR	1
 #define KG_SHIFTL	4
+#define KG_KANASHIFT	4
 #define KG_SHIFTR	5
 #define KG_CTRLL	6
 #define KG_CTRLR	7
@@ -15,18 +16,27 @@
 
 #define NR_SHIFT	9
 
-#define NR_KEYS		128
+#define NR_KEYS		256
 #define MAX_NR_KEYMAPS	256
-/* This means 64Kb if all keymaps are allocated. Only the superuser
+/* This means 128Kb if all keymaps are allocated. Only the superuser
 	may increase the number of keymaps beyond MAX_NR_OF_USER_KEYMAPS. */
 #define MAX_NR_OF_USER_KEYMAPS 256 	/* should be at least 7 */
 
 #ifdef __KERNEL__
-extern const int NR_TYPES;
-extern const int max_vals[];
+struct notifier_block;
 extern unsigned short *key_maps[MAX_NR_KEYMAPS];
 extern unsigned short plain_map[NR_KEYS];
-extern unsigned char keyboard_type;
+
+struct keyboard_notifier_param {
+	struct vc_data *vc;	/* VC on which the keyboard press was done */
+	int down;		/* Pressure of the key? */
+	int shift;		/* Current shift mask */
+	int ledstate;		/* Current led state */
+	unsigned int value;	/* keycode, unicode value or keysym */
+};
+
+extern int register_keyboard_notifier(struct notifier_block *nb);
+extern int unregister_keyboard_notifier(struct notifier_block *nb);
 #endif
 
 #define MAX_NR_FUNC	256	/* max nr of strings assigned to keys */
@@ -44,6 +54,8 @@ extern unsigned char keyboard_type;
 #define KT_ASCII	9
 #define KT_LOCK		10
 #define KT_SLOCK	12
+#define KT_DEAD2	13
+#define KT_BRL		14
 
 #define K(t,v)		(((t)<<8)|(v))
 #define KTYP(x)		((x) >> 8)
@@ -415,6 +427,7 @@ extern unsigned char keyboard_type;
 #define K_SHIFTRLOCK	K(KT_LOCK,KG_SHIFTR)
 #define K_CTRLLLOCK	K(KT_LOCK,KG_CTRLL)
 #define K_CTRLRLOCK	K(KT_LOCK,KG_CTRLR)
+#define K_CAPSSHIFTLOCK	K(KT_LOCK,KG_CAPSSHIFT)
 
 #define K_SHIFT_SLOCK	K(KT_SLOCK,KG_SHIFT)
 #define K_CTRL_SLOCK	K(KT_SLOCK,KG_CTRL)
@@ -424,8 +437,23 @@ extern unsigned char keyboard_type;
 #define K_SHIFTR_SLOCK	K(KT_SLOCK,KG_SHIFTR)
 #define K_CTRLL_SLOCK	K(KT_SLOCK,KG_CTRLL)
 #define K_CTRLR_SLOCK	K(KT_SLOCK,KG_CTRLR)
+#define K_CAPSSHIFT_SLOCK	K(KT_SLOCK,KG_CAPSSHIFT)
 
-#define NR_LOCK		8
+#define NR_LOCK		9
+
+#define K_BRL_BLANK     K(KT_BRL, 0)
+#define K_BRL_DOT1      K(KT_BRL, 1)
+#define K_BRL_DOT2      K(KT_BRL, 2)
+#define K_BRL_DOT3      K(KT_BRL, 3)
+#define K_BRL_DOT4      K(KT_BRL, 4)
+#define K_BRL_DOT5      K(KT_BRL, 5)
+#define K_BRL_DOT6      K(KT_BRL, 6)
+#define K_BRL_DOT7      K(KT_BRL, 7)
+#define K_BRL_DOT8      K(KT_BRL, 8)
+#define K_BRL_DOT9      K(KT_BRL, 9)
+#define K_BRL_DOT10     K(KT_BRL, 10)
+
+#define NR_BRL		11
 
 #define MAX_DIACR	256
 #endif

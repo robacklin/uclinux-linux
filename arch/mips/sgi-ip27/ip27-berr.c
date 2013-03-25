@@ -10,14 +10,16 @@
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/signal.h>	/* for SIGBUS */
+#include <linux/sched.h>	/* schow_regs(), force_sig() */
 
 #include <asm/module.h>
 #include <asm/sn/addrs.h>
 #include <asm/sn/arch.h>
 #include <asm/sn/sn0/hub.h>
+#include <asm/tlbdebug.h>
 #include <asm/traps.h>
 #include <asm/uaccess.h>
-#include <asm/tlbdebug.h>
 
 static void dump_hub_information(unsigned long errst0, unsigned long errst1)
 {
@@ -64,7 +66,7 @@ int ip27_be_handler(struct pt_regs *regs, int is_fixup)
 	printk("Slice %c got %cbe at 0x%lx\n", 'A' + cpu, data ? 'd' : 'i',
 	       regs->cp0_epc);
 	printk("Hub information:\n");
-	printk("ERR_INT_PEND = 0x%06lx\n", LOCAL_HUB_L(PI_ERR_INT_PEND));
+	printk("ERR_INT_PEND = 0x%06llx\n", LOCAL_HUB_L(PI_ERR_INT_PEND));
 	errst0 = LOCAL_HUB_L(cpu ? PI_ERR_STATUS0_B : PI_ERR_STATUS0_A);
 	errst1 = LOCAL_HUB_L(cpu ? PI_ERR_STATUS1_B : PI_ERR_STATUS1_A);
 	dump_hub_information(errst0, errst1);

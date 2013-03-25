@@ -36,73 +36,122 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic79xx_osm_pci.c#24 $
+ * $Id: //depot/aic7xxx/linux/drivers/scsi/aic7xxx/aic79xx_osm_pci.c#25 $
  */
 
 #include "aic79xx_osm.h"
 #include "aic79xx_inline.h"
+#include "aic79xx_pci.h"
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-struct pci_device_id
-{
-};
-#endif
+/* Define the macro locally since it's different for different class of chips.
+ */
+#define ID(x)            \
+	ID2C(x),         \
+	ID2C(IDIROC(x))
 
-static int	ahd_linux_pci_dev_probe(struct pci_dev *pdev,
-					const struct pci_device_id *ent);
-static int	ahd_linux_pci_reserve_io_regions(struct ahd_softc *ahd,
-						 u_long *base, u_long *base2);
-#ifdef MMAPIO
-static int	ahd_linux_pci_reserve_mem_region(struct ahd_softc *ahd,
-						 u_long *bus_addr,
-						 uint8_t **maddr);
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
-static void	ahd_linux_pci_dev_remove(struct pci_dev *pdev);
-
-/* We do our own ID filtering.  So, grab all SCSI storage class devices. */
-static struct pci_device_id ahd_linux_pci_id_table[] = {
-	{
-		0x9005, PCI_ANY_ID, PCI_ANY_ID, PCI_ANY_ID,
-		PCI_CLASS_STORAGE_SCSI << 8, 0xFFFF00, 0
-	},
+static const struct pci_device_id ahd_linux_pci_id_table[] = {
+	/* aic7901 based controllers */
+	ID(ID_AHA_29320A),
+	ID(ID_AHA_29320ALP),
+	ID(ID_AHA_29320LPE),
+	/* aic7902 based controllers */
+	ID(ID_AHA_29320),
+	ID(ID_AHA_29320B),
+	ID(ID_AHA_29320LP),
+	ID(ID_AHA_39320),
+	ID(ID_AHA_39320_B),
+	ID(ID_AHA_39320A),
+	ID(ID_AHA_39320D),
+	ID(ID_AHA_39320D_HP),
+	ID(ID_AHA_39320D_B),
+	ID(ID_AHA_39320D_B_HP),
+	/* Generic chip probes for devices we don't know exactly. */
+	ID16(ID_AIC7901 & ID_9005_GENERIC_MASK),
+	ID(ID_AIC7901A & ID_DEV_VENDOR_MASK),
+	ID16(ID_AIC7902 & ID_9005_GENERIC_MASK),
 	{ 0 }
 };
 
 MODULE_DEVICE_TABLE(pci, ahd_linux_pci_id_table);
 
-struct pci_driver aic79xx_pci_driver = {
-	name:		"aic79xx",
-	probe:		ahd_linux_pci_dev_probe,
-	remove:		ahd_linux_pci_dev_remove,
-	id_table:	ahd_linux_pci_id_table
-};
+#ifdef CONFIG_PM
+static int
+ahd_linux_pci_dev_suspend(struct pci_dev *pdev, pm_message_t mesg)
+{
+	struct ahd_softc *ahd = pci_get_drvdata(pdev);
+	int rc;
+
+	if ((rc = ahd_suspend(ahd)))
+		return rc;
+
+	ahd_pci_suspend(ahd);
+
+	pci_save_state(pdev);
+	pci_disable_device(pdev);
+
+	if (mesg.event & PM_EVENT_SLEEP)
+		pci_set_power_state(pdev, PCI_D3hot);
+
+	return rc;
+}
+
+static int
+ahd_linux_pci_dev_resume(struct pci_dev *pdev)
+{
+	struct ahd_softc *ahd = pci_get_drvdata(pdev);
+	int rc;
+
+	pci_set_power_state(pdev, PCI_D0);
+	pci_restore_state(pdev);
+
+	if ((rc = pci_enable_device(pdev))) {
+		dev_printk(KERN_ERR, &pdev->dev,
+			   "failed to enable device after resume (%d)\n", rc);
+		return rc;
+	}
+
+	pci_set_master(pdev);
+
+	ahd_pci_resume(ahd);
+
+	ahd_resume(ahd);
+
+	return rc;
+}
+#endif
 
 static void
 ahd_linux_pci_dev_remove(struct pci_dev *pdev)
 {
-	struct ahd_softc *ahd;
-	u_long l;
+	struct ahd_softc *ahd = pci_get_drvdata(pdev);
+	u_long s;
 
-	/*
-	 * We should be able to just perform
-	 * the free directly, but check our
-	 * list for extra sanity.
-	 */
-	ahd_list_lock(&l);
-	ahd = ahd_find_softc((struct ahd_softc *)pci_get_drvdata(pdev));
-	if (ahd != NULL) {
-		u_long s;
+	if (ahd->platform_data && ahd->platform_data->host)
+			scsi_remove_host(ahd->platform_data->host);
 
-		ahd_lock(ahd, &s);
-		ahd_intr_enable(ahd, FALSE);
-		ahd_unlock(ahd, &s);
-		ahd_free(ahd);
-	}
-	ahd_list_unlock(&l);
+	ahd_lock(ahd, &s);
+	ahd_intr_enable(ahd, FALSE);
+	ahd_unlock(ahd, &s);
+	ahd_free(ahd);
 }
-#endif /* !LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0) */
+
+static void
+ahd_linux_pci_inherit_flags(struct ahd_softc *ahd)
+{
+	struct pci_dev *pdev = ahd->dev_softc, *master_pdev;
+	unsigned int master_devfn = PCI_DEVFN(PCI_SLOT(pdev->devfn), 0);
+
+	master_pdev = pci_get_slot(pdev->bus, master_devfn);
+	if (master_pdev) {
+		struct ahd_softc *master = pci_get_drvdata(master_pdev);
+		if (master) {
+			ahd->flags &= ~AHD_BIOS_ENABLED;
+			ahd->flags |= master->flags & AHD_BIOS_ENABLED;
+		} else
+			printk(KERN_ERR "aic79xx: no multichannel peer found!\n");
+		pci_dev_put(master_pdev);
+	}
+}
 
 static int
 ahd_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
@@ -110,25 +159,10 @@ ahd_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	char		 buf[80];
 	struct		 ahd_softc *ahd;
 	ahd_dev_softc_t	 pci;
-	struct		 ahd_pci_identity *entry;
+	const struct ahd_pci_identity *entry;
 	char		*name;
 	int		 error;
-
-	/*
-	 * Some BIOSen report the same device multiple times.
-	 */
-	TAILQ_FOREACH(ahd, &ahd_tailq, links) {
-		struct pci_dev *probed_pdev;
-
-		probed_pdev = ahd->dev_softc;
-		if (probed_pdev->bus->number == pdev->bus->number
-		 && probed_pdev->devfn == pdev->devfn)
-			break;
-	}
-	if (ahd != NULL) {
-		/* Skip duplicate. */
-		return (-ENODEV);
-	}
+	struct device	*dev = &pdev->dev;
 
 	pci = pdev;
 	entry = ahd_find_pci_device(pci);
@@ -144,91 +178,68 @@ ahd_linux_pci_dev_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 		ahd_get_pci_bus(pci),
 		ahd_get_pci_slot(pci),
 		ahd_get_pci_function(pci));
-	name = malloc(strlen(buf) + 1, M_DEVBUF, M_NOWAIT);
+	name = kmalloc(strlen(buf) + 1, GFP_ATOMIC);
 	if (name == NULL)
 		return (-ENOMEM);
 	strcpy(name, buf);
 	ahd = ahd_alloc(NULL, name);
 	if (ahd == NULL)
 		return (-ENOMEM);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 	if (pci_enable_device(pdev)) {
 		ahd_free(ahd);
 		return (-ENODEV);
 	}
 	pci_set_master(pdev);
 
-	if (sizeof(bus_addr_t) > 4) {
-		uint64_t   memsize;
-		bus_addr_t mask_64bit;
-		bus_addr_t mask_39bit;
+	if (sizeof(dma_addr_t) > 4) {
+		const u64 required_mask = dma_get_required_mask(dev);
 
-		memsize = ahd_linux_get_memsize();
-		mask_64bit = (bus_addr_t)0xFFFFFFFFFFFFFFFFULL;
-		mask_39bit = (bus_addr_t)0x7FFFFFFFFFULL;
-		if (memsize >= 0x8000000000ULL
-	 	 && ahd_pci_set_dma_mask(pdev, mask_64bit) == 0) {
+		if (required_mask > DMA_BIT_MASK(39) &&
+		    dma_set_mask(dev, DMA_BIT_MASK(64)) == 0)
 			ahd->flags |= AHD_64BIT_ADDRESSING;
-			ahd->platform_data->hw_dma_mask = mask_64bit;
-		} else if (memsize > 0x80000000
-			&& ahd_pci_set_dma_mask(pdev, mask_39bit) == 0) {
+		else if (required_mask > DMA_BIT_MASK(32) &&
+			 dma_set_mask(dev, DMA_BIT_MASK(39)) == 0)
 			ahd->flags |= AHD_39BIT_ADDRESSING;
-			ahd->platform_data->hw_dma_mask = mask_39bit;
-		}
+		else
+			dma_set_mask(dev, DMA_BIT_MASK(32));
 	} else {
-		ahd_pci_set_dma_mask(pdev, 0xFFFFFFFF);
-		ahd->platform_data->hw_dma_mask = 0xFFFFFFFF;
+		dma_set_mask(dev, DMA_BIT_MASK(32));
 	}
-#endif
 	ahd->dev_softc = pci;
 	error = ahd_pci_config(ahd, entry);
 	if (error != 0) {
 		ahd_free(ahd);
 		return (-error);
 	}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
+
+	/*
+	 * Second Function PCI devices need to inherit some
+	 * * settings from function 0.
+	 */
+	if ((ahd->features & AHD_MULTI_FUNC) && PCI_FUNC(pdev->devfn) != 0)
+		ahd_linux_pci_inherit_flags(ahd);
+
 	pci_set_drvdata(pdev, ahd);
-	if (aic79xx_detect_complete) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,5,0)
-		ahd_linux_register_host(ahd, &aic79xx_driver_template);
-#else
-		printf("aic79xx: ignoring PCI device found after "
-		       "initialization\n");
-		return (-ENODEV);
-#endif
-	}
-#endif
+
+	ahd_linux_register_host(ahd, &aic79xx_driver_template);
 	return (0);
 }
+
+static struct pci_driver aic79xx_pci_driver = {
+	.name		= "aic79xx",
+	.probe		= ahd_linux_pci_dev_probe,
+#ifdef CONFIG_PM
+	.suspend	= ahd_linux_pci_dev_suspend,
+	.resume		= ahd_linux_pci_dev_resume,
+#endif
+	.remove		= ahd_linux_pci_dev_remove,
+	.id_table	= ahd_linux_pci_id_table
+};
 
 int
 ahd_linux_pci_init(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
-	return (pci_module_init(&aic79xx_pci_driver));
-#else
-	struct pci_dev *pdev;
-	u_int class;
-	int found;
-
-	/* If we don't have a PCI bus, we can't find any adapters. */
-	if (pci_present() == 0)
-		return (0);
-
-	found = 0;
-	pdev = NULL;
-	class = PCI_CLASS_STORAGE_SCSI << 8;
-	while ((pdev = pci_find_class(class, pdev)) != NULL) {
-		ahd_dev_softc_t pci;
-		int error;
-
-		pci = pdev;
-		error = ahd_linux_pci_dev_probe(pdev, /*pci_devid*/NULL);
-		if (error == 0)
-			found++;
-	}
-	return (found);
-#endif
+	return pci_register_driver(&aic79xx_pci_driver);
 }
 
 void
@@ -238,10 +249,9 @@ ahd_linux_pci_exit(void)
 }
 
 static int
-ahd_linux_pci_reserve_io_regions(struct ahd_softc *ahd, u_long *base,
-				 u_long *base2)
+ahd_linux_pci_reserve_io_regions(struct ahd_softc *ahd, resource_size_t *base,
+				 resource_size_t *base2)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 	*base = pci_resource_start(ahd->dev_softc, 0);
 	/*
 	 * This is really the 3rd bar and should be at index 2,
@@ -249,41 +259,26 @@ ahd_linux_pci_reserve_io_regions(struct ahd_softc *ahd, u_long *base,
 	 * bars.
 	 */
 	*base2 = pci_resource_start(ahd->dev_softc, 3);
-#else
-	*base = ahd_pci_read_config(ahd->dev_softc, AHD_PCI_IOADDR0, 4);
-	*base2 = ahd_pci_read_config(ahd->dev_softc, AHD_PCI_IOADDR1, 4);
-	*base &= PCI_BASE_ADDRESS_IO_MASK;
-	*base2 &= PCI_BASE_ADDRESS_IO_MASK;
-#endif
 	if (*base == 0 || *base2 == 0)
 		return (ENOMEM);
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
-	if (check_region(*base, 256) != 0
-	 || check_region(*base2, 256) != 0)
+	if (!request_region(*base, 256, "aic79xx"))
 		return (ENOMEM);
-	request_region(*base, 256, "aic79xx");
-	request_region(*base2, 256, "aic79xx");
-#else
-	if (request_region(*base, 256, "aic79xx") == 0)
-		return (ENOMEM);
-	if (request_region(*base2, 256, "aic79xx") == 0) {
-		release_region(*base2, 256);
+	if (!request_region(*base2, 256, "aic79xx")) {
+		release_region(*base, 256);
 		return (ENOMEM);
 	}
-#endif
 	return (0);
 }
 
-#ifdef MMAPIO
 static int
 ahd_linux_pci_reserve_mem_region(struct ahd_softc *ahd,
-				 u_long *bus_addr,
-				 uint8_t **maddr)
+				 resource_size_t *bus_addr,
+				 uint8_t __iomem **maddr)
 {
-	u_long	start;
-	u_long	base_page;
+	resource_size_t	start;
+	resource_size_t	base_page;
 	u_long	base_offset;
-	int	error;
+	int	error = 0;
 
 	if (aic79xx_allow_memio == 0)
 		return (ENOMEM);
@@ -291,30 +286,18 @@ ahd_linux_pci_reserve_mem_region(struct ahd_softc *ahd,
 	if ((ahd->bugs & AHD_PCIX_MMAPIO_BUG) != 0)
 		return (ENOMEM);
 
-	error = 0;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
 	start = pci_resource_start(ahd->dev_softc, 1);
 	base_page = start & PAGE_MASK;
 	base_offset = start - base_page;
-#else
-	start = ahd_pci_read_config(ahd->dev_softc, PCIR_MAPS+4, 4);
-	base_offset = start & PCI_BASE_ADDRESS_MEM_MASK;
-	base_page = base_offset & PAGE_MASK;
-	base_offset -= base_page;
-#endif
 	if (start != 0) {
 		*bus_addr = start;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
-		if (request_mem_region(start, 0x1000, "aic79xx") == 0)
+		if (!request_mem_region(start, 0x1000, "aic79xx"))
 			error = ENOMEM;
-#endif
-		if (error == 0) {
-			*maddr = ioremap_nocache(base_page, base_offset + 256);
+		if (!error) {
+			*maddr = ioremap_nocache(base_page, base_offset + 512);
 			if (*maddr == NULL) {
 				error = ENOMEM;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 				release_mem_region(start, 0x1000);
-#endif
 			} else
 				*maddr += base_offset;
 		}
@@ -322,14 +305,13 @@ ahd_linux_pci_reserve_mem_region(struct ahd_softc *ahd,
 		error = ENOMEM;
 	return (error);
 }
-#endif
 
 int
 ahd_pci_map_registers(struct ahd_softc *ahd)
 {
 	uint32_t command;
-	u_long	 base;
-	uint8_t	*maddr;
+	resource_size_t base;
+	uint8_t	__iomem *maddr;
 	int	 error;
 
 	/*
@@ -339,7 +321,6 @@ ahd_pci_map_registers(struct ahd_softc *ahd)
 	command &= ~(PCIM_CMD_PORTEN|PCIM_CMD_MEMEN);
 	base = 0;
 	maddr = NULL;
-#ifdef MMAPIO
 	error = ahd_linux_pci_reserve_mem_region(ahd, &base, &maddr);
 	if (error == 0) {
 		ahd->platform_data->mem_busaddr = base;
@@ -352,47 +333,45 @@ ahd_pci_map_registers(struct ahd_softc *ahd)
 
 		if (ahd_pci_test_register_access(ahd) != 0) {
 
-			printf("aic79xx: PCI Device %d:%d:%d "
+			printk("aic79xx: PCI Device %d:%d:%d "
 			       "failed memory mapped test.  Using PIO.\n",
 			       ahd_get_pci_bus(ahd->dev_softc),
 			       ahd_get_pci_slot(ahd->dev_softc),
 			       ahd_get_pci_function(ahd->dev_softc));
-			iounmap((void *)((u_long)maddr & PAGE_MASK));
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
+			iounmap(maddr);
 			release_mem_region(ahd->platform_data->mem_busaddr,
 					   0x1000);
-#endif
 			ahd->bshs[0].maddr = NULL;
 			maddr = NULL;
 		} else
 			command |= PCIM_CMD_MEMEN;
 	} else if (bootverbose) {
-		printf("aic79xx: PCI%d:%d:%d MEM region 0x%lx "
+		printk("aic79xx: PCI%d:%d:%d MEM region 0x%llx "
 		       "unavailable. Cannot memory map device.\n",
 		       ahd_get_pci_bus(ahd->dev_softc),
 		       ahd_get_pci_slot(ahd->dev_softc),
 		       ahd_get_pci_function(ahd->dev_softc),
-		       base);
+		       (unsigned long long)base);
 	}
-#endif
 
 	if (maddr == NULL) {
-		u_long	 base2;
+		resource_size_t base2;
 
 		error = ahd_linux_pci_reserve_io_regions(ahd, &base, &base2);
 		if (error == 0) {
 			ahd->tags[0] = BUS_SPACE_PIO;
 			ahd->tags[1] = BUS_SPACE_PIO;
-			ahd->bshs[0].ioport = base;
-			ahd->bshs[1].ioport = base2;
+			ahd->bshs[0].ioport = (u_long)base;
+			ahd->bshs[1].ioport = (u_long)base2;
 			command |= PCIM_CMD_PORTEN;
 		} else {
-			printf("aic79xx: PCI%d:%d:%d IO regions 0x%lx and 0x%lx"
-			       "unavailable. Cannot map device.\n",
+			printk("aic79xx: PCI%d:%d:%d IO regions 0x%llx and "
+			       "0x%llx unavailable. Cannot map device.\n",
 			       ahd_get_pci_bus(ahd->dev_softc),
 			       ahd_get_pci_slot(ahd->dev_softc),
 			       ahd_get_pci_function(ahd->dev_softc),
-			       base, base2);
+			       (unsigned long long)base,
+			       (unsigned long long)base2);
 		}
 	}
 	ahd_pci_write_config(ahd->dev_softc, PCIR_COMMAND, command, 4);
@@ -405,8 +384,8 @@ ahd_pci_map_int(struct ahd_softc *ahd)
 	int error;
 
 	error = request_irq(ahd->dev_softc->irq, ahd_linux_isr,
-			    SA_SHIRQ, "aic79xx", ahd);
-	if (error == 0)
+			    IRQF_SHARED, "aic79xx", ahd);
+	if (!error)
 		ahd->platform_data->irq = ahd->dev_softc->irq;
 	
 	return (-error);
@@ -415,38 +394,5 @@ ahd_pci_map_int(struct ahd_softc *ahd)
 void
 ahd_power_state_change(struct ahd_softc *ahd, ahd_power_state new_state)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 	pci_set_power_state(ahd->dev_softc, new_state);
-#else
-	uint32_t cap;
-	u_int cap_offset;
-
-	/*
-	 * Traverse the capability list looking for
-	 * the power management capability.
-	 */
-	cap = 0;
-	cap_offset = ahd_pci_read_config(ahd->dev_softc,
-					 PCIR_CAP_PTR, /*bytes*/1);
-	while (cap_offset != 0) {
-
-		cap = ahd_pci_read_config(ahd->dev_softc,
-					  cap_offset, /*bytes*/4);
-		if ((cap & 0xFF) == 1
-		 && ((cap >> 16) & 0x3) > 0) {
-			uint32_t pm_control;
-
-			pm_control = ahd_pci_read_config(ahd->dev_softc,
-							 cap_offset + 4,
-							 /*bytes*/4);
-			pm_control &= ~0x3;
-			pm_control |= new_state;
-			ahd_pci_write_config(ahd->dev_softc,
-					     cap_offset + 4,
-					     pm_control, /*bytes*/2);
-			break;
-		}
-		cap_offset = (cap >> 8) & 0xFF;
-	}
-#endif 
 }

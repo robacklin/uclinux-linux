@@ -1,12 +1,12 @@
 /*
  * Simple testcode to download by the rescue block.
- * Just lits some LEDs to show it was downloaded correctly.
+ * Just lights some LEDs to show it was downloaded correctly.
  *
- * Copyright (C) 1999-2003 Axis Communications AB
+ * Copyright (C) 1999 Axis Communications AB
  */
 
 #define ASSEMBLER_MACROS_ONLY
-#include <asm/sv_addr_ag.h>
+#include <arch/sv_addr_ag.h>
 
 	.text
 
@@ -21,3 +21,4 @@ endless:
 	nop
 	ba	endless
 	nop
+

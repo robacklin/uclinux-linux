@@ -72,7 +72,7 @@
 #define TP_CFG_DisableLBusTimeout 0	/* Enable LBus timeout */
 #define TP_CFG_N_Divisor       32	/* Clock = 39.1608 Mhz */
 #define TP_CFG_M_Multiplier    37	/* " */
-#define TP_CFG_PllBypass        0	/* dont bypass */
+#define TP_CFG_PllBypass        0	/* don't bypass */
 #define TP_CFG_ChipletEnable 0xFFFF	/* Enable all chiplets */
 
 typedef struct {
@@ -93,10 +93,10 @@ int tp3780I_StartDSP(THINKPAD_BD_DATA * pBDData);
 int tp3780I_QueryAbilities(THINKPAD_BD_DATA * pBDData, MW_ABILITIES * pAbilities);
 int tp3780I_Cleanup(THINKPAD_BD_DATA * pBDData);
 int tp3780I_ReadWriteDspDStore(THINKPAD_BD_DATA * pBDData, unsigned int uOpcode,
-                               void *pvBuffer, unsigned int uCount,
+                               void __user *pvBuffer, unsigned int uCount,
                                unsigned long ulDSPAddr);
 int tp3780I_ReadWriteDspIStore(THINKPAD_BD_DATA * pBDData, unsigned int uOpcode,
-                               void *pvBuffer, unsigned int uCount,
+                               void __user *pvBuffer, unsigned int uCount,
                                unsigned long ulDSPAddr);
 
 

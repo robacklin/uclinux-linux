@@ -13,287 +13,572 @@
  * Shared /dev/zero support, Kanoj Sarcar <kanoj@sgi.com>
  * Move the mm functionality over to mm/shmem.c, Christoph Rohland <cr@sap.com>
  *
+ * support for audit of ipc object properties and permission changes
+ * Dustin Kirkland <dustin.kirkland@us.ibm.com>
+ *
+ * namespaces support
+ * OpenVZ, SWsoft Inc.
+ * Pavel Emelianov <xemul@openvz.org>
  */
 
- /*
-  * uClinux revisions for NO_MM
-  *
-  * A simplistic attempt to get shared memory under a mmu-less system.  Uses
-  * the shm_file pointer as a pointer to a chunk of shared memory instead of
-  * a "struct file".
-  */
-
-#include <linux/config.h>
 #include <linux/slab.h>
+#include <linux/mm.h>
+#include <linux/hugetlb.h>
 #include <linux/shm.h>
 #include <linux/init.h>
 #include <linux/file.h>
 #include <linux/mman.h>
-#include <linux/proc_fs.h>
+#include <linux/shmem_fs.h>
+#include <linux/security.h>
+#include <linux/syscalls.h>
+#include <linux/audit.h>
+#include <linux/capability.h>
+#include <linux/ptrace.h>
+#include <linux/seq_file.h>
+#include <linux/rwsem.h>
+#include <linux/nsproxy.h>
+#include <linux/mount.h>
+#include <linux/ipc_namespace.h>
+
 #include <asm/uaccess.h>
 
 #include "util.h"
 
-struct shmid_kernel /* private to the kernel */
-{	
-	struct kern_ipc_perm	shm_perm;
-	struct file *		shm_file;
-	int			id;
-	unsigned long		shm_nattch;
-	unsigned long		shm_segsz;
-	time_t			shm_atim;
-	time_t			shm_dtim;
-	time_t			shm_ctim;
-	pid_t			shm_cprid;
-	pid_t			shm_lprid;
+struct shm_file_data {
+	int id;
+	struct ipc_namespace *ns;
+	struct file *file;
+	const struct vm_operations_struct *vm_ops;
 };
 
-#define shm_flags	shm_perm.mode
+#define shm_file_data(file) (*((struct shm_file_data **)&(file)->private_data))
 
-#ifndef NO_MM
-static struct file_operations shm_file_operations;
-static struct vm_operations_struct shm_vm_ops;
-#endif /* NO_MM */
+static const struct file_operations shm_file_operations;
+static const struct vm_operations_struct shm_vm_ops;
 
-static struct ipc_ids shm_ids;
+#define shm_ids(ns)	((ns)->ids[IPC_SHM_IDS])
 
-#define shm_lock(id)	((struct shmid_kernel*)ipc_lock(&shm_ids,id))
-#define shm_unlock(id)	ipc_unlock(&shm_ids,id)
-#define shm_lockall()	ipc_lockall(&shm_ids)
-#define shm_unlockall()	ipc_unlockall(&shm_ids)
-#define shm_get(id)	((struct shmid_kernel*)ipc_get(&shm_ids,id))
-#define shm_buildid(id, seq) \
-	ipc_buildid(&shm_ids, id, seq)
+#define shm_unlock(shp)			\
+	ipc_unlock(&(shp)->shm_perm)
 
-static int newseg (key_t key, int shmflg, size_t size);
-#ifndef NO_MM
-static void shm_open (struct vm_area_struct *shmd);
-static void shm_close (struct vm_area_struct *shmd);
-#endif /* NO_MM */
+static int newseg(struct ipc_namespace *, struct ipc_params *);
+static void shm_open(struct vm_area_struct *vma);
+static void shm_close(struct vm_area_struct *vma);
+static void shm_destroy (struct ipc_namespace *ns, struct shmid_kernel *shp);
 #ifdef CONFIG_PROC_FS
-static int sysvipc_shm_read_proc(char *buffer, char **start, off_t offset, int length, int *eof, void *data);
+static int sysvipc_shm_proc_show(struct seq_file *s, void *it);
 #endif
 
-size_t	shm_ctlmax = SHMMAX;
-size_t 	shm_ctlall = SHMALL;
-int 	shm_ctlmni = SHMMNI;
-
-static int shm_tot; /* total number of shared memory pages */
-
-void __init shm_init (void)
+void shm_init_ns(struct ipc_namespace *ns)
 {
-	ipc_init_ids(&shm_ids, 1);
-#ifdef CONFIG_PROC_FS
-	create_proc_read_entry("sysvipc/shm", 0, 0, sysvipc_shm_read_proc, NULL);
-#endif
+	ns->shm_ctlmax = SHMMAX;
+	ns->shm_ctlall = SHMALL;
+	ns->shm_ctlmni = SHMMNI;
+	ns->shm_rmid_forced = 0;
+	ns->shm_tot = 0;
+	ipc_init_ids(&shm_ids(ns));
 }
 
-static inline int shm_checkid(struct shmid_kernel *s, int id)
+/*
+ * Called with shm_ids.rw_mutex (writer) and the shp structure locked.
+ * Only shm_ids.rw_mutex remains locked on exit.
+ */
+static void do_shm_rmid(struct ipc_namespace *ns, struct kern_ipc_perm *ipcp)
 {
-	if (ipc_checkid(&shm_ids,&s->shm_perm,id))
-		return -EIDRM;
+	struct shmid_kernel *shp;
+	shp = container_of(ipcp, struct shmid_kernel, shm_perm);
+
+	if (shp->shm_nattch){
+		shp->shm_perm.mode |= SHM_DEST;
+		/* Do not find it any more */
+		shp->shm_perm.key = IPC_PRIVATE;
+		shm_unlock(shp);
+	} else
+		shm_destroy(ns, shp);
+}
+
+#ifdef CONFIG_IPC_NS
+void shm_exit_ns(struct ipc_namespace *ns)
+{
+	free_ipcs(ns, &shm_ids(ns), do_shm_rmid);
+	idr_destroy(&ns->ids[IPC_SHM_IDS].ipcs_idr);
+}
+#endif
+
+static int __init ipc_ns_init(void)
+{
+	shm_init_ns(&init_ipc_ns);
 	return 0;
 }
 
-static inline struct shmid_kernel *shm_rmid(int id)
+pure_initcall(ipc_ns_init);
+
+void __init shm_init (void)
 {
-	return (struct shmid_kernel *)ipc_rmid(&shm_ids,id);
+	ipc_init_proc_interface("sysvipc/shm",
+#if BITS_PER_LONG <= 32
+				"       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime        rss       swap\n",
+#else
+				"       key      shmid perms                  size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime                   rss                  swap\n",
+#endif
+				IPC_SHM_IDS, sysvipc_shm_proc_show);
 }
 
-static inline int shm_addid(struct shmid_kernel *shp)
+/*
+ * shm_lock_(check_) routines are called in the paths where the rw_mutex
+ * is not necessarily held.
+ */
+static inline struct shmid_kernel *shm_lock(struct ipc_namespace *ns, int id)
 {
-	return ipc_addid(&shm_ids, &shp->shm_perm, shm_ctlmni+1);
+	struct kern_ipc_perm *ipcp = ipc_lock(&shm_ids(ns), id);
+
+	if (IS_ERR(ipcp))
+		return (struct shmid_kernel *)ipcp;
+
+	return container_of(ipcp, struct shmid_kernel, shm_perm);
+}
+
+static inline void shm_lock_by_ptr(struct shmid_kernel *ipcp)
+{
+	rcu_read_lock();
+	spin_lock(&ipcp->shm_perm.lock);
+}
+
+static inline struct shmid_kernel *shm_lock_check(struct ipc_namespace *ns,
+						int id)
+{
+	struct kern_ipc_perm *ipcp = ipc_lock_check(&shm_ids(ns), id);
+
+	if (IS_ERR(ipcp))
+		return (struct shmid_kernel *)ipcp;
+
+	return container_of(ipcp, struct shmid_kernel, shm_perm);
+}
+
+static inline void shm_rmid(struct ipc_namespace *ns, struct shmid_kernel *s)
+{
+	ipc_rmid(&shm_ids(ns), &s->shm_perm);
 }
 
 
-
-static inline void shm_inc (int id) {
+/* This is called by fork, once for every shm attach. */
+static void shm_open(struct vm_area_struct *vma)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
 
-	if(!(shp = shm_lock(id)))
-		BUG();
-	shp->shm_atim = CURRENT_TIME;
-	shp->shm_lprid = current->pid;
+	shp = shm_lock(sfd->ns, sfd->id);
+	BUG_ON(IS_ERR(shp));
+	shp->shm_atim = get_seconds();
+	shp->shm_lprid = task_tgid_vnr(current);
 	shp->shm_nattch++;
-	shm_unlock(id);
+	shm_unlock(shp);
 }
-
-#ifndef NO_MM
-/* This is called by fork, once for every shm attach. */
-static void shm_open (struct vm_area_struct *shmd)
-{
-	shm_inc (shmd->vm_file->f_dentry->d_inode->i_ino);
-}
-#endif /* NO_MM */
 
 /*
  * shm_destroy - free the struct shmid_kernel
  *
+ * @ns: namespace
  * @shp: struct to free
  *
- * It has to be called with shp and shm_ids.sem locked,
+ * It has to be called with shp and shm_ids.rw_mutex (writer) locked,
  * but returns with shp unlocked and freed.
  */
-static void shm_destroy (struct shmid_kernel *shp)
+static void shm_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
 {
-	shm_tot -= (shp->shm_segsz + PAGE_SIZE - 1) >> PAGE_SHIFT;
-	shm_rmid (shp->id);
-#ifndef NO_MM
-	shm_unlock(shp->id);
-	shmem_lock(shp->shm_file, 0);
+	ns->shm_tot -= (shp->shm_segsz + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	shm_rmid(ns, shp);
+	shm_unlock(shp);
+	if (!is_file_hugepages(shp->shm_file))
+		shmem_lock(shp->shm_file, 0, shp->mlock_user);
+	else if (shp->mlock_user)
+		user_shm_unlock(shp->shm_file->f_path.dentry->d_inode->i_size,
+						shp->mlock_user);
 	fput (shp->shm_file);
-#else
-	kfree (shp->shm_file);
-#endif /* NO_MM */
-	kfree (shp);
+	security_shm_free(shp);
+	ipc_rcu_putref(shp);
 }
 
-#ifndef NO_MM
 /*
- * remove the attach descriptor shmd.
+ * shm_may_destroy - identifies whether shm segment should be destroyed now
+ *
+ * Returns true if and only if there are no active users of the segment and
+ * one of the following is true:
+ *
+ * 1) shmctl(id, IPC_RMID, NULL) was called for this shp
+ *
+ * 2) sysctl kernel.shm_rmid_forced is set to 1.
+ */
+static bool shm_may_destroy(struct ipc_namespace *ns, struct shmid_kernel *shp)
+{
+	return (shp->shm_nattch == 0) &&
+	       (ns->shm_rmid_forced ||
+		(shp->shm_perm.mode & SHM_DEST));
+}
+
+/*
+ * remove the attach descriptor vma.
  * free memory for segment if it is marked destroyed.
  * The descriptor has already been removed from the current->mm->mmap list
  * and will later be kfree()d.
  */
-static void shm_close (struct vm_area_struct *shmd)
+static void shm_close(struct vm_area_struct *vma)
 {
-	struct file * file = shmd->vm_file;
-	int id = file->f_dentry->d_inode->i_ino;
+	struct file * file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
 	struct shmid_kernel *shp;
+	struct ipc_namespace *ns = sfd->ns;
 
-	down (&shm_ids.sem);
+	down_write(&shm_ids(ns).rw_mutex);
 	/* remove from the list of attaches of the shm segment */
-	if(!(shp = shm_lock(id)))
-		BUG();
-	shp->shm_lprid = current->pid;
-	shp->shm_dtim = CURRENT_TIME;
+	shp = shm_lock(ns, sfd->id);
+	BUG_ON(IS_ERR(shp));
+	shp->shm_lprid = task_tgid_vnr(current);
+	shp->shm_dtim = get_seconds();
 	shp->shm_nattch--;
-	if(shp->shm_nattch == 0 &&
-	   shp->shm_flags & SHM_DEST)
-		shm_destroy (shp);
+	if (shm_may_destroy(ns, shp))
+		shm_destroy(ns, shp);
 	else
-		shm_unlock(id);
-	up (&shm_ids.sem);
+		shm_unlock(shp);
+	up_write(&shm_ids(ns).rw_mutex);
 }
 
-static int shm_mmap(struct file * file, struct vm_area_struct * vma)
+/* Called with ns->shm_ids(ns).rw_mutex locked */
+static int shm_try_destroy_current(int id, void *p, void *data)
 {
-	UPDATE_ATIME(file->f_dentry->d_inode);
-	vma->vm_ops = &shm_vm_ops;
-	if (!(vma->vm_flags & VM_WRITE))
-		vma->vm_flags &= ~VM_MAYWRITE;
-	shm_inc(file->f_dentry->d_inode->i_ino);
+	struct ipc_namespace *ns = data;
+	struct kern_ipc_perm *ipcp = p;
+	struct shmid_kernel *shp = container_of(ipcp, struct shmid_kernel, shm_perm);
+
+	if (shp->shm_creator != current)
+		return 0;
+
+	/*
+	 * Mark it as orphaned to destroy the segment when
+	 * kernel.shm_rmid_forced is changed.
+	 * It is noop if the following shm_may_destroy() returns true.
+	 */
+	shp->shm_creator = NULL;
+
+	/*
+	 * Don't even try to destroy it.  If shm_rmid_forced=0 and IPC_RMID
+	 * is not set, it shouldn't be deleted here.
+	 */
+	if (!ns->shm_rmid_forced)
+		return 0;
+
+	if (shm_may_destroy(ns, shp)) {
+		shm_lock_by_ptr(shp);
+		shm_destroy(ns, shp);
+	}
 	return 0;
 }
 
-static struct file_operations shm_file_operations = {
-	mmap:	shm_mmap
-};
-
-static struct vm_operations_struct shm_vm_ops = {
-	open:	shm_open,	/* callback for a new vm-area open */
-	close:	shm_close,	/* callback for when the vm-area is released */
-	nopage:	shmem_nopage,
-};
-#else
-struct file *shmem_file_setup(char * name, loff_t size)
+/* Called with ns->shm_ids(ns).rw_mutex locked */
+static int shm_try_destroy_orphaned(int id, void *p, void *data)
 {
-	void * f = kmalloc(size, GFP_KERNEL);
+	struct ipc_namespace *ns = data;
+	struct kern_ipc_perm *ipcp = p;
+	struct shmid_kernel *shp = container_of(ipcp, struct shmid_kernel, shm_perm);
 
-	return (struct file *)(PTR_ERR(f) ? f : (void *)-ENOMEM);
+	/*
+	 * We want to destroy segments without users and with already
+	 * exit'ed originating process.
+	 *
+	 * As shp->* are changed under rw_mutex, it's safe to skip shp locking.
+	 */
+	if (shp->shm_creator != NULL)
+		return 0;
+
+	if (shm_may_destroy(ns, shp)) {
+		shm_lock_by_ptr(shp);
+		shm_destroy(ns, shp);
+	}
+	return 0;
 }
-#endif /* NO_MM */
 
-static int newseg (key_t key, int shmflg, size_t size)
+void shm_destroy_orphaned(struct ipc_namespace *ns)
 {
+	down_write(&shm_ids(ns).rw_mutex);
+	if (shm_ids(ns).in_use)
+		idr_for_each(&shm_ids(ns).ipcs_idr, &shm_try_destroy_orphaned, ns);
+	up_write(&shm_ids(ns).rw_mutex);
+}
+
+
+void exit_shm(struct task_struct *task)
+{
+	struct ipc_namespace *ns = task->nsproxy->ipc_ns;
+
+	if (shm_ids(ns).in_use == 0)
+		return;
+
+	/* Destroy all already created segments, but not mapped yet */
+	down_write(&shm_ids(ns).rw_mutex);
+	if (shm_ids(ns).in_use)
+		idr_for_each(&shm_ids(ns).ipcs_idr, &shm_try_destroy_current, ns);
+	up_write(&shm_ids(ns).rw_mutex);
+}
+
+static int shm_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+
+	return sfd->vm_ops->fault(vma, vmf);
+}
+
+#ifdef CONFIG_NUMA
+static int shm_set_policy(struct vm_area_struct *vma, struct mempolicy *new)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+	int err = 0;
+	if (sfd->vm_ops->set_policy)
+		err = sfd->vm_ops->set_policy(vma, new);
+	return err;
+}
+
+static struct mempolicy *shm_get_policy(struct vm_area_struct *vma,
+					unsigned long addr)
+{
+	struct file *file = vma->vm_file;
+	struct shm_file_data *sfd = shm_file_data(file);
+	struct mempolicy *pol = NULL;
+
+	if (sfd->vm_ops->get_policy)
+		pol = sfd->vm_ops->get_policy(vma, addr);
+	else if (vma->vm_policy)
+		pol = vma->vm_policy;
+
+	return pol;
+}
+#endif
+
+static int shm_mmap(struct file * file, struct vm_area_struct * vma)
+{
+	struct shm_file_data *sfd = shm_file_data(file);
+	int ret;
+
+	ret = sfd->file->f_op->mmap(sfd->file, vma);
+	if (ret != 0)
+		return ret;
+	sfd->vm_ops = vma->vm_ops;
+#ifdef CONFIG_MMU
+	BUG_ON(!sfd->vm_ops->fault);
+#endif
+	vma->vm_ops = &shm_vm_ops;
+	shm_open(vma);
+
+	return ret;
+}
+
+static int shm_release(struct inode *ino, struct file *file)
+{
+	struct shm_file_data *sfd = shm_file_data(file);
+
+	put_ipc_ns(sfd->ns);
+	shm_file_data(file) = NULL;
+	kfree(sfd);
+	return 0;
+}
+
+static int shm_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+{
+	struct shm_file_data *sfd = shm_file_data(file);
+
+	if (!sfd->file->f_op->fsync)
+		return -EINVAL;
+	return sfd->file->f_op->fsync(sfd->file, start, end, datasync);
+}
+
+static unsigned long shm_get_unmapped_area(struct file *file,
+	unsigned long addr, unsigned long len, unsigned long pgoff,
+	unsigned long flags)
+{
+	struct shm_file_data *sfd = shm_file_data(file);
+	return sfd->file->f_op->get_unmapped_area(sfd->file, addr, len,
+						pgoff, flags);
+}
+
+static const struct file_operations shm_file_operations = {
+	.mmap		= shm_mmap,
+	.fsync		= shm_fsync,
+	.release	= shm_release,
+#ifndef CONFIG_MMU
+	.get_unmapped_area	= shm_get_unmapped_area,
+#endif
+	.llseek		= noop_llseek,
+};
+
+static const struct file_operations shm_file_operations_huge = {
+	.mmap		= shm_mmap,
+	.fsync		= shm_fsync,
+	.release	= shm_release,
+	.get_unmapped_area	= shm_get_unmapped_area,
+	.llseek		= noop_llseek,
+};
+
+int is_file_shm_hugepages(struct file *file)
+{
+	return file->f_op == &shm_file_operations_huge;
+}
+
+static const struct vm_operations_struct shm_vm_ops = {
+	.open	= shm_open,	/* callback for a new vm-area open */
+	.close	= shm_close,	/* callback for when the vm-area is released */
+	.fault	= shm_fault,
+#if defined(CONFIG_NUMA)
+	.set_policy = shm_set_policy,
+	.get_policy = shm_get_policy,
+#endif
+};
+
+/**
+ * newseg - Create a new shared memory segment
+ * @ns: namespace
+ * @params: ptr to the structure that contains key, size and shmflg
+ *
+ * Called with shm_ids.rw_mutex held as a writer.
+ */
+
+static int newseg(struct ipc_namespace *ns, struct ipc_params *params)
+{
+	key_t key = params->key;
+	int shmflg = params->flg;
+	size_t size = params->u.size;
 	int error;
 	struct shmid_kernel *shp;
 	int numpages = (size + PAGE_SIZE -1) >> PAGE_SHIFT;
 	struct file * file;
 	char name[13];
 	int id;
+	vm_flags_t acctflag = 0;
 
-	if (size < SHMMIN || size > shm_ctlmax)
+	if (size < SHMMIN || size > ns->shm_ctlmax)
 		return -EINVAL;
 
-	if (shm_tot + numpages >= shm_ctlall)
+	if (ns->shm_tot + numpages > ns->shm_ctlall)
 		return -ENOSPC;
 
-	shp = (struct shmid_kernel *) kmalloc (sizeof (*shp), GFP_USER);
+	shp = ipc_rcu_alloc(sizeof(*shp));
 	if (!shp)
 		return -ENOMEM;
+
+	shp->shm_perm.key = key;
+	shp->shm_perm.mode = (shmflg & S_IRWXUGO);
+	shp->mlock_user = NULL;
+
+	shp->shm_perm.security = NULL;
+	error = security_shm_alloc(shp);
+	if (error) {
+		ipc_rcu_putref(shp);
+		return error;
+	}
+
 	sprintf (name, "SYSV%08x", key);
-	file = shmem_file_setup(name, size);
+	if (shmflg & SHM_HUGETLB) {
+		/* hugetlb_file_setup applies strict accounting */
+		if (shmflg & SHM_NORESERVE)
+			acctflag = VM_NORESERVE;
+		file = hugetlb_file_setup(name, 0, size, acctflag,
+					&shp->mlock_user, HUGETLB_SHMFS_INODE);
+	} else {
+		/*
+		 * Do not allow no accounting for OVERCOMMIT_NEVER, even
+	 	 * if it's asked for.
+		 */
+		if  ((shmflg & SHM_NORESERVE) &&
+				sysctl_overcommit_memory != OVERCOMMIT_NEVER)
+			acctflag = VM_NORESERVE;
+		file = shmem_file_setup(name, size, acctflag);
+	}
 	error = PTR_ERR(file);
 	if (IS_ERR(file))
 		goto no_file;
 
-	error = -ENOSPC;
-	id = shm_addid(shp);
-	if(id == -1) 
+	id = ipc_addid(&shm_ids(ns), &shp->shm_perm, ns->shm_ctlmni);
+	if (id < 0) {
+		error = id;
 		goto no_id;
-	shp->shm_perm.key = key;
-	shp->shm_flags = (shmflg & S_IRWXUGO);
-	shp->shm_cprid = current->pid;
+	}
+
+	shp->shm_cprid = task_tgid_vnr(current);
 	shp->shm_lprid = 0;
 	shp->shm_atim = shp->shm_dtim = 0;
-	shp->shm_ctim = CURRENT_TIME;
+	shp->shm_ctim = get_seconds();
 	shp->shm_segsz = size;
 	shp->shm_nattch = 0;
-	shp->id = shm_buildid(id,shp->shm_perm.seq);
 	shp->shm_file = file;
-#ifndef NO_MM
-	file->f_dentry->d_inode->i_ino = shp->id;
-	file->f_op = &shm_file_operations;
-#endif /* NO_MM */
-	shm_tot += numpages;
-	shm_unlock (id);
-	return shp->id;
+	shp->shm_creator = current;
+	/*
+	 * shmid gets reported as "inode#" in /proc/pid/maps.
+	 * proc-ps tools use this. Changing this will break them.
+	 */
+	file->f_dentry->d_inode->i_ino = shp->shm_perm.id;
+
+	ns->shm_tot += numpages;
+	error = shp->shm_perm.id;
+	shm_unlock(shp);
+	return error;
 
 no_id:
-#ifndef NO_MM
+	if (is_file_hugepages(file) && shp->mlock_user)
+		user_shm_unlock(size, shp->mlock_user);
 	fput(file);
-#else
-	kfree(file);
-#endif
-
 no_file:
-	kfree(shp);
+	security_shm_free(shp);
+	ipc_rcu_putref(shp);
 	return error;
 }
 
-asmlinkage long sys_shmget (key_t key, size_t size, int shmflg)
+/*
+ * Called with shm_ids.rw_mutex and ipcp locked.
+ */
+static inline int shm_security(struct kern_ipc_perm *ipcp, int shmflg)
 {
 	struct shmid_kernel *shp;
-	int err, id = 0;
 
-	down(&shm_ids.sem);
-	if (key == IPC_PRIVATE) {
-		err = newseg(key, shmflg, size);
-	} else if ((id = ipc_findkey(&shm_ids, key)) == -1) {
-		if (!(shmflg & IPC_CREAT))
-			err = -ENOENT;
-		else
-			err = newseg(key, shmflg, size);
-	} else if ((shmflg & IPC_CREAT) && (shmflg & IPC_EXCL)) {
-		err = -EEXIST;
-	} else {
-		shp = shm_lock(id);
-		if(shp==NULL)
-			BUG();
-		if (shp->shm_segsz < size)
-			err = -EINVAL;
-		else if (ipcperms(&shp->shm_perm, shmflg))
-			err = -EACCES;
-		else
-			err = shm_buildid(id, shp->shm_perm.seq);
-		shm_unlock(id);
-	}
-	up(&shm_ids.sem);
-	return err;
+	shp = container_of(ipcp, struct shmid_kernel, shm_perm);
+	return security_shm_associate(shp, shmflg);
 }
 
-static inline unsigned long copy_shmid_to_user(void *buf, struct shmid64_ds *in, int version)
+/*
+ * Called with shm_ids.rw_mutex and ipcp locked.
+ */
+static inline int shm_more_checks(struct kern_ipc_perm *ipcp,
+				struct ipc_params *params)
+{
+	struct shmid_kernel *shp;
+
+	shp = container_of(ipcp, struct shmid_kernel, shm_perm);
+	if (shp->shm_segsz < params->u.size)
+		return -EINVAL;
+
+	return 0;
+}
+
+SYSCALL_DEFINE3(shmget, key_t, key, size_t, size, int, shmflg)
+{
+	struct ipc_namespace *ns;
+	struct ipc_ops shm_ops;
+	struct ipc_params shm_params;
+
+	ns = current->nsproxy->ipc_ns;
+
+	shm_ops.getnew = newseg;
+	shm_ops.associate = shm_security;
+	shm_ops.more_checks = shm_more_checks;
+
+	shm_params.key = key;
+	shm_params.flg = shmflg;
+	shm_params.u.size = size;
+
+	return ipcget(ns, &shm_ids(ns), &shm_ops, &shm_params);
+}
+
+static inline unsigned long copy_shmid_to_user(void __user *buf, struct shmid64_ds *in, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -302,6 +587,7 @@ static inline unsigned long copy_shmid_to_user(void *buf, struct shmid64_ds *in,
 	    {
 		struct shmid_ds out;
 
+		memset(&out, 0, sizeof(out));
 		ipc64_perm_to_ipc_perm(&in->shm_perm, &out.shm_perm);
 		out.shm_segsz	= in->shm_segsz;
 		out.shm_atime	= in->shm_atime;
@@ -318,28 +604,14 @@ static inline unsigned long copy_shmid_to_user(void *buf, struct shmid64_ds *in,
 	}
 }
 
-struct shm_setbuf {
-	uid_t	uid;
-	gid_t	gid;
-	mode_t	mode;
-};	
-
-static inline unsigned long copy_shmid_from_user(struct shm_setbuf *out, void *buf, int version)
+static inline unsigned long
+copy_shmid_from_user(struct shmid64_ds *out, void __user *buf, int version)
 {
 	switch(version) {
 	case IPC_64:
-	    {
-		struct shmid64_ds tbuf;
-
-		if (copy_from_user(&tbuf, buf, sizeof(tbuf)))
+		if (copy_from_user(out, buf, sizeof(*out)))
 			return -EFAULT;
-
-		out->uid	= tbuf.shm_perm.uid;
-		out->gid	= tbuf.shm_perm.gid;
-		out->mode	= tbuf.shm_flags;
-
 		return 0;
-	    }
 	case IPC_OLD:
 	    {
 		struct shmid_ds tbuf_old;
@@ -347,9 +619,9 @@ static inline unsigned long copy_shmid_from_user(struct shm_setbuf *out, void *b
 		if (copy_from_user(&tbuf_old, buf, sizeof(tbuf_old)))
 			return -EFAULT;
 
-		out->uid	= tbuf_old.shm_perm.uid;
-		out->gid	= tbuf_old.shm_perm.gid;
-		out->mode	= tbuf_old.shm_flags;
+		out->shm_perm.uid	= tbuf_old.shm_perm.uid;
+		out->shm_perm.gid	= tbuf_old.shm_perm.gid;
+		out->shm_perm.mode	= tbuf_old.shm_perm.mode;
 
 		return 0;
 	    }
@@ -358,7 +630,7 @@ static inline unsigned long copy_shmid_from_user(struct shm_setbuf *out, void *b
 	}
 }
 
-static inline unsigned long copy_shminfo_to_user(void *buf, struct shminfo64 *in, int version)
+static inline unsigned long copy_shminfo_to_user(void __user *buf, struct shminfo64 *in, int version)
 {
 	switch(version) {
 	case IPC_64:
@@ -384,111 +656,202 @@ static inline unsigned long copy_shminfo_to_user(void *buf, struct shminfo64 *in
 	}
 }
 
-static void shm_get_stat (unsigned long *rss, unsigned long *swp) 
+/*
+ * Calculate and add used RSS and swap pages of a shm.
+ * Called with shm_ids.rw_mutex held as a reader
+ */
+static void shm_add_rss_swap(struct shmid_kernel *shp,
+	unsigned long *rss_add, unsigned long *swp_add)
 {
-#ifndef NO_MM
-	struct shmem_inode_info *info;
-#endif
-	int i;
+	struct inode *inode;
 
-	*rss = 0;
-	*swp = 0;
+	inode = shp->shm_file->f_path.dentry->d_inode;
 
-	for(i = 0; i <= shm_ids.max_id; i++) {
-		struct shmid_kernel* shp;
-#ifndef NO_MM
-		struct inode * inode;
-#endif
-
-		shp = shm_get(i);
-		if(shp == NULL)
-			continue;
-#ifndef NO_MM
-		inode = shp->shm_file->f_dentry->d_inode;
-		info = SHMEM_I(inode);
-		spin_lock (&info->lock);
-		*rss += inode->i_mapping->nrpages;
-		*swp += info->swapped;
-		spin_unlock (&info->lock);
+	if (is_file_hugepages(shp->shm_file)) {
+		struct address_space *mapping = inode->i_mapping;
+		struct hstate *h = hstate_file(shp->shm_file);
+		*rss_add += pages_per_huge_page(h) * mapping->nrpages;
+	} else {
+#ifdef CONFIG_SHMEM
+		struct shmem_inode_info *info = SHMEM_I(inode);
+		spin_lock(&info->lock);
+		*rss_add += inode->i_mapping->nrpages;
+		*swp_add += info->swapped;
+		spin_unlock(&info->lock);
 #else
-		*rss += (shp->shm_segsz + PAGE_SIZE -1) >> PAGE_SHIFT;
+		*rss_add += inode->i_mapping->nrpages;
 #endif
 	}
 }
 
-asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
+/*
+ * Called with shm_ids.rw_mutex held as a reader
+ */
+static void shm_get_stat(struct ipc_namespace *ns, unsigned long *rss,
+		unsigned long *swp)
 {
-	struct shm_setbuf setbuf;
+	int next_id;
+	int total, in_use;
+
+	*rss = 0;
+	*swp = 0;
+
+	in_use = shm_ids(ns).in_use;
+
+	for (total = 0, next_id = 0; total < in_use; next_id++) {
+		struct kern_ipc_perm *ipc;
+		struct shmid_kernel *shp;
+
+		ipc = idr_find(&shm_ids(ns).ipcs_idr, next_id);
+		if (ipc == NULL)
+			continue;
+		shp = container_of(ipc, struct shmid_kernel, shm_perm);
+
+		shm_add_rss_swap(shp, rss, swp);
+
+		total++;
+	}
+}
+
+/*
+ * This function handles some shmctl commands which require the rw_mutex
+ * to be held in write mode.
+ * NOTE: no locks must be held, the rw_mutex is taken inside this function.
+ */
+static int shmctl_down(struct ipc_namespace *ns, int shmid, int cmd,
+		       struct shmid_ds __user *buf, int version)
+{
+	struct kern_ipc_perm *ipcp;
+	struct shmid64_ds shmid64;
+	struct shmid_kernel *shp;
+	int err;
+
+	if (cmd == IPC_SET) {
+		if (copy_shmid_from_user(&shmid64, buf, version))
+			return -EFAULT;
+	}
+
+	ipcp = ipcctl_pre_down(ns, &shm_ids(ns), shmid, cmd,
+			       &shmid64.shm_perm, 0);
+	if (IS_ERR(ipcp))
+		return PTR_ERR(ipcp);
+
+	shp = container_of(ipcp, struct shmid_kernel, shm_perm);
+
+	err = security_shm_shmctl(shp, cmd);
+	if (err)
+		goto out_unlock;
+	switch (cmd) {
+	case IPC_RMID:
+		do_shm_rmid(ns, ipcp);
+		goto out_up;
+	case IPC_SET:
+		ipc_update_perm(&shmid64.shm_perm, ipcp);
+		shp->shm_ctim = get_seconds();
+		break;
+	default:
+		err = -EINVAL;
+	}
+out_unlock:
+	shm_unlock(shp);
+out_up:
+	up_write(&shm_ids(ns).rw_mutex);
+	return err;
+}
+
+SYSCALL_DEFINE3(shmctl, int, shmid, int, cmd, struct shmid_ds __user *, buf)
+{
 	struct shmid_kernel *shp;
 	int err, version;
+	struct ipc_namespace *ns;
 
-	if (cmd < 0 || shmid < 0)
-		return -EINVAL;
+	if (cmd < 0 || shmid < 0) {
+		err = -EINVAL;
+		goto out;
+	}
 
 	version = ipc_parse_version(&cmd);
+	ns = current->nsproxy->ipc_ns;
 
 	switch (cmd) { /* replace with proc interface ? */
 	case IPC_INFO:
 	{
 		struct shminfo64 shminfo;
 
-		memset(&shminfo,0,sizeof(shminfo));
-		shminfo.shmmni = shminfo.shmseg = shm_ctlmni;
-		shminfo.shmmax = shm_ctlmax;
-		shminfo.shmall = shm_ctlall;
+		err = security_shm_shmctl(NULL, cmd);
+		if (err)
+			return err;
+
+		memset(&shminfo, 0, sizeof(shminfo));
+		shminfo.shmmni = shminfo.shmseg = ns->shm_ctlmni;
+		shminfo.shmmax = ns->shm_ctlmax;
+		shminfo.shmall = ns->shm_ctlall;
 
 		shminfo.shmmin = SHMMIN;
 		if(copy_shminfo_to_user (buf, &shminfo, version))
 			return -EFAULT;
-		/* reading a integer is always atomic */
-		err= shm_ids.max_id;
+
+		down_read(&shm_ids(ns).rw_mutex);
+		err = ipc_get_maxid(&shm_ids(ns));
+		up_read(&shm_ids(ns).rw_mutex);
+
 		if(err<0)
 			err = 0;
-		return err;
+		goto out;
 	}
 	case SHM_INFO:
 	{
 		struct shm_info shm_info;
 
-		memset(&shm_info,0,sizeof(shm_info));
-		down(&shm_ids.sem);
-		shm_lockall();
-		shm_info.used_ids = shm_ids.in_use;
-		shm_get_stat (&shm_info.shm_rss, &shm_info.shm_swp);
-		shm_info.shm_tot = shm_tot;
+		err = security_shm_shmctl(NULL, cmd);
+		if (err)
+			return err;
+
+		memset(&shm_info, 0, sizeof(shm_info));
+		down_read(&shm_ids(ns).rw_mutex);
+		shm_info.used_ids = shm_ids(ns).in_use;
+		shm_get_stat (ns, &shm_info.shm_rss, &shm_info.shm_swp);
+		shm_info.shm_tot = ns->shm_tot;
 		shm_info.swap_attempts = 0;
 		shm_info.swap_successes = 0;
-		err = shm_ids.max_id;
-		shm_unlockall();
-		up(&shm_ids.sem);
-		if(copy_to_user (buf, &shm_info, sizeof(shm_info)))
-			return -EFAULT;
+		err = ipc_get_maxid(&shm_ids(ns));
+		up_read(&shm_ids(ns).rw_mutex);
+		if (copy_to_user(buf, &shm_info, sizeof(shm_info))) {
+			err = -EFAULT;
+			goto out;
+		}
 
-		return err < 0 ? 0 : err;
+		err = err < 0 ? 0 : err;
+		goto out;
 	}
 	case SHM_STAT:
 	case IPC_STAT:
 	{
 		struct shmid64_ds tbuf;
 		int result;
-		memset(&tbuf, 0, sizeof(tbuf));
-		shp = shm_lock(shmid);
-		if(shp==NULL)
-			return -EINVAL;
-		if(cmd==SHM_STAT) {
-			err = -EINVAL;
-			if (shmid > shm_ids.max_id)
-				goto out_unlock;
-			result = shm_buildid(shmid, shp->shm_perm.seq);
+
+		if (cmd == SHM_STAT) {
+			shp = shm_lock(ns, shmid);
+			if (IS_ERR(shp)) {
+				err = PTR_ERR(shp);
+				goto out;
+			}
+			result = shp->shm_perm.id;
 		} else {
-			err = shm_checkid(shp,shmid);
-			if(err)
-				goto out_unlock;
+			shp = shm_lock_check(ns, shmid);
+			if (IS_ERR(shp)) {
+				err = PTR_ERR(shp);
+				goto out;
+			}
 			result = 0;
 		}
-		err=-EACCES;
-		if (ipcperms (&shp->shm_perm, S_IRUGO))
+		err = -EACCES;
+		if (ipcperms(ns, &shp->shm_perm, S_IRUGO))
 			goto out_unlock;
+		err = security_shm_shmctl(shp, cmd);
+		if (err)
+			goto out_unlock;
+		memset(&tbuf, 0, sizeof(tbuf));
 		kernel_to_ipc64_perm(&shp->shm_perm, &tbuf.shm_perm);
 		tbuf.shm_segsz	= shp->shm_segsz;
 		tbuf.shm_atime	= shp->shm_atim;
@@ -497,192 +860,185 @@ asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf)
 		tbuf.shm_cpid	= shp->shm_cprid;
 		tbuf.shm_lpid	= shp->shm_lprid;
 		tbuf.shm_nattch	= shp->shm_nattch;
-		shm_unlock(shmid);
+		shm_unlock(shp);
 		if(copy_shmid_to_user (buf, &tbuf, version))
-			return -EFAULT;
-		return result;
+			err = -EFAULT;
+		else
+			err = result;
+		goto out;
 	}
 	case SHM_LOCK:
 	case SHM_UNLOCK:
 	{
-/* Allow superuser to lock segment in memory */
-/* Should the pages be faulted in here or leave it to user? */
-/* need to determine interaction with current->swappable */
-		if (!capable(CAP_IPC_LOCK))
-			return -EPERM;
+		struct file *shm_file;
 
-		shp = shm_lock(shmid);
-		if(shp==NULL)
-			return -EINVAL;
-		err = shm_checkid(shp,shmid);
-		if(err)
-			goto out_unlock;
-		if(cmd==SHM_LOCK) {
-#ifndef NO_MM
-			shmem_lock(shp->shm_file, 1);
-#endif /* NO_MM */
-			shp->shm_flags |= SHM_LOCKED;
-		} else {
-#ifndef NO_MM
-			shmem_lock(shp->shm_file, 0);
-#endif /* NO_MM */
-			shp->shm_flags &= ~SHM_LOCKED;
+		shp = shm_lock_check(ns, shmid);
+		if (IS_ERR(shp)) {
+			err = PTR_ERR(shp);
+			goto out;
 		}
-		shm_unlock(shmid);
-		return err;
+
+		audit_ipc_obj(&(shp->shm_perm));
+
+		if (!ns_capable(ns->user_ns, CAP_IPC_LOCK)) {
+			uid_t euid = current_euid();
+			err = -EPERM;
+			if (euid != shp->shm_perm.uid &&
+			    euid != shp->shm_perm.cuid)
+				goto out_unlock;
+			if (cmd == SHM_LOCK && !rlimit(RLIMIT_MEMLOCK))
+				goto out_unlock;
+		}
+
+		err = security_shm_shmctl(shp, cmd);
+		if (err)
+			goto out_unlock;
+
+		shm_file = shp->shm_file;
+		if (is_file_hugepages(shm_file))
+			goto out_unlock;
+
+		if (cmd == SHM_LOCK) {
+			struct user_struct *user = current_user();
+			err = shmem_lock(shm_file, 1, user);
+			if (!err && !(shp->shm_perm.mode & SHM_LOCKED)) {
+				shp->shm_perm.mode |= SHM_LOCKED;
+				shp->mlock_user = user;
+			}
+			goto out_unlock;
+		}
+
+		/* SHM_UNLOCK */
+		if (!(shp->shm_perm.mode & SHM_LOCKED))
+			goto out_unlock;
+		shmem_lock(shm_file, 0, shp->mlock_user);
+		shp->shm_perm.mode &= ~SHM_LOCKED;
+		shp->mlock_user = NULL;
+		get_file(shm_file);
+		shm_unlock(shp);
+		shmem_unlock_mapping(shm_file->f_mapping);
+		fput(shm_file);
+		goto out;
 	}
 	case IPC_RMID:
-	{
-		/*
-		 *	We cannot simply remove the file. The SVID states
-		 *	that the block remains until the last person
-		 *	detaches from it, then is deleted. A shmat() on
-		 *	an RMID segment is legal in older Linux and if 
-		 *	we change it apps break...
-		 *
-		 *	Instead we set a destroyed flag, and then blow
-		 *	the name away when the usage hits zero.
-		 */
-		down(&shm_ids.sem);
-		shp = shm_lock(shmid);
-		err = -EINVAL;
-		if (shp == NULL) 
-			goto out_up;
-		err = shm_checkid(shp, shmid);
-		if(err)
-			goto out_unlock_up;
-		if (current->euid != shp->shm_perm.uid &&
-		    current->euid != shp->shm_perm.cuid && 
-		    !capable(CAP_SYS_ADMIN)) {
-			err=-EPERM;
-			goto out_unlock_up;
-		}
-		if (shp->shm_nattch){
-			shp->shm_flags |= SHM_DEST;
-			/* Do not find it any more */
-			shp->shm_perm.key = IPC_PRIVATE;
-			shm_unlock(shmid);
-		} else
-			shm_destroy (shp);
-		up(&shm_ids.sem);
-		return err;
-	}
-
 	case IPC_SET:
-	{
-		if(copy_shmid_from_user (&setbuf, buf, version))
-			return -EFAULT;
-		down(&shm_ids.sem);
-		shp = shm_lock(shmid);
-		err=-EINVAL;
-		if(shp==NULL)
-			goto out_up;
-		err = shm_checkid(shp,shmid);
-		if(err)
-			goto out_unlock_up;
-		err=-EPERM;
-		if (current->euid != shp->shm_perm.uid &&
-		    current->euid != shp->shm_perm.cuid && 
-		    !capable(CAP_SYS_ADMIN)) {
-			goto out_unlock_up;
-		}
-
-		shp->shm_perm.uid = setbuf.uid;
-		shp->shm_perm.gid = setbuf.gid;
-		shp->shm_flags = (shp->shm_flags & ~S_IRWXUGO)
-			| (setbuf.mode & S_IRWXUGO);
-		shp->shm_ctim = CURRENT_TIME;
-		break;
-	}
-
+		err = shmctl_down(ns, shmid, cmd, buf, version);
+		return err;
 	default:
 		return -EINVAL;
 	}
 
-	err = 0;
-out_unlock_up:
-	shm_unlock(shmid);
-out_up:
-	up(&shm_ids.sem);
-	return err;
 out_unlock:
-	shm_unlock(shmid);
+	shm_unlock(shp);
+out:
 	return err;
 }
 
 /*
  * Fix shmaddr, allocate descriptor, map shm, add attach descriptor to lists.
+ *
+ * NOTE! Despite the name, this is NOT a direct system call entrypoint. The
+ * "raddr" thing points to kernel space, and there has to be a wrapper around
+ * this.
  */
-asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
+long do_shmat(int shmid, char __user *shmaddr, int shmflg, ulong *raddr)
 {
 	struct shmid_kernel *shp;
 	unsigned long addr;
-#ifndef NO_MM
 	unsigned long size;
 	struct file * file;
-#endif /* NO_MM */
 	int    err;
 	unsigned long flags;
 	unsigned long prot;
-	unsigned long o_flags;
 	int acc_mode;
-	void *user_addr;
+	unsigned long user_addr;
+	struct ipc_namespace *ns;
+	struct shm_file_data *sfd;
+	struct path path;
+	fmode_t f_mode;
 
+	err = -EINVAL;
 	if (shmid < 0)
-		return -EINVAL;
-
-	if ((addr = (ulong)shmaddr)) {
+		goto out;
+	else if ((addr = (ulong)shmaddr)) {
 		if (addr & (SHMLBA-1)) {
 			if (shmflg & SHM_RND)
 				addr &= ~(SHMLBA-1);	   /* round down */
 			else
-				return -EINVAL;
+#ifndef __ARCH_FORCE_SHMLBA
+				if (addr & ~PAGE_MASK)
+#endif
+					goto out;
 		}
 		flags = MAP_SHARED | MAP_FIXED;
 	} else {
 		if ((shmflg & SHM_REMAP))
-			return -EINVAL;
+			goto out;
 
 		flags = MAP_SHARED;
 	}
 
 	if (shmflg & SHM_RDONLY) {
 		prot = PROT_READ;
-		o_flags = O_RDONLY;
 		acc_mode = S_IRUGO;
+		f_mode = FMODE_READ;
 	} else {
 		prot = PROT_READ | PROT_WRITE;
-		o_flags = O_RDWR;
 		acc_mode = S_IRUGO | S_IWUGO;
+		f_mode = FMODE_READ | FMODE_WRITE;
+	}
+	if (shmflg & SHM_EXEC) {
+		prot |= PROT_EXEC;
+		acc_mode |= S_IXUGO;
 	}
 
 	/*
 	 * We cannot rely on the fs check since SYSV IPC does have an
 	 * additional creator id...
 	 */
-	shp = shm_lock(shmid);
-	if(shp == NULL)
-		return -EINVAL;
-	err = shm_checkid(shp,shmid);
-	if (err) {
-		shm_unlock(shmid);
-		return err;
+	ns = current->nsproxy->ipc_ns;
+	shp = shm_lock_check(ns, shmid);
+	if (IS_ERR(shp)) {
+		err = PTR_ERR(shp);
+		goto out;
 	}
-	if (ipcperms(&shp->shm_perm, acc_mode)) {
-		shm_unlock(shmid);
-		return -EACCES;
-	}
-#ifndef NO_MM
-	file = shp->shm_file;
-	size = file->f_dentry->d_inode->i_size;
-#endif /* NO_MM */
+
+	err = -EACCES;
+	if (ipcperms(ns, &shp->shm_perm, acc_mode))
+		goto out_unlock;
+
+	err = security_shm_shmat(shp, shmaddr, shmflg);
+	if (err)
+		goto out_unlock;
+
+	path = shp->shm_file->f_path;
+	path_get(&path);
 	shp->shm_nattch++;
-	shm_unlock(shmid);
+	size = i_size_read(path.dentry->d_inode);
+	shm_unlock(shp);
+
+	err = -ENOMEM;
+	sfd = kzalloc(sizeof(*sfd), GFP_KERNEL);
+	if (!sfd)
+		goto out_put_dentry;
+
+	file = alloc_file(&path, f_mode,
+			  is_file_hugepages(shp->shm_file) ?
+				&shm_file_operations_huge :
+				&shm_file_operations);
+	if (!file)
+		goto out_free;
+
+	file->private_data = sfd;
+	file->f_mapping = shp->shm_file->f_mapping;
+	sfd->id = shp->shm_perm.id;
+	sfd->ns = get_ipc_ns(ns);
+	sfd->file = shp->shm_file;
+	sfd->vm_ops = NULL;
 
 	down_write(&current->mm->mmap_sem);
-#ifndef NO_MM
 	if (addr && !(shmflg & SHM_REMAP)) {
-		user_addr = ERR_PTR(-EINVAL);
+		err = -EINVAL;
 		if (find_vma_intersection(current->mm, addr, addr + size))
 			goto invalid;
 		/*
@@ -694,146 +1050,188 @@ asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *raddr)
 			goto invalid;
 	}
 		
-	user_addr = (void*) do_mmap (file, addr, size, prot, flags, 0);
-#else
-	if (addr) {
-		user_addr = ERR_PTR(-EINVAL);
-		goto invalid;
-	}
-
-	user_addr = (void*)shp->shm_file;
-	if (user_addr)
-		shm_inc(shmid);
-#endif /* NO_MM */
-
+	user_addr = do_mmap (file, addr, size, prot, flags, 0);
+	*raddr = user_addr;
+	err = 0;
+	if (IS_ERR_VALUE(user_addr))
+		err = (long)user_addr;
 invalid:
 	up_write(&current->mm->mmap_sem);
 
-	down (&shm_ids.sem);
-	if(!(shp = shm_lock(shmid)))
-		BUG();
-	shp->shm_nattch--;
-	if(shp->shm_nattch == 0 &&
-	   shp->shm_flags & SHM_DEST)
-		shm_destroy (shp);
-	else
-		shm_unlock(shmid);
-	up (&shm_ids.sem);
+	fput(file);
 
-	*raddr = (unsigned long) user_addr;
-	err = 0;
-	if (IS_ERR(user_addr))
-		err = PTR_ERR(user_addr);
+out_nattch:
+	down_write(&shm_ids(ns).rw_mutex);
+	shp = shm_lock(ns, shmid);
+	BUG_ON(IS_ERR(shp));
+	shp->shm_nattch--;
+	if (shm_may_destroy(ns, shp))
+		shm_destroy(ns, shp);
+	else
+		shm_unlock(shp);
+	up_write(&shm_ids(ns).rw_mutex);
+
+out:
 	return err;
 
+out_unlock:
+	shm_unlock(shp);
+	goto out;
+
+out_free:
+	kfree(sfd);
+out_put_dentry:
+	path_put(&path);
+	goto out_nattch;
+}
+
+SYSCALL_DEFINE3(shmat, int, shmid, char __user *, shmaddr, int, shmflg)
+{
+	unsigned long ret;
+	long err;
+
+	err = do_shmat(shmid, shmaddr, shmflg, &ret);
+	if (err)
+		return err;
+	force_successful_syscall_return();
+	return (long)ret;
 }
 
 /*
  * detach and kill segment if marked destroyed.
  * The work is done in shm_close.
  */
-asmlinkage long sys_shmdt (char *shmaddr)
+SYSCALL_DEFINE1(shmdt, char __user *, shmaddr)
 {
-#ifndef NO_MM
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *shmd, *shmdnext;
+	struct vm_area_struct *vma;
+	unsigned long addr = (unsigned long)shmaddr;
 	int retval = -EINVAL;
+#ifdef CONFIG_MMU
+	loff_t size = 0;
+	struct vm_area_struct *next;
+#endif
+
+	if (addr & ~PAGE_MASK)
+		return retval;
 
 	down_write(&mm->mmap_sem);
-	for (shmd = mm->mmap; shmd; shmd = shmdnext) {
-		shmdnext = shmd->vm_next;
-		if (shmd->vm_ops == &shm_vm_ops
-		    && shmd->vm_start - (shmd->vm_pgoff << PAGE_SHIFT) == (ulong) shmaddr) {
-			do_munmap(mm, shmd->vm_start, shmd->vm_end - shmd->vm_start);
+
+	/*
+	 * This function tries to be smart and unmap shm segments that
+	 * were modified by partial mlock or munmap calls:
+	 * - It first determines the size of the shm segment that should be
+	 *   unmapped: It searches for a vma that is backed by shm and that
+	 *   started at address shmaddr. It records it's size and then unmaps
+	 *   it.
+	 * - Then it unmaps all shm vmas that started at shmaddr and that
+	 *   are within the initially determined size.
+	 * Errors from do_munmap are ignored: the function only fails if
+	 * it's called with invalid parameters or if it's called to unmap
+	 * a part of a vma. Both calls in this function are for full vmas,
+	 * the parameters are directly copied from the vma itself and always
+	 * valid - therefore do_munmap cannot fail. (famous last words?)
+	 */
+	/*
+	 * If it had been mremap()'d, the starting address would not
+	 * match the usual checks anyway. So assume all vma's are
+	 * above the starting address given.
+	 */
+	vma = find_vma(mm, addr);
+
+#ifdef CONFIG_MMU
+	while (vma) {
+		next = vma->vm_next;
+
+		/*
+		 * Check if the starting address would match, i.e. it's
+		 * a fragment created by mprotect() and/or munmap(), or it
+		 * otherwise it starts at this address with no hassles.
+		 */
+		if ((vma->vm_ops == &shm_vm_ops) &&
+			(vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff) {
+
+
+			size = vma->vm_file->f_path.dentry->d_inode->i_size;
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start);
+			/*
+			 * We discovered the size of the shm segment, so
+			 * break out of here and fall through to the next
+			 * loop that uses the size information to stop
+			 * searching for matching vma's.
+			 */
 			retval = 0;
+			vma = next;
+			break;
 		}
+		vma = next;
 	}
+
+	/*
+	 * We need look no further than the maximum address a fragment
+	 * could possibly have landed at. Also cast things to loff_t to
+	 * prevent overflows and make comparisons vs. equal-width types.
+	 */
+	size = PAGE_ALIGN(size);
+	while (vma && (loff_t)(vma->vm_end - addr) <= size) {
+		next = vma->vm_next;
+
+		/* finding a matching vma now does not alter retval */
+		if ((vma->vm_ops == &shm_vm_ops) &&
+			(vma->vm_start - addr)/PAGE_SIZE == vma->vm_pgoff)
+
+			do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start);
+		vma = next;
+	}
+
+#else /* CONFIG_MMU */
+	/* under NOMMU conditions, the exact address to be destroyed must be
+	 * given */
+	retval = -EINVAL;
+	if (vma->vm_start == addr && vma->vm_ops == &shm_vm_ops) {
+		do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start);
+		retval = 0;
+	}
+
+#endif
+
 	up_write(&mm->mmap_sem);
 	return retval;
-#else
-	int i;
-
-	down (&shm_ids.sem);
-	for(i= 0; i <= shm_ids.max_id; i++) {
-		struct shmid_kernel* shp;
-
-		shp = shm_lock(i);
-		if(shp!=NULL) {
-			if (shp->shm_file == (struct file *)shmaddr) {
-				shp->shm_lprid = current->pid;
-				shp->shm_dtim = CURRENT_TIME;
-				shp->shm_nattch--;
-				if(shp->shm_nattch == 0 &&
-				   shp->shm_flags & SHM_DEST)
-					shm_destroy (shp);
-				i = shm_ids.max_id+1; /* Make this the last iteration */
-			}
-			shm_unlock(i);
-		}
-	}
-	up (&shm_ids.sem);
-	return 0;
-#endif /* NO_MM */
 }
 
 #ifdef CONFIG_PROC_FS
-static int sysvipc_shm_read_proc(char *buffer, char **start, off_t offset, int length, int *eof, void *data)
+static int sysvipc_shm_proc_show(struct seq_file *s, void *it)
 {
-	off_t pos = 0;
-	off_t begin = 0;
-	int i, len = 0;
+	struct shmid_kernel *shp = it;
+	unsigned long rss = 0, swp = 0;
 
-	down(&shm_ids.sem);
-	len += sprintf(buffer, "       key      shmid perms       size  cpid  lpid nattch   uid   gid  cuid  cgid      atime      dtime      ctime\n");
+	shm_add_rss_swap(shp, &rss, &swp);
 
-	for(i = 0; i <= shm_ids.max_id; i++) {
-		struct shmid_kernel* shp;
+#if BITS_PER_LONG <= 32
+#define SIZE_SPEC "%10lu"
+#else
+#define SIZE_SPEC "%21lu"
+#endif
 
-		shp = shm_lock(i);
-		if(shp!=NULL) {
-#define SMALL_STRING "%10d %10d  %4o %10u %5u %5u  %5d %5u %5u %5u %5u %10lu %10lu %10lu\n"
-#define BIG_STRING   "%10d %10d  %4o %21u %5u %5u  %5d %5u %5u %5u %5u %10lu %10lu %10lu\n"
-			char *format;
-
-			if (sizeof(size_t) <= sizeof(int))
-				format = SMALL_STRING;
-			else
-				format = BIG_STRING;
-			len += sprintf(buffer + len, format,
-				shp->shm_perm.key,
-				shm_buildid(i, shp->shm_perm.seq),
-				shp->shm_flags,
-				shp->shm_segsz,
-				shp->shm_cprid,
-				shp->shm_lprid,
-				shp->shm_nattch,
-				shp->shm_perm.uid,
-				shp->shm_perm.gid,
-				shp->shm_perm.cuid,
-				shp->shm_perm.cgid,
-				shp->shm_atim,
-				shp->shm_dtim,
-				shp->shm_ctim);
-			shm_unlock(i);
-
-			pos += len;
-			if(pos < offset) {
-				len = 0;
-				begin = pos;
-			}
-			if(pos > offset + length)
-				goto done;
-		}
-	}
-	*eof = 1;
-done:
-	up(&shm_ids.sem);
-	*start = buffer + (offset - begin);
-	len -= (offset - begin);
-	if(len > length)
-		len = length;
-	if(len < 0)
-		len = 0;
-	return len;
+	return seq_printf(s,
+			  "%10d %10d  %4o " SIZE_SPEC " %5u %5u  "
+			  "%5lu %5u %5u %5u %5u %10lu %10lu %10lu "
+			  SIZE_SPEC " " SIZE_SPEC "\n",
+			  shp->shm_perm.key,
+			  shp->shm_perm.id,
+			  shp->shm_perm.mode,
+			  shp->shm_segsz,
+			  shp->shm_cprid,
+			  shp->shm_lprid,
+			  shp->shm_nattch,
+			  shp->shm_perm.uid,
+			  shp->shm_perm.gid,
+			  shp->shm_perm.cuid,
+			  shp->shm_perm.cgid,
+			  shp->shm_atim,
+			  shp->shm_dtim,
+			  shp->shm_ctim,
+			  rss * PAGE_SIZE,
+			  swp * PAGE_SIZE);
 }
 #endif

@@ -8,32 +8,29 @@
  * This file handles the architecture-dependent parts of process handling.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/utsname.h>
 #include <linux/time.h>
 #include <linux/major.h>
 #include <linux/stat.h>
+#include <linux/vt.h>
 #include <linux/mman.h>
 #include <linux/elfcore.h>
 #include <linux/reboot.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <linux/slab.h>
 
 #include <asm/reg.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/hwrpb.h>
@@ -43,51 +40,23 @@
 #include "pci_impl.h"
 
 /*
- * Initial task structure. Make this a per-architecture thing,
- * because different architectures tend to have different
- * alignment requirements and potentially different initial
- * setup.
+ * Power off function, if any
  */
-
-unsigned long init_user_stack[1024] = { STACK_MAGIC, };
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-struct mm_struct init_mm = INIT_MM(init_mm);
-
-union task_union init_task_union __attribute__((section("init_task")))
-	 = { task: INIT_TASK(init_task_union.task) };
-
-/*
- * No need to acquire the kernel lock, we're entirely local..
- */
-asmlinkage int
-sys_sethae(unsigned long hae, unsigned long a1, unsigned long a2,
-	   unsigned long a3, unsigned long a4, unsigned long a5,
-	   struct pt_regs regs)
-{
-	(&regs)->hae = hae;
-	return 0;
-}
+void (*pm_power_off)(void) = machine_power_off;
+EXPORT_SYMBOL(pm_power_off);
 
 void
 cpu_idle(void)
 {
-	/* An endless idle loop with no priority at all.  */
-	current->nice = 20;
-	current->counter = -100;
+	set_thread_flag(TIF_POLLING_NRFLAG);
 
 	while (1) {
 		/* FIXME -- EV6 and LCA45 know how to power down
 		   the CPU.  */
 
-		/* Although we are an idle CPU, we do not want to 
-		   get into the scheduler unnecessarily.  */
-		long oldval = xchg(&current->need_resched, -1UL);
-		if (!oldval)
-			while (current->need_resched < 0);
+		while (!need_resched())
+			cpu_relax();
 		schedule();
-		check_pgt_cache();
 	}
 }
 
@@ -106,7 +75,7 @@ common_shutdown_1(void *generic_ptr)
 	int cpuid = smp_processor_id();
 
 	/* No point in taking interrupts anymore. */
-	__cli();
+	local_irq_disable();
 
 	cpup = (struct percpu_struct *)
 			((unsigned long)hwrpb + hwrpb->processor_offset
@@ -122,7 +91,8 @@ common_shutdown_1(void *generic_ptr)
 	if (cpuid != boot_cpuid) {
 		flags |= 0x00040000UL; /* "remain halted" */
 		*pflags = flags;
-		clear_bit(cpuid, &cpu_present_mask);
+		set_cpu_present(cpuid, false);
+		set_cpu_possible(cpuid, false);
 		halt();
 	}
 #endif
@@ -148,14 +118,19 @@ common_shutdown_1(void *generic_ptr)
 
 #ifdef CONFIG_SMP
 	/* Wait for the secondaries to halt. */
-	clear_bit(boot_cpuid, &cpu_present_mask);
-	while (cpu_present_mask)
+	set_cpu_present(boot_cpuid, false);
+	set_cpu_possible(boot_cpuid, false);
+	while (cpumask_weight(cpu_present_mask))
 		barrier();
 #endif
 
-        /* If booted from SRM, reset some of the original environment. */
+	/* If booted from SRM, reset some of the original environment. */
 	if (alpha_using_srm) {
 #ifdef CONFIG_DUMMY_CONSOLE
+		/* If we've gotten here after SysRq-b, leave interrupt
+		   context before taking over the console. */
+		if (in_interrupt())
+			irq_exit();
 		/* This has the effect of resetting the VGA video origin.  */
 		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
 #endif
@@ -185,10 +160,7 @@ common_shutdown(int mode, char *restart_cmd)
 	struct halt_info args;
 	args.mode = mode;
 	args.restart_cmd = restart_cmd;
-#ifdef CONFIG_SMP
-	smp_call_function(common_shutdown_1, &args, 1, 0);
-#endif
-	common_shutdown_1(&args);
+	on_each_cpu(common_shutdown_1, &args, 0);
 }
 
 void
@@ -197,11 +169,13 @@ machine_restart(char *restart_cmd)
 	common_shutdown(LINUX_REBOOT_CMD_RESTART, restart_cmd);
 }
 
+
 void
 machine_halt(void)
 {
 	common_shutdown(LINUX_REBOOT_CMD_HALT, NULL);
 }
+
 
 void
 machine_power_off(void)
@@ -209,26 +183,14 @@ machine_power_off(void)
 	common_shutdown(LINUX_REBOOT_CMD_POWER_OFF, NULL);
 }
 
+
+/* Used by sysrq-p, among others.  I don't believe r9-r15 are ever
+   saved in the context it's used.  */
+
 void
-show_regs(struct pt_regs * regs)
+show_regs(struct pt_regs *regs)
 {
-	printk("\n");
-	printk("Pid: %d, comm: %20s\n", current->pid, current->comm);
-	printk("ps: %04lx pc: [<%016lx>] CPU %d    %s\n",
-	       regs->ps, regs->pc, smp_processor_id(), print_tainted());
-	printk("rp: [<%016lx>] sp: %p\n", regs->r26, regs+1);
-	printk(" r0: %016lx  r1: %016lx  r2: %016lx  r3: %016lx\n",
-	       regs->r0, regs->r1, regs->r2, regs->r3);
-	printk(" r4: %016lx  r5: %016lx  r6: %016lx  r7: %016lx\n",
-	       regs->r4, regs->r5, regs->r6, regs->r7);
-	printk(" r8: %016lx r16: %016lx r17: %016lx r18: %016lx\n",
-	       regs->r8, regs->r16, regs->r17, regs->r18);
-	printk("r19: %016lx r20: %016lx r21: %016lx r22: %016lx\n",
-	       regs->r19, regs->r20, regs->r21, regs->r22);
-	printk("r23: %016lx r24: %016lx r25: %016lx r26: %016lx\n",
-	       regs->r23, regs->r24, regs->r25, regs->r26);
-	printk("r27: %016lx r28: %016lx r29: %016lx hae: %016lx\n",
-	       regs->r27, regs->r28, regs->gp, regs->hae);
+	dik_show_regs(regs, NULL);
 }
 
 /*
@@ -237,11 +199,11 @@ show_regs(struct pt_regs * regs)
 void
 start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 {
-	set_fs(USER_DS);
 	regs->pc = pc;
 	regs->ps = 8;
 	wrusp(sp);
 }
+EXPORT_SYMBOL(start_thread);
 
 /*
  * Free current thread data structures etc..
@@ -256,8 +218,11 @@ flush_thread(void)
 {
 	/* Arrange for each exec'ed process to start off with a clean slate
 	   with respect to the FPU.  This is all exceptions disabled.  */
-	current->thread.flags &= ~IEEE_SW_MASK;
+	current_thread_info()->ieee_state = 0;
 	wrfpcr(FPCR_DYN_NORMAL | ieee_swcr_to_fpcr(0));
+
+	/* Clean slate for TLS.  */
+	current_thread_info()->pcb.unique = 0;
 }
 
 void
@@ -276,18 +241,20 @@ release_thread(struct task_struct *dead_task)
  */
 int
 alpha_clone(unsigned long clone_flags, unsigned long usp,
-	    struct switch_stack * swstack)
+	    int __user *parent_tid, int __user *child_tid,
+	    unsigned long tls_value, struct pt_regs *regs)
 {
 	if (!usp)
 		usp = rdusp();
-	return do_fork(clone_flags, usp, (struct pt_regs *) (swstack+1), 0);
+
+	return do_fork(clone_flags, usp, regs, 0, parent_tid, child_tid);
 }
 
 int
-alpha_vfork(struct switch_stack * swstack)
+alpha_vfork(struct pt_regs *regs)
 {
 	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(),
-			(struct pt_regs *) (swstack+1), 0);
+		       regs, 0, NULL, NULL);
 }
 
 /*
@@ -295,30 +262,32 @@ alpha_vfork(struct switch_stack * swstack)
  *
  * Note the "stack_offset" stuff: when returning to kernel mode, we need
  * to have some extra stack-space for the kernel stack that still exists
- * after the "ret_from_sys_call". When returning to user mode, we only
- * want the space needed by the syscall stack frame (ie "struct pt_regs").
+ * after the "ret_from_fork".  When returning to user mode, we only want
+ * the space needed by the syscall stack frame (ie "struct pt_regs").
  * Use the passed "regs" pointer to determine how much space we need
  * for a kernel fork().
  */
 
 int
-copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+copy_thread(unsigned long clone_flags, unsigned long usp,
 	    unsigned long unused,
 	    struct task_struct * p, struct pt_regs * regs)
 {
-	extern void ret_from_sys_call(void);
 	extern void ret_from_fork(void);
 
+	struct thread_info *childti = task_thread_info(p);
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
-	unsigned long stack_offset;
+	unsigned long stack_offset, settls;
 
 	stack_offset = PAGE_SIZE - sizeof(struct pt_regs);
 	if (!(regs->ps & 8))
 		stack_offset = (PAGE_SIZE-1) & (unsigned long) regs;
-	childregs = (struct pt_regs *) (stack_offset + PAGE_SIZE + (long)p);
+	childregs = (struct pt_regs *)
+	  (stack_offset + PAGE_SIZE + task_stack_page(p));
 		
 	*childregs = *regs;
+	settls = regs->r20;
 	childregs->r0 = 0;
 	childregs->r19 = 0;
 	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
@@ -327,81 +296,30 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
 	childstack->r26 = (unsigned long) ret_from_fork;
-	p->thread.usp = usp;
-	p->thread.ksp = (unsigned long) childstack;
-	p->thread.pal_flags = 1;	/* set FEN, clear everything else */
-	p->thread.flags = current->thread.flags;
+	childti->pcb.usp = usp;
+	childti->pcb.ksp = (unsigned long) childstack;
+	childti->pcb.flags = 1;	/* set FEN, clear everything else */
+
+	/* Set a new TLS for the child thread?  Peek back into the
+	   syscall arguments that we saved on syscall entry.  Oops,
+	   except we'd have clobbered it with the parent/child set
+	   of r20.  Read the saved copy.  */
+	/* Note: if CLONE_SETTLS is not set, then we must inherit the
+	   value from the parent, which will have been set by the block
+	   copy in dup_task_struct.  This is non-intuitive, but is
+	   required for proper operation in the case of a threaded
+	   application calling fork.  */
+	if (clone_flags & CLONE_SETTLS)
+		childti->pcb.unique = settls;
 
 	return 0;
-}
-
-/*
- * Fill in the user structure for an ECOFF core dump.
- */
-void
-dump_thread(struct pt_regs * pt, struct user * dump)
-{
-	/* switch stack follows right below pt_regs: */
-	struct switch_stack * sw = ((struct switch_stack *) pt) - 1;
-
-	dump->magic = CMAGIC;
-	dump->start_code  = current->mm->start_code;
-	dump->start_data  = current->mm->start_data;
-	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((current->mm->end_code - dump->start_code)
-			 >> PAGE_SHIFT);
-	dump->u_dsize = ((current->mm->brk + PAGE_SIZE-1 - dump->start_data)
-			 >> PAGE_SHIFT);
-	dump->u_ssize = (current->mm->start_stack - dump->start_stack
-			 + PAGE_SIZE-1) >> PAGE_SHIFT;
-
-	/*
-	 * We store the registers in an order/format that is
-	 * compatible with DEC Unix/OSF/1 as this makes life easier
-	 * for gdb.
-	 */
-	dump->regs[EF_V0]  = pt->r0;
-	dump->regs[EF_T0]  = pt->r1;
-	dump->regs[EF_T1]  = pt->r2;
-	dump->regs[EF_T2]  = pt->r3;
-	dump->regs[EF_T3]  = pt->r4;
-	dump->regs[EF_T4]  = pt->r5;
-	dump->regs[EF_T5]  = pt->r6;
-	dump->regs[EF_T6]  = pt->r7;
-	dump->regs[EF_T7]  = pt->r8;
-	dump->regs[EF_S0]  = sw->r9;
-	dump->regs[EF_S1]  = sw->r10;
-	dump->regs[EF_S2]  = sw->r11;
-	dump->regs[EF_S3]  = sw->r12;
-	dump->regs[EF_S4]  = sw->r13;
-	dump->regs[EF_S5]  = sw->r14;
-	dump->regs[EF_S6]  = sw->r15;
-	dump->regs[EF_A3]  = pt->r19;
-	dump->regs[EF_A4]  = pt->r20;
-	dump->regs[EF_A5]  = pt->r21;
-	dump->regs[EF_T8]  = pt->r22;
-	dump->regs[EF_T9]  = pt->r23;
-	dump->regs[EF_T10] = pt->r24;
-	dump->regs[EF_T11] = pt->r25;
-	dump->regs[EF_RA]  = pt->r26;
-	dump->regs[EF_T12] = pt->r27;
-	dump->regs[EF_AT]  = pt->r28;
-	dump->regs[EF_SP]  = rdusp();
-	dump->regs[EF_PS]  = pt->ps;
-	dump->regs[EF_PC]  = pt->pc;
-	dump->regs[EF_GP]  = pt->gp;
-	dump->regs[EF_A0]  = pt->r16;
-	dump->regs[EF_A1]  = pt->r17;
-	dump->regs[EF_A2]  = pt->r18;
-	memcpy((char *)dump->regs + EF_SIZE, sw->fp, 32 * 8);
 }
 
 /*
  * Fill in the user structure for a ELF core dump.
  */
 void
-dump_elf_thread(elf_gregset_t dest, struct pt_regs *pt,
-		struct task_struct *task)
+dump_elf_thread(elf_greg_t *dest, struct pt_regs *pt, struct thread_info *ti)
 {
 	/* switch stack follows right below pt_regs: */
 	struct switch_stack * sw = ((struct switch_stack *) pt) - 1;
@@ -436,38 +354,40 @@ dump_elf_thread(elf_gregset_t dest, struct pt_regs *pt,
 	dest[27] = pt->r27;
 	dest[28] = pt->r28;
 	dest[29] = pt->gp;
-	dest[30] = rdusp();
+	dest[30] = ti == current_thread_info() ? rdusp() : ti->pcb.usp;
 	dest[31] = pt->pc;
 
 	/* Once upon a time this was the PS value.  Which is stupid
 	   since that is always 8 for usermode.  Usurped for the more
 	   useful value of the thread's UNIQUE field.  */
-	dest[32] = task->thread.unique;
+	dest[32] = ti->pcb.unique;
 }
+EXPORT_SYMBOL(dump_elf_thread);
 
 int
-dump_fpu(struct pt_regs * regs, elf_fpregset_t *r)
+dump_elf_task(elf_greg_t *dest, struct task_struct *task)
 {
-	/* switch stack follows right below pt_regs: */
-	struct switch_stack * sw = ((struct switch_stack *) regs) - 1;
-	memcpy(r, sw->fp, 32 * 8);
+	dump_elf_thread(dest, task_pt_regs(task), task_thread_info(task));
 	return 1;
 }
+EXPORT_SYMBOL(dump_elf_task);
+
+int
+dump_elf_task_fp(elf_fpreg_t *dest, struct task_struct *task)
+{
+	struct switch_stack *sw = (struct switch_stack *)task_pt_regs(task) - 1;
+	memcpy(dest, sw->fp, 32 * 8);
+	return 1;
+}
+EXPORT_SYMBOL(dump_elf_task_fp);
 
 /*
  * sys_execve() executes a new program.
- *
- * This works due to the alpha calling sequence: the first 6 args
- * are gotten from registers, while the rest is on the stack, so
- * we get a0-a5 for free, and then magically find "struct pt_regs"
- * on the stack for us..
- *
- * Don't do this at home.
  */
 asmlinkage int
-sys_execve(char *ufilename, char **argv, char **envp,
-	   unsigned long a3, unsigned long a4, unsigned long a5,
-	   struct pt_regs regs)
+do_sys_execve(const char __user *ufilename,
+	      const char __user *const __user *argv,
+	      const char __user *const __user *envp, struct pt_regs *regs)
 {
 	int error;
 	char *filename;
@@ -476,19 +396,40 @@ sys_execve(char *ufilename, char **argv, char **envp,
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
-	error = do_execve(filename, argv, envp, &regs);
+	error = do_execve(filename, argv, envp, regs);
 	putname(filename);
 out:
 	return error;
 }
 
 /*
- * These bracket the sleeping functions..
+ * Return saved PC of a blocked thread.  This assumes the frame
+ * pointer is the 6th saved long on the kernel stack and that the
+ * saved return address is the first long in the frame.  This all
+ * holds provided the thread blocked through a call to schedule() ($15
+ * is the frame pointer in schedule() and $15 is saved at offset 48 by
+ * entry.S:do_switch_stack).
+ *
+ * Under heavy swap load I've seen this lose in an ugly way.  So do
+ * some extra sanity checking on the ranges we expect these pointers
+ * to be in so that we can fail gracefully.  This is just for ps after
+ * all.  -- r~
  */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
+
+unsigned long
+thread_saved_pc(struct task_struct *t)
+{
+	unsigned long base = (unsigned long)task_stack_page(t);
+	unsigned long fp, sp = task_thread_info(t)->pcb.ksp;
+
+	if (sp > base && sp+6*8 < base + 16*1024) {
+		fp = ((unsigned long*)sp)[6];
+		if (fp > sp && fp < base + 16*1024)
+			return *(unsigned long *)fp;
+	}
+
+	return 0;
+}
 
 unsigned long
 get_wchan(struct task_struct *p)
@@ -507,9 +448,9 @@ get_wchan(struct task_struct *p)
 	 * after all...
 	 */
 
-	pc = thread_saved_pc(&p->thread);
-	if (pc >= first_sched && pc < last_sched) {
-		schedule_frame = ((unsigned long *)p->thread.ksp)[6];
+	pc = thread_saved_pc(p);
+	if (in_sched_functions(pc)) {
+		schedule_frame = ((unsigned long *)task_thread_info(p)->pcb.ksp)[6];
 		return ((unsigned long *)schedule_frame)[12];
 	}
 	return pc;

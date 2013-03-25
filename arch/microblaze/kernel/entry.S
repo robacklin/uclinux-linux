@@ -1,13 +1,14 @@
 /*
- * arch/microblaze/kernel/entry.S -- Low-level system-call handling, trap handlers,
- *	and context-switching
+ * Low-level system-call handling, trap handlers and context-switching
  *
- *  Copyright (C) 2003	     John Williams <jwilliams@itee.uq.edu.au>
- *  Copyright (C) 2001,2002  NEC Corporation
- *  Copyright (C) 2001,2002  Miles Bader <miles@gnu.org>
+ * Copyright (C) 2008-2009 Michal Simek <monstr@monstr.eu>
+ * Copyright (C) 2008-2009 PetaLogix
+ * Copyright (C) 2003		John Williams <jwilliams@itee.uq.edu.au>
+ * Copyright (C) 2001,2002	NEC Corporation
+ * Copyright (C) 2001,2002	Miles Bader <miles@gnu.org>
  *
  * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file COPYING in the main directory of this
+ * Public License. See the file COPYING in the main directory of this
  * archive for more details.
  *
  * Written by Miles Bader <miles@gnu.org>
@@ -15,660 +16,266 @@
  */
 
 #include <linux/sys.h>
+#include <linux/linkage.h>
 
 #include <asm/entry.h>
-#include <asm/clinkage.h>
 #include <asm/current.h>
 #include <asm/processor.h>
-#include <asm/irq.h>
-#include <linux/config.h>
 #include <asm/exceptions.h>
+#include <asm/asm-offsets.h>
+#include <asm/thread_info.h>
 
-#include "microblaze_defs.h"
+#include <asm/page.h>
+#include <asm/unistd.h>
 
+#include <linux/errno.h>
+#include <asm/signal.h>
 
-/* Make a slightly more convenient alias for C_SYMBOL_NAME.  */
-#define CSYM	C_SYMBOL_NAME
+#undef DEBUG
 
-/* The offset of the struct pt_regs in a `state save frame' on the stack.  */
-#define PTO	STATE_SAVE_PT_OFFSET
+#ifdef DEBUG
+/* Create space for syscalls counting. */
+.section .data
+.global syscall_debug_table
+.align 4
+syscall_debug_table:
+	.space	(__NR_syscalls * 4)
+#endif /* DEBUG */
 
-/* Standard way of enabling and disabling interrupts in entry.S */
+#define C_ENTRY(name)	.globl name; .align 4; name
+
+/*
+ * Various ways of setting and clearing BIP in flags reg.
+ * This is mucky, but necessary using microblaze version that
+ * allows msr ops to write to BIP
+ */
 #if CONFIG_XILINX_MICROBLAZE0_USE_MSR_INSTR
-#define ENTRY_CLI(scratch_reg)                                                \
-	msrclr scratch_reg, 0x2;					      \
-	nop;
+	.macro	clear_bip
+	msrclr	r0, MSR_BIP
+	.endm
 
-#define ENTRY_EI(scratch_reg)                                                 \
-	msrset scratch_reg, 0x2;					      \
-	nop;
+	.macro	set_bip
+	msrset	r0, MSR_BIP
+	.endm
 
+	.macro	clear_eip
+	msrclr	r0, MSR_EIP
+	.endm
+
+	.macro	set_ee
+	msrset	r0, MSR_EE
+	.endm
+
+	.macro	disable_irq
+	msrclr	r0, MSR_IE
+	.endm
+
+	.macro	enable_irq
+	msrset	r0, MSR_IE
+	.endm
+
+	.macro	set_ums
+	msrset	r0, MSR_UMS
+	msrclr	r0, MSR_VMS
+	.endm
+
+	.macro	set_vms
+	msrclr	r0, MSR_UMS
+	msrset	r0, MSR_VMS
+	.endm
+
+	.macro	clear_ums
+	msrclr	r0, MSR_UMS
+	.endm
+
+	.macro	clear_vms_ums
+	msrclr	r0, MSR_VMS | MSR_UMS
+	.endm
 #else
+	.macro	clear_bip
+	mfs	r11, rmsr
+	andi	r11, r11, ~MSR_BIP
+	mts	rmsr, r11
+	.endm
 
-#define ENTRY_CLI(scratch_reg)                                                \
-        mfs     scratch_reg, rmsr;                                            \
-        andi    scratch_reg, scratch_reg, ~2;                                 \
-        mts     rmsr, scratch_reg;					      \
-	nop;
+	.macro	set_bip
+	mfs	r11, rmsr
+	ori	r11, r11, MSR_BIP
+	mts	rmsr, r11
+	.endm
 
-#define ENTRY_EI(scratch_reg)                                                 \
-	mfs     scratch_reg, rmsr;                                            \
-	ori     scratch_reg, scratch_reg, 2;                                  \
-	mts     rmsr, scratch_reg;					      \
-	nop;
+	.macro	clear_eip
+	mfs	r11, rmsr
+	andi	r11, r11, ~MSR_EIP
+	mts	rmsr, r11
+	.endm
+
+	.macro	set_ee
+	mfs	r11, rmsr
+	ori	r11, r11, MSR_EE
+	mts	rmsr, r11
+	.endm
+
+	.macro	disable_irq
+	mfs	r11, rmsr
+	andi	r11, r11, ~MSR_IE
+	mts	rmsr, r11
+	.endm
+
+	.macro	enable_irq
+	mfs	r11, rmsr
+	ori	r11, r11, MSR_IE
+	mts	rmsr, r11
+	.endm
+
+	.macro set_ums
+	mfs	r11, rmsr
+	ori	r11, r11, MSR_VMS
+	andni	r11, r11, MSR_UMS
+	mts	rmsr, r11
+	.endm
+
+	.macro	set_vms
+	mfs	r11, rmsr
+	ori	r11, r11, MSR_VMS
+	andni	r11, r11, MSR_UMS
+	mts	rmsr, r11
+	.endm
+
+	.macro	clear_ums
+	mfs	r11, rmsr
+	andni	r11, r11, MSR_UMS
+	mts	rmsr,r11
+	.endm
+
+	.macro	clear_vms_ums
+	mfs	r11, rmsr
+	andni	r11, r11, (MSR_VMS|MSR_UMS)
+	mts	rmsr,r11
+	.endm
 #endif
 
-/* Various ways of setting and clearing BIP in flags reg.  This is mucky, but
-   necessary */
-//#ifdef CONFIG_MICROBLAZE_BIPDIRECT
-#if 1
-  /* using microblaze version that allows msr ops to write to BIP */
-  #if CONFIG_XILINX_MICROBLAZE0_USE_MSR_INSTR
-	#define BIPCLR(scratch_reg)					      \
-		msrclr 	scratch_reg, 0x8;				      \
-		nop;
-
-	#define BIPSET(scratch_reg)					      \
-		msrset	scratch_reg, 0x8;				      \
-		nop;
-  #else
-	#define BIPCLR(scratch_reg)					      \
-		mfs	scratch_reg, rmsr;				      \
-		andi	scratch_reg, scratch_reg, ~0x8;			      \
-		mts	rmsr, scratch_reg;				      \
-		nop;
-
-	#define BIPSET(scratch_reg)					      \
-		mfs	scratch_reg, rmsr;				      \
-		ori	scratch_reg, scratch_reg, 0x8;			      \
-		mts	rmsr, scratch_reg;				      \
-		nop;
-  #endif
-#else
-  /* Older microblaze version that prevents direct access to BIP bit 
-     We hack around it using the rtbd and brki instructions */
-	#define BIPCLR(scratch_reg)					      \
-		rtbd	r0, 1f;						      \
-		nop;							      \
-	   1:
-
-	#define BIPSET(scratch_reg)					      \
-		brki	r0, 1f;						      \
-	   1:
-#endif
-	
-/* Standard macros to save and restore regs in the pt_regs struct pointed
-   to by the stack pointer (r1) */
-#define SAVE_REG(reg_num) \
-	swi	macrology_paste(r,reg_num), r1, PTO+PT_GPR(reg_num);
-
-#define RESTORE_REG(reg_num) \
-	lwi	macrology_paste(r,reg_num), r1, PTO+PT_GPR(reg_num);
-
-/* Save argument registers to the struct pt_regs pointed to by EP.  */
-#define SAVE_ARG_REGS							      \
-	SAVE_REG(5);							      \
-	SAVE_REG(6);							      \
-	SAVE_REG(7);							      \
-	SAVE_REG(8);							      \
-	SAVE_REG(9);							      \
-	SAVE_REG(10);	
-
-/* Restore argument registers from the struct pt_regs pointed to by EP.  */
-#define RESTORE_ARG_REGS						      \
-	RESTORE_REG(5);							      \
-	RESTORE_REG(6);							      \
-	RESTORE_REG(7);							      \
-	RESTORE_REG(8);							      \
-	RESTORE_REG(9);							      \
-	RESTORE_REG(10);
-
-/* Save value return registers to the struct pt_regs pointed to by EP.  */
-#define SAVE_RVAL_REGS							      \
-	SAVE_REG(3);							      \
-	SAVE_REG(4);							      
-
-/* Restore value return registers from the struct pt_regs pointed to by EP.  */
-#define RESTORE_RVAL_REGS						      \
-	RESTORE_REG(3);							      \
-	RESTORE_REG(4);	
-
-#define SAVE_CALL_CLOBBERED_REGS_BEFORE_ARGS
-
-#define SAVE_CALL_CLOBBERED_REGS_AFTER_RVAL				      \
-	SAVE_REG(11);							      \
-	SAVE_REG(12);							      
-
-#define RESTORE_CALL_CLOBBERED_REGS_BEFORE_ARGS	
-
-#define RESTORE_CALL_CLOBBERED_REGS_AFTER_RVAL				      \
-	RESTORE_REG(11);						      \
-	RESTORE_REG(12);						      
-
-/* Save `call clobbered' registers to the struct pt_regs pointed to by EP.  */
-#define SAVE_CALL_CLOBBERED_REGS					      \
-	SAVE_CALL_CLOBBERED_REGS_BEFORE_ARGS;				      \
-	SAVE_RVAL_REGS;							      \
-	SAVE_ARG_REGS;							      \
-	SAVE_CALL_CLOBBERED_REGS_AFTER_RVAL;
-/* Restore `call clobbered' registers from the struct pt_regs pointed to
-   by EP.  */
-#define RESTORE_CALL_CLOBBERED_REGS					      \
-	RESTORE_CALL_CLOBBERED_REGS_BEFORE_ARGS;			      \
-	RESTORE_RVAL_REGS;						      \
-	RESTORE_ARG_REGS;						      \
-	RESTORE_CALL_CLOBBERED_REGS_AFTER_RVAL;
-
-/* Save `call clobbered' registers except for the return-value registers
-   to the struct pt_regs pointed to by EP.  */
-#define SAVE_CALL_CLOBBERED_REGS_NO_RVAL				      \
-	SAVE_CALL_CLOBBERED_REGS_BEFORE_ARGS;				      \
-	SAVE_ARG_REGS;							      \
-	SAVE_CALL_CLOBBERED_REGS_AFTER_RVAL;
-/* Restore `call clobbered' registers except for the return-value registers
-   from the struct pt_regs pointed to by EP.  */
-#define RESTORE_CALL_CLOBBERED_REGS_NO_RVAL				      \
-	RESTORE_CALL_CLOBBERED_REGS_BEFORE_ARGS;			      \
-	RESTORE_ARG_REGS;						      \
-	RESTORE_CALL_CLOBBERED_REGS_AFTER_RVAL;
-
-#define ZERO_REG(reg_num)						      \
-	add	r ## reg_num, r0, r0;
-
-/* Zero `call clobbered' registers except for the return-value registers.  */
-#define ZERO_CALL_CLOBBERED_REGS_NO_RVAL				      \
-	ZERO_REG(11); ZERO_REG(12);			      
-
-/* Save `call saved' registers to the struct pt_regs pointed to by EP.  */
-#define SAVE_CALL_SAVED_REGS						      \
-	SAVE_REG(19);							      \
-	SAVE_REG(20);							      \
-	SAVE_REG(21);							      \
-	SAVE_REG(22);							      \
-	SAVE_REG(23);							      \
-	SAVE_REG(24);							      \
-	SAVE_REG(25);							      \
-	SAVE_REG(26);							      \
-	SAVE_REG(27);							      \
-	SAVE_REG(28);							      \
-	SAVE_REG(29);							      \
-	SAVE_REG(30);							      \
- 	SAVE_REG(31);
-
-/* Restore `call saved' registers from the struct pt_regs pointed to by EP.  */
-#define RESTORE_CALL_SAVED_REGS						      \
-	RESTORE_REG(19);						      \
-	RESTORE_REG(20);						      \
-	RESTORE_REG(21);						      \
-	RESTORE_REG(22);						      \
-	RESTORE_REG(23);						      \
-	RESTORE_REG(24);						      \
-	RESTORE_REG(25);						      \
-	RESTORE_REG(26);						      \
-	RESTORE_REG(27);						      \
-	RESTORE_REG(28);						      \
-	RESTORE_REG(29);						      \
-	RESTORE_REG(30);						      \
-	RESTORE_REG(31);
-
-                                                                                
-/* Save link register into state save frame */
-#define SAVE_LINK(linkreg)						      \
-	swi	linkreg, r1, PTO+PT_PC;		/* PC, before IRQ/trap /*     
-
-/* Restore saved PC into desired return link register */
-#define RESTORE_LINK(linkreg)						      \
-	lwi	linkreg, r1, PTO+PT_PC;		/* PC, before IRQ/trap /*     
-
-/* Save a special reg into saved state frame
-   Clobbers r{clobber} in the process */
-#define SAVE_SPECIAL(reg,OFFS,clobber)					      \
-	mfs	clobber, r ## reg;					      \
-	swi	clobber, r1, PTO+PT_ ## OFFS;
-
-/* Restore a special reg from saved state frame
-   Clobbers r{clobber} */
-#define RESTORE_SPECIAL(reg,OFFS,clobber)				      \
-	lwi	clobber, r1, PTO+PT_ ## OFFS;				      \
-	mts	r ## reg , clobber;
-
-/* Save processor status word into saved state frame
-   Uses r{clobber} as a clobber register */
-#define SAVE_PSW(clobber)						      \
-	SAVE_SPECIAL(msr,PSW,clobber)						      
-
-/* Restore processor status word from saved state frame
-   Uses r{clobber} as a clobber register */
-#define RESTORE_PSW(clobber)						      \
-	RESTORE_SPECIAL(msr,PSW,clobber)
-
-/* Save system registers to the struct pt_regs pointed to by REG.  
-   r14 is clobbered, but it's already saved on the frame. */
-#define SAVE_SYS_REGS_FOR_IRQ						      \
-	SAVE_REG(17); 							      \
-	SAVE_LINK(r14);							      \
-	SAVE_PSW(r14);
-
-/* Restore system registers from the struct pt_regs pointed to by EP.         
-   clobber r14 to restore status register, it gets fixed immediately */    
-#define RESTORE_SYS_REGS_FOR_IRQ					      \
-	RESTORE_PSW(r14);						      \
-	RESTORE_LINK(r14);						      \
-	RESTORE_REG(17);
-
-/* Save system registers to the struct pt_regs pointed to by REG.  
-   r14 is clobbered, but not until after it's saved on the frame.
-   We add 4 to r14 (the return PC address, so we can return with an
-   rtbd r14,0.  This unifies handling of return offsets in signal handler
-   and makes life a lot easier.
-   r12 must be saved in case we end up doing a syscall restart */
-#define SAVE_SYS_REGS_FOR_TRAP						      \
-	SAVE_REG(12);							      \
-	SAVE_REG(17); 							      \
-	addik	r14, r14, 4;						      \
-	SAVE_LINK(r14);							      \
-	SAVE_PSW(r14);
-
-/* Restore system registers from the struct pt_regs pointed to by EP.         
-   clobber r14 to restore status register, but is fixed immediately.
-   r12 is restored in case we are doing a syscall restart */
-#define RESTORE_SYS_REGS_FOR_TRAP					      \
-	RESTORE_PSW(r14);						      \
-	RESTORE_LINK(r14);						      \
-	RESTORE_REG(17);						      \
-	RESTORE_REG(12);
-
-/* Save system registers to the struct pt_regs pointed to by REG.  
-   r14 is clobbered after being saved on the frame..  */
-#define SAVE_SYS_REGS_FOR_DBTRAP					      \
-	SAVE_REG(17);							      \
-	SAVE_LINK(r14);							      \
-	SAVE_PSW(r14);
-
-/* Restore system registers from the struct pt_regs pointed to by EP.         
-   clobber r14 to restore status register, but is fixed immediately */
-#define RESTORE_SYS_REGS_FOR_DBTRAP					      \
-	RESTORE_PSW(r14);						      \
-	RESTORE_LINK(r14);						      \
-	RESTORE_REG(17);
-
-/* Save system registers to the struct pt_regs pointed to by REG.  This is a
-   NMI-specific version, because NMIs save the PC/PSW in a different place
-   than other interrupt requests.  r16 is clobbered after being saved on frame.  */
-#define SAVE_SYS_REGS_FOR_NMI						      \
-	SAVE_LINK(r16);							      \
-	SAVE_PSW(r16);
-
-/* Restore system registers from the struct pt_regs pointed to by EP.  This is
-   a NMI-specific version, because NMIs save the PC/PSW in a different place
-   than other interrupt requests.  r16 is clobbered, but immediately restored */
-#define RESTORE_SYS_REGS_FOR_NMI					      \
-	RESTORE_PSW(r16);						      \
-	RESTORE_LINK(r16);
-
-/* Push register state, except for the stack pointer, on the stack in the form
-   of a struct pt_regs, in preparation for a system call.  This macro makes
-   sure that `special' registers, system registers; TYPE identifies the set of
-   extra registers to be saved as well.  EP is clobbered.  
-   Uses add(i)k to prevent corrupting carry flags prior to them being saved */
-#ifdef CONFIG_REGISTER_TASK_PTR						      
-#define PUSH_STATE(type)						      \
-	addik	r1, r1, -STATE_SAVE_SIZE; /* Make room on the stack.  */      \
-	SAVE_REG(2);				/* Save SDA */		      \
-	SAVE_REG(13);				/* Save SDA2 */		      \
-	SAVE_REG(15);				/* Save LP */		      \
-	SAVE_REG(18);				/* Save asm scratch reg */    \
-	SAVE_REG(CURRENT_TASK_REGNUM);		/* Save current task reg */   \
-	type ## _STATE_SAVER;
-#else
-#define PUSH_STATE(type)						      \
-	addik	r1, r1, -STATE_SAVE_SIZE; /* Make room on the stack.  */      \
-	SAVE_REG(2);				/* Save SDA */		      \
-	SAVE_REG(13);				/* Save SDA2 */		      \
-	SAVE_REG(15);				/* Save LP */		      \
-	SAVE_REG(18);				/* Save asm scratch reg */    \
-	type ## _STATE_SAVER;
-#endif									      
-
-/* Pop a register state, except for the stack pointer, from the struct pt_regs
-   on the stack.  */
-#ifdef CONFIG_REGISTER_TASK_PTR						      
-#define POP_STATE(type)							      \
-	type ## _STATE_RESTORER;					      \
-	RESTORE_REG(2);				/* Restore SDA */	      \
-	RESTORE_REG(13);			/* Restore SDA2 */	      \
-	RESTORE_REG(15);			/* Restore LP */	      \
-	RESTORE_REG(18);			/* Restore asm scratch reg */ \
-	RESTORE_REG(CURRENT_TASK_REGNUM);	/* Restore cur task reg */    \
-	addik	r1, r1, STATE_SAVE_SIZE		/* Clean up stack space.  */
-#else
-#define POP_STATE(type)							      \
-	type ## _STATE_RESTORER;					      \
-	RESTORE_REG(2);				/* Restore SDA */	      \
-	RESTORE_REG(13);			/* Restore SDA2 */	      \
-	RESTORE_REG(15);			/* Restore LP */	      \
-	RESTORE_REG(18);			/* Restore asm scratch reg */ \
-	addik	r1, r1, STATE_SAVE_SIZE		/* Clean up stack space.  */
-#endif
-
-
-/* Switch to the kernel stack if necessary, and push register state on
-   the stack in the form of a struct pt_regs.  Also load the current
-   task pointer if switching from user mode.  The stack-pointer (r3)
-   should have already been saved to the memory location SP_SAVE_LOC
-   (the reason for this is that the interrupt vectors may be beyond a
-   22-bit signed offset jump from the actual interrupt handler, and this
-   allows them to save the stack-pointer and use that register to do an
-   indirect jump).  This macro makes sure that `special' registers,
-   system registers, and the stack pointer are saved; TYPE identifies
-   the set of extra registers to be saved as well.  SYSCALL_NUM is the
-   register in which the system-call number this state is for is stored
-   (r0 if this isn't a system call).  Interrupts should already be
-   disabled when calling this.  */
-#define SAVE_STATE(type, syscall_num, sp_save_loc)			      \
-	swi	r11, r0, R11_SAVE;	/* Save r11 */			      \
-        lwi	r11, r0, KM;		/* See if already in kernel mode.  */ \
-	beqi	r11, 1f;		/* Jump ahead if coming from user */  \
-	lwi	r11, r0, R11_SAVE;	/* restore r11 */		      \
-        /* Kernel-mode state save.  */					      \
-	lwi	r1, r0, sp_save_loc;	/* Reload kernel stack-pointer.  */   \
-	swi	r1, r1, (PT_GPR(GPR_SP)-PT_SIZE); /* Save original SP. */     \
-        PUSH_STATE(type);						      \
-	addi	r11, r0, 1; 		/* Was in kernel-mode.  */	      \
-        swi	r11, r1, PTO+PT_KERNEL_MODE; 	 			      \
-        brid	2f;							      \
-	nop;				/* Fill delay slot */		      \
-1:      /* User-mode state save.  */					      \
-	lwi	r11, r0, R11_SAVE;	/* restore r11 */		      \
-        lwi	r1, r0, KSP;		/* Switch to kernel stack.  */	      \
-        PUSH_STATE(type);						      \
-	swi	r0, r1, PTO+PT_KERNEL_MODE; /* Was in user-mode.  */	      \
-	lwi	r11, r0, sp_save_loc;					      \
-	swi	r11, r1, PTO+PT_GPR(GPR_SP); /* Store user SP.  */	      \
-	addi	r11, r0, 1;						      \
-	swi	r11, r0, KM;		/* Now we're in kernel-mode.  */      \
-	GET_CURRENT_TASK(CURRENT_TASK);	/* Update the current task pointer.*/ \
-2:      /* Save away the syscall number.  */				      \
-        swi	syscall_num, r1, PTO+PT_SYSCALL
-
-
-/* Save register state not normally saved by PUSH_STATE for TYPE.  */
-#define SAVE_EXTRA_STATE(type)						      \
-	type ## _EXTRA_STATE_SAVER;
-
-/* Restore register state not normally restored by POP_STATE for TYPE.  */
-#define RESTORE_EXTRA_STATE(type)					      \
-	type ## _EXTRA_STATE_RESTORER;
-
-/* Save any call-clobbered registers not normally saved by PUSH_STATE
-   for TYPE.  */
-#define SAVE_EXTRA_STATE_FOR_FUNCALL(type)				      \
-	type ## _FUNCALL_EXTRA_STATE_SAVER;
-
-/* Restore any call-clobbered registers not normally restored by POP_STATE for
-   TYPE.  */
-#define RESTORE_EXTRA_STATE_FOR_FUNCALL(type)				      \
-	type ## _FUNCALL_EXTRA_STATE_RESTORER;
-
-
-/* These are extra_state_saver/restorer values for a user trap.  Note that we
-   save the argument registers so that restarted syscalls will function
-   properly (otherwise it wouldn't be necessary), and we must _not_ restore
-   the return-value registers (so that traps can return a value!), but there
-   are various options for what happens to other call-clobbered registers,
-   selected by preprocessor conditionals.  */
-
-#if TRAPS_PRESERVE_CALL_CLOBBERED_REGS
-   
-/* Traps save/restore all call-clobbered registers (except for rval regs).  */
-#define TRAP_STATE_SAVER						      \
-     SAVE_CALL_CLOBBERED_REGS_NO_RVAL;					      \
-     SAVE_SYS_REGS_FOR_TRAP
-
-#define TRAP_STATE_RESTORER						      \
-     RESTORE_SYS_REGS_FOR_TRAP						      \
-     RESTORE_CALL_CLOBBERED_REGS_NO_RVAL;
-
-#else /* !TRAPS_PRESERVE_CALL_CLOBBERED_REGS */
-
-/* Traps don't save call-clobbered registers (but do still save arg regs).  */
-#define TRAP_STATE_SAVER						      \
-     SAVE_ARG_REGS;							      \
-     SAVE_SYS_REGS_FOR_TRAP
-
-#if TRAPS_ZERO_CALL_CLOBBERED_REGS
-   
-/* Traps zero call-clobbered registers (except for arg/rval regs) before
-   returning from a system call, to avoid any internal values from leaking out
-   of the kernel.  */
-#define TRAP_STATE_RESTORER						      \
-     RESTORE_SYS_REGS_FOR_TRAP;						      \
-     ZERO_CALL_CLOBBERED_REGS_NO_ARGS_NO_RVAL;				      \
-     RESTORE_ARG_REGS;
-
-#else /* !TRAPS_ZERO_CALL_CLOBBERED_REGS */
-   
-/* When traps return, they just leave call-clobbered registers (except for arg
-   regs) with whatever value they have from the kernel.  */
-#define TRAP_STATE_RESTORER						      \
-     RESTORE_SYS_REGS_FOR_TRAP;						      \
-     RESTORE_ARG_REGS;
-
-#endif /* TRAPS_ZERO_CALL_CLOBBERED_REGS */
-#endif /* TRAPS_PRESERVE_CALL_CLOBBERED_REGS */
-
-/* Save registers not normally saved by traps.  */
-#define TRAP_EXTRA_STATE_SAVER						      \
-   SAVE_RVAL_REGS;							      \
-   SAVE_CALL_SAVED_REGS
-
-#define TRAP_EXTRA_STATE_RESTORER					      \
-   RESTORE_RVAL_REGS;							      \
-   RESTORE_CALL_SAVED_REGS
-
-#define TRAP_FUNCALL_EXTRA_STATE_SAVER					      \
-   SAVE_RVAL_REGS
-
-#define TRAP_FUNCALL_EXTRA_STATE_RESTORER				      \
-   RESTORE_RVAL_REGS
-
-/* Save registers not normally saved by traps.  */
-/* DBTRAP saves everything on entry, so nothing "extra" to save */
-#define DBTRAP_EXTRA_STATE_SAVER
-#define DBTRAP_EXTRA_STATE_RESTORER
-
-#define DBTRAP_FUNCALL_EXTRA_STATE_SAVER
-#define DBTRAP_FUNCALL_EXTRA_STATE_RESTORER
-
-/* The PTRACE syscall expects the entire PT_REGS struct to be correct, so no
-   optimisations allows - we must save all registers immediately upon entry */
-#define DBTRAP_STATE_SAVER						      \
-     SAVE_CALL_SAVED_REGS;						      \
-     SAVE_CALL_CLOBBERED_REGS;						      \
-     SAVE_SYS_REGS_FOR_DBTRAP
-
-#define DBTRAP_STATE_RESTORER						      \
-     RESTORE_SYS_REGS_FOR_DBTRAP;					      \
-     RESTORE_CALL_CLOBBERED_REGS					      \
-     RESTORE_CALL_SAVED_REGS;
-
-/* Register saving/restoring for maskable interrupts.  */
-#define IRQ_STATE_SAVER							      \
-   SAVE_CALL_CLOBBERED_REGS;						      \
-   SAVE_SYS_REGS_FOR_IRQ
-
-#define IRQ_STATE_RESTORER						      \
-   RESTORE_SYS_REGS_FOR_IRQ						      \
-   RESTORE_CALL_CLOBBERED_REGS;	
-
-#define IRQ_EXTRA_STATE_SAVER						      \
-   SAVE_CALL_SAVED_REGS
-
-#define IRQ_EXTRA_STATE_RESTORER					      \
-   RESTORE_CALL_SAVED_REGS
-
-#define IRQ_FUNCALL_EXTRA_STATE_SAVER       /* nothing */
-
-#define IRQ_FUNCALL_EXTRA_STATE_RESTORER    /* nothing */
-
-/* Register saving/restoring for non-maskable interrupts.  */
-#define NMI_STATE_SAVER							      \
-   SAVE_CALL_CLOBBERED_REGS;						      \
-   SAVE_SYS_REGS_FOR_NMI
-
-#define NMI_STATE_RESTORER						      \
-   RESTORE_SYS_REGS_FOR_NMI						      \
-   RESTORE_CALL_CLOBBERED_REGS;
-
-#define NMI_EXTRA_STATE_SAVER						      \
-   SAVE_CALL_SAVED_REGS
-
-#define NMI_EXTRA_STATE_RESTORER					      \
-   RESTORE_CALL_SAVED_REGS
-
-#define NMI_FUNCALL_EXTRA_STATE_SAVER       /* nothing */
-
-#define NMI_FUNCALL_EXTRA_STATE_RESTORER    /* nothing */
-   
-/* Register saving/restoring for a context switch.  We don't need to save too
-   many registers, because context-switching looks like a function call (via
-   the function `switch_thread'), so callers will save any call-clobbered
-   registers themselves.  The stack pointer and return value are handled by
-   switch_thread itself.  */
-#define SWITCH_STATE_SAVER						      \
-   SAVE_CALL_SAVED_REGS							      \
-   SAVE_PSW(r11)
-
-#define SWITCH_STATE_RESTORER						      \
-   RESTORE_PSW(r11)							      \
-   RESTORE_CALL_SAVED_REGS
-
-/* Instructions to return from an IRQ */
-#define IRQ_RETURN_INST							      \
-	rtid	r14, 0;		/* Follow interrupt link pointer back to */   \
-				/* next insn after interrupt occured */       \
-	nop;			/* Delay slot */		      
-
-/* Instructions to return from a trap */
-/* Note we use rtbd to clear BIP bit on way out */
-/* Return offset is zero, because we incremented r14 on the way in */
-#define TRAP_RETURN_INST						      \
-	rtbd	r14, 0;		/* r14 used as trap link register */	      \
-	nop;
-
-/* Instructions to return from a debug trap */
-/* Note we use rtbd to clear BIP bit on exit */
-/* Return offset is zero, to ensure trapped instruction is re-executed */
-#define DBTRAP_RETURN_INST						      \
-	rtbd	r14, 0;		/* r14 used as trap link register */	      \
-	nop;
-
-/* Code fragment to return from NMI */
-#define NMI_RETURN_INST							      \
-	rtbd	r16, 0;		/* r16 is NMI (brk) link register */	      \
-	nop;
-
-/* Restore register state from the struct pt_regs on the stack, switch back
-   to the user stack if necessary, and return from the trap/interrupt.
-   EXTRA_STATE_RESTORER is a sequence of assembly language statements to
-   restore anything not restored by this macro.  Only registers not saved by
-   the C compiler are restored (that is, R1(sp), R2(gp), R15(lp), and
-   anything restored by EXTRA_STATE_RESTORER).  */
-#define RETURN(type)							      \
-	ENTRY_CLI(r11);							      \
-        lwi	r11, r1, PTO+PT_KERNEL_MODE;				      \
-	bnei	r11, 2f;		/* See if returning to kernel mode, */\
-					/* ... if so, skip resched &c.  */    \
-									      \
-	/* We're returning to user mode, so check for various conditions that \
-	   trigger rescheduling. */					      \
-	/* Get current task ptr into r11 */				      \
-	RETRIEVE_CURRENT_TASK(r11);					      \
-	lwi	r11, r11, TASK_NEED_RESCHED;				      \
-	bnei	r11, 3f;		/* Call the scheduler */	      \
-									      \
-	/* XXX Is PT_DTRACE handling needed here? */			      \
-	/* XXX m68knommu also checks TASK_STATE & TASK_COUNTER here.  */      \
-									      \
-	/* Maybe handle a signal */					      \
-5:	RETRIEVE_CURRENT_TASK(r11);					      \
-	lwi	r11, r11, TASK_SIGPENDING;				      \
-	bnei	r11, 4f;		/* Signals to handle, handle them */  \
-									      \
-	RETRIEVE_CURRENT_TASK(r11);					      \
-	lwi	r11, r11, TASK_PTRACE;					      \
-	bnei	r11, 4f;		/* Signals to handle, handle them */  \
-									      \
-/* Finally, return to user state.  */					      \
-1:	swi	r0, r0, KM;		/* Now officially in user state. */   \
-	POP_STATE(type);						      \
-	swi	r1, r0, KSP;		/* Save the kernel stack pointer. */  \
-	lwi	r1, r1, PT_GPR(GPR_SP)-PT_SIZE;				      \
-					/* Restore user stack pointer. */     \
-	bri	6f;							      \
-									      \
-/* Return to kernel state.  */						      \
-2:	POP_STATE(type);						      \
-6:									      \
-type ## _return:		/* Make global symbol for debugging */	      \
-	type ## _RETURN_INST						      \
-									      \
-/* Call the scheduler before returning from a syscall/trap. */		      \
-3:	SAVE_EXTRA_STATE_FOR_FUNCALL(type); /* Prepare for funcall. */	      \
-	bralid	r15, CSYM(schedule);	/* Call scheduler */		      \
-	nop;				/* delay slot */		      \
-	ENTRY_CLI(r11);		/* The scheduler enables interrupts */	      \
-	RESTORE_EXTRA_STATE_FOR_FUNCALL(type);				      \
-	brid	5b;		/* Back to continue return processing */      \
-	nop;								      \
-									      \
-/* Handle a signal return; Pending signals should be in r18.  */	      \
-4:      /* Not all registers are saved by the normal trap/interrupt entry     \
-	   points (for instance, call-saved registers (because the normal     \
-	   C-compiler calling sequence in the kernel makes sure they're	      \
-	   preserved), and call-clobbered registers in the case of	      \
-	   traps), but signal handlers may want to examine or change the      \
-	   complete register state.  Here we save anything not saved by	      \
-	   the normal entry sequence, so that it may be safely restored	      \
-	   (in a possibly modified form) after do_signal returns.  */	      \
-        SAVE_EXTRA_STATE(type)		/* Save state not saved by entry. */  \
-	la	r5, r1, PTO;		/* Arg 1: struct pt_regs *regs */     \
-	add	r6, r0, r0;		/* Arg 2: sigset_t *oldset */	      \
-	bralid	r15, CSYM(do_signal);	/* Handle any signals */	      \
-	nop;								      \
-	ENTRY_CLI(r11);		/* Sig handling enables interrupts */	      \
-        RESTORE_EXTRA_STATE(type);	/* Restore extra regs.  */	      \
-	brid	1b;							      \
-	nop;	
-
-
-/* Jump to the appropriate function for the system call number in r12
-   (r12 is not preserved), or return an error if r12 is not valid.  The
-   LP register should point to the location where the called function
-   should return.  [note that MAKE_SYS_CALL uses label 1]  */
-#define MAKE_SYS_CALL							      \
-	/* See if the system call number is valid.  */			      \
-	addi	r11, r12, -NR_syscalls;					      \
-	bgei	r11,1f;							      \
-	/* Figure out which function to use for this system call.  */	      \
-	/* Note Microblaze barrel shift is optional, so don't rely on it */   \
-	add	r12, r12, r12;			/* convert num -> ptr */      \
-	add	r12, r12, r12;						      \
-	lwi	r12, r12, CSYM(sys_call_table);	/* Get function pointer */    \
-	/* Make the system call.  */					      \
-	bra	r12;							      \
-	/* The syscall number is invalid, return an error.  */		      \
-1:	addi	r3, r0, -ENOSYS;					      \
-	rtsd	r15,8;		/* looks like a normal subroutine return */
-
-
-	// Ugly kludge to get around some Xilinx mb-gcc wierdness
-	.data
-	.globl CSYM(_shift_temp_loc)
-CSYM(_shift_temp_loc):
-	.long	0
-
-	.text
+/* Define how to call high-level functions. With MMU, virtual mode must be
+ * enabled when calling the high-level function. Clobbers R11.
+ * VM_ON, VM_OFF, DO_JUMP_BIPCLR, DO_CALL
+ */
+
+/* turn on virtual protected mode save */
+#define VM_ON		\
+	set_ums;	\
+	rted	r0, 2f;	\
+	nop; \
+2:
+
+/* turn off virtual protected mode save and user mode save*/
+#define VM_OFF			\
+	clear_vms_ums;		\
+	rted	r0, TOPHYS(1f);	\
+	nop; \
+1:
+
+#define SAVE_REGS \
+	swi	r2, r1, PT_R2;	/* Save SDA */			\
+	swi	r3, r1, PT_R3;					\
+	swi	r4, r1, PT_R4;					\
+	swi	r5, r1, PT_R5;					\
+	swi	r6, r1, PT_R6;					\
+	swi	r7, r1, PT_R7;					\
+	swi	r8, r1, PT_R8;					\
+	swi	r9, r1, PT_R9;					\
+	swi	r10, r1, PT_R10;					\
+	swi	r11, r1, PT_R11;	/* save clobbered regs after rval */\
+	swi	r12, r1, PT_R12;					\
+	swi	r13, r1, PT_R13;	/* Save SDA2 */			\
+	swi	r14, r1, PT_PC;	/* PC, before IRQ/trap */	\
+	swi	r15, r1, PT_R15;	/* Save LP */			\
+	swi	r16, r1, PT_R16;					\
+	swi	r17, r1, PT_R17;					\
+	swi	r18, r1, PT_R18;	/* Save asm scratch reg */	\
+	swi	r19, r1, PT_R19;					\
+	swi	r20, r1, PT_R20;					\
+	swi	r21, r1, PT_R21;					\
+	swi	r22, r1, PT_R22;					\
+	swi	r23, r1, PT_R23;					\
+	swi	r24, r1, PT_R24;					\
+	swi	r25, r1, PT_R25;					\
+	swi	r26, r1, PT_R26;					\
+	swi	r27, r1, PT_R27;					\
+	swi	r28, r1, PT_R28;					\
+	swi	r29, r1, PT_R29;					\
+	swi	r30, r1, PT_R30;					\
+	swi	r31, r1, PT_R31;	/* Save current task reg */	\
+	mfs	r11, rmsr;		/* save MSR */			\
+	swi	r11, r1, PT_MSR;
+
+#define RESTORE_REGS \
+	lwi	r11, r1, PT_MSR;					\
+	mts	rmsr , r11;						\
+	lwi	r2, r1, PT_R2;	/* restore SDA */		\
+	lwi	r3, r1, PT_R3;					\
+	lwi	r4, r1, PT_R4;					\
+	lwi	r5, r1, PT_R5;					\
+	lwi	r6, r1, PT_R6;					\
+	lwi	r7, r1, PT_R7;					\
+	lwi	r8, r1, PT_R8;					\
+	lwi	r9, r1, PT_R9;					\
+	lwi	r10, r1, PT_R10;					\
+	lwi	r11, r1, PT_R11;	/* restore clobbered regs after rval */\
+	lwi	r12, r1, PT_R12;					\
+	lwi	r13, r1, PT_R13;	/* restore SDA2 */		\
+	lwi	r14, r1, PT_PC;	/* RESTORE_LINK PC, before IRQ/trap */\
+	lwi	r15, r1, PT_R15;	/* restore LP */		\
+	lwi	r16, r1, PT_R16;					\
+	lwi	r17, r1, PT_R17;					\
+	lwi	r18, r1, PT_R18;	/* restore asm scratch reg */	\
+	lwi	r19, r1, PT_R19;					\
+	lwi	r20, r1, PT_R20;					\
+	lwi	r21, r1, PT_R21;					\
+	lwi	r22, r1, PT_R22;					\
+	lwi	r23, r1, PT_R23;					\
+	lwi	r24, r1, PT_R24;					\
+	lwi	r25, r1, PT_R25;					\
+	lwi	r26, r1, PT_R26;					\
+	lwi	r27, r1, PT_R27;					\
+	lwi	r28, r1, PT_R28;					\
+	lwi	r29, r1, PT_R29;					\
+	lwi	r30, r1, PT_R30;					\
+	lwi	r31, r1, PT_R31;	/* Restore cur task reg */
+
+#define SAVE_STATE	\
+	swi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP)); /* save stack */	\
+	/* See if already in kernel mode.*/				\
+	mfs	r1, rmsr;						\
+	andi	r1, r1, MSR_UMS;					\
+	bnei	r1, 1f;						\
+	/* Kernel-mode state save.  */					\
+	/* Reload kernel stack-ptr. */					\
+	lwi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP));			\
+	/* FIXME: I can add these two lines to one */			\
+	/* tophys(r1,r1); */						\
+	/* addik	r1, r1, -PT_SIZE; */				\
+	addik	r1, r1, CONFIG_KERNEL_BASE_ADDR - CONFIG_KERNEL_START - PT_SIZE; \
+	SAVE_REGS							\
+	brid	2f;							\
+	swi	r1, r1, PT_MODE; 	 				\
+1:	/* User-mode state save.  */					\
+	lwi	r1, r0, TOPHYS(PER_CPU(CURRENT_SAVE)); /* get saved current */\
+	tophys(r1,r1);							\
+	lwi	r1, r1, TS_THREAD_INFO;	/* get the thread info */	\
+	/* MS these three instructions can be added to one */		\
+	/* addik	r1, r1, THREAD_SIZE; */				\
+	/* tophys(r1,r1); */						\
+	/* addik	r1, r1, -PT_SIZE; */			\
+	addik r1, r1, THREAD_SIZE + CONFIG_KERNEL_BASE_ADDR - CONFIG_KERNEL_START - PT_SIZE; \
+	SAVE_REGS							\
+	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));			\
+	swi	r11, r1, PT_R1; /* Store user SP.  */		\
+	swi	r0, r1, PT_MODE; /* Was in user-mode.  */		\
+	/* MS: I am clearing UMS even in case when I come from kernel space */ \
+	clear_ums; 							\
+2:	lwi	CURRENT_TASK, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+
+.text
 
 /*
  * User trap.
@@ -676,35 +283,195 @@ CSYM(_shift_temp_loc):
  * System calls are handled here.
  *
  * Syscall protocol:
- *   Syscall number in r12, args in r5-r10
- *   Return value in r3
+ * Syscall number in r12, args in r5-r10
+ * Return value in r3
  *
  * Trap entered via brki instruction, so BIP bit is set, and interrupts
- * are masked.  This is nice, means we don't have to CLI before state save
+ * are masked. This is nice, means we don't have to CLI before state save
  */
-G_ENTRY(trap):
-	swi	r1, r0, ENTRY_SP;	// save stack (emulate v850)
-	SAVE_STATE (TRAP, r12, ENTRY_SP) // Save registers. 
-	BIPCLR(r11);			// Clear BIP
-					// BIP now cleared, interrupts enabled
-	la	r15, r0, ret_from_trap-8// where the trap should return
-					// need -8 to adjust for rtsd r15, 8
-	MAKE_SYS_CALL			// Jump to the syscall function. 
-END(trap)
+C_ENTRY(_user_exception):
+	swi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP)) /* save stack */
+	addi	r14, r14, 4	/* return address is 4 byte after call */
 
-/* This is just like ret_from_trap, but first restores extra registers
-   saved by some wrappers.  */
-L_ENTRY(restore_extra_regs_and_ret_from_trap):
-	RESTORE_EXTRA_STATE(TRAP)
-	// fall through
-END(restore_extra_regs_and_ret_from_trap)
+	mfs	r1, rmsr
+	nop
+	andi	r1, r1, MSR_UMS
+	bnei	r1, 1f
 
-/* Entry point used to return from a syscall/trap.  */
+/* Kernel-mode state save - kernel execve */
+	lwi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP)); /* Reload kernel stack-ptr*/
+	tophys(r1,r1);
+
+	addik	r1, r1, -PT_SIZE; /* Make room on the stack. */
+	SAVE_REGS
+
+	swi	r1, r1, PT_MODE; /* pt_regs -> kernel mode */
+	brid	2f;
+	nop;				/* Fill delay slot */
+
+/* User-mode state save.  */
+1:
+	lwi	r1, r0, TOPHYS(PER_CPU(CURRENT_SAVE)); /* get saved current */
+	tophys(r1,r1);
+	lwi	r1, r1, TS_THREAD_INFO;	/* get stack from task_struct */
+/* calculate kernel stack pointer from task struct 8k */
+	addik	r1, r1, THREAD_SIZE;
+	tophys(r1,r1);
+
+	addik	r1, r1, -PT_SIZE; /* Make room on the stack.  */
+	SAVE_REGS
+	swi	r0, r1, PT_R3
+	swi	r0, r1, PT_R4
+
+	swi	r0, r1, PT_MODE;			/* Was in user-mode. */
+	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+	swi	r11, r1, PT_R1;		/* Store user SP.  */
+	clear_ums;
+2:	lwi	CURRENT_TASK, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+	/* Save away the syscall number.  */
+	swi	r12, r1, PT_R0;
+	tovirt(r1,r1)
+
+/* where the trap should return need -8 to adjust for rtsd r15, 8*/
+/* Jump to the appropriate function for the system call number in r12
+ * (r12 is not preserved), or return an error if r12 is not valid. The LP
+ * register should point to the location where
+ * the called function should return.  [note that MAKE_SYS_CALL uses label 1] */
+
+	/* Step into virtual mode */
+	rtbd	r0, 3f
+	nop
+3:
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO /* get thread info */
+	lwi	r11, r11, TI_FLAGS	 /* get flags in thread info */
+	andi	r11, r11, _TIF_WORK_SYSCALL_MASK
+	beqi	r11, 4f
+
+	addik	r3, r0, -ENOSYS
+	swi	r3, r1, PT_R3
+	brlid	r15, do_syscall_trace_enter
+	addik	r5, r1, PT_R0
+
+	# do_syscall_trace_enter returns the new syscall nr.
+	addk	r12, r0, r3
+	lwi	r5, r1, PT_R5;
+	lwi	r6, r1, PT_R6;
+	lwi	r7, r1, PT_R7;
+	lwi	r8, r1, PT_R8;
+	lwi	r9, r1, PT_R9;
+	lwi	r10, r1, PT_R10;
+4:
+/* Jump to the appropriate function for the system call number in r12
+ * (r12 is not preserved), or return an error if r12 is not valid.
+ * The LP register should point to the location where the called function
+ * should return.  [note that MAKE_SYS_CALL uses label 1] */
+	/* See if the system call number is valid */
+	addi	r11, r12, -__NR_syscalls;
+	bgei	r11,5f;
+	/* Figure out which function to use for this system call.  */
+	/* Note Microblaze barrel shift is optional, so don't rely on it */
+	add	r12, r12, r12;			/* convert num -> ptr */
+	add	r12, r12, r12;
+
+#ifdef DEBUG
+	/* Trac syscalls and stored them to syscall_debug_table */
+	/* The first syscall location stores total syscall number */
+	lwi	r3, r0, syscall_debug_table
+	addi	r3, r3, 1
+	swi	r3, r0, syscall_debug_table
+	lwi	r3, r12, syscall_debug_table
+	addi	r3, r3, 1
+	swi	r3, r12, syscall_debug_table
+#endif
+
+	# Find and jump into the syscall handler.
+	lwi	r12, r12, sys_call_table
+	/* where the trap should return need -8 to adjust for rtsd r15, 8 */
+	addi	r15, r0, ret_from_trap-8
+	bra	r12
+
+	/* The syscall number is invalid, return an error.  */
+5:
+	rtsd	r15, 8;		/* looks like a normal subroutine return */
+	addi	r3, r0, -ENOSYS;
+
+/* Entry point used to return from a syscall/trap */
 /* We re-enable BIP bit before state restore */
-L_ENTRY(ret_from_trap):
-	BIPSET(r11);			//  Ints masked for state restore
-	RETURN(TRAP)
-END(ret_from_trap)
+C_ENTRY(ret_from_trap):
+	swi	r3, r1, PT_R3
+	swi	r4, r1, PT_R4
+
+	lwi	r11, r1, PT_MODE;
+/* See if returning to kernel mode, if so, skip resched &c.  */
+	bnei	r11, 2f;
+	/* We're returning to user mode, so check for various conditions that
+	 * trigger rescheduling. */
+	/* FIXME: Restructure all these flag checks. */
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r11, r11, TI_FLAGS;		/* get flags in thread info */
+	andi	r11, r11, _TIF_WORK_SYSCALL_MASK
+	beqi	r11, 1f
+
+	brlid	r15, do_syscall_trace_leave
+	addik	r5, r1, PT_R0
+1:
+	/* We're returning to user mode, so check for various conditions that
+	 * trigger rescheduling. */
+	/* get thread info from current task */
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;
+	lwi	r11, r11, TI_FLAGS;		/* get flags in thread info */
+	andi	r11, r11, _TIF_NEED_RESCHED;
+	beqi	r11, 5f;
+
+	bralid	r15, schedule;	/* Call scheduler */
+	nop;				/* delay slot */
+
+	/* Maybe handle a signal */
+5:	/* get thread info from current task*/
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;
+	lwi	r11, r11, TI_FLAGS;	/* get flags in thread info */
+	andi	r11, r11, _TIF_SIGPENDING;
+	beqi	r11, 1f;		/* Signals to handle, handle them */
+
+	addik	r5, r1, 0;		/* Arg 1: struct pt_regs *regs */
+	addi	r7, r0, 1;		/* Arg 3: int in_syscall */
+	bralid	r15, do_signal;	/* Handle any signals */
+	add	r6, r0, r0;		/* Arg 2: sigset_t *oldset */
+
+/* Finally, return to user state.  */
+1:	set_bip;			/*  Ints masked for state restore */
+	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE); /* save current */
+	VM_OFF;
+	tophys(r1,r1);
+	RESTORE_REGS;
+	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
+	lwi	r1, r1, PT_R1 - PT_SIZE;/* Restore user stack pointer. */
+	bri	6f;
+
+/* Return to kernel state.  */
+2:	set_bip;			/*  Ints masked for state restore */
+	VM_OFF;
+	tophys(r1,r1);
+	RESTORE_REGS;
+	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
+	tovirt(r1,r1);
+6:
+TRAP_return:		/* Make global symbol for debugging */
+	rtbd	r14, 0;	/* Instructions to return from an IRQ */
+	nop;
+
+
+/* These syscalls need access to the struct pt_regs on the stack, so we
+   implement them in assembly (they're basically all wrappers anyway).  */
+
+C_ENTRY(sys_fork_wrapper):
+	addi	r5, r0, SIGCHLD			/* Arg 0: flags */
+	lwi	r6, r1, PT_R1	/* Arg 1: child SP (use parent's) */
+	addik	r7, r1, 0			/* Arg 2: parent context */
+	add	r8, r0, r0			/* Arg 3: (unused) */
+	add	r9, r0, r0;			/* Arg 4: (unused) */
+	brid	do_fork		/* Do real work (tail-call) */
+	add	r10, r0, r0;			/* Arg 5: (unused) */
 
 /* This the initial entry point for a new child thread, with an appropriate
    stack in place that makes it look the the child is in the middle of an
@@ -712,524 +479,562 @@ END(ret_from_trap)
    (copy_thread makes ret_from_fork the return address in each new thread's
    saved context).  */
 C_ENTRY(ret_from_fork):
-	bralid	r15, CSYM(schedule_tail); // ...which is schedule_tail's arg
-	add	r3, r5, r0;		// switch_thread returns the prev task.
-					// ( in the delay slot )
-	add	r3, r0, r0;		// Child's fork call should return 0.
-	brid	ret_from_trap		// Do normal trap return.
+	bralid	r15, schedule_tail; /* ...which is schedule_tail's arg */
+	add	r3, r5, r0;	/* switch_thread returns the prev task */
+				/* ( in the delay slot ) */
+	brid	ret_from_trap;	/* Do normal trap return */
+	add	r3, r0, r0;	/* Child's fork call should return 0. */
+
+C_ENTRY(sys_vfork):
+	brid	microblaze_vfork	/* Do real work (tail-call) */
+	addik	r5, r1, 0
+
+C_ENTRY(sys_clone):
+	bnei	r6, 1f;			/* See if child SP arg (arg 1) is 0. */
+	lwi	r6, r1, PT_R1;	/* If so, use paret's stack ptr */
+1:	addik	r7, r1, 0;			/* Arg 2: parent context */
+	add	r8, r0, r0;			/* Arg 3: (unused) */
+	add	r9, r0, r0;			/* Arg 4: (unused) */
+	brid	do_fork		/* Do real work (tail-call) */
+	add	r10, r0, r0;			/* Arg 5: (unused) */
+
+C_ENTRY(sys_execve):
+	brid	microblaze_execve;	/* Do real work (tail-call).*/
+	addik	r8, r1, 0;		/* add user context as 4th arg */
+
+C_ENTRY(sys_rt_sigreturn_wrapper):
+	brid	sys_rt_sigreturn	/* Do real work */
+	addik	r5, r1, 0;		/* add user context as 1st arg */
+
+/*
+ * HW EXCEPTION rutine start
+ */
+C_ENTRY(full_exception_trap):
+	/* adjust exception address for privileged instruction
+	 * for finding where is it */
+	addik	r17, r17, -4
+	SAVE_STATE /* Save registers */
+	/* PC, before IRQ/trap - this is one instruction above */
+	swi	r17, r1, PT_PC;
+	tovirt(r1,r1)
+	/* FIXME this can be store directly in PT_ESR reg.
+	 * I tested it but there is a fault */
+	/* where the trap should return need -8 to adjust for rtsd r15, 8 */
+	addik	r15, r0, ret_from_exc - 8
+	mfs	r6, resr
+	mfs	r7, rfsr;		/* save FSR */
+	mts	rfsr, r0;	/* Clear sticky fsr */
+	rted	r0, full_exception
+	addik	r5, r1, 0		 /* parameter struct pt_regs * regs */
+
+/*
+ * Unaligned data trap.
+ *
+ * Unaligned data trap last on 4k page is handled here.
+ *
+ * Trap entered via exception, so EE bit is set, and interrupts
+ * are masked.  This is nice, means we don't have to CLI before state save
+ *
+ * The assembler routine is in "arch/microblaze/kernel/hw_exception_handler.S"
+ */
+C_ENTRY(unaligned_data_trap):
+	/* MS: I have to save r11 value and then restore it because
+	 * set_bit, clear_eip, set_ee use r11 as temp register if MSR
+	 * instructions are not used. We don't need to do if MSR instructions
+	 * are used and they use r0 instead of r11.
+	 * I am using ENTRY_SP which should be primary used only for stack
+	 * pointer saving. */
+	swi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+	set_bip;        /* equalize initial state for all possible entries */
+	clear_eip;
+	set_ee;
+	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+	SAVE_STATE		/* Save registers.*/
+	/* PC, before IRQ/trap - this is one instruction above */
+	swi	r17, r1, PT_PC;
+	tovirt(r1,r1)
+	/* where the trap should return need -8 to adjust for rtsd r15, 8 */
+	addik	r15, r0, ret_from_exc-8
+	mfs	r3, resr		/* ESR */
+	mfs	r4, rear		/* EAR */
+	rtbd	r0, _unaligned_data_exception
+	addik	r7, r1, 0		/* parameter struct pt_regs * regs */
+
+/*
+ * Page fault traps.
+ *
+ * If the real exception handler (from hw_exception_handler.S) didn't find
+ * the mapping for the process, then we're thrown here to handle such situation.
+ *
+ * Trap entered via exceptions, so EE bit is set, and interrupts
+ * are masked.  This is nice, means we don't have to CLI before state save
+ *
+ * Build a standard exception frame for TLB Access errors.  All TLB exceptions
+ * will bail out to this point if they can't resolve the lightweight TLB fault.
+ *
+ * The C function called is in "arch/microblaze/mm/fault.c", declared as:
+ * void do_page_fault(struct pt_regs *regs,
+ *				unsigned long address,
+ *				unsigned long error_code)
+ */
+/* data and intruction trap - which is choose is resolved int fault.c */
+C_ENTRY(page_fault_data_trap):
+	SAVE_STATE		/* Save registers.*/
+	/* PC, before IRQ/trap - this is one instruction above */
+	swi	r17, r1, PT_PC;
+	tovirt(r1,r1)
+	/* where the trap should return need -8 to adjust for rtsd r15, 8 */
+	addik	r15, r0, ret_from_exc-8
+	mfs	r6, rear		/* parameter unsigned long address */
+	mfs	r7, resr		/* parameter unsigned long error_code */
+	rted	r0, do_page_fault
+	addik	r5, r1, 0		/* parameter struct pt_regs * regs */
+
+C_ENTRY(page_fault_instr_trap):
+	SAVE_STATE		/* Save registers.*/
+	/* PC, before IRQ/trap - this is one instruction above */
+	swi	r17, r1, PT_PC;
+	tovirt(r1,r1)
+	/* where the trap should return need -8 to adjust for rtsd r15, 8 */
+	addik	r15, r0, ret_from_exc-8
+	mfs	r6, rear		/* parameter unsigned long address */
+	ori	r7, r0, 0		/* parameter unsigned long error_code */
+	rted	r0, do_page_fault
+	addik	r5, r1, 0		/* parameter struct pt_regs * regs */
+
+/* Entry point used to return from an exception.  */
+C_ENTRY(ret_from_exc):
+	lwi	r11, r1, PT_MODE;
+	bnei	r11, 2f;		/* See if returning to kernel mode, */
+					/* ... if so, skip resched &c.  */
+
+	/* We're returning to user mode, so check for various conditions that
+	   trigger rescheduling. */
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r11, r11, TI_FLAGS;	/* get flags in thread info */
+	andi	r11, r11, _TIF_NEED_RESCHED;
+	beqi	r11, 5f;
+
+/* Call the scheduler before returning from a syscall/trap. */
+	bralid	r15, schedule;	/* Call scheduler */
+	nop;				/* delay slot */
+
+	/* Maybe handle a signal */
+5:	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r11, r11, TI_FLAGS;	/* get flags in thread info */
+	andi	r11, r11, _TIF_SIGPENDING;
+	beqi	r11, 1f;		/* Signals to handle, handle them */
+
+	/*
+	 * Handle a signal return; Pending signals should be in r18.
+	 *
+	 * Not all registers are saved by the normal trap/interrupt entry
+	 * points (for instance, call-saved registers (because the normal
+	 * C-compiler calling sequence in the kernel makes sure they're
+	 * preserved), and call-clobbered registers in the case of
+	 * traps), but signal handlers may want to examine or change the
+	 * complete register state.  Here we save anything not saved by
+	 * the normal entry sequence, so that it may be safely restored
+	 * (in a possibly modified form) after do_signal returns. */
+	addik	r5, r1, 0;		/* Arg 1: struct pt_regs *regs */
+	addi	r7, r0, 0;		/* Arg 3: int in_syscall */
+	bralid	r15, do_signal;	/* Handle any signals */
+	add	r6, r0, r0;		/* Arg 2: sigset_t *oldset */
+
+/* Finally, return to user state.  */
+1:	set_bip;			/* Ints masked for state restore */
+	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE); /* save current */
+	VM_OFF;
+	tophys(r1,r1);
+
+	RESTORE_REGS;
+	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
+
+	lwi	r1, r1, PT_R1 - PT_SIZE; /* Restore user stack pointer. */
+	bri	6f;
+/* Return to kernel state.  */
+2:	set_bip;			/* Ints masked for state restore */
+	VM_OFF;
+	tophys(r1,r1);
+	RESTORE_REGS;
+	addik	r1, r1, PT_SIZE		/* Clean up stack space.  */
+
+	tovirt(r1,r1);
+6:
+EXC_return:		/* Make global symbol for debugging */
+	rtbd	r14, 0;	/* Instructions to return from an IRQ */
 	nop;
-C_END(ret_from_fork)
 
-
-#if !TRAPS_PRESERVE_CALL_CLOBBERED_REGS
-	// Make sure r13 and r14 are preserved, in case we have to restart a
-	// system call because of a signal (ep has already been set by caller).
-	//st.w	r13, PTO+PT_GPR(13)[sp]
-	//st.w	r14, PTO+PT_GPR(13)[sp]
-	la	r15, r0, ret_from_long_syscall-8
-#endif /* !TRAPS_PRESERVE_CALL_CLOBBERED_REGS */
-
-	MAKE_SYS_CALL			// Jump to the syscall function.
-END(syscall_long)	
-
-#if !TRAPS_PRESERVE_CALL_CLOBBERED_REGS
-/* Entry point used to return from a long syscall.  Only needed to restore
-   r13/r14 if the general trap mechanism doesnt' do so.  */
-L_ENTRY(ret_from_long_syscall):
-	//ld.w	PTO+PT_GPR(13)[sp], r13 // Restore the extra registers
-	//ld.w	PTO+PT_GPR(13)[sp], r14
-	brid	ret_from_trap;		// The rest is the same as other traps
-	nop;
-END(ret_from_long_syscall)
-#endif /* !TRAPS_PRESERVE_CALL_CLOBBERED_REGS */
-
-
-/* These syscalls need access to the struct pt_regs on the stack, so we
-   implement them in assembly (they're basically all wrappers anyway).  */
-
-L_ENTRY(sys_fork_wrapper):
-#ifdef NO_MM
-	// fork almost works, enough to trick you into looking elsewhere :-(
-	rtsd	r15, 8;
-	addi	r3, r0, -EINVAL		// Delay slot
-
-#else
-	// Save state not saved by entry.  This is actually slight overkill;
-	// it's actually only necessary to save any state restored by
-	// switch_thread that's not saved by the trap entry.
-	SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	addi	r5, r0, SIGCHLD		// Arg 0: flags
-	lwi	r6, r1, PTO+PT_GPR(GPR_SP) // Arg 1: child SP (use parent's)
-	la	r7, r1, PTO;		// Arg 2: parent context
-	add	r9. r0, r0;		// Arg 3: (unused)
-	brid	CSYM(do_fork)		// Do real work (tail-call).
-	nop;
-#endif
-END(sys_fork_wrapper)
-
-L_ENTRY(sys_vfork_wrapper):
-	// Save state not saved by entry.  This is actually slight overkill;
-	// it's actually only necessary to save any state restored by
-	// switch_thread that's not saved by the trap entry.
-	SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	addi	r5, r0, CLONE_VFORK | CLONE_VM | SIGCHLD // Arg 0: flags
-	lwi	r6, r1, PTO+PT_GPR(GPR_SP) // Arg 1: child SP (use parent's)
-	la	r7, r1, PTO;		// Arg 2: parent context
-	add	r8, r0, r0;			// Arg 3: (unused)
-	brid	CSYM(do_fork)		// Do real work (tail-call).
-	nop
-END(sys_vfork_wrapper)
-
-L_ENTRY(sys_clone_wrapper):
-	// Save state not saved by entry.  This is actually slight overkill;
-	// it's actually only necessary to save any state restored by
-	// switch_thread that's not saved by the trap entry.
-	SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	bnei	r6, 1f; 		// See if child SP arg (arg 1) is 0.
-	lwi	r6, r1, PTO+PT_GPR(GPR_SP);	// If so, use paret's stack ptr
-1:	la	r7, r1, PTO;		// Arg 2: parent context
-	add	r8, r0, r0;		// Arg 3: (unused)
-	brid	CSYM(do_fork)		// Do real work (tail-call).
-	nop;
-END(sys_clone_wrapper)
-
-L_ENTRY(sys_execve_wrapper):
-	la	r8, r1, PTO;		// add user context as 4th arg
-	brid	CSYM(sys_execve);	// Do real work (tail-call).
-	nop;
-END(sys_execve_wrapper)
-
-L_ENTRY(sys_sigsuspend_wrapper):
-        SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	la	r6, r1, PTO;		// add user context as 2nd arg
-	bralid	r15, CSYM(sys_sigsuspend); // Do real work.
-	nop;
-	brid	restore_extra_regs_and_ret_from_trap;
-	nop;
-END(sys_sigsuspend_wrapper)
-
-L_ENTRY(sys_rt_sigsuspend_wrapper):
-        SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	la	r7, r1, PTO;		// add user context as 3rd arg
-	brlid	r15, CSYM(sys_rt_sigsuspend);	// Do real work.
-	nop;
-	brid	restore_extra_regs_and_ret_from_trap;
-	nop;
-END(sys_rt_sigsuspend_wrapper)
-
-L_ENTRY(sys_sigreturn_wrapper):
-        SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	la	r5, r1, PTO;		// add user context as 1st arg
-	brlid	r15, CSYM(sys_sigreturn);	// Do real work.
-	nop;
-	brid	restore_extra_regs_and_ret_from_trap;
-	nop;
-END(sys_sigreturn_wrapper)
-
-L_ENTRY(sys_rt_sigreturn_wrapper):
-        SAVE_EXTRA_STATE(TRAP)		// Save state not saved by entry.
-	la	r5, r1, PTO;		// add user context as 1st arg
-	brlid	r15, CSYM(sys_rt_sigreturn)	// Do real work.
-	nop;
-	brid	restore_extra_regs_and_ret_from_trap;
-	nop;
-END(sys_rt_sigreturn_wrapper)
-
+/*
+ * HW EXCEPTION rutine end
+ */
 
 /*
  * Hardware maskable interrupts.
  *
  * The stack-pointer (r1) should have already been saved to the memory
- * location ENTRY_SP.
- * Currently this is just because the v850 code does it.  This should
- * be removed at some point to streamline things
+ * location PER_CPU(ENTRY_SP).
  */
-G_ENTRY(irq):
-	swi	r1, r0, ENTRY_SP;	// save stack (emulate v850)
-	SAVE_STATE (IRQ, r0, ENTRY_SP)	// Save registers. 
-
-	add	r5, r0, r0;		// Clear first param
-	la	r6, r1, PTO;		// User regs are arg2
-
-	// It's up to the high level handler to query the
-	// interrupt controller and get the IRQ number etc
-
-	// Call the high-level interrupt handling code.
-	bralid r15, CSYM(handle_irq);
-	nop;
-
-	// fall through
-
-/* Entry point used to return from an interrupt (also used by exception
-   handle
-s, below).  */
-ret_from_irq:
-	RETURN(IRQ)
-END(irq)
-
-
-/*
- * Hardware non-maskable interrupts.
- *
- * The stack-pointer (r1) should have already been saved to the memory
- * location ENTRY_SP (the reason for this is that the interrupt vectors may be
- * beyond a 22-bit signed offset jump from the actual interrupt handler, and
- * this allows them to save the stack-pointer and use that register to do an
- * indirect jump).
- */
-G_ENTRY(nmi):
-	swi	r1, r0, NMI_ENTRY_SP;		/* Save state (emulate v850) */
-	SAVE_STATE (NMI, r0, NMI_ENTRY_SP); /* Save registers.  */
-
-	add	r5, r0, r0;
-	la	r6, r1, PTO;	/* User regs are arg2.  */
-
-	/* Non-maskable interrupts always lie right after maskable interrupts.
-	   Call the generic IRQ handler, with two arguments, the IRQ number,
-	   and a pointer to the user registers, to handle the specifics.
-	   (we subtract one because the first NMI has code 1).  */
-	bralid 	r15, CSYM(handle_irq);
-	nop;
-
-	RETURN(NMI)
-END(nmi0)
-
-
-/*
- * Illegal instruction trap.
- *
- * The stack-pointer (r3) should have already been saved to the memory
- * location ENTRY_SP (the reason for this is that the interrupt vectors may be
- * beyond a 22-bit signed offset jump from the actual interrupt handler, and
- * this allows them to save the stack-pointer and use that register to do an
- * indirect jump).
- */
-G_ENTRY(illegal_instruction):
-	swi	r1, r0, ENTRY_SP;	// Save stack (emulate v850)
-	SAVE_STATE (IRQ, r0, ENTRY_SP)	// Save registers. 
-	ENTRY_EI(r11);
-	addi	r5, r0, SIGILL;		// Arg 0: signal number
-	RETRIEVE_CURRENT_TASK(r6);	// Arg 1: task
-	la	r15, r0, ret_from_irq-8	// where the handler should return
-	brid	CSYM(force_sig);
-	nop;
-
-END(illegal_instruction)
-
-
-/*
- * `Debug' trap
- *  We enter dbtrap in "BIP" (breakpoint) mode. 
- *  So we exit the breakpoint mode with an 'rtbd' and proceed with the
- *  original dbtrap.
- *  however, wait to save state first
- */
-G_ENTRY(dbtrap):
-	/* BIP bit is set on entry, no interrupts can occur */
-	swi	r1, r0, ENTRY_SP;	// Save stack (emulate v850)
-	SAVE_STATE (DBTRAP, r0, ENTRY_SP)   // Save registers. 
-	BIPCLR(r11);
-	/* BIP bit now clear, interrupts can occur */
-	// Should insert code to detect illegal traps etc
-
-	addi	r5, r0, SIGTRAP;	// send the trap signal
-	RETRIEVE_CURRENT_TASK(r6);	// to the current task
-	brlid	r15, CSYM(send_sig);
-	add	r7, r0, r0;		// 3rd param zero (delay slot)
-
-	BIPSET(r11);		/* Set BIP again, ready for state restore */
-	RETURN(DBTRAP);
-
-END(dbtrap)
-
-G_ENTRY(reset_trap):
-
-	/* BIP bit is set on entry, no interrupts can occur */
-	swi	r1, r0, ENTRY_SP;	// Save stack (emulate v850)
-	SAVE_STATE (DBTRAP, r0, ENTRY_SP)   // Save registers. 
-	BIPCLR(r11);
-
-	// For now, call into kernel for debugging
-	brlid	r15, CSYM(debug_trap);
-	la	r5, r1, PTO
-	// And loop forever! */
-foo:	brid foo
+C_ENTRY(_interrupt):
+/* MS: we are in physical address */
+/* Save registers, switch to proper stack, convert SP to virtual.*/
+	swi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP))
+	/* MS: See if already in kernel mode. */
+	mfs	r1, rmsr
 	nop
-END(reset_trap)
+	andi	r1, r1, MSR_UMS
+	bnei	r1, 1f
+
+/* Kernel-mode state save. */
+	lwi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP))
+	tophys(r1,r1); /* MS: I have in r1 physical address where stack is */
+	/* save registers */
+/* MS: Make room on the stack -> activation record */
+	addik	r1, r1, -PT_SIZE;
+	SAVE_REGS
+	brid	2f;
+	swi	r1, r1, PT_MODE; /* 0 - user mode, 1 - kernel mode */
+1:
+/* User-mode state save. */
+ /* MS: get the saved current */
+	lwi	r1, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+	tophys(r1,r1);
+	lwi	r1, r1, TS_THREAD_INFO;
+	addik	r1, r1, THREAD_SIZE;
+	tophys(r1,r1);
+	/* save registers */
+	addik	r1, r1, -PT_SIZE;
+	SAVE_REGS
+	/* calculate mode */
+	swi	r0, r1, PT_MODE;
+	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+	swi	r11, r1, PT_R1;
+	clear_ums;
+2:
+	lwi	CURRENT_TASK, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+	tovirt(r1,r1)
+	addik	r15, r0, irq_call;
+irq_call:rtbd	r0, do_IRQ;
+	addik	r5, r1, 0;
+
+/* MS: we are in virtual mode */
+ret_from_irq:
+	lwi	r11, r1, PT_MODE;
+	bnei	r11, 2f;
+
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;
+	lwi	r11, r11, TI_FLAGS; /* MS: get flags from thread info */
+	andi	r11, r11, _TIF_NEED_RESCHED;
+	beqi	r11, 5f
+	bralid	r15, schedule;
+	nop; /* delay slot */
+
+    /* Maybe handle a signal */
+5:	lwi	r11, CURRENT_TASK, TS_THREAD_INFO; /* MS: get thread info */
+	lwi	r11, r11, TI_FLAGS; /* get flags in thread info */
+	andi	r11, r11, _TIF_SIGPENDING;
+	beqid	r11, no_intr_resched
+/* Handle a signal return; Pending signals should be in r18. */
+	addi	r7, r0, 0; /* Arg 3: int in_syscall */
+	addik	r5, r1, 0; /* Arg 1: struct pt_regs *regs */
+	bralid	r15, do_signal;	/* Handle any signals */
+	add	r6, r0, r0; /* Arg 2: sigset_t *oldset */
+
+/* Finally, return to user state. */
+no_intr_resched:
+    /* Disable interrupts, we are now committed to the state restore */
+	disable_irq
+	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE);
+	VM_OFF;
+	tophys(r1,r1);
+	RESTORE_REGS
+	addik	r1, r1, PT_SIZE /* MS: Clean up stack space. */
+	lwi	r1, r1, PT_R1 - PT_SIZE;
+	bri	6f;
+/* MS: Return to kernel state. */
+2:
+#ifdef CONFIG_PREEMPT
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;
+	/* MS: get preempt_count from thread info */
+	lwi	r5, r11, TI_PREEMPT_COUNT;
+	bgti	r5, restore;
+
+	lwi	r5, r11, TI_FLAGS;		/* get flags in thread info */
+	andi	r5, r5, _TIF_NEED_RESCHED;
+	beqi	r5, restore /* if zero jump over */
+
+preempt:
+	/* interrupts are off that's why I am calling preempt_chedule_irq */
+	bralid	r15, preempt_schedule_irq
+	nop
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r5, r11, TI_FLAGS;		/* get flags in thread info */
+	andi	r5, r5, _TIF_NEED_RESCHED;
+	bnei	r5, preempt /* if non zero jump to resched */
+restore:
+#endif
+	VM_OFF /* MS: turn off MMU */
+	tophys(r1,r1)
+	RESTORE_REGS
+	addik	r1, r1, PT_SIZE	/* MS: Clean up stack space. */
+	tovirt(r1,r1);
+6:
+IRQ_return: /* MS: Make global symbol for debugging */
+	rtid	r14, 0
+	nop
 
 /*
- * Trap with no handler
+ * Debug trap for KGDB. Enter to _debug_exception by brki r16, 0x18
+ * and call handling function with saved pt_regs
  */
-L_ENTRY(bad_trap_wrapper):
-	add	r5, r0, r19; 		// Arg 0: trap number
-	la	r6, r1, PTO;		// Arg 1: user regs
-	brid	CSYM(bad_trap);		// tail call handler
+C_ENTRY(_debug_exception):
+	/* BIP bit is set on entry, no interrupts can occur */
+	swi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP))
+
+	mfs	r1, rmsr
+	nop
+	andi	r1, r1, MSR_UMS
+	bnei	r1, 1f
+/* MS: Kernel-mode state save - kgdb */
+	lwi	r1, r0, TOPHYS(PER_CPU(ENTRY_SP)); /* Reload kernel stack-ptr*/
+
+	/* BIP bit is set on entry, no interrupts can occur */
+	addik   r1, r1, CONFIG_KERNEL_BASE_ADDR - CONFIG_KERNEL_START - PT_SIZE;
+	SAVE_REGS;
+	/* save all regs to pt_reg structure */
+	swi	r0, r1, PT_R0;	/* R0 must be saved too */
+	swi	r14, r1, PT_R14	/* rewrite saved R14 value */
+	swi	r16, r1, PT_PC; /* PC and r16 are the same */
+	/* save special purpose registers to pt_regs */
+	mfs	r11, rear;
+	swi	r11, r1, PT_EAR;
+	mfs	r11, resr;
+	swi	r11, r1, PT_ESR;
+	mfs	r11, rfsr;
+	swi	r11, r1, PT_FSR;
+
+	/* stack pointer is in physical address at it is decrease
+	 * by PT_SIZE but we need to get correct R1 value */
+	addik   r11, r1, CONFIG_KERNEL_START - CONFIG_KERNEL_BASE_ADDR + PT_SIZE;
+	swi	r11, r1, PT_R1
+	/* MS: r31 - current pointer isn't changed */
+	tovirt(r1,r1)
+#ifdef CONFIG_KGDB
+	addi	r5, r1, 0 /* pass pt_reg address as the first arg */
+	addik	r15, r0, dbtrap_call; /* return address */
+	rtbd	r0, microblaze_kgdb_break
+	nop;
+#endif
+	/* MS: Place handler for brki from kernel space if KGDB is OFF.
+	 * It is very unlikely that another brki instruction is called. */
+	bri 0
+
+/* MS: User-mode state save - gdb */
+1:	lwi	r1, r0, TOPHYS(PER_CPU(CURRENT_SAVE)); /* get saved current */
+	tophys(r1,r1);
+	lwi	r1, r1, TS_THREAD_INFO;	/* get the thread info */
+	addik	r1, r1, THREAD_SIZE;	/* calculate kernel stack pointer */
+	tophys(r1,r1);
+
+	addik	r1, r1, -PT_SIZE; /* Make room on the stack.  */
+	SAVE_REGS;
+	swi	r16, r1, PT_PC;	/* Save LP */
+	swi	r0, r1, PT_MODE; /* Was in user-mode.  */
+	lwi	r11, r0, TOPHYS(PER_CPU(ENTRY_SP));
+	swi	r11, r1, PT_R1; /* Store user SP.  */
+	lwi	CURRENT_TASK, r0, TOPHYS(PER_CPU(CURRENT_SAVE));
+	tovirt(r1,r1)
+	set_vms;
+	addik	r5, r1, 0;
+	addik	r15, r0, dbtrap_call;
+dbtrap_call: /* Return point for kernel/user entry + 8 because of rtsd r15, 8 */
+	rtbd	r0, sw_exception
+	nop
+
+	/* MS: The first instruction for the second part of the gdb/kgdb */
+	set_bip; /* Ints masked for state restore */
+	lwi	r11, r1, PT_MODE;
+	bnei	r11, 2f;
+/* MS: Return to user space - gdb */
+	/* Get current task ptr into r11 */
+	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r11, r11, TI_FLAGS;	/* get flags in thread info */
+	andi	r11, r11, _TIF_NEED_RESCHED;
+	beqi	r11, 5f;
+
+	/* Call the scheduler before returning from a syscall/trap. */
+	bralid	r15, schedule;	/* Call scheduler */
+	nop;				/* delay slot */
+
+	/* Maybe handle a signal */
+5:	lwi	r11, CURRENT_TASK, TS_THREAD_INFO;	/* get thread info */
+	lwi	r11, r11, TI_FLAGS;	/* get flags in thread info */
+	andi	r11, r11, _TIF_SIGPENDING;
+	beqi	r11, 1f;		/* Signals to handle, handle them */
+
+	addik	r5, r1, 0;		/* Arg 1: struct pt_regs *regs */
+	addi  r7, r0, 0;	/* Arg 3: int in_syscall */
+	bralid	r15, do_signal;	/* Handle any signals */
+	add	r6, r0, r0;		/* Arg 2: sigset_t *oldset */
+
+/* Finally, return to user state.  */
+1:	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE); /* save current */
+	VM_OFF;
+	tophys(r1,r1);
+	/* MS: Restore all regs */
+	RESTORE_REGS
+	addik	r1, r1, PT_SIZE	 /* Clean up stack space */
+	lwi	r1, r1, PT_R1 - PT_SIZE; /* Restore user stack pointer */
+DBTRAP_return_user: /* MS: Make global symbol for debugging */
+	rtbd	r16, 0; /* MS: Instructions to return from a debug trap */
 	nop;
 
-END(bad_trap_wrapper)
-
-/*
- * This is where we switch between two threads.  The arguments are:
- *   r5 -- pointer to the struct thread for the `current' process
- *   r6 -- pointer to the struct thread for the `new' process.  
- * when this function returns, it will return to the new thread.
- */
-C_ENTRY(switch_thread):
-
-	// Return the previous task
-	// Do this before push_state, so that return value is on stack
-	// Update the current task pointer
-	//GET_CURRENT_TASK(CURRENT_TASK)
-	RETRIEVE_CURRENT_TASK(r3);
-
-	// First, push the current processor state on the stack
-	PUSH_STATE(SWITCH)
-
-	// Now save the location of the kernel stack pointer for this thread;
-	// since we've pushed all other state on the stack, this is enough to
-	// restore it all later.
-	swi	r1, r5, THREAD_KSP;
-	// Now restore the stack pointer from the new process
-	lwi	r1, r6, THREAD_KSP;
-	// ... and restore all state from that
-	POP_STATE(SWITCH)
-	// Update the current task pointer
-	GET_CURRENT_TASK(CURRENT_TASK)
-	// Now return into the new thread
-	rtsd	r15,8;
+/* MS: Return to kernel state - kgdb */
+2:	VM_OFF;
+	tophys(r1,r1);
+	/* MS: Restore all regs */
+	RESTORE_REGS
+	lwi	r14, r1, PT_R14;
+	lwi	r16, r1, PT_PC;
+	addik	r1, r1, PT_SIZE; /* MS: Clean up stack space */
+	tovirt(r1,r1);
+DBTRAP_return_kernel: /* MS: Make global symbol for debugging */
+	rtbd	r16, 0; /* MS: Instructions to return from a debug trap */
 	nop;
-C_END(switch_thread)
 
-	.section .rodata
-	
+
+ENTRY(_switch_to)
+	/* prepare return value */
+	addk	r3, r0, CURRENT_TASK
+
+	/* save registers in cpu_context */
+	/* use r11 and r12, volatile registers, as temp register */
+	/* give start of cpu_context for previous process */
+	addik	r11, r5, TI_CPU_CONTEXT
+	swi	r1, r11, CC_R1
+	swi	r2, r11, CC_R2
+	/* skip volatile registers.
+	 * they are saved on stack when we jumped to _switch_to() */
+	/* dedicated registers */
+	swi	r13, r11, CC_R13
+	swi	r14, r11, CC_R14
+	swi	r15, r11, CC_R15
+	swi	r16, r11, CC_R16
+	swi	r17, r11, CC_R17
+	swi	r18, r11, CC_R18
+	/* save non-volatile registers */
+	swi	r19, r11, CC_R19
+	swi	r20, r11, CC_R20
+	swi	r21, r11, CC_R21
+	swi	r22, r11, CC_R22
+	swi	r23, r11, CC_R23
+	swi	r24, r11, CC_R24
+	swi	r25, r11, CC_R25
+	swi	r26, r11, CC_R26
+	swi	r27, r11, CC_R27
+	swi	r28, r11, CC_R28
+	swi	r29, r11, CC_R29
+	swi	r30, r11, CC_R30
+	/* special purpose registers */
+	mfs	r12, rmsr
+	swi	r12, r11, CC_MSR
+	mfs	r12, rear
+	swi	r12, r11, CC_EAR
+	mfs	r12, resr
+	swi	r12, r11, CC_ESR
+	mfs	r12, rfsr
+	swi	r12, r11, CC_FSR
+
+	/* update r31, the current-give me pointer to task which will be next */
+	lwi	CURRENT_TASK, r6, TI_TASK
+	/* stored it to current_save too */
+	swi	CURRENT_TASK, r0, PER_CPU(CURRENT_SAVE)
+
+	/* get new process' cpu context and restore */
+	/* give me start where start context of next task */
+	addik	r11, r6, TI_CPU_CONTEXT
+
+	/* non-volatile registers */
+	lwi	r30, r11, CC_R30
+	lwi	r29, r11, CC_R29
+	lwi	r28, r11, CC_R28
+	lwi	r27, r11, CC_R27
+	lwi	r26, r11, CC_R26
+	lwi	r25, r11, CC_R25
+	lwi	r24, r11, CC_R24
+	lwi	r23, r11, CC_R23
+	lwi	r22, r11, CC_R22
+	lwi	r21, r11, CC_R21
+	lwi	r20, r11, CC_R20
+	lwi	r19, r11, CC_R19
+	/* dedicated registers */
+	lwi	r18, r11, CC_R18
+	lwi	r17, r11, CC_R17
+	lwi	r16, r11, CC_R16
+	lwi	r15, r11, CC_R15
+	lwi	r14, r11, CC_R14
+	lwi	r13, r11, CC_R13
+	/* skip volatile registers */
+	lwi	r2, r11, CC_R2
+	lwi	r1, r11, CC_R1
+
+	/* special purpose registers */
+	lwi	r12, r11, CC_FSR
+	mts	rfsr, r12
+	lwi	r12, r11, CC_MSR
+	mts	rmsr, r12
+
+	rtsd	r15, 8
+	nop
+
+ENTRY(_reset)
+	brai	0; /* Jump to reset vector */
+
+	/* These are compiled and loaded into high memory, then
+	 * copied into place in mach_early_setup */
+	.section	.init.ivt, "ax"
+#if CONFIG_MANUAL_RESET_VECTOR
+	.org	0x0
+	brai	CONFIG_MANUAL_RESET_VECTOR
+#endif
+	.org	0x8
+	brai	TOPHYS(_user_exception); /* syscall handler */
+	.org	0x10
+	brai	TOPHYS(_interrupt);	/* Interrupt handler */
+	.org	0x18
+	brai	TOPHYS(_debug_exception);	/* debug trap handler */
+	.org	0x20
+	brai	TOPHYS(_hw_exception_handler);	/* HW exception handler */
+
+.section .rodata,"a"
+#include "syscall_table.S"
+
+syscall_table_size=(.-sys_call_table)
+
+type_SYSCALL:
+	.ascii "SYSCALL\0"
+type_IRQ:
+	.ascii "IRQ\0"
+type_IRQ_PREEMPT:
+	.ascii "IRQ (PREEMPTED)\0"
+type_SYSCALL_PREEMPT:
+	.ascii " SYSCALL (PREEMPTED)\0"
+
+	/*
+	 * Trap decoding for stack unwinder
+	 * Tuples are (start addr, end addr, string)
+	 * If return address lies on [start addr, end addr],
+	 * unwinder displays 'string'
+	 */
+
 	.align 4
-	.globl CSYM(sys_call_table)
-CSYM(sys_call_table):
-	.long CSYM(sys_ni_syscall)	// 0  -  old "setup()" system call
-	.long CSYM(sys_exit)
-	.long sys_fork_wrapper
-	.long CSYM(sys_read)
-	.long CSYM(sys_write)
-	.long CSYM(sys_open)		// 5
-	.long CSYM(sys_close)
-	.long CSYM(sys_waitpid)
-	.long CSYM(sys_creat)
-	.long CSYM(sys_link)
-	.long CSYM(sys_unlink)		// 10
-	.long sys_execve_wrapper
-	.long CSYM(sys_chdir)
-	.long CSYM(sys_time)
-	.long CSYM(sys_mknod)
-	.long CSYM(sys_chmod)		// 15
-	.long CSYM(sys_chown16)
-	.long CSYM(sys_ni_syscall)	// was: break
-	.long CSYM(sys_ni_syscall)	// was: oldstat (aka stat)
-	.long CSYM(sys_lseek)
-	.long CSYM(sys_getpid)		// 20
-	.long CSYM(sys_mount)
-	.long CSYM(sys_oldumount)
-	.long CSYM(sys_setuid16)
-	.long CSYM(sys_getuid16)
-	.long CSYM(sys_stime)		// 25
-	.long CSYM(sys_ptrace)
-	.long CSYM(sys_alarm)
-	.long CSYM(sys_ni_syscall)	// was: oldfstat (aka fstat)
-	.long CSYM(sys_pause)
-	.long CSYM(sys_utime)		// 30
-	.long CSYM(sys_ni_syscall)	// was: stty
-	.long CSYM(sys_ni_syscall)	// was: gtty
-	.long CSYM(sys_access)
-	.long CSYM(sys_nice)
-	.long CSYM(sys_ni_syscall)	// 35, was: ftime
-	.long CSYM(sys_sync)
-	.long CSYM(sys_kill)
-	.long CSYM(sys_rename)
-	.long CSYM(sys_mkdir)
-	.long CSYM(sys_rmdir)		// 40
-	.long CSYM(sys_dup)
-	.long CSYM(sys_pipe)
-	.long CSYM(sys_times)
-	.long CSYM(sys_ni_syscall)	// was: prof
-	.long CSYM(sys_brk)		// 45
-	.long CSYM(sys_setgid16)
-	.long CSYM(sys_getgid16)
-	.long CSYM(sys_signal)
-	.long CSYM(sys_geteuid16)
-	.long CSYM(sys_getegid16)	// 50
-	.long CSYM(sys_acct)
-	.long CSYM(sys_umount)		// recycled never used phys()
-	.long CSYM(sys_ni_syscall)	// was: lock
-	.long CSYM(sys_ioctl)
-	.long CSYM(sys_fcntl)		// 55
-	.long CSYM(sys_ni_syscall)	// was: mpx
-	.long CSYM(sys_setpgid)
-	.long CSYM(sys_ni_syscall) 	// was: ulimit
-	.long CSYM(sys_ni_syscall)
-	.long CSYM(sys_umask)		// 60
-	.long CSYM(sys_chroot)
-	.long CSYM(sys_ustat)
-	.long CSYM(sys_dup2)
-	.long CSYM(sys_getppid)
-	.long CSYM(sys_getpgrp)		// 65
-	.long CSYM(sys_setsid)
-	.long CSYM(sys_sigaction)
-	.long CSYM(sys_sgetmask)
-	.long CSYM(sys_ssetmask)
-	.long CSYM(sys_setreuid16)	// 70
-	.long CSYM(sys_setregid16)
-	.long sys_sigsuspend_wrapper
-	.long CSYM(sys_sigpending)
-	.long CSYM(sys_sethostname)
-	.long CSYM(sys_setrlimit)	// 75
-	.long CSYM(sys_old_getrlimit)
-	.long CSYM(sys_getrusage)
-	.long CSYM(sys_gettimeofday)
-	.long CSYM(sys_settimeofday)
-	.long CSYM(sys_getgroups16)	// 80
-	.long CSYM(sys_setgroups16)
-	.long CSYM(sys_ni_syscall)	// was: old_select
-	.long CSYM(sys_symlink)
-	.long CSYM(sys_ni_syscall)	// was: oldlstat (aka lstat)
-	.long CSYM(sys_readlink)	// 85
-	.long CSYM(sys_uselib)
-	.long CSYM(sys_swapon)
-	.long CSYM(sys_reboot)
-	.long CSYM(old_readdir)
-	.long CSYM(sys_mmap)		// 90
-	.long CSYM(sys_munmap)
-	.long CSYM(sys_truncate)
-	.long CSYM(sys_ftruncate)
-	.long CSYM(sys_fchmod)
-	.long CSYM(sys_fchown16)	// 95
-	.long CSYM(sys_getpriority)
-	.long CSYM(sys_setpriority)
-	.long CSYM(sys_ni_syscall) 	// was: profil
-	.long CSYM(sys_statfs)
-	.long CSYM(sys_fstatfs)		// 100
-	.long CSYM(sys_ni_syscall)	// i386: ioperm
-	.long CSYM(sys_socketcall)
-	.long CSYM(sys_syslog)
-	.long CSYM(sys_setitimer)
-	.long CSYM(sys_getitimer)	// 105
-	.long CSYM(sys_newstat)
-	.long CSYM(sys_newlstat)
-	.long CSYM(sys_newfstat)
-	.long CSYM(sys_ni_syscall)	// was: olduname (aka uname)
-	.long CSYM(sys_ni_syscall)	// 110, i386: iopl
-	.long CSYM(sys_vhangup)
-	.long CSYM(sys_ni_syscall)	// was: idle
-	.long CSYM(sys_ni_syscall)	// i386: vm86old
-	.long CSYM(sys_wait4)
-	.long CSYM(sys_swapoff)		// 115
-	.long CSYM(sys_sysinfo)
-	.long CSYM(sys_ipc)
-	.long CSYM(sys_fsync)
-	.long sys_sigreturn_wrapper
-	.long sys_clone_wrapper		// 120
-	.long CSYM(sys_setdomainname)
-	.long CSYM(sys_newuname)
-	.long CSYM(sys_ni_syscall)	// i386: modify_ldt, m68k: cacheflush 
-	.long CSYM(sys_adjtimex)
-	.long CSYM(sys_mprotect)	// 125
-	.long CSYM(sys_sigprocmask)
-	.long CSYM(sys_create_module)
-	.long CSYM(sys_init_module)
-	.long CSYM(sys_delete_module)
-	.long CSYM(sys_get_kernel_syms) // 130
-	.long CSYM(sys_quotactl)
-	.long CSYM(sys_getpgid)
-	.long CSYM(sys_fchdir)
-	.long CSYM(sys_bdflush)
-	.long CSYM(sys_sysfs)		// 135
-	.long CSYM(sys_personality)
-	.long CSYM(sys_ni_syscall)	// for afs_syscall
-	.long CSYM(sys_setfsuid16)
-	.long CSYM(sys_setfsgid16)
-	.long CSYM(sys_llseek)		// 140
-	.long CSYM(sys_getdents)
-	.long CSYM(sys_select)
-	.long CSYM(sys_flock)
-	.long CSYM(sys_msync)
-	.long CSYM(sys_readv)		// 145
-	.long CSYM(sys_writev)
-	.long CSYM(sys_getsid)
-	.long CSYM(sys_fdatasync)
-	.long CSYM(sys_sysctl)
-	.long CSYM(sys_mlock)		// 150
-	.long CSYM(sys_munlock)
-	.long CSYM(sys_mlockall)
-	.long CSYM(sys_munlockall)
-	.long CSYM(sys_sched_setparam)
-	.long CSYM(sys_sched_getparam)	// 155
-	.long CSYM(sys_sched_setscheduler)
-	.long CSYM(sys_sched_getscheduler)
-	.long CSYM(sys_sched_yield)
-	.long CSYM(sys_sched_get_priority_max)
-	.long CSYM(sys_sched_get_priority_min)  // 160
-	.long CSYM(sys_sched_rr_get_interval)
-	.long CSYM(sys_nanosleep)
-	.long CSYM(sys_mremap)
-	.long CSYM(sys_setresuid16)
-	.long CSYM(sys_getresuid16)	// 165
-	.long CSYM(sys_ni_syscall)	// for vm86
-	.long CSYM(sys_query_module)
-	.long CSYM(sys_poll)
-	.long CSYM(sys_nfsservctl)
-	.long CSYM(sys_setresgid16)	// 170
-	.long CSYM(sys_getresgid16)
-	.long CSYM(sys_prctl)
-	.long sys_rt_sigreturn_wrapper
-	.long CSYM(sys_rt_sigaction)
-	.long CSYM(sys_rt_sigprocmask)	// 175
-	.long CSYM(sys_rt_sigpending)
-	.long CSYM(sys_rt_sigtimedwait)
-	.long CSYM(sys_rt_sigqueueinfo)
-	.long sys_rt_sigsuspend_wrapper
-	.long CSYM(sys_pread)		// 180
-	.long CSYM(sys_pwrite)
-	.long CSYM(sys_lchown16);
-	.long CSYM(sys_getcwd)
-	.long CSYM(sys_capget)
-	.long CSYM(sys_capset)		// 185
-	.long CSYM(sys_sigaltstack)
-	.long CSYM(sys_sendfile)
-	.long CSYM(sys_ni_syscall)	// streams1
-	.long CSYM(sys_ni_syscall)	// streams2
-	.long sys_vfork_wrapper		// 190
-	.long CSYM(sys_getrlimit)
-	.long CSYM(sys_mmap2)
-	.long CSYM(sys_truncate64)
-	.long CSYM(sys_ftruncate64)
-	.long CSYM(sys_stat64)		// 195
-	.long CSYM(sys_lstat64)
-	.long CSYM(sys_fstat64)
-	.long CSYM(sys_chown)
-	.long CSYM(sys_getuid)
-	.long CSYM(sys_getgid)		// 200
-	.long CSYM(sys_geteuid)
-	.long CSYM(sys_getegid)
-	.long CSYM(sys_setreuid)
-	.long CSYM(sys_setregid)
-	.long CSYM(sys_getgroups)	// 205
-	.long CSYM(sys_setgroups)
-	.long CSYM(sys_fchown)
-	.long CSYM(sys_setresuid)
-	.long CSYM(sys_getresuid)
-	.long CSYM(sys_setresgid)	// 210
-	.long CSYM(sys_getresgid)
-	.long CSYM(sys_lchown)
-	.long CSYM(sys_setuid)
-	.long CSYM(sys_setgid)
-	.long CSYM(sys_setfsuid)	// 215
-	.long CSYM(sys_setfsgid)
-	.long CSYM(sys_pivot_root)
-	.long CSYM(sys_mincore)		// just returns ENOSYS without MMU
-	.long CSYM(sys_madvise)		// just returns ENOSYS without MMU
-	.long CSYM(sys_getdents64)	// 220
-	.long CSYM(sys_fcntl64)
-	.long CSYM(sys_ni_syscall)	// Reserved for TUX
-	.long CSYM(sys_ni_syscall)	// Reserved for `security'
-	.long CSYM(sys_gettid)
-	.long CSYM(sys_ni_syscall)	// 225, sys_readahead on i386
-
-	.space (NR_syscalls-225)*4
+.global microblaze_trap_handlers
+microblaze_trap_handlers:
+	/* Exact matches come first */
+	.word ret_from_trap; .word ret_from_trap   ; .word type_SYSCALL
+	.word ret_from_irq ; .word ret_from_irq    ; .word type_IRQ
+	/* Fuzzy matches go here */
+	.word ret_from_irq ; .word no_intr_resched ; .word type_IRQ_PREEMPT
+	.word ret_from_trap; .word TRAP_return     ; .word type_SYSCALL_PREEMPT
+	/* End of table */
+	.word 0               ; .word 0               ; .word 0

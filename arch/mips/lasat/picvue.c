@@ -1,7 +1,7 @@
-/* 
+/*
  * Picvue PVC160206 display driver
  *
- * Brian Murphy <brian@murphy.dk> 
+ * Brian Murphy <brian@murphy.dk>
  *
  */
 #include <linux/kernel.h>
@@ -20,16 +20,14 @@
 #define PVC_DISPMEM		80
 #define PVC_LINELEN		PVC_DISPMEM / PVC_NLINES
 
-struct pvc_defs *picvue = NULL;
+struct pvc_defs *picvue;
 
-DECLARE_MUTEX(pvc_sem);
-
-static void pvc_reg_write(u32 val) 
+static void pvc_reg_write(u32 val)
 {
 	*picvue->reg = val;
 }
 
-static u32 pvc_reg_read(void) 
+static u32 pvc_reg_read(void)
 {
 	u32 tmp = *picvue->reg;
 	return tmp;
@@ -65,12 +63,12 @@ static u8 pvc_read_data(void)
 {
 	u32 data = pvc_reg_read();
 	u8 byte;
-	data |= picvue->rw; 
+	data |= picvue->rw;
 	data &= ~picvue->rs;
 	pvc_reg_write(data);
 	ndelay(40);
 	byte = pvc_read_byte(data);
-	data |= picvue->rs; 
+	data |= picvue->rs;
 	pvc_reg_write(data);
 	return byte;
 }
@@ -141,7 +139,6 @@ void pvc_dump_string(const unsigned char *str)
 {
 	int len = strlen(str);
 
-	pvc_clear();
 	pvc_write_string(str, 0, 0);
 	if (len > PVC_VISIBLE_CHARS)
 		pvc_write_string(&str[PVC_VISIBLE_CHARS], 0, 1);
@@ -160,7 +157,7 @@ int pvc_program_cg(int charnum, u8 bitmap[BM_SIZE])
 	addr = charnum * 8;
 	pvc_write(0x40 | addr, MODE_INST);
 
-	for (i=0; i<BM_SIZE; i++)
+	for (i = 0; i < BM_SIZE; i++)
 		pvc_write(bitmap[i], MODE_DATA);
 	return 0;
 }
@@ -172,18 +169,22 @@ int pvc_program_cg(int charnum, u8 bitmap[BM_SIZE])
 #define  ONE_LINE	0
 #define  LARGE_FONT	(1 << 2)
 #define  SMALL_FONT	0
+
 static void pvc_funcset(u8 cmd)
 {
-	pvc_write(FUNC_SET_CMD | (cmd & (EIGHT_BYTE|TWO_LINES|LARGE_FONT)), MODE_INST);
+	pvc_write(FUNC_SET_CMD | (cmd & (EIGHT_BYTE|TWO_LINES|LARGE_FONT)),
+		  MODE_INST);
 }
 
 #define ENTRYMODE_CMD		0x4
 #define  AUTO_INC		(1 << 1)
 #define  AUTO_DEC		0
 #define  CURSOR_FOLLOWS_DISP	(1 << 0)
+
 static void pvc_entrymode(u8 cmd)
 {
-	pvc_write(ENTRYMODE_CMD | (cmd & (AUTO_INC|CURSOR_FOLLOWS_DISP)), MODE_INST);
+	pvc_write(ENTRYMODE_CMD | (cmd & (AUTO_INC|CURSOR_FOLLOWS_DISP)),
+		  MODE_INST);
 }
 
 #define DISP_CNT_CMD	0x08

@@ -1,18 +1,18 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
- *   the Free Software Foundation; either version 2 of the License, or 
+ *   the Free Software Foundation; either version 2 of the License, or
  *   (at your option) any later version.
- * 
+ *
  *   This program is distributed in the hope that it will be useful,
  *   but WITHOUT ANY WARRANTY;  without even the implied warranty of
  *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See
  *   the GNU General Public License for more details.
  *
  *   You should have received a copy of the GNU General Public License
- *   along with this program;  if not, write to the Free Software 
+ *   along with this program;  if not, write to the Free Software
  *   Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 #ifndef _H_JFS_DTREE
@@ -35,7 +35,7 @@ typedef union {
 
 
 /*
- *      entry segment/slot
+ *	entry segment/slot
  *
  * an entry consists of type dependent head/only segment/slot and
  * additional segments/slots linked vi next field;
@@ -47,7 +47,7 @@ typedef union {
 struct dtslot {
 	s8 next;		/* 1: */
 	s8 cnt;			/* 1: */
-	wchar_t name[15];	/* 30: */
+	__le16 name[15];	/* 30: */
 };				/* (32) */
 
 
@@ -67,27 +67,27 @@ struct idtentry {
 
 	s8 next;		/* 1: */
 	u8 namlen;		/* 1: */
-	wchar_t name[11];	/* 22: 2-byte aligned */
+	__le16 name[11];	/* 22: 2-byte aligned */
 };				/* (32) */
 
 #define DTIHDRSIZE	10
 #define DTIHDRDATALEN	11
 
 /* compute number of slots for entry */
-#define	NDTINTERNAL(klen) ( ((4 + (klen)) + (15 - 1)) / 15 )
+#define	NDTINTERNAL(klen) (DIV_ROUND_UP((4 + (klen)), 15))
 
 
 /*
  *	leaf node entry head/only segment
  *
- * 	For legacy filesystems, name contains 13 wchars -- no index field
+ *	For legacy filesystems, name contains 13 wchars -- no index field
  */
 struct ldtentry {
-	u32 inumber;		/* 4: 4-byte aligned */
+	__le32 inumber;		/* 4: 4-byte aligned */
 	s8 next;		/* 1: */
 	u8 namlen;		/* 1: */
-	wchar_t name[11];	/* 22: 2-byte aligned */
-	u32 index;		/* 4: index into dir_table */
+	__le16 name[11];	/* 22: 2-byte aligned */
+	__le32 index;		/* 4: index into dir_table */
 };				/* (32) */
 
 #define DTLHDRSIZE	6
@@ -113,7 +113,7 @@ struct dir_table_slot {
 	u8 flag;		/* 1: 0 if free */
 	u8 slot;		/* 1: slot within leaf page of entry */
 	u8 addr1;		/* 1: upper 8 bits of leaf page address */
-	u32 addr2;		/* 4: lower 32 bits of leaf page address -OR-
+	__le32 addr2;		/* 4: lower 32 bits of leaf page address -OR-
 				   index of next entry when this entry was deleted */
 };				/* (8) */
 
@@ -133,7 +133,7 @@ struct dir_table_slot {
 	( ((s64)((dts)->addr1)) << 32 | __le32_to_cpu((dts)->addr2) )
 
 /* compute number of slots for entry */
-#define	NDTLEAF_LEGACY(klen)	( ((2 + (klen)) + (15 - 1)) / 15 )
+#define	NDTLEAF_LEGACY(klen)	(DIV_ROUND_UP((2 + (klen)), 15))
 #define	NDTLEAF	NDTINTERNAL
 
 
@@ -151,7 +151,7 @@ typedef union {
 		s8 freecnt;	/* 1: free count */
 		s8 freelist;	/* 1: freelist header */
 
-		u32 idotdot;	/* 4: parent inode number */
+		__le32 idotdot;	/* 4: parent inode number */
 
 		s8 stbl[8];	/* 8: sorted entry index table */
 	} header;		/* (32) */
@@ -192,8 +192,8 @@ typedef union {
  */
 typedef union {
 	struct {
-		s64 next;	/* 8: next sibling */
-		s64 prev;	/* 8: previous sibling */
+		__le64 next;	/* 8: next sibling */
+		__le64 prev;	/* 8: previous sibling */
 
 		u8 flag;	/* 1: */
 		u8 nextindex;	/* 1: next entry index in stbl */
@@ -243,9 +243,6 @@ typedef union {
 #define JFS_REMOVE 3
 #define JFS_RENAME 4
 
-#define DIRENTSIZ(namlen) \
-    ( (sizeof(struct dirent) - 2*(JFS_NAME_MAX+1) + 2*((namlen)+1) + 3) &~ 3 )
-
 /*
  * Maximum file offset for directories.
  */
@@ -269,11 +266,4 @@ extern int dtModify(tid_t tid, struct inode *ip, struct component_name * key,
 		    ino_t * orig_ino, ino_t new_ino, int flag);
 
 extern int jfs_readdir(struct file *filp, void *dirent, filldir_t filldir);
-
-#ifdef  _JFS_DEBUG_DTREE
-extern int dtDisplayTree(struct inode *ip);
-
-extern int dtDisplayPage(struct inode *ip, s64 bn, dtpage_t * p);
-#endif				/* _JFS_DEBUG_DTREE */
-
 #endif				/* !_H_JFS_DTREE */

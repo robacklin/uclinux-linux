@@ -23,32 +23,24 @@
  *  ext2 fs regular file handling primitives
  */
 
-#include <asm/uaccess.h>
-#include <asm/system.h>
-
-#include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/ufs_fs.h>
-#include <linux/fcntl.h>
-#include <linux/sched.h>
-#include <linux/stat.h>
-#include <linux/locks.h>
-#include <linux/mm.h>
-#include <linux/pagemap.h>
+
+#include "ufs_fs.h"
+#include "ufs.h"
 
 /*
  * We have mostly NULL's here: the current defaults are ok for
  * the ufs filesystem.
  */
  
-struct file_operations ufs_file_operations = {
-	llseek:		generic_file_llseek,
-	read:		generic_file_read,
-	write:		generic_file_write,
-	mmap:		generic_file_mmap,
-	open:           generic_file_open,
-};
-
-struct inode_operations ufs_file_inode_operations = {
-	truncate:	ufs_truncate,
+const struct file_operations ufs_file_operations = {
+	.llseek		= generic_file_llseek,
+	.read		= do_sync_read,
+	.aio_read	= generic_file_aio_read,
+	.write		= do_sync_write,
+	.aio_write	= generic_file_aio_write,
+	.mmap		= generic_file_mmap,
+	.open           = generic_file_open,
+	.fsync		= generic_file_fsync,
+	.splice_read	= generic_file_splice_read,
 };

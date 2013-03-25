@@ -10,7 +10,6 @@
  */
 
 
-        .file		"outsl_sw.S"
         .text
         .p2align	4
 

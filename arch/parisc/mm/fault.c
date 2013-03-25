@@ -1,5 +1,4 @@
-/* $Id: fault.c,v 1.5 2000/01/26 16:20:29 jsm Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -15,6 +14,7 @@
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 #include <asm/traps.h>
@@ -23,10 +23,6 @@
 			 /*  dumped to the console via printk)          */
 
 
-/* Defines for parisc_acctyp()	*/
-#define READ		0
-#define WRITE		1
-
 /* Various important other fields */
 #define bit22set(x)		(x & 0x00000200)
 #define bits23_25set(x)		(x & 0x000001c0)
@@ -34,6 +30,9 @@
 				/* extended opcode is 0x6a */
 
 #define BITSSET		0x1c0	/* for identifying LDCW */
+
+
+DEFINE_PER_CPU(struct exception_data, exception_data);
 
 /*
  * parisc_acctyp(unsigned int inst) --
@@ -139,16 +138,45 @@ parisc_acctyp(unsigned long code, unsigned int inst)
 			}
 #endif
 
+int fixup_exception(struct pt_regs *regs)
+{
+	const struct exception_table_entry *fix;
+
+	fix = search_exception_tables(regs->iaoq[0]);
+	if (fix) {
+		struct exception_data *d;
+		d = &__get_cpu_var(exception_data);
+		d->fault_ip = regs->iaoq[0];
+		d->fault_space = regs->isr;
+		d->fault_addr = regs->ior;
+
+		regs->iaoq[0] = ((fix->fixup) & ~3);
+		/*
+		 * NOTE: In some cases the faulting instruction
+		 * may be in the delay slot of a branch. We
+		 * don't want to take the branch, so we don't
+		 * increment iaoq[1], instead we set it to be
+		 * iaoq[0]+4, and clear the B bit in the PSW
+		 */
+		regs->iaoq[1] = regs->iaoq[0] + 4;
+		regs->gr[0] &= ~PSW_B; /* IPSW in gr[0] */
+
+		return 1;
+	}
+
+	return 0;
+}
+
 void do_page_fault(struct pt_regs *regs, unsigned long code,
 			      unsigned long address)
 {
 	struct vm_area_struct *vma, *prev_vma;
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
-	const struct exception_table_entry *fix;
 	unsigned long acc_type;
+	int fault;
 
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -173,23 +201,23 @@ good_area:
 	 * fault.
 	 */
 
-	switch (handle_mm_fault(mm, vma, address, (acc_type & VM_WRITE) != 0)) {
-	      case 1:
-		++current->min_flt;
-		break;
-	      case 2:
-		++current->maj_flt;
-		break;
-	      case 0:
+	fault = handle_mm_fault(mm, vma, address, (acc_type & VM_WRITE) ? FAULT_FLAG_WRITE : 0);
+	if (unlikely(fault & VM_FAULT_ERROR)) {
 		/*
-		 * We ran out of memory, or some other thing happened
-		 * to us that made us unable to handle the page fault
-		 * gracefully.
+		 * We hit a shared mapping outside of the file, or some
+		 * other thing happened to us that made us unable to
+		 * handle the page fault gracefully.
 		 */
-		goto bad_area;
-	      default:
-		goto out_of_memory;
+		if (fault & VM_FAULT_OOM)
+			goto out_of_memory;
+		else if (fault & VM_FAULT_SIGBUS)
+			goto bad_area;
+		BUG();
 	}
+	if (fault & VM_FAULT_MAJOR)
+		current->maj_flt++;
+	else
+		current->min_flt++;
 	up_read(&mm->mmap_sem);
 	return;
 
@@ -210,7 +238,7 @@ bad_area:
 #ifdef PRINT_USER_FAULTS
 		printk(KERN_DEBUG "\n");
 		printk(KERN_DEBUG "do_page_fault() pid=%d command='%s' type=%lu address=0x%08lx\n",
-		    tsk->pid, tsk->comm, code, address);
+		    task_pid_nr(tsk), tsk->comm, code, address);
 		if (vma) {
 			printk(KERN_DEBUG "vm_start = 0x%08lx, vm_end = 0x%08lx\n",
 					vma->vm_start, vma->vm_end);
@@ -221,48 +249,22 @@ bad_area:
 		si.si_signo = SIGSEGV;
 		si.si_errno = 0;
 		si.si_code = SEGV_MAPERR;
-		si.si_addr = (void *) address;
+		si.si_addr = (void __user *) address;
 		force_sig_info(SIGSEGV, &si, current);
 		return;
 	}
 
 no_context:
 
-	if (!user_mode(regs)) {
-
-		fix = search_exception_table(regs->iaoq[0]);
-
-		if (fix) {
-
-			if (fix->skip & 1) 
-				regs->gr[8] = -EFAULT;
-			if (fix->skip & 2)
-				regs->gr[9] = 0;
-
-			regs->iaoq[0] += ((fix->skip) & ~3);
-
-			/*
-			 * NOTE: In some cases the faulting instruction
-			 * may be in the delay slot of a branch. We
-			 * don't want to take the branch, so we don't
-			 * increment iaoq[1], instead we set it to be
-			 * iaoq[0]+4, and clear the B bit in the PSW
-			 */
-
-			regs->iaoq[1] = regs->iaoq[0] + 4;
-			regs->gr[0] &= ~PSW_B; /* IPSW in gr[0] */
-
-			return;
-		}
+	if (!user_mode(regs) && fixup_exception(regs)) {
+		return;
 	}
 
 	parisc_terminate("Bad Address (null pointer deref?)", regs, code, address);
-	/* NOT REACHED! */
-	
+
   out_of_memory:
 	up_read(&mm->mmap_sem);
-	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
-	if (user_mode(regs))
-		do_exit(SIGKILL);
-	goto no_context;
+	if (!user_mode(regs))
+		goto no_context;
+	pagefault_out_of_memory();
 }

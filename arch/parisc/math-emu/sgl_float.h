@@ -16,14 +16,14 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 #ifdef __NO_PA_HDRS
     PA header file -- do not include this header file for non-PA builds.
 #endif
 
-/* 32-bit word grabing functions */
+/* 32-bit word grabbing functions */
 #define Sgl_firstword(value) Sall(value)
 #define Sgl_secondword(value) dummy_location
 #define Sgl_thirdword(value) dummy_location
@@ -36,7 +36,7 @@
 #define Sgl_exponentmantissa(object) Sexponentmantissa(object)
 #define Sgl_all(object) Sall(object)
 
-/* sgl_and_signs ands the sign bits of each argument and puts the result
+/* sgl_and_signs ANDs the sign bits of each argument and puts the result
  * into the first argument. sgl_or_signs ors those same sign bits */
 #define Sgl_and_signs( src1dst, src2)		\
     Sall(src1dst) = (Sall(src2)|~((unsigned int)1<<31)) & Sall(src1dst)

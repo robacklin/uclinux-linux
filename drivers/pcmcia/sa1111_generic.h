@@ -1,15 +1,25 @@
-extern int sa1111_pcmcia_init(struct pcmcia_init *);
-extern int sa1111_pcmcia_shutdown(void);
-extern int sa1111_pcmcia_socket_state(struct pcmcia_state_array *);
-extern int sa1111_pcmcia_get_irq_info(struct pcmcia_irq_info *);
-extern int sa1111_pcmcia_configure_socket(const struct pcmcia_configure *);
-extern int sa1111_pcmcia_socket_init(int);
-extern int sa1111_pcmcia_socket_suspend(int);
+#include "soc_common.h"
+#include "sa11xx_base.h"
 
-/*
- * I'd really like to move the INTPOL stuff to arch/arm/mach-sa1100/sa1111.c
- */
-#define SA1111_IRQMASK_LO(x)	(1 << (x - IRQ_SA1111_START))
-#define SA1111_IRQMASK_HI(x)	(1 << (x - IRQ_SA1111_START - 32))
+struct sa1111_pcmcia_socket {
+	struct soc_pcmcia_socket soc;
+	struct sa1111_dev *dev;
+	struct sa1111_pcmcia_socket *next;
+};
 
+static inline struct sa1111_pcmcia_socket *to_skt(struct soc_pcmcia_socket *s)
+{
+	return container_of(s, struct sa1111_pcmcia_socket, soc);
+}
+
+int sa1111_pcmcia_add(struct sa1111_dev *dev, struct pcmcia_low_level *ops,
+	int (*add)(struct soc_pcmcia_socket *));
+
+extern void sa1111_pcmcia_socket_state(struct soc_pcmcia_socket *, struct pcmcia_state *);
+extern int sa1111_pcmcia_configure_socket(struct soc_pcmcia_socket *, const socket_state_t *);
+
+extern int pcmcia_badge4_init(struct device *);
+extern int pcmcia_jornada720_init(struct device *);
+extern int pcmcia_lubbock_init(struct sa1111_dev *);
+extern int pcmcia_neponset_init(struct sa1111_dev *);
 

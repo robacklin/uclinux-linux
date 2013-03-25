@@ -38,7 +38,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_scan.l#18 $
+ * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_scan.l#20 $
  *
  * $FreeBSD$
  */
@@ -87,6 +87,7 @@ MBODY		((\\[^\n])*[^\n\\]*)+
 
 %%
 \n			{ ++yylineno; }
+\r			;
 "/*"			{ BEGIN COMMENT;  /* Enter comment eating state */ }
 <COMMENT>"/*"		{ fprintf(stderr, "Warning! Comment within comment."); }
 <COMMENT>\n		{ ++yylineno; }
@@ -114,6 +115,7 @@ if[ \t]*\(		{
 				}
 			}
 <CEXPR>\n		{ ++yylineno; }
+<CEXPR>\r		;
 <CEXPR>[^()\n]+	{
 				char *yptr;
 
@@ -130,7 +132,7 @@ if[ \t]*\(		{
 						*string_buf_ptr++ = *yptr++;
 				}
 			}
-
+else			{ return T_ELSE; }
 VERSION			{ return T_VERSION; }
 PREFIX			{ return T_PREFIX; }
 PATCH_ARG_LIST		{ return T_PATCH_ARG_LIST; }
@@ -160,7 +162,9 @@ register		{ return T_REGISTER; }
 const			{ yylval.value = FALSE; return T_CONST; }
 download		{ return T_DOWNLOAD; }
 address			{ return T_ADDRESS; }
+count			{ return T_COUNT; }
 access_mode		{ return T_ACCESS_MODE; }
+dont_generate_debug_code { return T_DONT_GENERATE_DEBUG_CODE; }
 modes			{ return T_MODES; }
 RW|RO|WO		{
 				 if (strcmp(yytext, "RW") == 0)
@@ -171,10 +175,6 @@ RW|RO|WO		{
 					yylval.value = WO;
 				 return T_MODE;
 			}
-BEGIN_CRITICAL		{ return T_BEGIN_CS; }
-END_CRITICAL		{ return T_END_CS; }
-SET_SRC_MODE		{ return T_SET_SRC_MODE; }
-SET_DST_MODE		{ return T_SET_DST_MODE; }
 field			{ return T_FIELD; }
 enum			{ return T_ENUM; }
 mask			{ return T_MASK; }
@@ -189,6 +189,13 @@ allzeros		{ return T_ALLZEROS; }
 none			{ return T_NONE; }
 sindex			{ return T_SINDEX; }
 A			{ return T_A; }
+
+	/* Instruction Formatting */
+PAD_PAGE		{ return T_PAD_PAGE; }
+BEGIN_CRITICAL		{ return T_BEGIN_CS; }
+END_CRITICAL		{ return T_END_CS; }
+SET_SRC_MODE		{ return T_SET_SRC_MODE; }
+SET_DST_MODE		{ return T_SET_DST_MODE; }
 
 	/* Opcodes */
 shl			{ return T_SHL; }
@@ -221,7 +228,17 @@ and			{ return T_AND;	}
 or			{ return T_OR;	}
 ret			{ return T_RET; }
 nop			{ return T_NOP; }
-else			{ return T_ELSE; }
+
+	/* ARP2 16bit extensions */
+	/* or16			{ return T_OR16; } */
+	/* and16			{ return T_AND16; }*/
+	/* xor16			{ return T_XOR16; }*/
+	/* add16			{ return T_ADD16; }*/
+	/* adc16			{ return T_ADC16; }*/
+	/* mvi16			{ return T_MVI16; }*/
+	/* test16			{ return T_TEST16; }*/
+	/* cmp16			{ return T_CMP16; }*/
+	/* cmpxchg			{ return T_CMPXCHG; }*/
 
 	/* Allowed Symbols */
 \<\<			{ return T_EXPR_LSHIFT; }
@@ -359,6 +376,7 @@ else			{ return T_ELSE; }
 				/* Eat escaped newlines. */
 				++yylineno;
 			}
+<MACROBODY>\r		;
 <MACROBODY>\n		{
 				/* Macros end on the first unescaped newline. */
 				BEGIN INITIAL;
@@ -369,10 +387,17 @@ else			{ return T_ELSE; }
 			}
 <MACROBODY>{MBODY}	{
 				char *yptr;
+				char c;
 
 				yptr = yytext;
-				while (*yptr)
-					*string_buf_ptr++ = *yptr++;
+				while (c = *yptr++) {
+					/*
+					 * Strip carriage returns.
+					 */
+					if (c == '\r')
+						continue;
+					*string_buf_ptr++ = c;
+				}
 			}
 {WORD}\(		{
 				char *yptr;

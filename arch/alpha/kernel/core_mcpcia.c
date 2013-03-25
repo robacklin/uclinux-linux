@@ -6,7 +6,11 @@
  * Code common to all MCbus-PCI Adaptor core logic chipsets
  */
 
-#include <linux/kernel.h>
+#define __EXTERN_INLINE inline
+#include <asm/io.h>
+#include <asm/core_mcpcia.h>
+#undef __EXTERN_INLINE
+
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
@@ -14,13 +18,6 @@
 #include <linux/delay.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
-#include <asm/hwrpb.h>
-
-#define __EXTERN_INLINE inline
-#include <asm/io.h>
-#include <asm/core_mcpcia.h>
-#undef __EXTERN_INLINE
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -42,8 +39,6 @@
 #else
 # define DBG_CFG(args)
 #endif
-
-#define MCPCIA_MAX_HOSES 4
 
 /*
  * Given a bus, device, and function number, compute resulting
@@ -93,11 +88,11 @@ conf_read(unsigned long addr, unsigned char type1,
 {
 	unsigned long flags;
 	unsigned long mid = MCPCIA_HOSE2MID(hose->index);
-	unsigned int stat0, value, temp, cpu;
+	unsigned int stat0, value, cpu;
 
 	cpu = smp_processor_id();
 
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	DBG_CFG(("conf_read(addr=0x%lx, type1=%d, hose=%d)\n",
 		 addr, type1, mid));
@@ -106,7 +101,7 @@ conf_read(unsigned long addr, unsigned char type1,
 	stat0 = *(vuip)MCPCIA_CAP_ERR(mid);
 	*(vuip)MCPCIA_CAP_ERR(mid) = stat0;
 	mb();
-	temp = *(vuip)MCPCIA_CAP_ERR(mid);
+	*(vuip)MCPCIA_CAP_ERR(mid);
 	DBG_CFG(("conf_read: MCPCIA_CAP_ERR(%d) was 0x%x\n", mid, stat0));
 
 	mb();
@@ -131,7 +126,7 @@ conf_read(unsigned long addr, unsigned char type1,
 
 	DBG_CFG(("conf_read(): finished\n"));
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	return value;
 }
 
@@ -141,16 +136,16 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1,
 {
 	unsigned long flags;
 	unsigned long mid = MCPCIA_HOSE2MID(hose->index);
-	unsigned int stat0, temp, cpu;
+	unsigned int stat0, cpu;
 
 	cpu = smp_processor_id();
 
-	__save_and_cli(flags);	/* avoid getting hit by machine check */
+	local_irq_save(flags);	/* avoid getting hit by machine check */
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vuip)MCPCIA_CAP_ERR(mid);
 	*(vuip)MCPCIA_CAP_ERR(mid) = stat0; mb();
-	temp = *(vuip)MCPCIA_CAP_ERR(mid);
+	*(vuip)MCPCIA_CAP_ERR(mid);
 	DBG_CFG(("conf_write: MCPCIA CAP_ERR(%d) was 0x%x\n", mid, stat0));
 
 	draina();
@@ -162,20 +157,20 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1,
 	*((vuip)addr) = value;
 	mb();
 	mb();  /* magic */
-	temp = *(vuip)MCPCIA_CAP_ERR(mid); /* read to force the write */
+	*(vuip)MCPCIA_CAP_ERR(mid); /* read to force the write */
 	mcheck_expected(cpu) = 0;
 	mb();
 
 	DBG_CFG(("conf_write(): finished\n"));
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, struct pci_controller *hose,
-	     unsigned long *pci_addr, unsigned char *type1)
+mk_conf_addr(struct pci_bus *pbus, unsigned int devfn, int where,
+	     struct pci_controller *hose, unsigned long *pci_addr,
+	     unsigned char *type1)
 {
-	u8 bus = dev->bus->number;
-	u8 devfn = dev->devfn;
+	u8 bus = pbus->number;
 	unsigned long addr;
 
 	DBG_CFG(("mk_conf_addr(bus=%d,devfn=0x%x,hose=%d,where=0x%x,"
@@ -185,7 +180,7 @@ mk_conf_addr(struct pci_dev *dev, int where, struct pci_controller *hose,
 	/* Type 1 configuration cycle for *ALL* busses.  */
 	*type1 = 1;
 
-	if (dev->bus->number == hose->first_busno)
+	if (!pbus->parent) /* No parent means peer PCI bus. */
 		bus = 0;
 	addr = (bus << 16) | (devfn << 8) | (where);
 	addr <<= 5; /* swizzle for SPARSE */
@@ -197,94 +192,53 @@ mk_conf_addr(struct pci_dev *dev, int where, struct pci_controller *hose,
 }
 
 static int
-mcpcia_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+mcpcia_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		   int size, u32 *value)
 {
-	struct pci_controller *hose = dev->sysdata;
+	struct pci_controller *hose = bus->sysdata;
 	unsigned long addr, w;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, hose, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, hose, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr |= 0x00;
+	addr |= (size - 1) * 8;
 	w = conf_read(addr, type1, hose);
-	*value = __kernel_extbl(w, where & 3);
+	switch (size) {
+	case 1:
+		*value = __kernel_extbl(w, where & 3);
+		break;
+	case 2:
+		*value = __kernel_extwl(w, where & 3);
+		break;
+	case 4:
+		*value = w;
+		break;
+	}
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int
-mcpcia_read_config_word(struct pci_dev *dev, int where, u16 *value)
+mcpcia_write_config(struct pci_bus *bus, unsigned int devfn, int where,
+		    int size, u32 value)
 {
-	struct pci_controller *hose = dev->sysdata;
-	unsigned long addr, w;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, hose, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr |= 0x08;
-	w = conf_read(addr, type1, hose);
-	*value = __kernel_extwl(w, where & 3);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-mcpcia_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	struct pci_controller *hose = dev->sysdata;
+	struct pci_controller *hose = bus->sysdata;
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, hose, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, hose, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr |= 0x18;
-	*value = conf_read(addr, type1, hose);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-mcpcia_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	struct pci_controller *hose = dev->sysdata;
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, hose, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr |= mask;
+	addr |= (size - 1) * 8;
 	value = __kernel_insql(value, where & 3);
 	conf_write(addr, value, type1, hose);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-mcpcia_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return mcpcia_write_config(dev, where, value, 0x00);
-}
-
-static int
-mcpcia_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return mcpcia_write_config(dev, where, value, 0x08);
-}
-
-static int
-mcpcia_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return mcpcia_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops mcpcia_pci_ops = 
 {
-	read_byte:	mcpcia_read_config_byte,
-	read_word:	mcpcia_read_config_word,
-	read_dword:	mcpcia_read_config_dword,
-	write_byte:	mcpcia_write_config_byte,
-	write_word:	mcpcia_write_config_word,
-	write_dword:	mcpcia_write_config_dword
+	.read =		mcpcia_read_config,
+	.write =	mcpcia_write_config,
 };
 
 void
@@ -448,7 +402,6 @@ mcpcia_init_arch(void)
 {
 	/* With multiple PCI busses, we play with I/O as physical addrs.  */
 	ioport_resource.end = ~0UL;
-	iomem_resource.end = ~0UL;
 
 	/* Allocate hose 0.  That's the one that all the ISA junk hangs
 	   off of, from which we'll be registering stuff here in a bit.
@@ -617,15 +570,12 @@ mcpcia_print_system_area(unsigned long la_ptr)
 }
 
 void
-mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
-		     struct pt_regs * regs)
+mcpcia_machine_check(unsigned long vector, unsigned long la_ptr)
 {
-	struct el_common *mchk_header;
 	struct el_MCPCIA_uncorrected_frame_mcheck *mchk_logout;
 	unsigned int cpu = smp_processor_id();
 	int expected;
 
-	mchk_header = (struct el_common *)la_ptr;
 	mchk_logout = (struct el_MCPCIA_uncorrected_frame_mcheck *)la_ptr;
 	expected = mcheck_expected(cpu);
 
@@ -655,7 +605,7 @@ mcpcia_machine_check(unsigned long vector, unsigned long la_ptr,
 	wrmces(0x7);
 	mb();
 
-	process_mcheck_info(vector, la_ptr, regs, "MCPCIA", expected != 0);
+	process_mcheck_info(vector, la_ptr, "MCPCIA", expected != 0);
 	if (!expected && vector != 0x620 && vector != 0x630) {
 		mcpcia_print_uncorrectable(mchk_logout);
 		mcpcia_print_system_area(la_ptr);

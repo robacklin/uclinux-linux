@@ -11,8 +11,6 @@
  * published by the Free Software Foundation.
  *
  */
-
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -20,52 +18,36 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/cpufreq.h>
-#include <linux/list.h>
-#include <linux/timer.h>
+#include <linux/serial_core.h>
+#include <linux/mtd/mtd.h>
+#include <linux/mtd/partitions.h>
 
-#include <asm/hardware.h>
+#include <asm/mach-types.h>
 #include <asm/setup.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/irq.h>
 
 #include <asm/mach/arch.h>
+#include <asm/mach/flash.h>
 #include <asm/mach/map.h>
 #include <asm/mach/irq.h>
 #include <asm/mach/serial_sa1100.h>
 
-#include <asm/arch/irq.h>
-
-#include <linux/serial_core.h>
+#include <mach/hardware.h>
+#include <mach/irqs.h>
 
 #include "generic.h"
-
-#define DEBUG 1
-
-#ifdef DEBUG
-#	define DPRINTK( x, args... )	printk( "%s: line %d: "x, __FUNCTION__, __LINE__, ## args  );
-#else
-#	define DPRINTK( x, args... )	/* nix */
-#endif
 
 /**********************************************************************
  *  prototypes
  */
 
 /* init funcs */
-static void __init fixup_hackkit(struct machine_desc *desc,
-		struct param_struct *params, char **cmdline, struct meminfo *mi);
-static void __init get_hackkit_scr(void);
-static int __init hackkit_init(void);
-static void __init hackkit_init_irq(void);
 static void __init hackkit_map_io(void);
 
-static int hackkit_get_mctrl(struct uart_port *port);
+static u_int hackkit_get_mctrl(struct uart_port *port);
 static void hackkit_set_mctrl(struct uart_port *port, u_int mctrl);
 static void hackkit_uart_pm(struct uart_port *port, u_int state, u_int oldstate);
-
-extern void convert_to_tag_list(struct param_struct *params, int mem_init);
-
 
 /**********************************************************************
  *  global data
@@ -76,9 +58,12 @@ extern void convert_to_tag_list(struct param_struct *params, int mem_init);
  */
 
 static struct map_desc hackkit_io_desc[] __initdata = {
- /* virtual     physical    length      domain     r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x01000000, DOMAIN_IO, 0, 1, 0, 0 }, /* Flash bank 0 */
-  LAST_DESC
+	{	/* Flash bank 0 */
+		.virtual	=  0xe8000000,
+		.pfn		= __phys_to_pfn(0x00000000),
+		.length		= 0x01000000,
+		.type		= MT_DEVICE
+	},
 };
 
 static struct sa1100_port_fns hackkit_port_fns __initdata = {
@@ -93,9 +78,8 @@ static struct sa1100_port_fns hackkit_port_fns __initdata = {
 
 static void __init hackkit_map_io(void)
 {
-	DPRINTK( "%s\n", "START" );
 	sa1100_map_io();
-	iotable_init(hackkit_io_desc);
+	iotable_init(hackkit_io_desc, ARRAY_SIZE(hackkit_io_desc));
 
 	sa1100_register_uart_fns(&hackkit_port_fns);
 	sa1100_register_uart(0, 1);	/* com port */
@@ -104,30 +88,6 @@ static void __init hackkit_map_io(void)
 
 	Ser1SDCR0 |= SDCR0_SUS;
 }
-
-static void __init hackkit_init_irq(void)
-{
-	/* none used yet */
-}
-
-/**
- *	fixup_hackkit - fixup function for system 3 board
- *	@desc:		machine description
- *	@param:		kernel params
- *	@cmdline:	kernel cmdline
- *	@mi:		memory info struct
- *
- */
-static void __init fixup_hackkit(struct machine_desc *desc,
-		struct param_struct *params, char **cmdline, struct meminfo *mi)
-{
-	DPRINTK( "%s\n", "START" );
-
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
-	setup_ramdisk( 1, 0, 0, 8192 );
-	setup_initrd( 0xc0800000, 8*1024*1024 );
-}
-
 
 /**
  *	hackkit_uart_pm - powermgmt callback function for system 3 UART
@@ -167,7 +127,7 @@ static void hackkit_set_mctrl(struct uart_port *port, u_int mctrl)
 #endif
 }
 
-static int hackkit_get_mctrl(struct uart_port *port)
+static u_int hackkit_get_mctrl(struct uart_port *port)
 {
 	u_int ret = 0;
 #if 0
@@ -185,37 +145,59 @@ static int hackkit_get_mctrl(struct uart_port *port)
 	return ret;
 }
 
-static int __init hackkit_init(void)
-{
-	int ret = 0;
-	DPRINTK( "%s\n", "START" );
-
-	if ( !machine_is_hackkit() ) {
-		ret = -EINVAL;
-		goto DONE;
+static struct mtd_partition hackkit_partitions[] = {
+	{
+		.name		= "BLOB",
+		.size		= 0x00040000,
+		.offset		= 0x00000000,
+		.mask_flags	= MTD_WRITEABLE,  /* force read-only */
+	}, {
+		.name		= "config",
+		.size		= 0x00040000,
+		.offset		= MTDPART_OFS_APPEND,
+	}, {
+		.name		= "kernel",
+		.size		= 0x00100000,
+		.offset		= MTDPART_OFS_APPEND,
+	}, {
+		.name		= "initrd",
+		.size		= 0x00180000,
+		.offset		= MTDPART_OFS_APPEND,
+	}, {
+		.name		= "rootfs",
+		.size		= 0x700000,
+		.offset		= MTDPART_OFS_APPEND,
+	}, {
+		.name		= "data",
+		.size		= MTDPART_SIZ_FULL,
+		.offset		= MTDPART_OFS_APPEND,
 	}
+};
 
-	hackkit_init_irq();
+static struct flash_platform_data hackkit_flash_data = {
+	.map_name	= "cfi_probe",
+	.parts		= hackkit_partitions,
+	.nr_parts	= ARRAY_SIZE(hackkit_partitions),
+};
 
-	ret = 0;
-DONE:
-	DPRINTK( "ret=%d\n", ret );
-	return ret;
+static struct resource hackkit_flash_resource =
+	DEFINE_RES_MEM(SA1100_CS0_PHYS, SZ_32M);
+
+static void __init hackkit_init(void)
+{
+	sa11x0_register_mtd(&hackkit_flash_data, &hackkit_flash_resource, 1);
 }
 
 /**********************************************************************
  *  Exported Functions
  */
 
-/**********************************************************************
- *  kernel magic macros
- */
-__initcall(hackkit_init);
-
 MACHINE_START(HACKKIT, "HackKit Cpu Board")
-	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	BOOT_PARAMS(0xc0000100)
-	FIXUP(fixup_hackkit)
-	MAPIO(hackkit_map_io)
-	INITIRQ(sa1100_init_irq)
+	.atag_offset	= 0x100,
+	.map_io		= hackkit_map_io,
+	.nr_irqs	= SA1100_NR_IRQS,
+	.init_irq	= sa1100_init_irq,
+	.timer		= &sa1100_timer,
+	.init_machine	= hackkit_init,
+	.restart	= sa11x0_restart,
 MACHINE_END

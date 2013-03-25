@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -26,7 +26,6 @@
 #ifndef IRMLP_FRAME_H
 #define IRMLP_FRAME_H
 
-#include <linux/config.h>
 #include <linux/skbuff.h>
 
 #include <net/irda/discovery.h>
@@ -40,7 +39,7 @@
 
 #define CONTROL_BIT    0x80
 
-void irlmp_send_data_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap, 
+void irlmp_send_data_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap,
 				int expedited, struct sk_buff *skb);
 void irlmp_send_lcf_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap, 
 			__u8 opcode, struct sk_buff *skb);

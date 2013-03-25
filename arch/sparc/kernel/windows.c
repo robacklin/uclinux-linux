@@ -9,7 +9,6 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 
@@ -32,17 +31,17 @@ void flush_user_windows(void)
 		" restore %%g0, %%g0, %%g0\n"
 	: "=&r" (ctr)
 	: "0" (ctr),
-	  "i" ((const unsigned long)(&(((struct task_struct *)0)->thread.uwinmask)))
+	  "i" ((const unsigned long)TI_UWINMASK)
 	: "g4", "cc");
 }
 
-static inline void shift_window_buffer(int first_win, int last_win, struct thread_struct *tp)
+static inline void shift_window_buffer(int first_win, int last_win, struct thread_info *tp)
 {
 	int i;
 
 	for(i = first_win; i < last_win; i++) {
 		tp->rwbuf_stkptrs[i] = tp->rwbuf_stkptrs[i+1];
-		memcpy(&tp->reg_window[i], &tp->reg_window[i+1], sizeof(struct reg_window));
+		memcpy(&tp->reg_window[i], &tp->reg_window[i+1], sizeof(struct reg_window32));
 	}
 }
 
@@ -57,11 +56,10 @@ static inline void shift_window_buffer(int first_win, int last_win, struct threa
  */
 void synchronize_user_stack(void)
 {
-	struct thread_struct *tp;
+	struct thread_info *tp = current_thread_info();
 	int window;
 
 	flush_user_windows();
-	tp = &current->thread;
 	if(!tp->w_saved)
 		return;
 
@@ -70,8 +68,8 @@ void synchronize_user_stack(void)
 		unsigned long sp = tp->rwbuf_stkptrs[window];
 
 		/* Ok, let it rip. */
-		if(copy_to_user((char *) sp, &tp->reg_window[window],
-				sizeof(struct reg_window)))
+		if (copy_to_user((char __user *) sp, &tp->reg_window[window],
+				 sizeof(struct reg_window32)))
 			continue;
 
 		shift_window_buffer(window, tp->w_saved - 1, tp);
@@ -110,19 +108,17 @@ static inline void copy_aligned_window(void *dest, const void *src)
 
 void try_to_clear_window_buffer(struct pt_regs *regs, int who)
 {
-	struct thread_struct *tp;
+	struct thread_info *tp = current_thread_info();
 	int window;
 
-	lock_kernel();
 	flush_user_windows();
-	tp = &current->thread;
 	for(window = 0; window < tp->w_saved; window++) {
 		unsigned long sp = tp->rwbuf_stkptrs[window];
 
-		if((sp & 7) ||
-		   copy_to_user((char *) sp, &tp->reg_window[window], sizeof(struct reg_window)))
+		if ((sp & 7) ||
+		    copy_to_user((char __user *) sp, &tp->reg_window[window],
+				 sizeof(struct reg_window32)))
 			do_exit(SIGILL);
 	}
 	tp->w_saved = 0;
-	unlock_kernel();
 }

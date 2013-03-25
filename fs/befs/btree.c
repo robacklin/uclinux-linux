@@ -5,7 +5,7 @@
  *
  * Licensed under the GNU GPL. See the file COPYING for details.
  *
- * 2002-02-05: Sergey S. Kostyliov added binary search withing
+ * 2002-02-05: Sergey S. Kostyliov added binary search within
  * 		btree nodes.
  *
  * Many thanks to:
@@ -25,11 +25,11 @@
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
+#include <linux/buffer_head.h>
 
 #include "befs.h"
 #include "btree.h"
 #include "datastream.h"
-#include "endian.h"
 
 /*
  * The btree functions in this file are built on top of the
@@ -40,7 +40,7 @@
 /* Befs B+tree structure:
  * 
  * The first thing in the tree is the tree superblock. It tells you
- * all kinds of usefull things about the tree, like where the rootnode
+ * all kinds of useful things about the tree, like where the rootnode
  * is located, and the size of the nodes (always 1024 with current version
  * of BeOS).
  *
@@ -55,9 +55,9 @@
 /* Note:
  * 
  * The book states 2 confusing things about befs b+trees. First, 
- * it states that the overflow feild of node headers is used by internal nodes 
- * to point to another node that "effectivly continues this one". Here is what 
- * I belive that means. Each key in internal nodes points to another node that
+ * it states that the overflow field of node headers is used by internal nodes
+ * to point to another node that "effectively continues this one". Here is what
+ * I believe that means. Each key in internal nodes points to another node that
  * contains key values less than itself. Inspection reveals that the last key 
  * in the internal node is not the last key in the index. Keys that are 
  * greater than the last key in the internal node go into the overflow node. 
@@ -79,13 +79,13 @@
  * In memory structure of each btree node
  */
 typedef struct {
-	befs_btree_nodehead head;	/* head of node converted to cpu byteorder */
+	befs_host_btree_nodehead head;	/* head of node converted to cpu byteorder */
 	struct buffer_head *bh;
 	befs_btree_nodehead *od_node;	/* on disk node */
 } befs_btree_node;
 
 /* local constants */
-const static befs_off_t befs_bt_inval = 0xffffffffffffffffULL;
+static const befs_off_t befs_bt_inval = 0xffffffffffffffffULL;
 
 /* local functions */
 static int befs_btree_seekleaf(struct super_block *sb, befs_data_stream * ds,
@@ -101,9 +101,9 @@ static int befs_bt_read_node(struct super_block *sb, befs_data_stream * ds,
 
 static int befs_leafnode(befs_btree_node * node);
 
-static u16 *befs_bt_keylen_index(befs_btree_node * node);
+static fs16 *befs_bt_keylen_index(befs_btree_node * node);
 
-static befs_off_t *befs_bt_valarray(befs_btree_node * node);
+static fs64 *befs_bt_valarray(befs_btree_node * node);
 
 static char *befs_bt_keydata(befs_btree_node * node);
 
@@ -123,7 +123,7 @@ static int befs_compare_strings(const void *key1, int keylen1,
  * @sup: Buffer in which to place the btree superblock
  *
  * Calls befs_read_datastream to read in the btree superblock and
- * makes sure it is in cpu byteorder, byteswapping if nessisary.
+ * makes sure it is in cpu byteorder, byteswapping if necessary.
  *
  * On success, returns BEFS_OK and *@sup contains the btree superblock,
  * in cpu byte order.
@@ -135,7 +135,7 @@ befs_bt_read_super(struct super_block *sb, befs_data_stream * ds,
 		   befs_btree_super * sup)
 {
 	struct buffer_head *bh = NULL;
-	befs_btree_super *od_sup = NULL;
+	befs_disk_btree_super *od_sup = NULL;
 
 	befs_debug(sb, "---> befs_btree_read_super()");
 
@@ -145,7 +145,7 @@ befs_bt_read_super(struct super_block *sb, befs_data_stream * ds,
 		befs_error(sb, "Couldn't read index header.");
 		goto error;
 	}
-	od_sup = (befs_btree_super *) bh->b_data;
+	od_sup = (befs_disk_btree_super *) bh->b_data;
 	befs_dump_index_entry(sb, od_sup);
 
 	sup->magic = fs32_to_cpu(sb, od_sup->magic);
@@ -178,8 +178,8 @@ befs_bt_read_super(struct super_block *sb, befs_data_stream * ds,
  * @node_off: Starting offset (in bytes) of the node in @ds
  *
  * Calls befs_read_datastream to read in the indicated btree node and
- * makes sure its header feilds are in cpu byteorder, byteswapping if 
- * nessisary.
+ * makes sure its header fields are in cpu byteorder, byteswapping if
+ * necessary.
  * Note: node->bh must be NULL when this function called first
  * time. Don't forget brelse(node->bh) after last call.
  *
@@ -232,7 +232,7 @@ befs_bt_read_node(struct super_block *sb, befs_data_stream * ds,
  * @key: Key string to lookup in btree
  * @value: Value stored with @key
  *
- * On sucess, returns BEFS_OK and sets *@value to the value stored
+ * On success, returns BEFS_OK and sets *@value to the value stored
  * with @key (usually the disk block number of an inode).
  *
  * On failure, returns BEFS_ERR or BEFS_BT_NOT_FOUND.
@@ -260,7 +260,7 @@ befs_btree_find(struct super_block *sb, befs_data_stream * ds,
 		goto error;
 	}
 
-	this_node = (befs_btree_node *) kmalloc(sizeof (befs_btree_node),
+	this_node = kmalloc(sizeof (befs_btree_node),
 						GFP_NOFS);
 	if (!this_node) {
 		befs_error(sb, "befs_btree_find() failed to allocate %u "
@@ -323,7 +323,7 @@ befs_btree_find(struct super_block *sb, befs_data_stream * ds,
  *
  * finds exact match if one exists, and returns BEFS_BT_MATCH
  * If no exact match, finds first key in node that is greater
- * (alpabeticly) than the search key and returns BEFS_BT_PARMATCH
+ * (alphabetically) than the search key and returns BEFS_BT_PARMATCH
  * (for partial match, I guess). Can you think of something better to
  * call it?
  *
@@ -341,7 +341,7 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 	u16 keylen;
 	int findkey_len;
 	char *thiskey;
-	befs_off_t *valarray;
+	fs64 *valarray;
 
 	befs_debug(sb, "---> befs_find_key() %s", findkey);
 
@@ -371,12 +371,12 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 		thiskey = befs_bt_get_key(sb, node, mid, &keylen);
 		eq = befs_compare_strings(thiskey, keylen, findkey,
 					  findkey_len);
-		*value = fs64_to_cpu(sb, valarray[mid]);
 
 		if (eq == 0) {
 			befs_debug(sb, "<--- befs_find_key() found %s at %d",
 				   thiskey, mid);
 
+			*value = fs64_to_cpu(sb, valarray[mid]);
 			return BEFS_BT_MATCH;
 		}
 		if (eq > 0)
@@ -386,6 +386,8 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
 	}
 	if (eq < 0)
 		*value = fs64_to_cpu(sb, valarray[mid + 1]);
+	else
+		*value = fs64_to_cpu(sb, valarray[mid]);
 	befs_debug(sb, "<--- befs_find_key() found %s at %d", thiskey, mid);
 	return BEFS_BT_PARMATCH;
 }
@@ -401,9 +403,9 @@ befs_find_key(struct super_block *sb, befs_btree_node * node,
  * @value: Value stored with the returned key
  *
  * Heres how it works: Key_no is the index of the key/value pair to 
- * retun in keybuf/value.
+ * return in keybuf/value.
  * Bufsize is the size of keybuf (BEFS_NAME_LEN+1 is a good size). Keysize is 
- * the number of charecters in the key (just a convience).
+ * the number of charecters in the key (just a convenience).
  *
  * Algorithm:
  *   Get the first leafnode of the tree. See if the requested key is in that
@@ -419,7 +421,7 @@ befs_btree_read(struct super_block *sb, befs_data_stream * ds,
 	befs_btree_super bt_super;
 	befs_off_t node_off = 0;
 	int cur_key;
-	befs_off_t *valarray;
+	fs64 *valarray;
 	char *keystart;
 	u16 keylen;
 	int res;
@@ -529,7 +531,7 @@ befs_btree_read(struct super_block *sb, befs_data_stream * ds,
  * befs_btree_seekleaf - Find the first leafnode in the btree
  * @sb: Filesystem superblock
  * @ds: Datastream containing btree
- * @bt_super: Pointer to the uperblock of the btree
+ * @bt_super: Pointer to the superblock of the btree
  * @this_node: Buffer to return the leafnode in
  * @node_off: Pointer to offset of current node within datastream. Modified
  * 		by the function.
@@ -569,7 +571,7 @@ befs_btree_seekleaf(struct super_block *sb, befs_data_stream * ds,
 				   this_node->head.overflow);
 			*node_off = this_node->head.overflow;
 		} else {
-			befs_off_t *valarray = befs_bt_valarray(this_node);
+			fs64 *valarray = befs_bt_valarray(this_node);
 			*node_off = fs64_to_cpu(sb, valarray[0]);
 		}
 		if (befs_bt_read_node(sb, ds, this_node, *node_off) != BEFS_OK) {
@@ -614,12 +616,12 @@ befs_leafnode(befs_btree_node * node)
  * of the B+tree node *@node
  *
  * "The length of all the keys in the node is added to the size of the
- * header and then rounded up to a multiple of four to get the begining
+ * header and then rounded up to a multiple of four to get the beginning
  * of the key length index" (p.88, practical filesystem design).
  *
- * Exept that rounding up to 8 works, and rounding up to 4 doesn't.
+ * Except that rounding up to 8 works, and rounding up to 4 doesn't.
  */
-static u16 *
+static fs16 *
 befs_bt_keylen_index(befs_btree_node * node)
 {
 	const int keylen_align = 8;
@@ -630,7 +632,7 @@ befs_bt_keylen_index(befs_btree_node * node)
 	if (tmp)
 		off += keylen_align - tmp;
 
-	return (u16 *) ((void *) node->od_node + off);
+	return (fs16 *) ((void *) node->od_node + off);
 }
 
 /**
@@ -640,13 +642,13 @@ befs_bt_keylen_index(befs_btree_node * node)
  * Returns a pointer to the start of the value array
  * of the node pointed to by the node header
  */
-static befs_off_t *
+static fs64 *
 befs_bt_valarray(befs_btree_node * node)
 {
 	void *keylen_index_start = (void *) befs_bt_keylen_index(node);
-	size_t keylen_index_size = node->head.all_key_count * sizeof (u16);
+	size_t keylen_index_size = node->head.all_key_count * sizeof (fs16);
 
-	return (befs_off_t *) (keylen_index_start + keylen_index_size);
+	return (fs64 *) (keylen_index_start + keylen_index_size);
 }
 
 /**
@@ -678,7 +680,7 @@ befs_bt_get_key(struct super_block *sb, befs_btree_node * node,
 {
 	int prev_key_end;
 	char *keystart;
-	u16 *keylen_index;
+	fs16 *keylen_index;
 
 	if (index < 0 || index > node->head.all_key_count) {
 		*keylen = 0;
@@ -703,7 +705,7 @@ befs_bt_get_key(struct super_block *sb, befs_btree_node * node,
  * @key1: pointer to the first key to be compared 
  * @keylen1: length in bytes of key1
  * @key2: pointer to the second key to be compared
- * @kelen2: lenght in bytes of key2
+ * @kelen2: length in bytes of key2
  *
  * Returns 0 if @key1 and @key2 are equal.
  * Returns >0 if @key1 is greater.

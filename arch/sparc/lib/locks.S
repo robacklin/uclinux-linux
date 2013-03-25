@@ -1,4 +1,4 @@
-/* $Id: locks.S,v 1.16 2000/02/26 11:02:47 anton Exp $
+/*
  * locks.S: SMP low-level lock primitives on Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -6,7 +6,6 @@
  * Copyright (C) 1998 Jakub Jelinek   (jj@ultra.linux.cz)
  */
 
-#include <asm/cprefix.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
 #include <asm/smp.h>
@@ -26,6 +25,15 @@ ___rw_read_enter_spin_on_wlock:
 	 ldstub	[%g1 + 3], %g2
 	b	___rw_read_enter_spin_on_wlock
 	 ldub	[%g1 + 3], %g2
+___rw_read_try_spin_on_wlock:
+	andcc	%g2, 0xff, %g0
+	be,a	___rw_read_try
+	 ldstub	[%g1 + 3], %g2
+	xnorcc	%g2, 0x0, %o0	/* if g2 is ~0, set o0 to 0 and bugger off */
+	bne,a	___rw_read_enter_spin_on_wlock
+	 ld	[%g1], %g2
+	retl
+	 mov	%g4, %o7
 ___rw_read_exit_spin_on_wlock:
 	orcc	%g2, 0x0, %g0
 	be,a	___rw_read_exit
@@ -58,6 +66,17 @@ ___rw_read_exit:
 	ld	[%g1], %g2
 	sub	%g2, 0x1ff, %g2
 	st	%g2, [%g1]
+	retl
+	 mov	%g4, %o7
+
+	.globl	___rw_read_try
+___rw_read_try:
+	orcc	%g2, 0x0, %g0
+	bne	___rw_read_try_spin_on_wlock
+	 ld	[%g1], %g2
+	add	%g2, 1, %g2
+	st	%g2, [%g1]
+	set	1, %o1
 	retl
 	 mov	%g4, %o7
 

@@ -1,20 +1,22 @@
-#
-# Makefile for the linux kernel.
-#
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -c $< -o $*.o
+# arch/h8300/boot/Makefile
 
-all: bootup.o
-O_TARGET := bootup.o
-O_OBJS := boot.o gdb_output.o
+targets := vmlinux.srec vmlinux.bin zImage
+subdir- := compressed
 
-boot.o: boot.S
+OBJCOPYFLAGS_vmlinux.srec := -Osrec
+OBJCOPYFLAGS_vmlinux.bin  := -Obinary
+OBJCOPYFLAGS_zImage := -O binary -R .note -R .comment -R .stab -R .stabstr -S
 
-clean:
-	rm -f *.[oa]
+$(obj)/vmlinux.srec $(obj)/vmlinux.bin:  vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo '  Kernel: $@ is ready'
 
-include $(TOPDIR)/Rules.make
+$(obj)/zImage: $(obj)/compressed/vmlinux FORCE
+	$(call if_changed,objcopy)
+	@echo 'Kernel: $@ is ready'
+
+$(obj)/compressed/vmlinux: FORCE
+	$(Q)$(MAKE) $(build)=$(obj)/compressed $@
+
+CLEAN_FILES += arch/$(ARCH)/vmlinux.bin arch/$(ARCH)/vmlinux.srec
+

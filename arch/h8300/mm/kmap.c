@@ -1,15 +1,17 @@
 /*
+ *  linux/arch/h8300/mm/kmap.c
+ *  
+ *  Based on
  *  linux/arch/m68knommu/mm/kmap.c
  *
- *  Copyright (C) 2000 Lineo, <davidm@lineo.com>
+ *  Copyright (C) 2000 Lineo, <davidm@snapgear.com>
+ *  Copyright (C) 2000-2002 David McCullough <davidm@snapgear.com>
  */
 
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/vmalloc.h>
 
 #include <asm/setup.h>
@@ -17,21 +19,21 @@
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/system.h>
 
 #undef DEBUG
+
+#define VIRT_OFFSET (0x01000000)
 
 /*
  * Map some physical address range into the kernel address space.
  */
-
 void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag)
 {
-	return (void *)physaddr;
+	return (void *)(physaddr + VIRT_OFFSET);
 }
 
 /*
- * Unmap a ioremap()ed region again
+ * Unmap a ioremap()ed region again.
  */
 void iounmap(void *addr)
 {

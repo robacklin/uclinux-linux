@@ -8,7 +8,7 @@
    Changed (and renamed) for OnStream SCSI drives garloff@suse.de
    2000-06-21
 
-   $Header: /cvsroot/osst/Driver/osst_options.h,v 1.5 2001/01/07 22:19:15 riede Exp $
+   $Header: /cvsroot/osst/Driver/osst_options.h,v 1.6 2003/12/23 14:22:12 wriede Exp $
 */
 
 #ifndef _OSST_OPTIONS_H
@@ -57,7 +57,7 @@
 /* The size of the first scatter/gather segments (determines the maximum block
    size for SCSI adapters not supporting scatter/gather). The default is set
    to try to allocate the buffer as one chunk. */
-#define OSST_FIRST_ORDER  5
+#define OSST_FIRST_ORDER  (15-PAGE_SHIFT)
 
 
 /* The following lines define defaults for properties that can be set

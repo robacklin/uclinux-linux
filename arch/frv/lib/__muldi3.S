@@ -9,7 +9,6 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-        .file		"__muldi3.S"
         .text
         .p2align	4
 

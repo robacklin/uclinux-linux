@@ -46,38 +46,34 @@
 *	First release to the public
 */
 
-#include <linux/version.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/unistd.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
+#include <linux/sched.h>	/* cond_resched() */
+
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include "smapi.h"
 #include "mwavedd.h"
 #include "3780i.h"
 
-static spinlock_t dsp_lock = SPIN_LOCK_UNLOCKED;
-static unsigned long flags;
-
+static DEFINE_SPINLOCK(dsp_lock);
 
 static void PaceMsaAccess(unsigned short usDspBaseIO)
 {
-	if(current->need_resched)
-		schedule();
+	cond_resched();
 	udelay(100);
-	if(current->need_resched)
-		schedule();
+	cond_resched();
 }
 
 unsigned short dsp3780I_ReadMsaCfg(unsigned short usDspBaseIO,
                                    unsigned long ulMsaAddr)
 {
+	unsigned long flags;
 	unsigned short val;
 
 	PRINTK_3(TRACE_3780I,
@@ -98,6 +94,7 @@ unsigned short dsp3780I_ReadMsaCfg(unsigned short usDspBaseIO,
 void dsp3780I_WriteMsaCfg(unsigned short usDspBaseIO,
                           unsigned long ulMsaAddr, unsigned short usValue)
 {
+	unsigned long flags;
 
 	PRINTK_4(TRACE_3780I,
 		"3780i::dsp3780i_WriteMsaCfg entry usDspBaseIO %x ulMsaAddr %lx usValue %x\n",
@@ -110,8 +107,8 @@ void dsp3780I_WriteMsaCfg(unsigned short usDspBaseIO,
 	spin_unlock_irqrestore(&dsp_lock, flags);
 }
 
-void dsp3780I_WriteGenCfg(unsigned short usDspBaseIO, unsigned uIndex,
-                          unsigned char ucValue)
+static void dsp3780I_WriteGenCfg(unsigned short usDspBaseIO, unsigned uIndex,
+				 unsigned char ucValue)
 {
 	DSP_ISA_SLAVE_CONTROL rSlaveControl;
 	DSP_ISA_SLAVE_CONTROL rSlaveControl_Save;
@@ -144,6 +141,7 @@ void dsp3780I_WriteGenCfg(unsigned short usDspBaseIO, unsigned uIndex,
 
 }
 
+#if 0
 unsigned char dsp3780I_ReadGenCfg(unsigned short usDspBaseIO,
                                   unsigned uIndex)
 {
@@ -170,11 +168,13 @@ unsigned char dsp3780I_ReadGenCfg(unsigned short usDspBaseIO,
 
 	return ucValue;
 }
+#endif  /*  0  */
 
 int dsp3780I_EnableDSP(DSP_3780I_CONFIG_SETTINGS * pSettings,
                        unsigned short *pIrqMap,
                        unsigned short *pDmaMap)
 {
+	unsigned long flags;
 	unsigned short usDspBaseIO = pSettings->usDspBaseIO;
 	int i;
 	DSP_UART_CFG_1 rUartCfg1;
@@ -354,6 +354,7 @@ int dsp3780I_EnableDSP(DSP_3780I_CONFIG_SETTINGS * pSettings,
 
 int dsp3780I_DisableDSP(DSP_3780I_CONFIG_SETTINGS * pSettings)
 {
+	unsigned long flags;
 	unsigned short usDspBaseIO = pSettings->usDspBaseIO;
 	DSP_ISA_SLAVE_CONTROL rSlaveControl;
 
@@ -383,6 +384,7 @@ int dsp3780I_DisableDSP(DSP_3780I_CONFIG_SETTINGS * pSettings)
 
 int dsp3780I_Reset(DSP_3780I_CONFIG_SETTINGS * pSettings)
 {
+	unsigned long flags;
 	unsigned short usDspBaseIO = pSettings->usDspBaseIO;
 	DSP_BOOT_DOMAIN rBootDomain;
 	DSP_HBRIDGE_CONTROL rHBridgeControl;
@@ -427,6 +429,7 @@ int dsp3780I_Reset(DSP_3780I_CONFIG_SETTINGS * pSettings)
 
 int dsp3780I_Run(DSP_3780I_CONFIG_SETTINGS * pSettings)
 {
+	unsigned long flags;
 	unsigned short usDspBaseIO = pSettings->usDspBaseIO;
 	DSP_BOOT_DOMAIN rBootDomain;
 	DSP_HBRIDGE_CONTROL rHBridgeControl;
@@ -470,10 +473,11 @@ int dsp3780I_Run(DSP_3780I_CONFIG_SETTINGS * pSettings)
 }
 
 
-int dsp3780I_ReadDStore(unsigned short usDspBaseIO, void *pvBuffer,
+int dsp3780I_ReadDStore(unsigned short usDspBaseIO, void __user *pvBuffer,
                         unsigned uCount, unsigned long ulDSPAddr)
 {
-	unsigned short *pusBuffer = pvBuffer;
+	unsigned long flags;
+	unsigned short __user *pusBuffer = pvBuffer;
 	unsigned short val;
 
 
@@ -511,10 +515,11 @@ int dsp3780I_ReadDStore(unsigned short usDspBaseIO, void *pvBuffer,
 }
 
 int dsp3780I_ReadAndClearDStore(unsigned short usDspBaseIO,
-                                void *pvBuffer, unsigned uCount,
+                                void __user *pvBuffer, unsigned uCount,
                                 unsigned long ulDSPAddr)
 {
-	unsigned short *pusBuffer = pvBuffer;
+	unsigned long flags;
+	unsigned short __user *pusBuffer = pvBuffer;
 	unsigned short val;
 
 
@@ -552,10 +557,11 @@ int dsp3780I_ReadAndClearDStore(unsigned short usDspBaseIO,
 }
 
 
-int dsp3780I_WriteDStore(unsigned short usDspBaseIO, void *pvBuffer,
+int dsp3780I_WriteDStore(unsigned short usDspBaseIO, void __user *pvBuffer,
                          unsigned uCount, unsigned long ulDSPAddr)
 {
-	unsigned short *pusBuffer = pvBuffer;
+	unsigned long flags;
+	unsigned short __user *pusBuffer = pvBuffer;
 
 
 	PRINTK_5(TRACE_3780I,
@@ -593,10 +599,11 @@ int dsp3780I_WriteDStore(unsigned short usDspBaseIO, void *pvBuffer,
 }
 
 
-int dsp3780I_ReadIStore(unsigned short usDspBaseIO, void *pvBuffer,
+int dsp3780I_ReadIStore(unsigned short usDspBaseIO, void __user *pvBuffer,
                         unsigned uCount, unsigned long ulDSPAddr)
 {
-	unsigned short *pusBuffer = pvBuffer;
+	unsigned long flags;
+	unsigned short __user *pusBuffer = pvBuffer;
 
 	PRINTK_5(TRACE_3780I,
 		"3780i::dsp3780I_ReadIStore entry usDspBaseIO %x, pusBuffer %p, uCount %x, ulDSPAddr %lx\n",
@@ -640,10 +647,11 @@ int dsp3780I_ReadIStore(unsigned short usDspBaseIO, void *pvBuffer,
 }
 
 
-int dsp3780I_WriteIStore(unsigned short usDspBaseIO, void *pvBuffer,
+int dsp3780I_WriteIStore(unsigned short usDspBaseIO, void __user *pvBuffer,
                          unsigned uCount, unsigned long ulDSPAddr)
 {
-	unsigned short *pusBuffer = pvBuffer;
+	unsigned long flags;
+	unsigned short __user *pusBuffer = pvBuffer;
 
 	PRINTK_5(TRACE_3780I,
 		"3780i::dsp3780I_WriteIStore entry usDspBaseIO %x, pusBuffer %p, uCount %x, ulDSPAddr %lx\n",
@@ -691,6 +699,7 @@ int dsp3780I_WriteIStore(unsigned short usDspBaseIO, void *pvBuffer,
 int dsp3780I_GetIPCSource(unsigned short usDspBaseIO,
                           unsigned short *pusIPCSource)
 {
+	unsigned long flags;
 	DSP_HBRIDGE_CONTROL rHBridgeControl;
 	unsigned short temp;
 
@@ -700,7 +709,7 @@ int dsp3780I_GetIPCSource(unsigned short usDspBaseIO,
 		usDspBaseIO, pusIPCSource);
 
 	/*
-	* Disable DSP to PC interrupts, read the interupt register,
+	* Disable DSP to PC interrupts, read the interrupt register,
 	* clear the pending IPC bits, and reenable DSP to PC interrupts
 	*/
 	spin_lock_irqsave(&dsp_lock, flags);

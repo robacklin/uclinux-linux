@@ -20,12 +20,13 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/sysv_fs.h>
 #include <linux/stddef.h>
+#include <linux/sched.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/locks.h>
+#include <linux/buffer_head.h>
+#include <linux/writeback.h>
+#include "sysv.h"
 
 /* We don't trust the value of
    sb->sv_sbd2->s_tinode = *sb->sv_sb_total_free_inodes
@@ -37,33 +38,38 @@
 static inline sysv_ino_t *
 sv_sb_fic_inode(struct super_block * sb, unsigned int i)
 {
-	if (sb->sv_bh1 == sb->sv_bh2)
-		return &sb->sv_sb_fic_inodes[i];
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
+
+	if (sbi->s_bh1 == sbi->s_bh2)
+		return &sbi->s_sb_fic_inodes[i];
 	else {
 		/* 512 byte Xenix FS */
 		unsigned int offset = offsetof(struct xenix_super_block, s_inode[i]);
 		if (offset < 512)
-			return (sysv_ino_t*)(sb->sv_sbd1 + offset);
+			return (sysv_ino_t*)(sbi->s_sbd1 + offset);
 		else
-			return (sysv_ino_t*)(sb->sv_sbd2 + offset);
+			return (sysv_ino_t*)(sbi->s_sbd2 + offset);
 	}
 }
 
 struct sysv_inode *
 sysv_raw_inode(struct super_block *sb, unsigned ino, struct buffer_head **bh)
 {
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	struct sysv_inode *res;
-	int block = sb->sv_firstinodezone + sb->sv_block_base;
-	block += (ino-1) >> sb->sv_inodes_per_block_bits;
+	int block = sbi->s_firstinodezone + sbi->s_block_base;
+
+	block += (ino-1) >> sbi->s_inodes_per_block_bits;
 	*bh = sb_bread(sb, block);
 	if (!*bh)
 		return NULL;
-	res = (struct sysv_inode *) (*bh)->b_data;
-	return res + ((ino-1) & sb->sv_inodes_per_block_1);
+	res = (struct sysv_inode *)(*bh)->b_data;
+	return res + ((ino-1) & sbi->s_inodes_per_block_1);
 }
 
 static int refill_free_cache(struct super_block *sb)
 {
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	struct buffer_head * bh;
 	struct sysv_inode * raw_inode;
 	int i = 0, ino;
@@ -72,13 +78,13 @@ static int refill_free_cache(struct super_block *sb)
 	raw_inode = sysv_raw_inode(sb, ino, &bh);
 	if (!raw_inode)
 		goto out;
-	while (ino <= sb->sv_ninodes) {
+	while (ino <= sbi->s_ninodes) {
 		if (raw_inode->i_mode == 0 && raw_inode->i_nlink == 0) {
-			*sv_sb_fic_inode(sb,i++) = cpu_to_fs16(sb, ino);
-			if (i == sb->sv_fic_size)
+			*sv_sb_fic_inode(sb,i++) = cpu_to_fs16(SYSV_SB(sb), ino);
+			if (i == sbi->s_fic_size)
 				break;
 		}
-		if ((ino++ & sb->sv_inodes_per_block_1) == 0) {
+		if ((ino++ & sbi->s_inodes_per_block_1) == 0) {
 			brelse(bh);
 			raw_inode = sysv_raw_inode(sb, ino, &bh);
 			if (!raw_inode)
@@ -93,7 +99,8 @@ out:
 
 void sysv_free_inode(struct inode * inode)
 {
-	struct super_block * sb;
+	struct super_block *sb = inode->i_sb;
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	unsigned int ino;
 	struct buffer_head * bh;
 	struct sysv_inode * raw_inode;
@@ -101,24 +108,23 @@ void sysv_free_inode(struct inode * inode)
 
 	sb = inode->i_sb;
 	ino = inode->i_ino;
-	if (ino <= SYSV_ROOT_INO || ino > sb->sv_ninodes) {
+	if (ino <= SYSV_ROOT_INO || ino > sbi->s_ninodes) {
 		printk("sysv_free_inode: inode 0,1,2 or nonexistent inode\n");
 		return;
 	}
 	raw_inode = sysv_raw_inode(sb, ino, &bh);
-	clear_inode(inode);
 	if (!raw_inode) {
 		printk("sysv_free_inode: unable to read inode block on device "
-		       "%s\n", bdevname(inode->i_dev));
+		       "%s\n", inode->i_sb->s_id);
 		return;
 	}
 	lock_super(sb);
-	count = fs16_to_cpu(sb, *sb->sv_sb_fic_count);
-	if (count < sb->sv_fic_size) {
-		*sv_sb_fic_inode(sb,count++) = cpu_to_fs16(sb, ino);
-		*sb->sv_sb_fic_count = cpu_to_fs16(sb, count);
+	count = fs16_to_cpu(sbi, *sbi->s_sb_fic_count);
+	if (count < sbi->s_fic_size) {
+		*sv_sb_fic_inode(sb,count++) = cpu_to_fs16(sbi, ino);
+		*sbi->s_sb_fic_count = cpu_to_fs16(sbi, count);
 	}
-	fs16_add(sb, sb->sv_sb_total_free_inodes, 1);
+	fs16_add(sbi, sbi->s_sb_total_free_inodes, 1);
 	dirty_sb(sb);
 	memset(raw_inode, 0, sizeof(struct sysv_inode));
 	mark_buffer_dirty(bh);
@@ -126,20 +132,23 @@ void sysv_free_inode(struct inode * inode)
 	brelse(bh);
 }
 
-struct inode * sysv_new_inode(const struct inode * dir, mode_t mode)
+struct inode * sysv_new_inode(const struct inode * dir, umode_t mode)
 {
-	struct inode * inode;
-	struct super_block * sb;
-	u16 ino;
+	struct super_block *sb = dir->i_sb;
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
+	struct inode *inode;
+	sysv_ino_t ino;
 	unsigned count;
+	struct writeback_control wbc = {
+		.sync_mode = WB_SYNC_NONE
+	};
 
-	sb = dir->i_sb;
 	inode = new_inode(sb);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
 	lock_super(sb);
-	count = fs16_to_cpu(sb, *sb->sv_sb_fic_count);
+	count = fs16_to_cpu(sbi, *sbi->s_sb_fic_count);
 	if (count == 0 || (*sv_sb_fic_inode(sb,count-1) == 0)) {
 		count = refill_free_cache(sb);
 		if (count == 0) {
@@ -150,27 +159,19 @@ struct inode * sysv_new_inode(const struct inode * dir, mode_t mode)
 	}
 	/* Now count > 0. */
 	ino = *sv_sb_fic_inode(sb,--count);
-	*sb->sv_sb_fic_count = cpu_to_fs16(sb, count);
-	fs16_add(sb, sb->sv_sb_total_free_inodes, -1);
+	*sbi->s_sb_fic_count = cpu_to_fs16(sbi, count);
+	fs16_add(sbi, sbi->s_sb_total_free_inodes, -1);
 	dirty_sb(sb);
-	
-	if (dir->i_mode & S_ISGID) {
-		inode->i_gid = dir->i_gid;
-		if (S_ISDIR(mode))
-			mode |= S_ISGID;
-	} else
-		inode->i_gid = current->fsgid;
-
-	inode->i_uid = current->fsuid;
-	inode->i_ino = fs16_to_cpu(sb, ino);
-	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->i_blocks = inode->i_blksize = 0;
-	inode->u.sysv_i.i_dir_start_lookup = 0;
+	inode_init_owner(inode, dir, mode);
+	inode->i_ino = fs16_to_cpu(sbi, ino);
+	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME_SEC;
+	inode->i_blocks = 0;
+	memset(SYSV_I(inode)->i_data, 0, sizeof(SYSV_I(inode)->i_data));
+	SYSV_I(inode)->i_dir_start_lookup = 0;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
 
-	inode->i_mode = mode;		/* for sysv_write_inode() */
-	sysv_write_inode(inode, 0);	/* ensure inode not allocated again */
+	sysv_write_inode(inode, &wbc);	/* ensure inode not allocated again */
 	mark_inode_dirty(inode);	/* cleared by sysv_write_inode() */
 	/* That's it. */
 	unlock_super(sb);
@@ -179,13 +180,14 @@ struct inode * sysv_new_inode(const struct inode * dir, mode_t mode)
 
 unsigned long sysv_count_free_inodes(struct super_block * sb)
 {
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
 	struct buffer_head * bh;
 	struct sysv_inode * raw_inode;
 	int ino, count, sb_count;
 
 	lock_super(sb);
 
-	sb_count = fs16_to_cpu(sb, *sb->sv_sb_total_free_inodes);
+	sb_count = fs16_to_cpu(sbi, *sbi->s_sb_total_free_inodes);
 
 	if (0)
 		goto trust_sb;
@@ -196,10 +198,10 @@ unsigned long sysv_count_free_inodes(struct super_block * sb)
 	raw_inode = sysv_raw_inode(sb, ino, &bh);
 	if (!raw_inode)
 		goto Eio;
-	while (ino <= sb->sv_ninodes) {
+	while (ino <= sbi->s_ninodes) {
 		if (raw_inode->i_mode == 0 && raw_inode->i_nlink == 0)
 			count++;
-		if ((ino++ & sb->sv_inodes_per_block_1) == 0) {
+		if ((ino++ & sbi->s_inodes_per_block_1) == 0) {
 			brelse(bh);
 			raw_inode = sysv_raw_inode(sb, ino, &bh);
 			if (!raw_inode)
@@ -219,7 +221,7 @@ Einval:
 		"free inode count was %d, correcting to %d\n",
 		sb_count, count);
 	if (!(sb->s_flags & MS_RDONLY)) {
-		*sb->sv_sb_total_free_inodes = cpu_to_fs16(sb, count);
+		*sbi->s_sb_total_free_inodes = cpu_to_fs16(SYSV_SB(sb), count);
 		dirty_sb(sb);
 	}
 	goto out;

@@ -7,8 +7,8 @@
 /* ported to the Alpha architecture 02/20/96 (just used the HZ macro) */
 
 #define TR_RETRY_INTERVAL	(30*HZ)	/* 500 on PC = 5 s */
-#define TR_RST_TIME		(HZ/20) /* 5 on PC = 50 ms */
-#define TR_BUSY_INTERVAL	(HZ/5)	/* 5 on PC = 200 ms */
+#define TR_RST_TIME		(msecs_to_jiffies(50))	/* 5 on PC = 50 ms */
+#define TR_BUSY_INTERVAL	(msecs_to_jiffies(200))	/* 5 on PC = 200 ms */
 #define TR_SPIN_INTERVAL	(3*HZ)	/* 3 seconds before init timeout */
 
 #define TR_ISA 1
@@ -169,7 +169,7 @@ typedef enum {	CLOSED,	OPEN } open_state;
 
 struct tok_info {
 	unsigned char irq;
-	void *mmio;
+	void __iomem *mmio;
 	unsigned char hw_address[32];
 	unsigned char adapter_type;
 	unsigned char data_rate;
@@ -192,12 +192,13 @@ struct tok_info {
 	/* Additions by Peter De Schrijver */
 	unsigned char page_mask;          /* mask to select RAM page to Map*/
 	unsigned char mapped_ram_size;    /* size of RAM page */
-	__u32 sram_virt;                  /* Shared memory base address */
-	__u32 init_srb;               /* Initial System Request Block address */
-	__u32 srb;                        /* System Request Block address */
-	__u32 ssb;                        /* System Status Block address */
-	__u32 arb;                        /* Adapter Request Block address */
-	__u32 asb;                        /* Adapter Status Block address */
+	__u32 sram_phys;          /* Shared memory base address */
+	void __iomem *sram_virt;          /* Shared memory base address */
+	void __iomem *init_srb;   /* Initial System Request Block address */
+	void __iomem *srb;                /* System Request Block address */
+	void __iomem *ssb;                /* System Status Block address */
+	void __iomem *arb;                /* Adapter Request Block address */
+	void __iomem *asb;                /* Adapter Status Block address */
         __u8  init_srb_page;
         __u8  srb_page;
         __u8  ssb_page;
@@ -206,7 +207,7 @@ struct tok_info {
 	unsigned short exsap_station_id;
 	unsigned short global_int_enable;
 	struct sk_buff *current_skb;
-	struct net_device_stats tr_stats;
+
 	unsigned char auto_speedsave;
 	open_state			open_status, sap_status;
 	enum {MANUAL, AUTOMATIC}	open_mode;

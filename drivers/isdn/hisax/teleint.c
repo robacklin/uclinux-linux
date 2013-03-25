@@ -1,27 +1,24 @@
-/* $Id: teleint.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: teleint.c,v 1.16.2.5 2004/01/19 15:31:50 keil Exp $
  *
  * low level stuff for TeleInt isdn cards
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hfc_2bs0.h"
 #include "isdnl1.h"
 
-extern const char *CardType[];
+static const char *TeleInt_revision = "$Revision: 1.16.2.5 $";
 
-const char *TeleInt_revision = "$Revision: 1.1.4.1 $";
-
-#define byteout(addr,val) outb(val,addr)
+#define byteout(addr, val) outb(val, addr)
 #define bytein(addr) inb(addr)
 
 static inline u_char
@@ -29,33 +26,28 @@ readreg(unsigned int ale, unsigned int adr, u_char off)
 {
 	register u_char ret;
 	int max_delay = 2000;
-	long flags;
 
-	save_flags(flags);
-	cli();
 	byteout(ale, off);
 	ret = HFC_BUSY & bytein(ale);
 	while (ret && --max_delay)
 		ret = HFC_BUSY & bytein(ale);
 	if (!max_delay) {
 		printk(KERN_WARNING "TeleInt Busy not inactive\n");
-		restore_flags(flags);
 		return (0);
 	}
 	ret = bytein(adr);
-	restore_flags(flags);
 	return (ret);
 }
 
 static inline void
-readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
+readfifo(unsigned int ale, unsigned int adr, u_char off, u_char *data, int size)
 {
 	register u_char ret;
 	register int max_delay = 20000;
 	register int i;
-	
+
 	byteout(ale, off);
-	for (i = 0; i<size; i++) {
+	for (i = 0; i < size; i++) {
 		ret = HFC_BUSY & bytein(ale);
 		while (ret && --max_delay)
 			ret = HFC_BUSY & bytein(ale);
@@ -73,33 +65,27 @@ writereg(unsigned int ale, unsigned int adr, u_char off, u_char data)
 {
 	register u_char ret;
 	int max_delay = 2000;
-	long flags;
 
-	save_flags(flags);
-	cli();
 	byteout(ale, off);
 	ret = HFC_BUSY & bytein(ale);
 	while (ret && --max_delay)
 		ret = HFC_BUSY & bytein(ale);
 	if (!max_delay) {
 		printk(KERN_WARNING "TeleInt Busy not inactive\n");
-		restore_flags(flags);
 		return;
 	}
 	byteout(adr, data);
-	restore_flags(flags);
 }
 
 static inline void
-writefifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
+writefifo(unsigned int ale, unsigned int adr, u_char off, u_char *data, int size)
 {
 	register u_char ret;
 	register int max_delay = 20000;
 	register int i;
-	
-	/* fifo write without cli because it's allready done  */
+
 	byteout(ale, off);
-	for (i = 0; i<size; i++) {
+	for (i = 0; i < size; i++) {
 		ret = HFC_BUSY & bytein(ale);
 		while (ret && --max_delay)
 			ret = HFC_BUSY & bytein(ale);
@@ -128,14 +114,14 @@ WriteISAC(struct IsdnCardState *cs, u_char offset, u_char value)
 }
 
 static void
-ReadISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+ReadISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	cs->hw.hfc.cip = 0;
 	readfifo(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, 0, data, size);
 }
 
 static void
-WriteISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+WriteISACfifo(struct IsdnCardState *cs, u_char *data, int size)
 {
 	cs->hw.hfc.cip = 0;
 	writefifo(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, 0, data, size);
@@ -168,18 +154,16 @@ WriteHFC(struct IsdnCardState *cs, int data, u_char reg, u_char value)
 		debugl1(cs, "hfc W%c %02x %02x", data ? 'D' : 'C', reg, value);
 }
 
-static void
-TeleInt_interrupt(int intno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+TeleInt_interrupt(int intno, void *dev_id)
 {
 	struct IsdnCardState *cs = dev_id;
 	u_char val;
+	u_long flags;
 
-	if (!cs) {
-		printk(KERN_WARNING "TeleInt: Spurious interrupt!\n");
-		return;
-	}
+	spin_lock_irqsave(&cs->lock, flags);
 	val = readreg(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, ISAC_ISTA);
-      Start_ISAC:
+Start_ISAC:
 	if (val)
 		isac_interrupt(cs, val);
 	val = readreg(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, ISAC_ISTA);
@@ -190,13 +174,17 @@ TeleInt_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	writereg(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, ISAC_MASK, 0xFF);
 	writereg(cs->hw.hfc.addr | 1, cs->hw.hfc.addr, ISAC_MASK, 0x0);
+	spin_unlock_irqrestore(&cs->lock, flags);
+	return IRQ_HANDLED;
 }
 
 static void
 TeleInt_Timer(struct IsdnCardState *cs)
 {
 	int stat = 0;
+	u_long flags;
 
+	spin_lock_irqsave(&cs->lock, flags);
 	if (cs->bcs[0].mode) {
 		stat |= 1;
 		main_irq_hfc(&cs->bcs[0]);
@@ -205,11 +193,15 @@ TeleInt_Timer(struct IsdnCardState *cs)
 		stat |= 2;
 		main_irq_hfc(&cs->bcs[1]);
 	}
-	cs->hw.hfc.timer.expires = jiffies + 1;
+	spin_unlock_irqrestore(&cs->lock, flags);
+	stat = HZ / 100;
+	if (!stat)
+		stat = 1;
+	cs->hw.hfc.timer.expires = jiffies + stat;
 	add_timer(&cs->hw.hfc.timer);
 }
 
-void
+static void
 release_io_TeleInt(struct IsdnCardState *cs)
 {
 	del_timer(&cs->hw.hfc.timer);
@@ -221,49 +213,53 @@ release_io_TeleInt(struct IsdnCardState *cs)
 static void
 reset_TeleInt(struct IsdnCardState *cs)
 {
-	long flags;
-
 	printk(KERN_INFO "TeleInt: resetting card\n");
 	cs->hw.hfc.cirm |= HFC_RESET;
 	byteout(cs->hw.hfc.addr | 1, cs->hw.hfc.cirm);	/* Reset On */
-	save_flags(flags);
-	sti();
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((30*HZ)/1000);
+	mdelay(10);
 	cs->hw.hfc.cirm &= ~HFC_RESET;
 	byteout(cs->hw.hfc.addr | 1, cs->hw.hfc.cirm);	/* Reset Off */
-	set_current_state(TASK_UNINTERRUPTIBLE);
-	schedule_timeout((10*HZ)/1000);
-	restore_flags(flags);
+	mdelay(10);
 }
 
 static int
 TeleInt_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
+	u_long flags;
+	int delay;
+
 	switch (mt) {
-		case CARD_RESET:
-			reset_TeleInt(cs);
-			return(0);
-		case CARD_RELEASE:
-			release_io_TeleInt(cs);
-			return(0);
-		case CARD_INIT:
-			inithfc(cs);
-			clear_pending_isac_ints(cs);
-			initisac(cs);
-			/* Reenable all IRQ */
-			cs->writeisac(cs, ISAC_MASK, 0);
-			cs->writeisac(cs, ISAC_CMDR, 0x41);
-			cs->hw.hfc.timer.expires = jiffies + 1;
-			add_timer(&cs->hw.hfc.timer);
-			return(0);
-		case CARD_TEST:
-			return(0);
+	case CARD_RESET:
+		spin_lock_irqsave(&cs->lock, flags);
+		reset_TeleInt(cs);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		return (0);
+	case CARD_RELEASE:
+		release_io_TeleInt(cs);
+		return (0);
+	case CARD_INIT:
+		spin_lock_irqsave(&cs->lock, flags);
+		reset_TeleInt(cs);
+		inithfc(cs);
+		clear_pending_isac_ints(cs);
+		initisac(cs);
+		/* Reenable all IRQ */
+		cs->writeisac(cs, ISAC_MASK, 0);
+		cs->writeisac(cs, ISAC_CMDR, 0x41);
+		spin_unlock_irqrestore(&cs->lock, flags);
+		delay = HZ / 100;
+		if (!delay)
+			delay = 1;
+		cs->hw.hfc.timer.expires = jiffies + delay;
+		add_timer(&cs->hw.hfc.timer);
+		return (0);
+	case CARD_TEST:
+		return (0);
 	}
-	return(0);
+	return (0);
 }
 
-int __init
+int __devinit
 setup_TeleInt(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
@@ -286,52 +282,47 @@ setup_TeleInt(struct IsdnCard *card)
 	cs->hw.hfc.timer.function = (void *) TeleInt_Timer;
 	cs->hw.hfc.timer.data = (long) cs;
 	init_timer(&cs->hw.hfc.timer);
-	if (check_region((cs->hw.hfc.addr), 2)) {
+	if (!request_region(cs->hw.hfc.addr, 2, "TeleInt isdn")) {
 		printk(KERN_WARNING
-		       "HiSax: %s config port %x-%x already in use\n",
-		       CardType[card->typ],
+		       "HiSax: TeleInt config port %x-%x already in use\n",
 		       cs->hw.hfc.addr,
 		       cs->hw.hfc.addr + 2);
 		return (0);
-	} else {
-		request_region(cs->hw.hfc.addr, 2, "TeleInt isdn");
 	}
 	/* HW IO = IO */
 	byteout(cs->hw.hfc.addr, cs->hw.hfc.addr & 0xff);
 	byteout(cs->hw.hfc.addr | 1, ((cs->hw.hfc.addr & 0x300) >> 8) | 0x54);
 	switch (cs->irq) {
-		case 3:
-			cs->hw.hfc.cirm |= HFC_INTA;
-			break;
-		case 4:
-			cs->hw.hfc.cirm |= HFC_INTB;
-			break;
-		case 5:
-			cs->hw.hfc.cirm |= HFC_INTC;
-			break;
-		case 7:
-			cs->hw.hfc.cirm |= HFC_INTD;
-			break;
-		case 10:
-			cs->hw.hfc.cirm |= HFC_INTE;
-			break;
-		case 11:
-			cs->hw.hfc.cirm |= HFC_INTF;
-			break;
-		default:
-			printk(KERN_WARNING "TeleInt: wrong IRQ\n");
-			release_io_TeleInt(cs);
-			return (0);
+	case 3:
+		cs->hw.hfc.cirm |= HFC_INTA;
+		break;
+	case 4:
+		cs->hw.hfc.cirm |= HFC_INTB;
+		break;
+	case 5:
+		cs->hw.hfc.cirm |= HFC_INTC;
+		break;
+	case 7:
+		cs->hw.hfc.cirm |= HFC_INTD;
+		break;
+	case 10:
+		cs->hw.hfc.cirm |= HFC_INTE;
+		break;
+	case 11:
+		cs->hw.hfc.cirm |= HFC_INTF;
+		break;
+	default:
+		printk(KERN_WARNING "TeleInt: wrong IRQ\n");
+		release_io_TeleInt(cs);
+		return (0);
 	}
 	byteout(cs->hw.hfc.addr | 1, cs->hw.hfc.cirm);
 	byteout(cs->hw.hfc.addr | 1, cs->hw.hfc.ctmt);
 
-	printk(KERN_INFO
-	       "TeleInt: defined at 0x%x IRQ %d\n",
-	       cs->hw.hfc.addr,
-	       cs->irq);
+	printk(KERN_INFO "TeleInt: defined at 0x%x IRQ %d\n",
+	       cs->hw.hfc.addr, cs->irq);
 
-	reset_TeleInt(cs);
+	setup_isac(cs);
 	cs->readisac = &ReadISAC;
 	cs->writeisac = &WriteISAC;
 	cs->readisacfifo = &ReadISACfifo;

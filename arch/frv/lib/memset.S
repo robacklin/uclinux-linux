@@ -10,7 +10,6 @@
  */
 
 
-        .file		"memset.S"
         .text
         .p2align	4
 

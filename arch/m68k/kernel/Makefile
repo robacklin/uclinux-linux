@@ -1,43 +1,25 @@
 #
 # Makefile for the linux kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.o:
-	$(CC) $(AFLAGS) -traditional -c $< -o $*.o
+extra-$(CONFIG_AMIGA)	:= head.o
+extra-$(CONFIG_ATARI)	:= head.o
+extra-$(CONFIG_MAC)	:= head.o
+extra-$(CONFIG_APOLLO)	:= head.o
+extra-$(CONFIG_VME)	:= head.o
+extra-$(CONFIG_HP300)	:= head.o
+extra-$(CONFIG_Q40)	:= head.o
+extra-$(CONFIG_SUN3X)	:= head.o
+extra-$(CONFIG_SUN3)	:= sun3-head.o
+extra-y			+= vmlinux.lds
 
-ifndef CONFIG_SUN3
-all: head.o kernel.o
-else
-all: sun3-head.o kernel.o
-endif 
+obj-y	:= entry.o init_task.o irq.o m68k_ksyms.o module.o process.o ptrace.o
+obj-y	+= setup.o signal.o sys_m68k.o syscalltable.o time.o traps.o
 
-O_TARGET := kernel.o
+obj-$(CONFIG_MMU_MOTOROLA) += ints.o vectors.o
+obj-$(CONFIG_MMU_SUN3) += ints.o vectors.o
 
-export-objs	:= setup.o m68k_ksyms.o
+ifndef CONFIG_MMU_SUN3
+obj-y	+= dma.o
+endif
 
-obj-y		:= entry.o process.o traps.o ints.o signal.o ptrace.o \
-			sys_m68k.o time.o semaphore.o setup.o m68k_ksyms.o
-
-obj-$(CONFIG_PCI)	+= bios32.o
-
-head.o: head.S m68k_defs.h
-
-entry.o: entry.S m68k_defs.h
-
-sun3-head.o: sun3-head.S m68k_defs.h
-
-m68k_defs.h: m68k_defs.c m68k_defs.head
-	rm -f m68k_defs.d
-	SUNPRO_DEPENDENCIES="m68k_defs.d m68k_defs.h" \
-	$(CC) $(filter-out -MD,$(CFLAGS)) -S m68k_defs.c
-	cp m68k_defs.head m68k_defs.h
-	grep '^#define' m68k_defs.s >> m68k_defs.h
-	rm m68k_defs.s
--include m68k_defs.d
-
-include $(TOPDIR)/Rules.make

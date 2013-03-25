@@ -2,7 +2,7 @@
  * linux/net/sunrpc/svcauth.c
  *
  * The generic interface for RPC authentication on the server side.
- * 
+ *
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
  *
  * CHANGES
@@ -10,157 +10,156 @@
  */
 
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/module.h>
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/xdr.h>
-#include <linux/sunrpc/svcauth.h>
 #include <linux/sunrpc/svcsock.h>
+#include <linux/sunrpc/svcauth.h>
+#include <linux/err.h>
+#include <linux/hash.h>
 
 #define RPCDBG_FACILITY	RPCDBG_AUTH
 
-/*
- * Type of authenticator function
- */
-typedef void	(*auth_fn_t)(struct svc_rqst *rqstp, u32 *statp, u32 *authp);
-
-/*
- * Builtin auth flavors
- */
-static void	svcauth_null(struct svc_rqst *rqstp, u32 *statp, u32 *authp);
-static void	svcauth_unix(struct svc_rqst *rqstp, u32 *statp, u32 *authp);
-
-/*
- * Max number of authentication flavors we support
- */
-#define RPC_SVCAUTH_MAX	8
 
 /*
  * Table of authenticators
  */
-static auth_fn_t	authtab[RPC_SVCAUTH_MAX] = {
-	svcauth_null,
-	svcauth_unix,
-	NULL,
+extern struct auth_ops svcauth_null;
+extern struct auth_ops svcauth_unix;
+
+static DEFINE_SPINLOCK(authtab_lock);
+static struct auth_ops	*authtab[RPC_AUTH_MAXFLAVOR] = {
+	[0] = &svcauth_null,
+	[1] = &svcauth_unix,
 };
 
-void
-svc_authenticate(struct svc_rqst *rqstp, u32 *statp, u32 *authp)
+int
+svc_authenticate(struct svc_rqst *rqstp, __be32 *authp)
 {
-	u32		flavor;
-	auth_fn_t	func;
+	rpc_authflavor_t	flavor;
+	struct auth_ops		*aops;
 
-	*statp = rpc_success;
 	*authp = rpc_auth_ok;
 
-	svc_getlong(&rqstp->rq_argbuf, flavor);
-	flavor = ntohl(flavor);
+	flavor = svc_getnl(&rqstp->rq_arg.head[0]);
 
 	dprintk("svc: svc_authenticate (%d)\n", flavor);
-	if (flavor >= RPC_SVCAUTH_MAX || !(func = authtab[flavor])) {
-		*authp = rpc_autherr_badcred;
-		return;
-	}
 
-	rqstp->rq_cred.cr_flavor = flavor;
-	func(rqstp, statp, authp);
+	spin_lock(&authtab_lock);
+	if (flavor >= RPC_AUTH_MAXFLAVOR || !(aops = authtab[flavor]) ||
+	    !try_module_get(aops->owner)) {
+		spin_unlock(&authtab_lock);
+		*authp = rpc_autherr_badcred;
+		return SVC_DENIED;
+	}
+	spin_unlock(&authtab_lock);
+
+	rqstp->rq_authop = aops;
+	return aops->accept(rqstp, authp);
+}
+EXPORT_SYMBOL_GPL(svc_authenticate);
+
+int svc_set_client(struct svc_rqst *rqstp)
+{
+	return rqstp->rq_authop->set_client(rqstp);
+}
+EXPORT_SYMBOL_GPL(svc_set_client);
+
+/* A request, which was authenticated, has now executed.
+ * Time to finalise the credentials and verifier
+ * and release and resources
+ */
+int svc_authorise(struct svc_rqst *rqstp)
+{
+	struct auth_ops *aops = rqstp->rq_authop;
+	int rv = 0;
+
+	rqstp->rq_authop = NULL;
+
+	if (aops) {
+		rv = aops->release(rqstp);
+		module_put(aops->owner);
+	}
+	return rv;
 }
 
 int
-svc_auth_register(u32 flavor, auth_fn_t func)
+svc_auth_register(rpc_authflavor_t flavor, struct auth_ops *aops)
 {
-	if (flavor >= RPC_SVCAUTH_MAX || authtab[flavor])
-		return -EINVAL;
-	authtab[flavor] = func;
-	return 0;
+	int rv = -EINVAL;
+	spin_lock(&authtab_lock);
+	if (flavor < RPC_AUTH_MAXFLAVOR && authtab[flavor] == NULL) {
+		authtab[flavor] = aops;
+		rv = 0;
+	}
+	spin_unlock(&authtab_lock);
+	return rv;
 }
+EXPORT_SYMBOL_GPL(svc_auth_register);
 
 void
-svc_auth_unregister(u32 flavor)
+svc_auth_unregister(rpc_authflavor_t flavor)
 {
-	if (flavor < RPC_SVCAUTH_MAX)
+	spin_lock(&authtab_lock);
+	if (flavor < RPC_AUTH_MAXFLAVOR)
 		authtab[flavor] = NULL;
+	spin_unlock(&authtab_lock);
 }
+EXPORT_SYMBOL_GPL(svc_auth_unregister);
 
-static void
-svcauth_null(struct svc_rqst *rqstp, u32 *statp, u32 *authp)
+/**************************************************
+ * 'auth_domains' are stored in a hash table indexed by name.
+ * When the last reference to an 'auth_domain' is dropped,
+ * the object is unhashed and freed.
+ * If auth_domain_lookup fails to find an entry, it will return
+ * it's second argument 'new'.  If this is non-null, it will
+ * have been atomically linked into the table.
+ */
+
+#define	DN_HASHBITS	6
+#define	DN_HASHMAX	(1<<DN_HASHBITS)
+
+static struct hlist_head	auth_domain_table[DN_HASHMAX];
+static spinlock_t	auth_domain_lock =
+	__SPIN_LOCK_UNLOCKED(auth_domain_lock);
+
+void auth_domain_put(struct auth_domain *dom)
 {
-	struct svc_buf	*argp = &rqstp->rq_argbuf;
-	struct svc_buf	*resp = &rqstp->rq_resbuf;
-
-	if ((argp->len -= 3) < 0) {
-		*statp = rpc_garbage_args;
-		return;
+	if (atomic_dec_and_lock(&dom->ref.refcount, &auth_domain_lock)) {
+		hlist_del(&dom->hash);
+		dom->flavour->domain_release(dom);
+		spin_unlock(&auth_domain_lock);
 	}
-	if (*(argp->buf)++ != 0) {	/* we already skipped the flavor */
-		dprintk("svc: bad null cred\n");
-		*authp = rpc_autherr_badcred;
-		return;
-	}
-	if (*(argp->buf)++ != RPC_AUTH_NULL || *(argp->buf)++ != 0) {
-		dprintk("svc: bad null verf\n");
-		*authp = rpc_autherr_badverf;
-		return;
-	}
-
-	/* Signal that mapping to nobody uid/gid is required */
-	rqstp->rq_cred.cr_uid = (uid_t) -1;
-	rqstp->rq_cred.cr_gid = (gid_t) -1;
-	rqstp->rq_cred.cr_groups[0] = NOGROUP;
-
-	/* Put NULL verifier */
-	rqstp->rq_verfed = 1;
-	svc_putlong(resp, RPC_AUTH_NULL);
-	svc_putlong(resp, 0);
 }
+EXPORT_SYMBOL_GPL(auth_domain_put);
 
-static void
-svcauth_unix(struct svc_rqst *rqstp, u32 *statp, u32 *authp)
+struct auth_domain *
+auth_domain_lookup(char *name, struct auth_domain *new)
 {
-	struct svc_buf	*argp = &rqstp->rq_argbuf;
-	struct svc_buf	*resp = &rqstp->rq_resbuf;
-	struct svc_cred	*cred = &rqstp->rq_cred;
-	u32		*bufp = argp->buf, slen, i;
-	int		len   = argp->len;
+	struct auth_domain *hp;
+	struct hlist_head *head;
+	struct hlist_node *np;
 
-	if ((len -= 3) < 0) {
-		*statp = rpc_garbage_args;
-		return;
+	head = &auth_domain_table[hash_str(name, DN_HASHBITS)];
+
+	spin_lock(&auth_domain_lock);
+
+	hlist_for_each_entry(hp, np, head, hash) {
+		if (strcmp(hp->name, name)==0) {
+			kref_get(&hp->ref);
+			spin_unlock(&auth_domain_lock);
+			return hp;
+		}
 	}
-
-	bufp++;					/* length */
-	bufp++;					/* time stamp */
-	slen = (ntohl(*bufp++) + 3) >> 2;	/* machname length */
-	if (slen > 64 || (len -= slen + 3) < 0)
-		goto badcred;
-	bufp += slen;				/* skip machname */
-
-	cred->cr_uid = ntohl(*bufp++);		/* uid */
-	cred->cr_gid = ntohl(*bufp++);		/* gid */
-
-	slen = ntohl(*bufp++);			/* gids length */
-	if (slen > 16 || (len -= slen + 2) < 0)
-		goto badcred;
-	for (i = 0; i < NGROUPS && i < slen; i++)
-		cred->cr_groups[i] = ntohl(*bufp++);
-	if (i < NGROUPS)
-		cred->cr_groups[i] = NOGROUP;
-	bufp += (slen - i);
-
-	if (*bufp++ != RPC_AUTH_NULL || *bufp++ != 0) {
-		*authp = rpc_autherr_badverf;
-		return;
-	}
-
-	argp->buf = bufp;
-	argp->len = len;
-
-	/* Put NULL verifier */
-	rqstp->rq_verfed = 1;
-	svc_putlong(resp, RPC_AUTH_NULL);
-	svc_putlong(resp, 0);
-
-	return;
-
-badcred:
-	*authp = rpc_autherr_badcred;
+	if (new)
+		hlist_add_head(&new->hash, head);
+	spin_unlock(&auth_domain_lock);
+	return new;
 }
+EXPORT_SYMBOL_GPL(auth_domain_lookup);
+
+struct auth_domain *auth_domain_find(char *name)
+{
+	return auth_domain_lookup(name, NULL);
+}
+EXPORT_SYMBOL_GPL(auth_domain_find);

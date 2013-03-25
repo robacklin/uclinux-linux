@@ -2,8 +2,6 @@
 #define _LINUX_JOYSTICK_H
 
 /*
- * $Id: joystick.h,v 1.3 2000/11/30 11:07:05 vojtech Exp $
- *
  *  Copyright (C) 1996-2000 Vojtech Pavlik
  *
  *  Sponsored by SuSE
@@ -29,7 +27,7 @@
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
-#include <asm/types.h>
+#include <linux/types.h>
 #include <linux/input.h>
 
 /*
@@ -66,10 +64,10 @@ struct js_event {
 #define JSIOCSCORR		_IOW('j', 0x21, struct js_corr)			/* set correction values */
 #define JSIOCGCORR		_IOR('j', 0x22, struct js_corr)			/* get correction values */
 
-#define JSIOCSAXMAP		_IOW('j', 0x31, __u8[ABS_MAX])			/* set axis mapping */
-#define JSIOCGAXMAP		_IOR('j', 0x32, __u8[ABS_MAX])			/* get axis mapping */
-#define JSIOCSBTNMAP		_IOW('j', 0x33, __u16[KEY_MAX - BTN_MISC])	/* set button mapping */
-#define JSIOCGBTNMAP		_IOR('j', 0x34, __u16[KEY_MAX - BTN_MISC])	/* get button mapping */
+#define JSIOCSAXMAP		_IOW('j', 0x31, __u8[ABS_CNT])			/* set axis mapping */
+#define JSIOCGAXMAP		_IOR('j', 0x32, __u8[ABS_CNT])			/* get axis mapping */
+#define JSIOCSBTNMAP		_IOW('j', 0x33, __u16[KEY_MAX - BTN_MISC + 1])	/* set button mapping */
+#define JSIOCGBTNMAP		_IOR('j', 0x34, __u16[KEY_MAX - BTN_MISC + 1])	/* get button mapping */
 
 /*
  * Types and constants for get/set correction
@@ -111,18 +109,37 @@ struct js_corr {
 #define JS_SET_ALL		8
 
 struct JS_DATA_TYPE {
-	int buttons;
-	int x;
-	int y;
+	__s32 buttons;
+	__s32 x;
+	__s32 y;
 };
 
-struct JS_DATA_SAVE_TYPE {
-	int JS_TIMEOUT;
-	int BUSY;
-	long JS_EXPIRETIME;
-	long JS_TIMELIMIT;
+struct JS_DATA_SAVE_TYPE_32 {
+	__s32 JS_TIMEOUT;
+	__s32 BUSY;
+	__s32 JS_EXPIRETIME;
+	__s32 JS_TIMELIMIT;
 	struct JS_DATA_TYPE JS_SAVE;
 	struct JS_DATA_TYPE JS_CORR;
 };
+
+struct JS_DATA_SAVE_TYPE_64 {
+	__s32 JS_TIMEOUT;
+	__s32 BUSY;
+	__s64 JS_EXPIRETIME;
+	__s64 JS_TIMELIMIT;
+	struct JS_DATA_TYPE JS_SAVE;
+	struct JS_DATA_TYPE JS_CORR;
+};
+
+#ifdef __KERNEL__
+#if BITS_PER_LONG == 64
+#define JS_DATA_SAVE_TYPE JS_DATA_SAVE_TYPE_64
+#elif BITS_PER_LONG == 32
+#define JS_DATA_SAVE_TYPE JS_DATA_SAVE_TYPE_32
+#else
+#error Unexpected BITS_PER_LONG
+#endif
+#endif
 
 #endif /* _LINUX_JOYSTICK_H */

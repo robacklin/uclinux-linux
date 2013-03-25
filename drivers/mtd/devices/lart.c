@@ -2,8 +2,6 @@
 /*
  * MTD driver for the 28F160F3 Flash Memory (non-CFI) on LART.
  *
- * $Id: lart.c,v 1.2 2001/10/02 15:05:13 dwmw2 Exp $
- *
  * Author: Abraham vd Merwe <abraham@2d3d.co.za>
  *
  * Copyright (c) 2001, 2d3D, Inc.
@@ -19,7 +17,7 @@
  *           - January 2000
  *
  *    [2] MTD internal API documentation
- *           - http://www.linux-mtd.infradead.org/tech/
+ *           - http://www.linux-mtd.infradead.org/ 
  *
  * Limitations:
  *
@@ -36,18 +34,14 @@
 /* debugging */
 //#define LART_DEBUG
 
-/* partition support */
-#define HAVE_PARTITIONS
-
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/version.h>
+#include <linux/init.h>
 #include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/mtd/mtd.h>
-#ifdef HAVE_PARTITIONS
 #include <linux/mtd/partitions.h>
-#endif
 
 #ifndef CONFIG_SA1100_LART
 #error This is for LART architecture only
@@ -121,7 +115,7 @@ static char module_name[] = "lart";
 
 /*
  * The data line mapping on LART is as follows:
- * 
+ *
  *   	 U2  CPU |   U3  CPU
  *   	 -------------------
  *   	  0  20  |   0   12
@@ -180,7 +174,7 @@ static char module_name[] = "lart";
 		(((x) & 0x00004000) >> 13)		\
 	)
 
-/* 
+/*
  * The address line mapping on LART is as follows:
  *
  *   	 U3  CPU |   U2  CPU
@@ -203,7 +197,7 @@ static char module_name[] = "lart";
  *   	 12  15  |   12  15
  *   	 13  14  |   13  14
  *   	 14  16  |   14  16
- * 
+ *
  *   	 MAIN BLOCK BOUNDARY
  *
  *   	 15  17  |   15  18
@@ -274,7 +268,7 @@ static __u8 read8 (__u32 offset)
 {
    volatile __u8 *data = (__u8 *) (FLASH_OFFSET + offset);
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(): 0x%.8x -> 0x%.2x\n",__FUNCTION__,offset,*data);
+   printk (KERN_DEBUG "%s(): 0x%.8x -> 0x%.2x\n", __func__, offset, *data);
 #endif
    return (*data);
 }
@@ -283,7 +277,7 @@ static __u32 read32 (__u32 offset)
 {
    volatile __u32 *data = (__u32 *) (FLASH_OFFSET + offset);
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(): 0x%.8x -> 0x%.8x\n",__FUNCTION__,offset,*data);
+   printk (KERN_DEBUG "%s(): 0x%.8x -> 0x%.8x\n", __func__, offset, *data);
 #endif
    return (*data);
 }
@@ -293,7 +287,7 @@ static void write32 (__u32 x,__u32 offset)
    volatile __u32 *data = (__u32 *) (FLASH_OFFSET + offset);
    *data = x;
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(): 0x%.8x <- 0x%.8x\n",__FUNCTION__,offset,*data);
+   printk (KERN_DEBUG "%s(): 0x%.8x <- 0x%.8x\n", __func__, offset, *data);
 #endif
 }
 
@@ -322,7 +316,7 @@ static int flash_probe (void)
    /* put the flash back into command mode */
    write32 (DATA_TO_FLASH (READ_ARRAY),0x00000000);
 
-   return (manufacturer == FLASH_MANUFACTURER && (devtype == FLASH_DEVICE_16mbit_TOP || FLASH_DEVICE_16mbit_BOTTOM));
+   return (manufacturer == FLASH_MANUFACTURER && (devtype == FLASH_DEVICE_16mbit_TOP || devtype == FLASH_DEVICE_16mbit_BOTTOM));
 }
 
 /*
@@ -336,7 +330,7 @@ static inline int erase_block (__u32 offset)
    __u32 status;
 
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(): 0x%.8x\n",__FUNCTION__,offset);
+   printk (KERN_DEBUG "%s(): 0x%.8x\n", __func__, offset);
 #endif
 
    /* erase and confirm */
@@ -354,7 +348,7 @@ static inline int erase_block (__u32 offset)
    /* put the flash back into command mode */
    write32 (DATA_TO_FLASH (READ_ARRAY),offset);
 
-   /* was the erase successfull? */
+   /* was the erase successful? */
    if ((status & STATUS_ERASE_ERR))
 	 {
 		printk (KERN_WARNING "%s: erase error at address 0x%.8x.\n",module_name,offset);
@@ -370,11 +364,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
    int i,first;
 
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(addr = 0x%.8x, len = %d)\n",__FUNCTION__,instr->addr,instr->len);
+   printk (KERN_DEBUG "%s(addr = 0x%.8x, len = %d)\n", __func__, instr->addr, instr->len);
 #endif
-
-   /* sanity checks */
-   if (instr->addr + instr->len > mtd->size) return (-EINVAL);
 
    /*
 	* check that both start and end of the requested erase are
@@ -394,7 +385,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
 	* erase range is aligned with the erase size which is in
 	* effect here.
 	*/
-   if (instr->addr & (mtd->eraseregions[i].erasesize - 1)) return (-EINVAL);
+   if (i < 0 || (instr->addr & (mtd->eraseregions[i].erasesize - 1)))
+      return -EINVAL;
 
    /* Remember the erase region we start on */
    first = i;
@@ -410,7 +402,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
    i--;
 
    /* is the end aligned on a block boundary? */
-   if ((instr->addr + instr->len) & (mtd->eraseregions[i].erasesize - 1)) return (-EINVAL);
+   if (i < 0 || ((instr->addr + instr->len) & (mtd->eraseregions[i].erasesize - 1)))
+      return -EINVAL;
 
    addr = instr->addr;
    len = instr->len;
@@ -433,7 +426,7 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
 	 }
 
    instr->state = MTD_ERASE_DONE;
-   if (instr->callback) instr->callback (instr);
+   mtd_erase_callback(instr);
 
    return (0);
 }
@@ -441,12 +434,8 @@ static int flash_erase (struct mtd_info *mtd,struct erase_info *instr)
 static int flash_read (struct mtd_info *mtd,loff_t from,size_t len,size_t *retlen,u_char *buf)
 {
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(from = 0x%.8x, len = %d)\n",__FUNCTION__,(__u32) from,len);
+   printk (KERN_DEBUG "%s(from = 0x%.8x, len = %d)\n", __func__, (__u32)from, len);
 #endif
-
-   /* sanity checks */
-   if (!len) return (0);
-   if (from + len > mtd->size) return (-EINVAL);
 
    /* we always read len bytes */
    *retlen = len;
@@ -487,7 +476,7 @@ static inline int write_dword (__u32 offset,__u32 x)
    __u32 status;
 
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(): 0x%.8x <- 0x%.8x\n",__FUNCTION__,offset,x);
+   printk (KERN_DEBUG "%s(): 0x%.8x <- 0x%.8x\n", __func__, offset, x);
 #endif
 
    /* setup writing */
@@ -507,7 +496,7 @@ static inline int write_dword (__u32 offset,__u32 x)
    /* put the flash back into command mode */
    write32 (DATA_TO_FLASH (READ_ARRAY),offset);
 
-   /* was the write successfull? */
+   /* was the write successful? */
    if ((status & STATUS_PGM_ERR) || read32 (offset) != x)
 	 {
 		printk (KERN_WARNING "%s: write error at address 0x%.8x.\n",module_name,offset);
@@ -523,14 +512,11 @@ static int flash_write (struct mtd_info *mtd,loff_t to,size_t len,size_t *retlen
    int i,n;
 
 #ifdef LART_DEBUG
-   printk (KERN_DEBUG "%s(to = 0x%.8x, len = %d)\n",__FUNCTION__,(__u32) to,len);
+   printk (KERN_DEBUG "%s(to = 0x%.8x, len = %d)\n", __func__, (__u32)to, len);
 #endif
-
-   *retlen = 0;
 
    /* sanity checks */
    if (!len) return (0);
-   if (to + len > mtd->size) return (-EINVAL);
 
    /* first, we write a 0xFF.... padded byte until we reach a dword boundary */
    if (to & (BUSWIDTH - 1))
@@ -580,54 +566,46 @@ static int flash_write (struct mtd_info *mtd,loff_t to,size_t len,size_t *retlen
 
 /***************************************************************************************************/
 
-#define NB_OF(x) (sizeof (x) / sizeof (x[0]))
-
 static struct mtd_info mtd;
 
-static struct mtd_erase_region_info erase_regions[] =
-{
-   /* parameter blocks */
-   {
-	     offset: 0x00000000,
-	  erasesize: FLASH_BLOCKSIZE_PARAM,
-	  numblocks: FLASH_NUMBLOCKS_16m_PARAM
-   },
-   /* main blocks */
-   {
-	     offset: FLASH_BLOCKSIZE_PARAM * FLASH_NUMBLOCKS_16m_PARAM,
-	  erasesize: FLASH_BLOCKSIZE_MAIN,
-	  numblocks: FLASH_NUMBLOCKS_16m_MAIN
-   }
+static struct mtd_erase_region_info erase_regions[] = {
+	/* parameter blocks */
+	{
+		.offset		= 0x00000000,
+		.erasesize	= FLASH_BLOCKSIZE_PARAM,
+		.numblocks	= FLASH_NUMBLOCKS_16m_PARAM,
+	},
+	/* main blocks */
+	{
+		.offset	 = FLASH_BLOCKSIZE_PARAM * FLASH_NUMBLOCKS_16m_PARAM,
+		.erasesize	= FLASH_BLOCKSIZE_MAIN,
+		.numblocks	= FLASH_NUMBLOCKS_16m_MAIN,
+	}
 };
 
-#ifdef HAVE_PARTITIONS
-static struct mtd_partition lart_partitions[] =
-{
-   /* blob */
-   {
-	       name: "blob",
-	     offset: BLOB_START,
-	       size: BLOB_LEN,
-	 mask_flags: 0
-   },
-   /* kernel */
-   {
-	       name: "kernel",
-	     offset: KERNEL_START,			/* MTDPART_OFS_APPEND */
-	       size: KERNEL_LEN,
-	 mask_flags: 0
-   },
-   /* initial ramdisk / file system */
-   {
-	       name: "file system",
-	     offset: INITRD_START,			/* MTDPART_OFS_APPEND */
-	       size: INITRD_LEN,			/* MTDPART_SIZ_FULL */
-	 mask_flags: 0
-   }
+static struct mtd_partition lart_partitions[] = {
+	/* blob */
+	{
+		.name	= "blob",
+		.offset	= BLOB_START,
+		.size	= BLOB_LEN,
+	},
+	/* kernel */
+	{
+		.name	= "kernel",
+		.offset	= KERNEL_START,		/* MTDPART_OFS_APPEND */
+		.size	= KERNEL_LEN,
+	},
+	/* initial ramdisk / file system */
+	{
+		.name	= "file system",
+		.offset	= INITRD_START,		/* MTDPART_OFS_APPEND */
+		.size	= INITRD_LEN,		/* MTDPART_SIZ_FULL */
+	}
 };
-#endif
+#define NUM_PARTITIONS ARRAY_SIZE(lart_partitions)
 
-int __init lart_flash_init (void)
+static int __init lart_flash_init (void)
 {
    int result;
    memset (&mtd,0,sizeof (mtd));
@@ -641,15 +619,17 @@ int __init lart_flash_init (void)
    printk ("%s: This looks like a LART board to me.\n",module_name);
    mtd.name = module_name;
    mtd.type = MTD_NORFLASH;
+   mtd.writesize = 1;
+   mtd.writebufsize = 4;
    mtd.flags = MTD_CAP_NORFLASH;
    mtd.size = FLASH_BLOCKSIZE_PARAM * FLASH_NUMBLOCKS_16m_PARAM + FLASH_BLOCKSIZE_MAIN * FLASH_NUMBLOCKS_16m_MAIN;
    mtd.erasesize = FLASH_BLOCKSIZE_MAIN;
-   mtd.numeraseregions = NB_OF (erase_regions);
+   mtd.numeraseregions = ARRAY_SIZE(erase_regions);
    mtd.eraseregions = erase_regions;
-   mtd.module = THIS_MODULE;
-   mtd.erase = flash_erase;
-   mtd.read = flash_read;
-   mtd.write = flash_write;
+   mtd._erase = flash_erase;
+   mtd._read = flash_read;
+   mtd._write = flash_write;
+   mtd.owner = THIS_MODULE;
 
 #ifdef LART_DEBUG
    printk (KERN_DEBUG
@@ -673,10 +653,9 @@ int __init lart_flash_init (void)
 			   result,mtd.eraseregions[result].erasesize,mtd.eraseregions[result].erasesize / 1024,
 			   result,mtd.eraseregions[result].numblocks);
 
-#ifdef HAVE_PARTITIONS
-   printk ("\npartitions = %d\n",NB_OF (lart_partitions));
+   printk ("\npartitions = %d\n", ARRAY_SIZE(lart_partitions));
 
-   for (result = 0; result < NB_OF (lart_partitions); result++)
+   for (result = 0; result < ARRAY_SIZE(lart_partitions); result++)
 	 printk (KERN_DEBUG
 			 "\n\n"
 			 "lart_partitions[%d].name = %s\n"
@@ -686,24 +665,16 @@ int __init lart_flash_init (void)
 			 result,lart_partitions[result].offset,
 			 result,lart_partitions[result].size,lart_partitions[result].size / 1024);
 #endif
-#endif
 
-#ifndef HAVE_PARTITIONS
-   result = add_mtd_device (&mtd);
-#else
-   result = add_mtd_partitions (&mtd,lart_partitions,NB_OF (lart_partitions));
-#endif
+   result = mtd_device_register(&mtd, lart_partitions,
+                                ARRAY_SIZE(lart_partitions));
 
    return (result);
 }
 
-void __exit lart_flash_exit (void)
+static void __exit lart_flash_exit (void)
 {
-#ifndef HAVE_PARTITIONS
-   del_mtd_device (&mtd);
-#else
-   del_mtd_partitions (&mtd);
-#endif
+   mtd_device_unregister(&mtd);
 }
 
 module_init (lart_flash_init);
@@ -712,5 +683,3 @@ module_exit (lart_flash_exit);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Abraham vd Merwe <abraham@2d3d.co.za>");
 MODULE_DESCRIPTION("MTD driver for Intel 28F160F3 on LART board");
-
-

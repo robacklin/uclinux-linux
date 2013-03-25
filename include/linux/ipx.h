@@ -1,39 +1,36 @@
 #ifndef _IPX_H_
 #define _IPX_H_
+#include <linux/types.h>
 #include <linux/sockios.h>
 #include <linux/socket.h>
 #define IPX_NODE_LEN	6
 #define IPX_MTU		576
 
-struct sockaddr_ipx
-{
-	sa_family_t	sipx_family;
-	__u16		sipx_port;
-	__u32		sipx_network;
+struct sockaddr_ipx {
+	__kernel_sa_family_t sipx_family;
+	__be16		sipx_port;
+	__be32		sipx_network;
 	unsigned char 	sipx_node[IPX_NODE_LEN];
 	__u8		sipx_type;
 	unsigned char	sipx_zero;	/* 16 byte fill */
 };
 
 /*
- *	So we can fit the extra info for SIOCSIFADDR into the address nicely
+ * So we can fit the extra info for SIOCSIFADDR into the address nicely
  */
- 
 #define sipx_special	sipx_port
 #define sipx_action	sipx_zero
 #define IPX_DLTITF	0
 #define IPX_CRTITF	1
 
-typedef struct ipx_route_definition
-{
-	__u32         ipx_network;
-	__u32         ipx_router_network;
+struct ipx_route_definition {
+	__be32        ipx_network;
+	__be32        ipx_router_network;
 	unsigned char ipx_router_node[IPX_NODE_LEN];
-}	ipx_route_definition;
+};
 
-typedef struct ipx_interface_definition
-{
-	__u32         ipx_network;
+struct ipx_interface_definition {
+	__be32        ipx_network;
 	unsigned char ipx_device[16];
 	unsigned char ipx_dlink_type;
 #define IPX_FRAME_NONE		0
@@ -47,26 +44,24 @@ typedef struct ipx_interface_definition
 #define IPX_PRIMARY		1
 #define IPX_INTERNAL		2
 	unsigned char ipx_node[IPX_NODE_LEN];
-}	ipx_interface_definition;
+};
 	
-typedef struct ipx_config_data
-{
+struct ipx_config_data {
 	unsigned char	ipxcfg_auto_select_primary;
 	unsigned char	ipxcfg_auto_create_interfaces;
-}	ipx_config_data;
+};
 
 /*
  * OLD Route Definition for backward compatibility.
  */
 
-struct ipx_route_def
-{
-	__u32         ipx_network;
-	__u32         ipx_router_network;
+struct ipx_route_def {
+	__be32		ipx_network;
+	__be32		ipx_router_network;
 #define IPX_ROUTE_NO_ROUTER	0
-	unsigned char ipx_router_node[IPX_NODE_LEN];
-	unsigned char ipx_device[16];
-	unsigned short ipx_flags;
+	unsigned char	ipx_router_node[IPX_NODE_LEN];
+	unsigned char	ipx_device[16];
+	unsigned short	ipx_flags;
 #define IPX_RT_SNAP		8
 #define IPX_RT_8022		4
 #define IPX_RT_BLUEBOOK		2
@@ -74,16 +69,7 @@ struct ipx_route_def
 };
 
 #define SIOCAIPXITFCRT		(SIOCPROTOPRIVATE)
-#define SIOCAIPXPRISLT		(SIOCPROTOPRIVATE+1)
-#define SIOCIPXCFGDATA		(SIOCPROTOPRIVATE+2)
-#define SIOCIPXNCPCONN		(SIOCPROTOPRIVATE+3)
-
-#ifdef __KERNEL__
-#include <linux/skbuff.h>
-
-extern int ipxrtr_route_skb(struct sk_buff *);
-extern int ipx_if_offset(unsigned long ipx_net_number);
-extern void ipx_remove_socket(struct sock *sk);
-#endif /* def __KERNEL__ */
-
-#endif /* def _IPX_H_ */
+#define SIOCAIPXPRISLT		(SIOCPROTOPRIVATE + 1)
+#define SIOCIPXCFGDATA		(SIOCPROTOPRIVATE + 2)
+#define SIOCIPXNCPCONN		(SIOCPROTOPRIVATE + 3)
+#endif /* _IPX_H_ */

@@ -1,10 +1,15 @@
 /*
+ * Driver for the VINO (Video In No Out) system found in SGI Indys.
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License version 2 as published by the Free Software Foundation.
+ *
  * Copyright (C) 1999 Ulf Karlsson <ulfc@bun.falkenberg.se>
  * Copyright (C) 2003 Ladislav Michl <ladis@linux-mips.org>
  */
 
-#ifndef VINO_H
-#define VINO_H
+#ifndef _VINO_H_
+#define _VINO_H_
 
 #define VINO_BASE	0x00080000	/* Vino is in the EISA address space,
 					 * but it is not an EISA bus card */
@@ -22,8 +27,9 @@ struct sgi_vino_channel {
 	u32 _pad_clip_end;
 	volatile u32 clip_end;
 
+#define VINO_FRAMERT_FULL	0xfff
 #define VINO_FRAMERT_PAL	(1<<0)			/* 0=NTSC 1=PAL */
-#define VINO_FRAMERT_RT(x)	(((x) & 0x1fff) << 1)	/* bits 1:12 */
+#define VINO_FRAMERT_RT(x)	(((x) & 0xfff) << 1)	/* bits 1:12 */
 	u32 _pad_frame_rate;
 	volatile u32 frame_rate;
 

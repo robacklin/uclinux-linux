@@ -1,4 +1,4 @@
-/*   
+/*
  *  Copyright (C) 2003,2004 Aurelien Alleaume <slts@free.fr>
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -16,6 +16,9 @@
  *
  */
 
+#include <linux/kernel.h>
+#include <linux/slab.h>
+
 #include "prismcompat.h"
 #include "islpci_dev.h"
 #include "islpci_mgt.h"
@@ -24,8 +27,8 @@
 #include "isl_ioctl.h"
 
 /* to convert between channel and freq */
-const int frequency_list_bg[] = { 2412, 2417, 2422, 2427, 2432, 2437, 2442,
-	2447, 2452, 2457, 2462, 2467, 2472, 2484
+static const int frequency_list_bg[] = { 2412, 2417, 2422, 2427, 2432,
+	2437, 2442, 2447, 2452, 2457, 2462, 2467, 2472, 2484
 };
 
 int
@@ -235,22 +238,18 @@ mgt_init(islpci_private *priv)
 {
 	int i;
 
-	priv->mib = kmalloc(OID_NUM_LAST * sizeof (void *), GFP_KERNEL);
+	priv->mib = kcalloc(OID_NUM_LAST, sizeof (void *), GFP_KERNEL);
 	if (!priv->mib)
 		return -ENOMEM;
-
-	memset(priv->mib, 0, OID_NUM_LAST * sizeof (void *));
 
 	/* Alloc the cache */
 	for (i = 0; i < OID_NUM_LAST; i++) {
 		if (isl_oid[i].flags & OID_FLAG_CACHED) {
-			priv->mib[i] = kmalloc(isl_oid[i].size *
+			priv->mib[i] = kzalloc(isl_oid[i].size *
 					       (isl_oid[i].range + 1),
 					       GFP_KERNEL);
 			if (!priv->mib[i])
 				return -ENOMEM;
-			memset(priv->mib[i], 0,
-			       isl_oid[i].size * (isl_oid[i].range + 1));
 		} else
 			priv->mib[i] = NULL;
 	}
@@ -268,11 +267,10 @@ mgt_clean(islpci_private *priv)
 
 	if (!priv->mib)
 		return;
-	for (i = 0; i < OID_NUM_LAST; i++)
-		if (priv->mib[i]) {
-			kfree(priv->mib[i]);
-			priv->mib[i] = NULL;
-		}
+	for (i = 0; i < OID_NUM_LAST; i++) {
+		kfree(priv->mib[i]);
+		priv->mib[i] = NULL;
+	}
 	kfree(priv->mib);
 	priv->mib = NULL;
 }
@@ -333,7 +331,7 @@ mgt_le_to_cpu(int type, void *data)
 	case OID_TYPE_ATTACH:{
 			struct obj_attachment *attach = data;
 			attach->id = le16_to_cpu(attach->id);
-			attach->size = le16_to_cpu(attach->size);; 
+			attach->size = le16_to_cpu(attach->size);
 			break;
 	}
 	case OID_TYPE_SSID:
@@ -402,7 +400,7 @@ mgt_cpu_to_le(int type, void *data)
 	case OID_TYPE_ATTACH:{
 			struct obj_attachment *attach = data;
 			attach->id = cpu_to_le16(attach->id);
-			attach->size = cpu_to_le16(attach->size);; 
+			attach->size = cpu_to_le16(attach->size);
 			break;
 	}
 	case OID_TYPE_SSID:
@@ -504,7 +502,7 @@ mgt_set_varlen(islpci_private *priv, enum oid_num_t n, void *data, int extra_len
 		}
 		if (ret || response_op == PIMFOR_OP_ERROR)
 			ret = -EIO;
-	} else 
+	} else
 		ret = -EIO;
 
 	/* re-set given data to what it was */
@@ -695,13 +693,13 @@ mgt_update_addr(islpci_private *priv)
 	return ret;
 }
 
-#define VEC_SIZE(a) (sizeof(a)/sizeof(a[0]))
+#define VEC_SIZE(a) ARRAY_SIZE(a)
 
 int
 mgt_commit(islpci_private *priv)
 {
 	int rvalue;
-	u32 u;
+	enum oid_num_t u;
 
 	if (islpci_get_state(priv) < PRV_STATE_INIT)
 		return 0;
@@ -728,8 +726,9 @@ mgt_commit(islpci_private *priv)
  * MEDIUMLIMIT,BEACONPERIOD,DTIMPERIOD,ATIMWINDOW,LISTENINTERVAL
  * FREQUENCY,EXTENDEDRATES.
  *
- * The way to do this is to set ESSID. Note though that they may get 
+ * The way to do this is to set ESSID. Note though that they may get
  * unlatch before though by setting another OID. */
+#if 0
 void
 mgt_unlatch_all(islpci_private *priv)
 {
@@ -756,6 +755,7 @@ mgt_unlatch_all(islpci_private *priv)
 	if (rvalue)
 		printk(KERN_DEBUG "%s: Unlatching OIDs failed\n", priv->ndev->name);
 }
+#endif
 
 /* This will tell you if you are allowed to answer a mlme(ex) request .*/
 
@@ -820,7 +820,7 @@ mgt_response_to_str(enum oid_num_t n, union oid_res_t *r, char *str)
 			k = snprintf(str, PRIV_STR_SIZE, "nr=%u\n", list->nr);
 			for (i = 0; i < list->nr; i++)
 				k += snprintf(str + k, PRIV_STR_SIZE - k,
-					      "bss[%u] : \nage=%u\nchannel=%u\n"
+					      "bss[%u] :\nage=%u\nchannel=%u\n"
 					      "capinfo=0x%X\nrates=0x%X\n"
 					      "basic_rates=0x%X\n",
 					      i, list->bsslist[i].age,

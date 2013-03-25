@@ -10,32 +10,50 @@
 #define LINUX_LOCKD_BIND_H
 
 #include <linux/lockd/nlm.h>
+/* need xdr-encoded error codes too, so... */
+#include <linux/lockd/xdr.h>
+#ifdef CONFIG_LOCKD_V4
+#include <linux/lockd/xdr4.h>
+#endif
 
 /* Dummy declarations */
 struct svc_rqst;
-struct svc_client;		/* opaque type */
 
 /*
  * This is the set of functions for lockd->nfsd communication
  */
 struct nlmsvc_binding {
-	void			(*exp_readlock)(void);
-	void			(*exp_unlock)(void);
-	struct svc_client *	(*exp_getclient)(struct sockaddr_in *);
-	u32			(*fopen)(struct svc_rqst *,
+	__be32			(*fopen)(struct svc_rqst *,
 						struct nfs_fh *,
-						struct file *);
+						struct file **);
 	void			(*fclose)(struct file *);
-	void			(*detach)(void);
 };
 
 extern struct nlmsvc_binding *	nlmsvc_ops;
 
 /*
+ * Similar to nfs_client_initdata, but without the NFS-specific
+ * rpc_ops field.
+ */
+struct nlmclnt_initdata {
+	const char		*hostname;
+	const struct sockaddr	*address;
+	size_t			addrlen;
+	unsigned short		protocol;
+	u32			nfs_version;
+	int			noresvport;
+	struct net		*net;
+};
+
+/*
  * Functions exported by the lockd module
  */
-extern void	nlmsvc_invalidate_client(struct svc_client *clnt);
-extern int	nlmclnt_proc(struct inode *, int, struct file_lock *);
+
+extern struct nlm_host *nlmclnt_init(const struct nlmclnt_initdata *nlm_init);
+extern void	nlmclnt_done(struct nlm_host *host);
+
+extern int	nlmclnt_proc(struct nlm_host *host, int cmd,
+					struct file_lock *fl);
 extern int	lockd_up(void);
 extern void	lockd_down(void);
 

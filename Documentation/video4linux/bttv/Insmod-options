@@ -1,4 +1,10 @@
 
+Note: "modinfo <module>" prints various information about a kernel
+module, among them a complete and up-to-date list of insmod options.
+This list tends to be outdated because it is updated manually ...
+
+==========================================================================
+
 bttv.o
 	the bt848/878 (grabber chip) driver
 
@@ -38,6 +44,9 @@ bttv.o
 				push used by bttv.  bttv will disable overlay
 				by default on this hardware to avoid crashes.
 				With this insmod option you can override this.
+		no_overlay=1	Disable overlay. It should be used by broken
+				hardware that doesn't support PCI2PCI direct
+				transfers.
 		automute=0/1	Automatically mutes the sound if there is
 				no TV signal, on by default.  You might try
 				to disable this if you have bad input signal
@@ -45,6 +54,12 @@ bttv.o
 				dropouts.
 		chroma_agc=0/1	AGC of chroma signal, off by default.
 		adc_crush=0/1	Luminance ADC crush, on by default.
+		i2c_udelay=     Allow reduce I2C speed. Default is 5 usecs
+				(meaning 66,67 Kbps). The default is the
+				maximum supported speed by kernel bitbang
+				algorithm. You may use lower numbers, if I2C
+				messages are lost (16 is known to work on
+				all supported cards).
 
 		bttv_gpio=0/1
 		gpiomask=
@@ -65,16 +80,6 @@ tuner.o
 				see CARDLIST for a complete list.
 		pal=[bdgil]	select PAL variant (used for some tuners
 				only, important for the audio carrier).
-
-tvmixer.o
-	registers a mixer device for the TV card's volume/bass/treble
-	controls (requires a i2c audio control chip like the msp3400).
-
-	insmod args:
-		debug=1		print some debug info to the syslog.
-		devnr=n		allocate device #n (0 == /dev/mixer,
-				1 = /dev/mixer1, ...), default is to
-				use the first free one.
 
 tvaudio.o
 	new, experimental module which is supported to provide a single

@@ -11,22 +11,19 @@
  * Code common to all CIA core logic chips.
  */
 
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/pci.h>
-#include <linux/sched.h>
-#include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/ptrace.h>
-#include <asm/hwrpb.h>
-
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
 #include <asm/core_cia.h>
 #undef __EXTERN_INLINE
 
+#include <linux/types.h>
+#include <linux/pci.h>
+#include <linux/sched.h>
+#include <linux/init.h>
 #include <linux/bootmem.h>
+
+#include <asm/ptrace.h>
+#include <asm/mce.h>
 
 #include "proto.h"
 #include "pci_impl.h"
@@ -89,11 +86,10 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *bus_dev, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = bus_dev->number;
 
 	*type1 = (bus != 0);
 	*pci_addr = (bus << 16) | (device_fn << 8) | where;
@@ -113,7 +109,7 @@ conf_read(unsigned long addr, unsigned char type1)
 	int cia_cfg = 0;
 
 	DBGC(("conf_read(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -154,7 +150,7 @@ conf_read(unsigned long addr, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 
 	return value;
@@ -167,7 +163,7 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 	int stat0, cia_cfg = 0;
 
 	DBGC(("conf_write(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -204,92 +200,50 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 }
 
-static int
-cia_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+static int 
+cia_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		u32 *value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
+	mask = (size - 1) * 8;
+	shift = (where & 3) * 8;
+	addr = (pci_addr << 5) + mask + CIA_CONF;
+	*value = conf_read(addr, type1) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-cia_read_config_word(struct pci_dev *dev, int where, u16 *value)
+cia_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		 u32 value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + CIA_CONF;
-	*value = conf_read(addr, type1);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + CIA_CONF;
 	conf_write(addr, value << ((where & 3) * 8), type1);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-cia_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return cia_write_config(dev, where, value, 0x00);
-}
-
-static int 
-cia_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return cia_write_config(dev, where, value, 0x08);
-}
-
-static int 
-cia_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return cia_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops cia_pci_ops = 
 {
-	read_byte:	cia_read_config_byte,
-	read_word:	cia_read_config_word,
-	read_dword:	cia_read_config_dword,
-	write_byte:	cia_write_config_byte,
-	write_word:	cia_write_config_word,
-	write_dword:	cia_write_config_dword
+	.read = 	cia_read_config,
+	.write =	cia_write_config,
 };
 
 /*
@@ -329,7 +283,7 @@ void
 cia_pci_tbi_try2(struct pci_controller *hose,
 		 dma_addr_t start, dma_addr_t end)
 {
-	unsigned long bus_addr;
+	void __iomem *bus_addr;
 	int ctrl;
 
 	/* Put the chip into PCI loopback mode.  */
@@ -398,7 +352,7 @@ verify_tb_operation(void)
 	struct pci_iommu_arena *arena = pci_isa_hose->sg_isa;
 	int ctrl, addr0, tag0, pte0, data0;
 	int temp, use_tbia_try2 = 0;
-	unsigned long bus_addr;
+	void __iomem *bus_addr;
 
 	/* pyxis -- tbia is broken */
 	if (pci_isa_hose->dense_io_base)
@@ -601,21 +555,21 @@ failed:
 	goto exit;
 }
 
-#ifdef ALPHA_RESTORE_SRM_SETUP
+#if defined(ALPHA_RESTORE_SRM_SETUP)
 /* Save CIA configuration data as the console had it set up.  */
 struct 
 {
-	unsigned int hae_mem;
-	unsigned int hae_io;
-	unsigned int pci_dac_offset;
-	unsigned int err_mask;
-	unsigned int cia_ctrl;
-	unsigned int cia_cnfg;
-	struct {
-		unsigned int w_base;
-		unsigned int w_mask;
-		unsigned int t_base;
-	} window[4];
+    unsigned int hae_mem;
+    unsigned int hae_io;
+    unsigned int pci_dac_offset;
+    unsigned int err_mask;
+    unsigned int cia_ctrl;
+    unsigned int cia_cnfg;
+    struct {
+	unsigned int w_base;
+	unsigned int w_mask;
+	unsigned int t_base;
+    } window[4];
 } saved_config __attribute((common));
 
 void
@@ -630,13 +584,16 @@ cia_save_srm_settings(int is_pyxis)
 	saved_config.hae_io         = *(vip)CIA_IOC_HAE_IO;
 	saved_config.pci_dac_offset = *(vip)CIA_IOC_PCI_W_DAC;
 
-	saved_config.cia_cnfg = is_pyxis ? *(vip)CIA_IOC_CIA_CNFG : 0;
+	if (is_pyxis)
+	    saved_config.cia_cnfg   = *(vip)CIA_IOC_CIA_CNFG;
+	else
+	    saved_config.cia_cnfg   = 0;
 
 	/* Save DMA windows configuration. */
 	for (i = 0; i < 4; i++) {
-		saved_config.window[i].w_base = *(vip)CIA_IOC_PCI_Wn_BASE(i);
-		saved_config.window[i].w_mask = *(vip)CIA_IOC_PCI_Wn_MASK(i);
-		saved_config.window[i].t_base = *(vip)CIA_IOC_PCI_Tn_BASE(i);
+	    saved_config.window[i].w_base = *(vip)CIA_IOC_PCI_Wn_BASE(i);
+	    saved_config.window[i].w_mask = *(vip)CIA_IOC_PCI_Wn_MASK(i);
+	    saved_config.window[i].t_base = *(vip)CIA_IOC_PCI_Tn_BASE(i);
 	}
 	mb();
 }
@@ -647,9 +604,9 @@ cia_restore_srm_settings(void)
 	int i;
 
 	for (i = 0; i < 4; i++) {
-		*(vip)CIA_IOC_PCI_Wn_BASE(i) = saved_config.window[i].w_base;
-		*(vip)CIA_IOC_PCI_Wn_MASK(i) = saved_config.window[i].w_mask;
-		*(vip)CIA_IOC_PCI_Tn_BASE(i) = saved_config.window[i].t_base;
+	    *(vip)CIA_IOC_PCI_Wn_BASE(i) = saved_config.window[i].w_base;
+	    *(vip)CIA_IOC_PCI_Wn_MASK(i) = saved_config.window[i].w_mask;
+	    *(vip)CIA_IOC_PCI_Tn_BASE(i) = saved_config.window[i].t_base;
 	}
 
 	*(vip)CIA_IOC_HAE_MEM   = saved_config.hae_mem;
@@ -659,7 +616,7 @@ cia_restore_srm_settings(void)
 	*(vip)CIA_IOC_CIA_CTRL  = saved_config.cia_ctrl;
 
 	if (saved_config.cia_cnfg) /* Must be pyxis. */
-		*(vip)CIA_IOC_CIA_CNFG  = saved_config.cia_cnfg;
+	    *(vip)CIA_IOC_CIA_CNFG  = saved_config.cia_cnfg;
 
 	mb();
 }
@@ -715,7 +672,7 @@ do_init_arch(int is_pyxis)
 		*(vip)CIA_IOC_CIA_CNFG = temp;
 	}
 
-	/* Syncronize with all previous changes.  */
+	/* Synchronize with all previous changes.  */
 	mb();
 	*(vip)CIA_IOC_CIA_REV;
 
@@ -788,10 +745,10 @@ do_init_arch(int is_pyxis)
 	   elsewhere, we should not claim that we support DAC unless that
 	   4GB covers all of physical memory.
 
-	   On CIA rev 1, apparently W1 and W2 can't be used for SG.
-	   At least, there are reports that it doesn't work for Alcor.
-	   In that case, we have no choice but to use W3 for the TBIA
-	   workaround, which means we can't use DAC at all.  */
+	   On CIA rev 1, apparently W1 and W2 can't be used for SG. 
+	   At least, there are reports that it doesn't work for Alcor. 
+	   In that case, we have no choice but to use W3 for the TBIA 
+	   workaround, which means we can't use DAC at all. */ 
 
 	tbia_window = 1;
 	if (is_pyxis) {
@@ -806,7 +763,7 @@ do_init_arch(int is_pyxis)
 		*(vip)CIA_IOC_PCI_W3_MASK = 0xfff00000;
 		*(vip)CIA_IOC_PCI_T3_BASE = 0 >> 2;
 
-		alpha_mv.pci_dac_offset = 0x200000000;
+		alpha_mv.pci_dac_offset = 0x200000000UL;
 		*(vip)CIA_IOC_PCI_W_DAC = alpha_mv.pci_dac_offset >> 32;
 	}
 
@@ -1139,7 +1096,8 @@ cia_decode_parity_error(struct el_CIA_sysdata_mcheck *cia)
 	printk(KERN_CRIT "  Command: %s, Parity bit: %d\n", cmd, par);
 	printk(KERN_CRIT "  Address: %#010lx, Mask: %#lx\n", addr, mask);
 }
-#endif
+#endif /* CONFIG_VERBOSE_MCHECK */
+
 
 static int
 cia_decode_mchk(unsigned long la_ptr)
@@ -1154,6 +1112,9 @@ cia_decode_mchk(unsigned long la_ptr)
 		return 0;
 
 #ifdef CONFIG_VERBOSE_MCHECK
+	if (!alpha_verbose_mcheck)
+		return 1;
+
 	switch (ffs(cia->cia_err & 0xfff) - 1) {
 	case 0: /* CIA_ERR_COR_ERR */
 		cia_decode_ecc_error(cia, "Corrected ECC error");
@@ -1226,14 +1187,13 @@ cia_decode_mchk(unsigned long la_ptr)
 	if (cia->cia_err & CIA_ERR_LOST_IOA_TIMEOUT)
 		printk(KERN_CRIT "CIA lost machine check: "
 		       "I/O timeout\n");
-#endif
+#endif /* CONFIG_VERBOSE_MCHECK */
 
 	return 1;
 }
 
 void
-cia_machine_check(unsigned long vector, unsigned long la_ptr,
-		  struct pt_regs * regs)
+cia_machine_check(unsigned long vector, unsigned long la_ptr)
 {
 	int expected;
 
@@ -1248,5 +1208,5 @@ cia_machine_check(unsigned long vector, unsigned long la_ptr,
 	expected = mcheck_expected(0);
 	if (!expected && vector == 0x660)
 		expected = cia_decode_mchk(la_ptr);
-	process_mcheck_info(vector, la_ptr, regs, "CIA", expected);
+	process_mcheck_info(vector, la_ptr, "CIA", expected);
 }

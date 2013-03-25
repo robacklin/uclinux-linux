@@ -1,4 +1,4 @@
-/* $Id: isdn_divertif.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
+/* $Id: isdn_divertif.h,v 1.4.6.1 2001/09/23 22:25:05 kai Exp $
  *
  * Header for the diversion supplementary interface for i4l.
  *
@@ -10,6 +10,8 @@
  *
  */
 
+#ifndef _LINUX_ISDN_DIVERTIF_H
+#define _LINUX_ISDN_DIVERTIF_H
 
 /***********************************************************/
 /* magic value is also used to control version information */
@@ -23,6 +25,10 @@
 #define DIVERT_REG_ERR  0x03  /* module already registered */
 #define DIVERT_REL_ERR  0x04  /* module not registered */
 #define DIVERT_REG_NAME isdn_register_divert
+
+#ifdef __KERNEL__
+#include <linux/isdnif.h>
+#include <linux/types.h>
 
 /***************************************************************/
 /* structure exchanging data between isdn hl and divert module */
@@ -40,3 +46,6 @@ typedef struct
 /* function register */
 /*********************/
 extern int DIVERT_REG_NAME(isdn_divert_if *);
+#endif
+
+#endif /* _LINUX_ISDN_DIVERTIF_H */

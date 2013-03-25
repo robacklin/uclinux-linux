@@ -1,178 +1,397 @@
 #ifndef __LINUX_SPINLOCK_H
 #define __LINUX_SPINLOCK_H
 
-#include <linux/config.h>
-
-#include <asm/system.h>
-
 /*
- * These are the generic versions of the spinlocks and read-write
- * locks..
- */
-#define spin_lock_irqsave(lock, flags)		do { local_irq_save(flags);       spin_lock(lock); } while (0)
-#define spin_lock_irq(lock)			do { local_irq_disable();         spin_lock(lock); } while (0)
-#define spin_lock_bh(lock)			do { local_bh_disable();          spin_lock(lock); } while (0)
-
-#define read_lock_irqsave(lock, flags)		do { local_irq_save(flags);       read_lock(lock); } while (0)
-#define read_lock_irq(lock)			do { local_irq_disable();         read_lock(lock); } while (0)
-#define read_lock_bh(lock)			do { local_bh_disable();          read_lock(lock); } while (0)
-
-#define write_lock_irqsave(lock, flags)		do { local_irq_save(flags);      write_lock(lock); } while (0)
-#define write_lock_irq(lock)			do { local_irq_disable();        write_lock(lock); } while (0)
-#define write_lock_bh(lock)			do { local_bh_disable();         write_lock(lock); } while (0)
-
-#define spin_unlock_irqrestore(lock, flags)	do { spin_unlock(lock);  local_irq_restore(flags); } while (0)
-#define spin_unlock_irq(lock)			do { spin_unlock(lock);  local_irq_enable();       } while (0)
-#define spin_unlock_bh(lock)			do { spin_unlock(lock);  local_bh_enable();        } while (0)
-
-#define read_unlock_irqrestore(lock, flags)	do { read_unlock(lock);  local_irq_restore(flags); } while (0)
-#define read_unlock_irq(lock)			do { read_unlock(lock);  local_irq_enable();       } while (0)
-#define read_unlock_bh(lock)			do { read_unlock(lock);  local_bh_enable();        } while (0)
-
-#define write_unlock_irqrestore(lock, flags)	do { write_unlock(lock); local_irq_restore(flags); } while (0)
-#define write_unlock_irq(lock)			do { write_unlock(lock); local_irq_enable();       } while (0)
-#define write_unlock_bh(lock)			do { write_unlock(lock); local_bh_enable();        } while (0)
-#define spin_trylock_bh(lock)			({ int __r; local_bh_disable();\
-						__r = spin_trylock(lock);      \
-						if (!__r) local_bh_enable();   \
-						__r; })
-
-/* Must define these before including other files, inline functions need them */
-
-#include <linux/stringify.h>
-
-#define LOCK_SECTION_NAME			\
-	".text.lock." __stringify(KBUILD_BASENAME)
-
-#define LOCK_SECTION_START(extra)		\
-	".subsection 1\n\t"			\
-	extra					\
-	".ifndef " LOCK_SECTION_NAME "\n\t"	\
-	LOCK_SECTION_NAME ":\n\t"		\
-	".endif\n\t"
-
-#define LOCK_SECTION_END			\
-	".previous\n\t"
-
-#ifdef CONFIG_SMP
-#include <asm/spinlock.h>
-
-#elif !defined(spin_lock_init) /* !SMP and spin_lock_init not previously
-                                  defined (e.g. by including asm/spinlock.h */
-
-#define DEBUG_SPINLOCKS	0	/* 0 == no debugging, 1 == maintain lock state, 2 == full debug */
-
-#if (DEBUG_SPINLOCKS < 1)
-
-#define atomic_dec_and_lock(atomic,lock) atomic_dec_and_test(atomic)
-#define ATOMIC_DEC_AND_LOCK
-
-/*
- * Your basic spinlocks, allowing only a single CPU anywhere
+ * include/linux/spinlock.h - generic spinlock/rwlock declarations
  *
- * Some older gcc versions had a nasty bug with empty initializers.
- * (XXX: could someone please confirm whether egcs 1.1 still has this bug?)
+ * here's the role of the various spinlock/rwlock related include files:
+ *
+ * on SMP builds:
+ *
+ *  asm/spinlock_types.h: contains the arch_spinlock_t/arch_rwlock_t and the
+ *                        initializers
+ *
+ *  linux/spinlock_types.h:
+ *                        defines the generic type and initializers
+ *
+ *  asm/spinlock.h:       contains the arch_spin_*()/etc. lowlevel
+ *                        implementations, mostly inline assembly code
+ *
+ *   (also included on UP-debug builds:)
+ *
+ *  linux/spinlock_api_smp.h:
+ *                        contains the prototypes for the _spin_*() APIs.
+ *
+ *  linux/spinlock.h:     builds the final spin_*() APIs.
+ *
+ * on UP builds:
+ *
+ *  linux/spinlock_type_up.h:
+ *                        contains the generic, simplified UP spinlock type.
+ *                        (which is an empty structure on non-debug builds)
+ *
+ *  linux/spinlock_types.h:
+ *                        defines the generic type and initializers
+ *
+ *  linux/spinlock_up.h:
+ *                        contains the arch_spin_*()/etc. version of UP
+ *                        builds. (which are NOPs on non-debug, non-preempt
+ *                        builds)
+ *
+ *   (included on UP-non-debug builds:)
+ *
+ *  linux/spinlock_api_up.h:
+ *                        builds the _spin_*() APIs.
+ *
+ *  linux/spinlock.h:     builds the final spin_*() APIs.
  */
-#if (__GNUC__ > 2 || __GNUC_MINOR__ > 95)
-  typedef struct { } spinlock_t;
-  #define SPIN_LOCK_UNLOCKED (spinlock_t) { }
-#else
-  typedef struct { int gcc_is_buggy; } spinlock_t;
-  #define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
-#endif
 
-#define spin_lock_init(lock)	do { } while(0)
-#define spin_lock(lock)		(void)(lock) /* Not "unused variable". */
-#define spin_is_locked(lock)	(0)
-#define spin_trylock(lock)	({1; })
-#define spin_unlock_wait(lock)	do { } while(0)
-#define spin_unlock(lock)	do { } while(0)
-
-#elif (DEBUG_SPINLOCKS < 2)
-
-typedef struct {
-	volatile unsigned long lock;
-} spinlock_t;
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0 }
-
-#define spin_lock_init(x)	do { (x)->lock = 0; } while (0)
-#define spin_is_locked(lock)	(test_bit(0,(lock)))
-#define spin_trylock(lock)	(!test_and_set_bit(0,(lock)))
-
-#define spin_lock(x)		do { (x)->lock = 1; } while (0)
-#define spin_unlock_wait(x)	do { } while (0)
-#define spin_unlock(x)		do { (x)->lock = 0; } while (0)
-
-#else /* (DEBUG_SPINLOCKS >= 2) */
-
-typedef struct {
-	volatile unsigned long lock;
-	volatile unsigned int babble;
-	const char *module;
-} spinlock_t;
-#define SPIN_LOCK_UNLOCKED (spinlock_t) { 0, 25, __BASE_FILE__ }
-
+#include <linux/typecheck.h>
+#include <linux/preempt.h>
+#include <linux/linkage.h>
+#include <linux/compiler.h>
+#include <linux/irqflags.h>
+#include <linux/thread_info.h>
 #include <linux/kernel.h>
+#include <linux/stringify.h>
+#include <linux/bottom_half.h>
+#include <asm/barrier.h>
 
-#define spin_lock_init(x)	do { (x)->lock = 0; } while (0)
-#define spin_is_locked(lock)	(test_bit(0,(lock)))
-#define spin_trylock(lock)	(!test_and_set_bit(0,(lock)))
-
-#define spin_lock(x)		do {unsigned long __spinflags; save_flags(__spinflags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_lock(%s:%p) already locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 1; restore_flags(__spinflags);} while (0)
-#define spin_unlock_wait(x)	do {unsigned long __spinflags; save_flags(__spinflags); cli(); if ((x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock_wait(%s:%p) deadlock\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} restore_flags(__spinflags);} while (0)
-#define spin_unlock(x)		do {unsigned long __spinflags; save_flags(__spinflags); cli(); if (!(x)->lock&&(x)->babble) {printk("%s:%d: spin_unlock(%s:%p) not locked\n", __BASE_FILE__,__LINE__, (x)->module, (x));(x)->babble--;} (x)->lock = 0; restore_flags(__spinflags);} while (0)
-
-#endif	/* DEBUG_SPINLOCKS */
 
 /*
- * Read-write spinlocks, allowing multiple readers
- * but only one writer.
- *
- * NOTE! it is quite common to have readers in interrupts
- * but no interrupt writers. For those circumstances we
- * can "mix" irq-safe locks - any writer needs to get a
- * irq-safe write-lock, but readers can get non-irqsafe
- * read-locks.
- *
- * Some older gcc versions had a nasty bug with empty initializers.
- * (XXX: could someone please confirm whether egcs 1.1 still has this bug?)
+ * Must define these before including other files, inline functions need them
  */
-#if (__GNUC__ > 2 || __GNUC_MINOR__ > 91)
-  typedef struct { } rwlock_t;
-  #define RW_LOCK_UNLOCKED (rwlock_t) { }
-#else
-  typedef struct { int gcc_is_buggy; } rwlock_t;
-  #define RW_LOCK_UNLOCKED (rwlock_t) { 0 }
-#endif
+#define LOCK_SECTION_NAME ".text..lock."KBUILD_BASENAME
 
-#define rwlock_init(lock)	do { } while(0)
-#define read_lock(lock)		(void)(lock) /* Not "unused variable". */
-#define read_unlock(lock)	(void)(lock) /* Not "unused variable". */
-#define write_lock(lock)	(void)(lock) /* Not "unused variable". */
-#define write_unlock(lock)	do { } while(0)
+#define LOCK_SECTION_START(extra)               \
+        ".subsection 1\n\t"                     \
+        extra                                   \
+        ".ifndef " LOCK_SECTION_NAME "\n\t"     \
+        LOCK_SECTION_NAME ":\n\t"               \
+        ".endif\n"
 
-#endif /* !SMP */
+#define LOCK_SECTION_END                        \
+        ".previous\n\t"
 
-/* "lock on reference count zero" */
-#ifndef ATOMIC_DEC_AND_LOCK
-#include <asm/atomic.h>
-extern int atomic_dec_and_lock(atomic_t *atomic, spinlock_t *lock);
-#endif
+#define __lockfunc __attribute__((section(".spinlock.text")))
 
+/*
+ * Pull the arch_spinlock_t and arch_rwlock_t definitions:
+ */
+#include <linux/spinlock_types.h>
+
+/*
+ * Pull the arch_spin*() functions/declarations (UP-nondebug doesn't need them):
+ */
 #ifdef CONFIG_SMP
-#include <linux/cache.h>
+# include <asm/spinlock.h>
+#else
+# include <linux/spinlock_up.h>
+#endif
 
-typedef union {
-    spinlock_t lock;
-    char fill_up[(SMP_CACHE_BYTES)];
-} spinlock_cacheline_t __attribute__ ((aligned(SMP_CACHE_BYTES)));
+#ifdef CONFIG_DEBUG_SPINLOCK
+  extern void __raw_spin_lock_init(raw_spinlock_t *lock, const char *name,
+				   struct lock_class_key *key);
+# define raw_spin_lock_init(lock)				\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__raw_spin_lock_init((lock), #lock, &__key);		\
+} while (0)
 
-#else	/* SMP */
+#else
+# define raw_spin_lock_init(lock)				\
+	do { *(lock) = __RAW_SPIN_LOCK_UNLOCKED(lock); } while (0)
+#endif
 
-typedef struct {
-    spinlock_t lock;
-} spinlock_cacheline_t;
+#define raw_spin_is_locked(lock)	arch_spin_is_locked(&(lock)->raw_lock)
 
+#ifdef CONFIG_GENERIC_LOCKBREAK
+#define raw_spin_is_contended(lock) ((lock)->break_lock)
+#else
+
+#ifdef arch_spin_is_contended
+#define raw_spin_is_contended(lock)	arch_spin_is_contended(&(lock)->raw_lock)
+#else
+#define raw_spin_is_contended(lock)	(((void)(lock), 0))
+#endif /*arch_spin_is_contended*/
+#endif
+
+/* The lock does not imply full memory barrier. */
+#ifndef ARCH_HAS_SMP_MB_AFTER_LOCK
+static inline void smp_mb__after_lock(void) { smp_mb(); }
+#endif
+
+/**
+ * raw_spin_unlock_wait - wait until the spinlock gets unlocked
+ * @lock: the spinlock in question.
+ */
+#define raw_spin_unlock_wait(lock)	arch_spin_unlock_wait(&(lock)->raw_lock)
+
+#ifdef CONFIG_DEBUG_SPINLOCK
+ extern void do_raw_spin_lock(raw_spinlock_t *lock) __acquires(lock);
+#define do_raw_spin_lock_flags(lock, flags) do_raw_spin_lock(lock)
+ extern int do_raw_spin_trylock(raw_spinlock_t *lock);
+ extern void do_raw_spin_unlock(raw_spinlock_t *lock) __releases(lock);
+#else
+static inline void do_raw_spin_lock(raw_spinlock_t *lock) __acquires(lock)
+{
+	__acquire(lock);
+	arch_spin_lock(&lock->raw_lock);
+}
+
+static inline void
+do_raw_spin_lock_flags(raw_spinlock_t *lock, unsigned long *flags) __acquires(lock)
+{
+	__acquire(lock);
+	arch_spin_lock_flags(&lock->raw_lock, *flags);
+}
+
+static inline int do_raw_spin_trylock(raw_spinlock_t *lock)
+{
+	return arch_spin_trylock(&(lock)->raw_lock);
+}
+
+static inline void do_raw_spin_unlock(raw_spinlock_t *lock) __releases(lock)
+{
+	arch_spin_unlock(&lock->raw_lock);
+	__release(lock);
+}
+#endif
+
+/*
+ * Define the various spin_lock methods.  Note we define these
+ * regardless of whether CONFIG_SMP or CONFIG_PREEMPT are set. The
+ * various methods are defined as nops in the case they are not
+ * required.
+ */
+#define raw_spin_trylock(lock)	__cond_lock(lock, _raw_spin_trylock(lock))
+
+#define raw_spin_lock(lock)	_raw_spin_lock(lock)
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+# define raw_spin_lock_nested(lock, subclass) \
+	_raw_spin_lock_nested(lock, subclass)
+
+# define raw_spin_lock_nest_lock(lock, nest_lock)			\
+	 do {								\
+		 typecheck(struct lockdep_map *, &(nest_lock)->dep_map);\
+		 _raw_spin_lock_nest_lock(lock, &(nest_lock)->dep_map);	\
+	 } while (0)
+#else
+# define raw_spin_lock_nested(lock, subclass)		_raw_spin_lock(lock)
+# define raw_spin_lock_nest_lock(lock, nest_lock)	_raw_spin_lock(lock)
+#endif
+
+#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK)
+
+#define raw_spin_lock_irqsave(lock, flags)			\
+	do {						\
+		typecheck(unsigned long, flags);	\
+		flags = _raw_spin_lock_irqsave(lock);	\
+	} while (0)
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+#define raw_spin_lock_irqsave_nested(lock, flags, subclass)		\
+	do {								\
+		typecheck(unsigned long, flags);			\
+		flags = _raw_spin_lock_irqsave_nested(lock, subclass);	\
+	} while (0)
+#else
+#define raw_spin_lock_irqsave_nested(lock, flags, subclass)		\
+	do {								\
+		typecheck(unsigned long, flags);			\
+		flags = _raw_spin_lock_irqsave(lock);			\
+	} while (0)
+#endif
+
+#else
+
+#define raw_spin_lock_irqsave(lock, flags)		\
+	do {						\
+		typecheck(unsigned long, flags);	\
+		_raw_spin_lock_irqsave(lock, flags);	\
+	} while (0)
+
+#define raw_spin_lock_irqsave_nested(lock, flags, subclass)	\
+	raw_spin_lock_irqsave(lock, flags)
 
 #endif
+
+#define raw_spin_lock_irq(lock)		_raw_spin_lock_irq(lock)
+#define raw_spin_lock_bh(lock)		_raw_spin_lock_bh(lock)
+#define raw_spin_unlock(lock)		_raw_spin_unlock(lock)
+#define raw_spin_unlock_irq(lock)	_raw_spin_unlock_irq(lock)
+
+#define raw_spin_unlock_irqrestore(lock, flags)		\
+	do {							\
+		typecheck(unsigned long, flags);		\
+		_raw_spin_unlock_irqrestore(lock, flags);	\
+	} while (0)
+#define raw_spin_unlock_bh(lock)	_raw_spin_unlock_bh(lock)
+
+#define raw_spin_trylock_bh(lock) \
+	__cond_lock(lock, _raw_spin_trylock_bh(lock))
+
+#define raw_spin_trylock_irq(lock) \
+({ \
+	local_irq_disable(); \
+	raw_spin_trylock(lock) ? \
+	1 : ({ local_irq_enable(); 0;  }); \
+})
+
+#define raw_spin_trylock_irqsave(lock, flags) \
+({ \
+	local_irq_save(flags); \
+	raw_spin_trylock(lock) ? \
+	1 : ({ local_irq_restore(flags); 0; }); \
+})
+
+/**
+ * raw_spin_can_lock - would raw_spin_trylock() succeed?
+ * @lock: the spinlock in question.
+ */
+#define raw_spin_can_lock(lock)	(!raw_spin_is_locked(lock))
+
+/* Include rwlock functions */
+#include <linux/rwlock.h>
+
+/*
+ * Pull the _spin_*()/_read_*()/_write_*() functions/declarations:
+ */
+#if defined(CONFIG_SMP) || defined(CONFIG_DEBUG_SPINLOCK)
+# include <linux/spinlock_api_smp.h>
+#else
+# include <linux/spinlock_api_up.h>
+#endif
+
+/*
+ * Map the spin_lock functions to the raw variants for PREEMPT_RT=n
+ */
+
+static inline raw_spinlock_t *spinlock_check(spinlock_t *lock)
+{
+	return &lock->rlock;
+}
+
+#define spin_lock_init(_lock)				\
+do {							\
+	spinlock_check(_lock);				\
+	raw_spin_lock_init(&(_lock)->rlock);		\
+} while (0)
+
+static inline void spin_lock(spinlock_t *lock)
+{
+	raw_spin_lock(&lock->rlock);
+}
+
+static inline void spin_lock_bh(spinlock_t *lock)
+{
+	raw_spin_lock_bh(&lock->rlock);
+}
+
+static inline int spin_trylock(spinlock_t *lock)
+{
+	return raw_spin_trylock(&lock->rlock);
+}
+
+#define spin_lock_nested(lock, subclass)			\
+do {								\
+	raw_spin_lock_nested(spinlock_check(lock), subclass);	\
+} while (0)
+
+#define spin_lock_nest_lock(lock, nest_lock)				\
+do {									\
+	raw_spin_lock_nest_lock(spinlock_check(lock), nest_lock);	\
+} while (0)
+
+static inline void spin_lock_irq(spinlock_t *lock)
+{
+	raw_spin_lock_irq(&lock->rlock);
+}
+
+#define spin_lock_irqsave(lock, flags)				\
+do {								\
+	raw_spin_lock_irqsave(spinlock_check(lock), flags);	\
+} while (0)
+
+#define spin_lock_irqsave_nested(lock, flags, subclass)			\
+do {									\
+	raw_spin_lock_irqsave_nested(spinlock_check(lock), flags, subclass); \
+} while (0)
+
+static inline void spin_unlock(spinlock_t *lock)
+{
+	raw_spin_unlock(&lock->rlock);
+}
+
+static inline void spin_unlock_bh(spinlock_t *lock)
+{
+	raw_spin_unlock_bh(&lock->rlock);
+}
+
+static inline void spin_unlock_irq(spinlock_t *lock)
+{
+	raw_spin_unlock_irq(&lock->rlock);
+}
+
+static inline void spin_unlock_irqrestore(spinlock_t *lock, unsigned long flags)
+{
+	raw_spin_unlock_irqrestore(&lock->rlock, flags);
+}
+
+static inline int spin_trylock_bh(spinlock_t *lock)
+{
+	return raw_spin_trylock_bh(&lock->rlock);
+}
+
+static inline int spin_trylock_irq(spinlock_t *lock)
+{
+	return raw_spin_trylock_irq(&lock->rlock);
+}
+
+#define spin_trylock_irqsave(lock, flags)			\
+({								\
+	raw_spin_trylock_irqsave(spinlock_check(lock), flags); \
+})
+
+static inline void spin_unlock_wait(spinlock_t *lock)
+{
+	raw_spin_unlock_wait(&lock->rlock);
+}
+
+static inline int spin_is_locked(spinlock_t *lock)
+{
+	return raw_spin_is_locked(&lock->rlock);
+}
+
+static inline int spin_is_contended(spinlock_t *lock)
+{
+	return raw_spin_is_contended(&lock->rlock);
+}
+
+static inline int spin_can_lock(spinlock_t *lock)
+{
+	return raw_spin_can_lock(&lock->rlock);
+}
+
+#define assert_spin_locked(lock)	assert_raw_spin_locked(&(lock)->rlock)
+
+/*
+ * Pull the atomic_t declaration:
+ * (asm-mips/atomic.h needs above definitions)
+ */
+#include <linux/atomic.h>
+/**
+ * atomic_dec_and_lock - lock on reaching reference count zero
+ * @atomic: the atomic counter
+ * @lock: the spinlock in question
+ *
+ * Decrements @atomic by 1.  If the result is 0, returns true and locks
+ * @lock.  Returns false for all other cases.
+ */
+extern int _atomic_dec_and_lock(atomic_t *atomic, spinlock_t *lock);
+#define atomic_dec_and_lock(atomic, lock) \
+		__cond_lock(lock, _atomic_dec_and_lock(atomic, lock))
+
 #endif /* __LINUX_SPINLOCK_H */

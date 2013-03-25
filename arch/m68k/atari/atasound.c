@@ -22,9 +22,9 @@
 #include <linux/fcntl.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 
 #include <asm/atarihw.h>
-#include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/pgtable.h>
 #include <asm/atariints.h>
@@ -43,6 +43,7 @@ void atari_microwire_cmd (int cmd)
 	while( tt_microwire.mask != 0x7ff)
 		;
 }
+EXPORT_SYMBOL(atari_microwire_cmd);
 
 
 /* PSG base frequency */
@@ -58,8 +59,7 @@ void atari_mksound (unsigned int hz, unsigned int ticks)
 	unsigned char tmp;
 	int period;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 
 	/* Disable generator A in mixer control.  */
@@ -71,7 +71,7 @@ void atari_mksound (unsigned int hz, unsigned int ticks)
 	if (hz) {
 	    /* Convert from frequency value to PSG period value (base
 	       frequency 125 kHz).  */
-		
+
 	    period = PSG_FREQ / hz;
 
 	    if (period > 0xfff) period = 0xfff;
@@ -106,5 +106,5 @@ void atari_mksound (unsigned int hz, unsigned int ticks)
 	tmp &= ~1;
 	sound_ym.wd_data = tmp;
 	}
-	restore_flags(flags);
+	local_irq_restore(flags);
 }

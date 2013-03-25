@@ -5,21 +5,16 @@
  *  Aug 2001, Christoph Hellwig (hch@infradead.org)
  */
 
-#include <linux/fs.h>
+#include "sysv.h"
+#include <linux/namei.h>
 
-static int sysv_readlink(struct dentry *dentry, char *buffer, int buflen)
+static void *sysv_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	char *s = (char *)dentry->d_inode->u.sysv_i.i_data;
-	return vfs_readlink(dentry, buffer, buflen, s);
+	nd_set_link(nd, (char *)SYSV_I(dentry->d_inode)->i_data);
+	return NULL;
 }
 
-static int sysv_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	char *s = (char *)dentry->d_inode->u.sysv_i.i_data;
-	return vfs_follow_link(nd, s);
-}
-
-struct inode_operations sysv_fast_symlink_inode_operations = {
-	readlink:	sysv_readlink,
-	follow_link:	sysv_follow_link,
+const struct inode_operations sysv_fast_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= sysv_follow_link,
 };

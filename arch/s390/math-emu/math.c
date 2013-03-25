@@ -9,13 +9,13 @@
  *          that does not have the IEEE fpu (all processors before G5).
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
 #include <asm/uaccess.h>
+#include <asm/lowcore.h>
 
-#include "sfp-util.h"
+#include <asm/sfp-util.h>
 #include <math-emu/soft-fp.h>
 #include <math-emu/single.h>
 #include <math-emu/double.h>
@@ -86,22 +86,21 @@ int sysctl_ieee_emulation_warnings=1;
 
 #define mathemu_copy_from_user(d, s, n)\
         do { \
-                if (copy_from_user((d),(s),(n)) == -EFAULT) \
+                if (copy_from_user((d),(s),(n)) != 0) \
                         return SIGSEGV; \
         } while (0)
 
 #define mathemu_copy_to_user(d, s, n) \
         do { \
-                if (copy_to_user((d),(s),(n)) == -EFAULT) \
+                if (copy_to_user((d),(s),(n)) != 0) \
                         return SIGSEGV; \
         } while (0)
 
 static void display_emulation_not_implemented(struct pt_regs *regs, char *instr)
 {
-        struct pt_regs *regs;
         __u16 *location;
         
-#if CONFIG_SYSCTL
+#ifdef CONFIG_SYSCTL
         if(sysctl_ieee_emulation_warnings)
 #endif
         {
@@ -1565,52 +1564,52 @@ static int emu_tceb (struct pt_regs *regs, int rx, long val) {
 }
 
 static inline void emu_load_regd(int reg) {
-        if ((reg&9) != 0)         /* test if reg in {0,2,4,6} */
+	if ((reg&9) != 0)	/* test if reg in {0,2,4,6} */
                 return;
-        asm volatile (            /* load reg from fp_regs.fprs[reg] */
-                "     bras  1,0f\n"
-                "     ld    0,0(%1)\n"
-                "0:   ex    %0,0(1)"
-                : /* no output */
-                : "a" (reg<<4),"a" (&current->thread.fp_regs.fprs[reg].d)
-                : "1" );
+	asm volatile(		/* load reg from fp_regs.fprs[reg] */
+		"	bras	1,0f\n"
+		"	ld	0,0(%1)\n"
+		"0:	ex	%0,0(1)"
+		: /* no output */
+		: "a" (reg<<4),"a" (&current->thread.fp_regs.fprs[reg].d)
+		: "1");
 }
 
 static inline void emu_load_rege(int reg) {
-        if ((reg&9) != 0)         /* test if reg in {0,2,4,6} */
+	if ((reg&9) != 0)	/* test if reg in {0,2,4,6} */
                 return;
-        asm volatile (            /* load reg from fp_regs.fprs[reg] */
-                "     bras  1,0f\n"
-                "     le    0,0(%1)\n"
-                "0:   ex    %0,0(1)"
-                : /* no output */
-                : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
-                : "1" );
+	asm volatile(		/* load reg from fp_regs.fprs[reg] */
+		"	bras	1,0f\n"
+		"	le	0,0(%1)\n"
+		"0:	ex	%0,0(1)"
+		: /* no output */
+		: "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
+		: "1");
 }
 
 static inline void emu_store_regd(int reg) {
-        if ((reg&9) != 0)         /* test if reg in {0,2,4,6} */
+	if ((reg&9) != 0)	/* test if reg in {0,2,4,6} */
                 return;
-        asm volatile (            /* store reg to fp_regs.fprs[reg] */
-                "     bras  1,0f\n"
-                "     std   0,0(%1)\n"
-                "0:   ex    %0,0(1)"
-                : /* no output */
-                : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].d)
-                : "1" );
+	asm volatile(		/* store reg to fp_regs.fprs[reg] */
+		"	bras	1,0f\n"
+		"	std	0,0(%1)\n"
+		"0:	ex	%0,0(1)"
+		: /* no output */
+		: "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].d)
+		: "1");
 }
 
 
 static inline void emu_store_rege(int reg) {
-        if ((reg&9) != 0)         /* test if reg in {0,2,4,6} */
+	if ((reg&9) != 0)	/* test if reg in {0,2,4,6} */
                 return;
-        asm volatile (            /* store reg to fp_regs.fprs[reg] */
-                "     bras  1,0f\n"
-                "     ste   0,0(%1)\n"
-                "0:   ex    %0,0(1)"
-                : /* no output */
-                : "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
-                : "1" );
+	asm volatile(		/* store reg to fp_regs.fprs[reg] */
+		"	bras	1,0f\n"
+		"	ste	0,0(%1)\n"
+		"0:	ex	%0,0(1)"
+		: /* no output */
+		: "a" (reg<<4), "a" (&current->thread.fp_regs.fprs[reg].f)
+		: "1");
 }
 
 int math_emu_b3(__u8 *opcode, struct pt_regs * regs) {
@@ -2089,24 +2088,23 @@ int math_emu_ldr(__u8 *opcode) {
         __u16 opc = *((__u16 *) opcode);
 
         if ((opc & 0x90) == 0) {           /* test if rx in {0,2,4,6} */
-                /* we got an exception therfore ry can't be in {0,2,4,6} */
-                __asm__ __volatile (       /* load rx from fp_regs.fprs[ry] */
-                        "     bras  1,0f\n"
-                        "     ld    0,0(%1)\n"
-                        "0:   ex    %0,0(1)"
-                        : /* no output */
-                        : "a" (opc & 0xf0),
-                          "a" (&fp_regs->fprs[opc & 0xf].d)
-                        : "1" );
+                /* we got an exception therefore ry can't be in {0,2,4,6} */
+		asm volatile(		/* load rx from fp_regs.fprs[ry] */
+			"	bras	1,0f\n"
+			"	ld	0,0(%1)\n"
+			"0:	ex	%0,0(1)"
+			: /* no output */
+			: "a" (opc & 0xf0), "a" (&fp_regs->fprs[opc & 0xf].d)
+			: "1");
         } else if ((opc & 0x9) == 0) {     /* test if ry in {0,2,4,6} */
-                __asm__ __volatile (       /* store ry to fp_regs.fprs[rx] */
-                        "     bras  1,0f\n"
-                        "     std   0,0(%1)\n"
-                        "0:   ex    %0,0(1)"
-                        : /* no output */
-                        : "a" ((opc & 0xf) << 4),
-                          "a" (&fp_regs->fprs[(opc & 0xf0)>>4].d)
-                        : "1" );
+		asm volatile (		/* store ry to fp_regs.fprs[rx] */
+			"	bras	1,0f\n"
+			"	std	0,0(%1)\n"
+			"0:	ex	%0,0(1)"
+			: /* no output */
+			: "a" ((opc & 0xf) << 4),
+			  "a" (&fp_regs->fprs[(opc & 0xf0)>>4].d)
+			: "1");
         } else  /* move fp_regs.fprs[ry] to fp_regs.fprs[rx] */
                 fp_regs->fprs[(opc & 0xf0) >> 4] = fp_regs->fprs[opc & 0xf];
 	return 0;
@@ -2120,24 +2118,23 @@ int math_emu_ler(__u8 *opcode) {
         __u16 opc = *((__u16 *) opcode);
 
         if ((opc & 0x90) == 0) {           /* test if rx in {0,2,4,6} */
-                /* we got an exception therfore ry can't be in {0,2,4,6} */
-                __asm__ __volatile (       /* load rx from fp_regs.fprs[ry] */
-                        "     bras  1,0f\n"
-                        "     le    0,0(%1)\n"
-                        "0:   ex    %0,0(1)"
-                        : /* no output */
-                        : "a" (opc & 0xf0),
-                          "a" (&fp_regs->fprs[opc & 0xf].f)
-                        : "1" );
+                /* we got an exception therefore ry can't be in {0,2,4,6} */
+		asm volatile(		/* load rx from fp_regs.fprs[ry] */
+			"	bras	1,0f\n"
+			"	le	0,0(%1)\n"
+			"0:	ex	%0,0(1)"
+			: /* no output */
+			: "a" (opc & 0xf0), "a" (&fp_regs->fprs[opc & 0xf].f)
+			: "1");
         } else if ((opc & 0x9) == 0) {     /* test if ry in {0,2,4,6} */
-                __asm__ __volatile (       /* store ry to fp_regs.fprs[rx] */
-                        "     bras  1,0f\n"
-                        "     ste   0,0(%1)\n"
-                        "0:   ex    %0,0(1)"
-                        : /* no output */
-                        : "a" ((opc & 0xf) << 4),
-                          "a" (&fp_regs->fprs[(opc & 0xf0) >> 4].f)
-                        : "1" );
+		asm volatile(		/* store ry to fp_regs.fprs[rx] */
+			"	bras	1,0f\n"
+			"	ste	0,0(%1)\n"
+			"0:	ex	%0,0(1)"
+			: /* no output */
+			: "a" ((opc & 0xf) << 4),
+			  "a" (&fp_regs->fprs[(opc & 0xf0) >> 4].f)
+			: "1");
         } else  /* move fp_regs.fprs[ry] to fp_regs.fprs[rx] */
                 fp_regs->fprs[(opc & 0xf0) >> 4] = fp_regs->fprs[opc & 0xf];
 	return 0;

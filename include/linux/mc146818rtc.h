@@ -13,10 +13,29 @@
 
 #include <asm/io.h>
 #include <linux/rtc.h>			/* get the user-level API */
-#include <linux/spinlock.h>		/* spinlock_t */
 #include <asm/mc146818rtc.h>		/* register access macros */
 
+#ifdef __KERNEL__
+#include <linux/spinlock.h>		/* spinlock_t */
 extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
+
+/* Some RTCs extend the mc146818 register set to support alarms of more
+ * than 24 hours in the future; or dates that include a century code.
+ * This platform_data structure can pass this information to the driver.
+ *
+ * Also, some platforms need suspend()/resume() hooks to kick in special
+ * handling of wake alarms, e.g. activating ACPI BIOS hooks or setting up
+ * a separate wakeup alarm used by some almost-clone chips.
+ */
+struct cmos_rtc_board_info {
+	void	(*wake_on)(struct device *dev);
+	void	(*wake_off)(struct device *dev);
+
+	u8	rtc_day_alarm;		/* zero, or register index */
+	u8	rtc_mon_alarm;		/* zero, or register index */
+	u8	rtc_century;		/* zero, or register index */
+};
+#endif
 
 /**********************************************************************
  * register summary
@@ -87,23 +106,14 @@ extern spinlock_t rtc_lock;		/* serialize CMOS RAM access */
 # define RTC_VRT 0x80		/* valid RAM and time */
 /**********************************************************************/
 
-/* example: !(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) 
- * determines if the following two #defines are needed
- */
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
+#ifndef ARCH_RTC_LOCATION	/* Override by <asm/mc146818rtc.h>? */
 
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
-
-#ifndef RTC_IO_EXTENT
-#define RTC_IO_EXTENT	0x10	/* Only really two ports, but...	*/
-#endif
-
-#ifndef RTC_IOMAPPED
+#define RTC_IO_EXTENT	0x8
+#define RTC_IO_EXTENT_USED	0x2
 #define RTC_IOMAPPED	1	/* Default to I/O mapping. */
-#endif
+
+#else
+#define RTC_IO_EXTENT_USED      RTC_IO_EXTENT
+#endif /* ARCH_RTC_LOCATION */
 
 #endif /* _MC146818RTC_H */

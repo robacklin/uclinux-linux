@@ -12,21 +12,20 @@
 #include <linux/ptrace.h>
 #include <linux/delay.h>
 #include <linux/bootmem.h>
+#include <linux/bitops.h>
+#include <linux/module.h>
 
 #include <asm/setup.h>
 #include <asm/traps.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/sun3mmu.h>
 #include <asm/segment.h>
-#include <asm/bitops.h>
 #include <asm/oplib.h>
 #include <asm/mmu_context.h>
 #include <asm/dvma.h>
 
-extern void prom_reboot (char *) __attribute__ ((__noreturn__));
 
 #undef DEBUG_MMU_EMU
 #define DEBUG_PROM_MAPS
@@ -45,16 +44,19 @@ extern void prom_reboot (char *) __attribute__ ((__noreturn__));
 ** Globals
 */
 
-unsigned long vmalloc_end = 0;
+unsigned long m68k_vmalloc_end;
+EXPORT_SYMBOL(m68k_vmalloc_end);
+
 unsigned long pmeg_vaddr[PMEGS_NUM];
 unsigned char pmeg_alloc[PMEGS_NUM];
 unsigned char pmeg_ctx[PMEGS_NUM];
 
 /* pointers to the mm structs for each task in each
    context. 0xffffffff is a marker for kernel context */
-struct mm_struct *ctx_alloc[CONTEXTS_NUM] = {
-	(struct mm_struct *)0xffffffff, 0, 0, 0, 0, 0, 0, 0
+static struct mm_struct *ctx_alloc[CONTEXTS_NUM] = {
+    [0] = (struct mm_struct *)0xffffffff
 };
+
 /* has this context been mmdrop'd? */
 static unsigned char ctx_avail = CONTEXTS_NUM-1;
 
@@ -124,12 +126,12 @@ void mmu_emu_init(unsigned long bootmem_end)
 {
 	unsigned long seg, num;
 	int i,j;
-	
+
 	memset(rom_pages, 0, sizeof(rom_pages));
 	memset(pmeg_vaddr, 0, sizeof(pmeg_vaddr));
 	memset(pmeg_alloc, 0, sizeof(pmeg_alloc));
 	memset(pmeg_ctx, 0, sizeof(pmeg_ctx));
-	
+
 	/* pmeg align the end of bootmem, adding another pmeg,
 	 * later bootmem allocations will likely need it */
 	bootmem_end = (bootmem_end + (2 * SUN3_PMEG_SIZE)) & ~SUN3_PMEG_MASK;
@@ -147,7 +149,7 @@ void mmu_emu_init(unsigned long bootmem_end)
 	/* liberate all existing mappings in the rest of kernel space */
 	for(seg = bootmem_end; seg < 0x0f800000; seg += SUN3_PMEG_SIZE) {
 		i = sun3_get_segmap(seg);
-		
+
 		if(!pmeg_alloc[i]) {
 #ifdef DEBUG_MMU_EMU
 			printk("freed: ");
@@ -169,8 +171,8 @@ void mmu_emu_init(unsigned long bootmem_end)
 #endif
 			// the lowest mapping here is the end of our
 			// vmalloc region
-			if(!vmalloc_end)
-				vmalloc_end = seg;
+			if (!m68k_vmalloc_end)
+				m68k_vmalloc_end = seg;
 
 			// mark the segmap alloc'd, and reserve any
 			// of the first 0xbff pages the hardware is
@@ -178,13 +180,13 @@ void mmu_emu_init(unsigned long bootmem_end)
 			pmeg_alloc[sun3_get_segmap(seg)] = 2;
 		}
 	}
-	
+
 	dvma_init();
-	
-	
+
+
 	/* blank everything below the kernel, and we've got the base
 	   mapping to start all the contexts off with... */
-	for(seg = 0; seg < PAGE_OFFSET; seg += SUN3_PMEG_SIZE) 
+	for(seg = 0; seg < PAGE_OFFSET; seg += SUN3_PMEG_SIZE)
 		sun3_put_segmap(seg, SUN3_INVALID_PMEG);
 
 	set_fs(MAKE_MM_SEG(3));
@@ -194,7 +196,7 @@ void mmu_emu_init(unsigned long bootmem_end)
 			(*(romvec->pv_setctxt))(j, (void *)seg, i);
 	}
 	set_fs(KERNEL_DS);
-	
+
 }
 
 /* erase the mappings for a dead context.  Uses the pg_dir for hints
@@ -206,9 +208,9 @@ void clear_context(unsigned long context)
 {
      unsigned char oldctx;
      unsigned long i;
-    
+
      if(context) {
-	     if(!ctx_alloc[context]) 
+	     if(!ctx_alloc[context])
 		     panic("clear_context: context not allocated\n");
 
 	     ctx_alloc[context]->context = SUN3_INVALID_CONTEXT;
@@ -228,17 +230,17 @@ void clear_context(unsigned long context)
 		     pmeg_vaddr[i] = 0;
 	     }
      }
-     
+
      sun3_put_context(oldctx);
 }
 
 /* gets an empty context.  if full, kills the next context listed to
    die first */
 /* This context invalidation scheme is, well, totally arbitrary, I'm
-   sure it could be much more intellegent...  but it gets the job done
+   sure it could be much more intelligent...  but it gets the job done
    for now without much overhead in making it's decision. */
 /* todo: come up with optimized scheme for flushing contexts */
-unsigned long get_free_context(struct mm_struct *mm) 
+unsigned long get_free_context(struct mm_struct *mm)
 {
 	unsigned long new = 1;
 	static unsigned char next_to_die = 1;
@@ -258,7 +260,7 @@ unsigned long get_free_context(struct mm_struct *mm)
 				break;
 		}
 		// check to make sure one was really free...
-		if(new == CONTEXTS_NUM) 
+		if(new == CONTEXTS_NUM)
 			panic("get_free_context: failed to find free context");
 	}
 
@@ -306,7 +308,7 @@ printk("mmu_emu_map_pmeg: pmeg %x to context %d vaddr %x\n",
 	if(vaddr >= PAGE_OFFSET) {
 		/* map kernel pmegs into all contexts */
 		unsigned char i;
-		
+
 		for(i = 0; i < CONTEXTS_NUM; i++) {
 			sun3_put_context(i);
 			sun3_put_segmap (vaddr, curr_pmeg);
@@ -314,7 +316,7 @@ printk("mmu_emu_map_pmeg: pmeg %x to context %d vaddr %x\n",
 		sun3_put_context(context);
 		pmeg_alloc[curr_pmeg] = 2;
 		pmeg_ctx[curr_pmeg] = 0;
-		
+
 	}
 	else {
 		pmeg_alloc[curr_pmeg] = 1;
@@ -325,7 +327,7 @@ printk("mmu_emu_map_pmeg: pmeg %x to context %d vaddr %x\n",
 	pmeg_vaddr[curr_pmeg] = vaddr;
 
 	/* Set hardware mapping and clear the old PTE entries. */
-	for (i=0; i<SUN3_PMEG_SIZE; i+=SUN3_PTE_SIZE) 
+	for (i=0; i<SUN3_PMEG_SIZE; i+=SUN3_PTE_SIZE)
 		sun3_put_pte (vaddr + i, SUN3_PAGE_SYSTEM);
 
 	/* Consider a different one next time. */
@@ -360,7 +362,7 @@ int mmu_emu_handle_fault (unsigned long vaddr, int read_flag, int kernel_fault)
 		context = 0;
 	} else {
 		context = current->mm->context;
-		if(kernel_fault) 
+		if(kernel_fault)
 			crp = swapper_pg_dir;
 		else
 			crp = current->mm->pgd;
@@ -389,11 +391,11 @@ int mmu_emu_handle_fault (unsigned long vaddr, int read_flag, int kernel_fault)
 	pte = (pte_t *) __va ((unsigned long)(pte + offset));
 
 	/* Make sure this is a valid page */
-	if (!(pte_val (*pte) & SUN3_PAGE_VALID)) 
+	if (!(pte_val (*pte) & SUN3_PAGE_VALID))
 		return 0;
 
 	/* Make sure there's a pmeg allocated for the page */
-	if (sun3_get_segmap (vaddr&~SUN3_PMEG_MASK) == SUN3_INVALID_PMEG) 
+	if (sun3_get_segmap (vaddr&~SUN3_PMEG_MASK) == SUN3_INVALID_PMEG)
 		mmu_emu_map_pmeg (context, vaddr);
 
 	/* Write the pte value to hardware MMU */
@@ -408,7 +410,7 @@ int mmu_emu_handle_fault (unsigned long vaddr, int read_flag, int kernel_fault)
 		if (pte_val (*pte) & SUN3_PAGE_WRITEABLE)
 			pte_val (*pte) |= (SUN3_PAGE_ACCESSED
 					   | SUN3_PAGE_MODIFIED);
-		else 
+		else
 			return 0;	/* Write-protect error. */
 	} else
 		pte_val (*pte) |= SUN3_PAGE_ACCESSED;

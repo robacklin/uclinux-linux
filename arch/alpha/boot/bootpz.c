@@ -10,11 +10,11 @@
  * and the decompression code from MILO.
  */
 #include <linux/kernel.h>
+#include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/version.h>
+#include <generated/utsrelease.h>
 #include <linux/mm.h>
 
-#include <asm/system.h>
 #include <asm/console.h>
 #include <asm/hwrpb.h>
 #include <asm/pgtable.h>
@@ -29,8 +29,17 @@
 /* FIXME FIXME FIXME */
 
 
+/*
+  WARNING NOTE
+
+  It is very possible that turning on additional messages may cause
+  kernel image corruption due to stack usage to do the printing.
+
+*/
+
 #undef DEBUG_CHECK_RANGE
-#define DEBUG_ADDRESSES
+#undef DEBUG_ADDRESSES
+#undef DEBUG_LAST_STEPS
 
 extern unsigned long switch_to_osf_pal(unsigned long nr,
 	struct pcb_struct * pcb_va, struct pcb_struct * pcb_pa,
@@ -436,15 +445,31 @@ start_kernel(void)
 	}
 	
 	/* Clear the zero page, then move the argument list in. */
+#ifdef DEBUG_LAST_STEPS
+	srm_printk("Preparing ZERO_PGE...\n");
+#endif
 	memset((char*)ZERO_PGE, 0, PAGE_SIZE);
 	strcpy((char*)ZERO_PGE, envval);
 
 #ifdef INITRD_IMAGE_SIZE
+
+#ifdef DEBUG_LAST_STEPS
+	srm_printk("Preparing INITRD info...\n");
+#endif
 	/* Finally, set the INITRD paramenters for the kernel. */
 	((long *)(ZERO_PGE+256))[0] = initrd_image_start;
 	((long *)(ZERO_PGE+256))[1] = INITRD_IMAGE_SIZE;
 
 #endif /* INITRD_IMAGE_SIZE */
 
+#ifdef DEBUG_LAST_STEPS
+	srm_printk("Doing 'runkernel()'...\n");
+#endif
 	runkernel();
+}
+
+ /* dummy function, should never be called. */
+void *__kmalloc(size_t size, gfp_t flags)
+{
+	return (void *)NULL;
 }

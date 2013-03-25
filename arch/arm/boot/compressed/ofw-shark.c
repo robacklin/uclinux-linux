@@ -19,15 +19,17 @@
 asmlinkage void
 create_params (unsigned long *buffer)
 {
-	/* Is there a better address? Also change in mach-shark/arch.c */
+	/* Is there a better address? Also change in mach-shark/core.c */
 	struct tag *tag = (struct tag *) 0x08003000;
 	int j,i,m,k,nr_banks,size;
 	unsigned char *c;
 
+	k = 0;
+
 	/* Head of the taglist */
 	tag->hdr.tag  = ATAG_CORE;
 	tag->hdr.size = tag_size(tag_core);
-	tag->u.core.flags = FLAG_READONLY;
+	tag->u.core.flags = 1;
 	tag->u.core.pagesize = PAGE_SIZE;
 	tag->u.core.rootdev = 0;
 
@@ -254,5 +256,5 @@ asmlinkage void ofw_init(ofw_handle_t o, int *nomr, int *pointer)
 	temp[11]='\0';
 	mem_len = OF_getproplen(o,phandle, temp);
 	OF_getprop(o,phandle, temp, buffer, mem_len);
-	(unsigned char) pointer[32] = ((unsigned char *) buffer)[mem_len-2];
+	* ((unsigned char *) &pointer[32]) = ((unsigned char *) buffer)[mem_len-2];
 }

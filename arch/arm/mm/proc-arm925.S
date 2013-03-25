@@ -1,10 +1,15 @@
 /*
  *  linux/arch/arm/mm/arm925.S: MMU functions for ARM925
  *
- *  Copyright (C) 1999-2001 ARM Limited
+ *  Copyright (C) 1999,2000 ARM Limited
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
  *  Copyright (C) 2002 RidgeRun, Inc.
- *  Copyright (C) 2002 MontaVista Software, Inc.
+ *  Copyright (C) 2002-2003 MontaVista Software, Inc.
+ *
+ *  Update for Linux-2.6 and cache flush improvements
+ *  Copyright (C) 2004 Nokia Corporation by Tony Lindgren <tony@atomide.com>
+ *
+ *  hacked for non-paged-MM by Hyok S. Choi, 2004.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -23,81 +28,60 @@
  *
  * These are the low level assembler for performing cache and TLB
  * functions on the arm925.
- */
-#include <linux/linkage.h>
-#include <linux/config.h>
-#include <asm/assembler.h>
-#include <asm/constants.h>
-#include <asm/procinfo.h>
-#include <asm/hardware.h>
-
-
-/*
- * This is the maximum size of an area which will be invalidated
- * using the single invalidate entry instructions.  Anything larger
- * than this, and we go for the whole cache.
  *
- * This value should be chosen such that we choose the cheapest
- * alternative.
+ *  CONFIG_CPU_ARM925_CPU_IDLE -> nohlt
+ *
+ * Some additional notes based on deciphering the TI TRM on OMAP-5910:
+ *
+ * NOTE1: The TI925T Configuration Register bit "D-cache clean and flush
+ *	  entry mode" must be 0 to flush the entries in both segments
+ *	  at once. This is the default value. See TRM 2-20 and 2-24 for
+ *	  more information.
+ *
+ * NOTE2: Default is the "D-cache clean and flush entry mode". It looks
+ *	  like the "Transparent mode" must be on for partial cache flushes
+ *	  to work in this mode. This mode only works with 16-bit external
+ *	  memory. See TRM 2-24 for more information.
+ *
+ * NOTE3: Write-back cache flushing seems to be flakey with devices using
+ *        direct memory access, such as USB OHCI. The workaround is to use
+ *        write-through cache with CONFIG_CPU_DCACHE_WRITETHROUGH (this is
+ *        the default for OMAP-1510).
  */
-#define MAX_AREA_SIZE	(2 * 1024)
+
+#include <linux/linkage.h>
+#include <linux/init.h>
+#include <asm/assembler.h>
+#include <asm/hwcap.h>
+#include <asm/pgtable-hwdef.h>
+#include <asm/pgtable.h>
+#include <asm/page.h>
+#include <asm/ptrace.h>
+#include "proc-macros.S"
 
 /*
- * the cache line size of the I and D cache
+ * The size of one data cache line.
  */
-#define DCACHELINESIZE	16
-#define ICACHELINESIZE	16
+#define CACHE_DLINESIZE	16
 
 /*
- * and the page size
+ * The number of data cache segments.
  */
-#define PAGESIZE	4096
+#define CACHE_DSEGMENTS	2
+
+/*
+ * The number of lines in a cache segment.
+ */
+#define CACHE_DENTRIES	256
+
+/*
+ * This is the size at which it becomes more efficient to
+ * clean the whole cache, rather than using the individual
+ * cache line maintenance instructions.
+ */
+#define CACHE_DLIMIT	8192
 
 	.text
-
-/*
- * cpu_arm925_data_abort()
- *
- * obtain information about current aborted instruction
- * Note: we read user space.  This means we might cause a data
- * abort here if the I-TLB and D-TLB aren't seeing the same
- * picture.  Unfortunately, this does happen.  We live with it.
- *
- * Inputs:
- *  r2 = address of abort
- *  r3 = cpsr of abort
- *
- * Returns:
- *  r0 = address of abort
- *  r1 = FSR, bit 11 set if writing
- *  r3 = corrupted
- *  r4 = corrupted
- */
-	.align	5
-ENTRY(cpu_arm925_data_abort)
-	mrc	p15, 0, r1, c5, c0, 0		@ get FSR
-	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	bic	r1, r1, #1 << 11 | 1 << 10	@ clear bits 11 and 10 of FSR
-	tst	r3, #PSR_J_BIT			@ Java?
-	orrne	r1, r1, #1 << 11		@ always assume write
-	movne	pc, lr
-	tst	r3, #PSR_T_BIT			@ Thumb?
-	ldrneh	r3, [r2]			@ read aborted thumb instruction
-	ldreq	r3, [r2]			@ read aborted ARM instruction
-	movne	r3, r3, lsl #(21 - 12)		@ move thumb bit 11 to ARM bit 20
-	tst	r3, #1 << 20			@ L = 0 -> write
-	orreq	r1, r1, #1 << 11		@ yes.
-	mov	pc, lr
-
-/*
- * cpu_arm925_check_bugs()
- */
-ENTRY(cpu_arm925_check_bugs)
-	mrs	ip, cpsr
-	bic	ip, ip, #F_BIT
-	msr	cpsr, ip
-	mov	pc, lr
-
 /*
  * cpu_arm925_proc_init()
  */
@@ -108,15 +92,11 @@ ENTRY(cpu_arm925_proc_init)
  * cpu_arm925_proc_fin()
  */
 ENTRY(cpu_arm925_proc_fin)
-	stmfd	sp!, {lr}
-	mov	ip, #F_BIT | I_BIT | SVC_MODE
-	msr	cpsr_c, ip
-	bl	cpu_arm925_cache_clean_invalidate_all
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
 	bic	r0, r0, #0x1000			@ ...i............
 	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
-	ldmfd	sp!, {pc}
+	mov	pc, lr
 
 /*
  * cpu_arm925_reset(loc)
@@ -128,11 +108,23 @@ ENTRY(cpu_arm925_proc_fin)
  * loc: location to jump to for soft reset
  */
 	.align	5
+	.pushsection	.idmap.text, "ax"
 ENTRY(cpu_arm925_reset)
+	/* Send software reset to MPU and DSP */
+	mov	ip, #0xff000000
+	orr	ip, ip, #0x00fe0000
+	orr	ip, ip, #0x0000ce00
+	mov	r4, #1
+	strh	r4, [ip, #0x10]
+ENDPROC(cpu_arm925_reset)
+	.popsection
+
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I,D caches
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+#ifdef CONFIG_MMU
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
+#endif
 	mrc	p15, 0, ip, c1, c0, 0		@ ctrl register
 	bic	ip, ip, #0x000f			@ ............wcam
 	bic	ip, ip, #0x1100			@ ...i...s........
@@ -141,592 +133,391 @@ ENTRY(cpu_arm925_reset)
 
 /*
  * cpu_arm925_do_idle()
+ *
+ * Called with IRQs disabled
  */
-	.align	5
+	.align	10
 ENTRY(cpu_arm925_do_idle)
-#if defined(CONFIG_CPU_ARM925_CPU_IDLE)
+	mov	r0, #0
+	mrc	p15, 0, r1, c1, c0, 0		@ Read control register
+	mcr	p15, 0, r0, c7, c10, 4		@ Drain write buffer
+	bic	r2, r1, #1 << 12
+	mcr	p15, 0, r2, c1, c0, 0		@ Disable I cache
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-#endif
+	mcr	p15, 0, r1, c1, c0, 0		@ Restore ICache enable
 	mov	pc, lr
 
-/* ================================= CACHE ================================ */
-
+/*
+ *	flush_icache_all()
+ *
+ *	Unconditionally clean and invalidate the entire icache.
+ */
+ENTRY(arm925_flush_icache_all)
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+	mov	pc, lr
+ENDPROC(arm925_flush_icache_all)
 
 /*
- * cpu_arm925_cache_clean_invalidate_all()
+ *	flush_user_cache_all()
  *
- * clean and invalidate all cache lines
- *
- * Note:
- *  1. we should preserve r0 at all times
+ *	Clean and invalidate all cache entries in a particular
+ *	address space.
  */
-	.align	5
-ENTRY(cpu_arm925_cache_clean_invalidate_all)
-	mov	r2, #1
-cpu_arm925_cache_clean_invalidate_all_r2:
+ENTRY(arm925_flush_user_cache_all)
+	/* FALLTHROUGH */
+
+/*
+ *	flush_kern_cache_all()
+ *
+ *	Clean and invalidate the entire cache.
+ */
+ENTRY(arm925_flush_kern_cache_all)
+	mov	r2, #VM_EXEC
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
+__flush_whole_cache:
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
-/*
- * 'Clean & Invalidate whole DCache'
- * Re-written to use Index Ops.
- * NOTE: Requires TI925T Configuration Register C bit <- 0
- *       for clean and invalidate of both D-Cache sets.
- */
-	mov	r3, #255 << 4		@ 256 entries/set
-					@ ((NSETS - 1) << (CIR[13-12] + 3))
-2:	mcr	p15, 0, r3, c7, c14, 2	@ clean & invalidate D index
+	/* Flush entries in both segments at once, see NOTE1 above */
+	mov	r3, #(CACHE_DENTRIES - 1) << 4	@ 256 entries in segment
+2:	mcr	p15, 0, r3, c7, c14, 2		@ clean+invalidate D index
 	subs	r3, r3, #1 << 4
-	bcs	2b			@ entries 255 to 0
+	bcs	2b				@ entries 255 to 0
 #endif
-	teq	r2, #0
+	tst	r2, #VM_EXEC
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
-	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm925_cache_clean_invalidate_range(start, end, flags)
+ *	flush_user_cache_range(start, end, flags)
  *
- * clean and invalidate all cache lines associated with this area of memory
+ *	Clean and invalidate a range of cache entries in the
+ *	specified address range.
  *
- * This is a little misleading, it is not intended to clean out
- * the i-cache but to make sure that any data written to the
- * range is made consistant.  This means that when we execute code
- * in that region, everything works as we expect.
- *
- * This generally means writing back data in the Dcache and
- * write buffer and flushing the Icache over that region
- * start: Area start address
- * end:   Area end address
- * flags: nonzero for I cache as well
+ *	- start	- start address (inclusive)
+ *	- end	- end address (exclusive)
+ *	- flags	- vm_flags describing address space
  */
-		.align	5
-ENTRY(cpu_arm925_cache_clean_invalidate_range)
-	bic	r0, r0, #DCACHELINESIZE - 1	@ && added by PGM
-	bic	r1, r1, #DCACHELINESIZE - 1     @ && added by DHM
-	sub	r3, r1, r0
-	cmp	r3, #MAX_AREA_SIZE
-	bhi	cpu_arm925_cache_clean_invalidate_all_r2
-1:	teq	r2, #0
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
+ENTRY(arm925_flush_user_cache_range)
+	mov	ip, #0
+	sub	r3, r1, r0			@ calculate total size
+	cmp	r3, #CACHE_DLIMIT
+	bgt	__flush_whole_cache
+1:	tst	r2, #VM_EXEC
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 #else
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 #endif
 	cmp	r0, r1
 	blo	1b
-
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
+	tst	r2, #VM_EXEC
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm925_flush_ram_page(page)
+ *	coherent_kern_range(start, end)
  *
- * clean and invalidate all cache lines associated with this area of memory
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start, end.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
  *
- * page: page to clean and invalidate
+ *	- start	- virtual start address
+ *	- end	- virtual end address
  */
-	.align	5
-ENTRY(cpu_arm925_flush_ram_page)
-	mov	r1, #PAGESIZE
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
-1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-#else
-1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-#endif
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bne	1b
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/* ================================ D-CACHE =============================== */
+ENTRY(arm925_coherent_kern_range)
+	/* FALLTHROUGH */
 
 /*
- * cpu_arm925_dcache_invalidate_range(start, end)
+ *	coherent_user_range(start, end)
  *
- * throw away all D-cached data in specified region without an obligation
- * to write them back.  Note however that we must clean the D-cached entries
- * around the boundaries if the start and/or end address are not cache
- * aligned.
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start, end.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
  *
- * start: virtual start address
- * end:   virtual end address
+ *	- start	- virtual start address
+ *	- end	- virtual end address
  */
-	.align	5
-ENTRY(cpu_arm925_dcache_invalidate_range)
-#ifndef CONFIG_CPU_ARM925_WRITETHROUGH
-	tst	r0, #DCACHELINESIZE - 1
+ENTRY(arm925_coherent_user_range)
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcr	p15, 0, r0, c7, c5, 1		@ invalidate I entry
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	flush_kern_dcache_area(void *addr, size_t size)
+ *
+ *	Ensure no D cache aliasing occurs, either with itself or
+ *	the I cache
+ *
+ *	- addr	- kernel address
+ *	- size	- region size
+ */
+ENTRY(arm925_flush_kern_dcache_area)
+	add	r1, r0, r1
+1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+	mov	r0, #0
+	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_inv_range(start, end)
+ *
+ *	Invalidate (discard) the specified virtual address range.
+ *	May not write back any entries.  If 'start' or 'end'
+ *	are not cache line aligned, those lines must be written
+ *	back.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
+ */
+arm925_dma_inv_range:
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	tst	r0, #CACHE_DLINESIZE - 1
 	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
-	tst	r1, #DCACHELINESIZE - 1
+	tst	r1, #CACHE_DLINESIZE - 1
 	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry
 #endif
-	bic	r0, r0, #DCACHELINESIZE - 1
-	bic	r1, r1, #DCACHELINESIZE - 1
+	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm925_dcache_clean_range(start, end)
+ *	dma_clean_range(start, end)
  *
- * For the specified virtual address range, ensure that all caches contain
- * clean data, such that peripheral accesses to the physical RAM fetch
- * correct data.
+ *	Clean the specified virtual address range.
  *
- * start: virtual start address
- * end:   virtual end address
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
  */
-	.align	5
-ENTRY(cpu_arm925_dcache_clean_range)
-#ifndef CONFIG_CPU_ARM925_WRITETHROUGH
-	bic	r0, r0, #DCACHELINESIZE - 1
-	sub	r1, r1, r0
-	cmp	r1, #MAX_AREA_SIZE
-	mov	r2, #0
-	bhi	cpu_arm925_cache_clean_invalidate_all_r2
-
-	bic	r1, r1, #DCACHELINESIZE -1
-	add	r1, r1, #DCACHELINESIZE
-
+arm925_dma_clean_range:
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	bic	r0, r0, #CACHE_DLINESIZE - 1
 1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #DCACHELINESIZE
-	bpl	1b
-#endif
-	mcr	p15, 0, r2, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/*
- * cpu_arm925_dcache_clean_page(page)
- *
- * Cleans a single page of dcache so that if we have any future aliased
- * mappings, they will be consistent at the time that they are created.
- *
- * page: virtual address of page to clean from dcache
- *
- * Note:
- *  1. we don't need to flush the write buffer in this case.
- *  2. we don't invalidate the entries since when we write the page
- *     out to disk, the entries may get reloaded into the cache.
- */
-	.align	5
-ENTRY(cpu_arm925_dcache_clean_page)
-#ifndef CONFIG_CPU_ARM925_WRITETHROUGH
-	mov	r1, #PAGESIZE
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bne	1b
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm925_dcache_clean_entry(addr)
- *
- * Clean the specified entry of any caches such that the MMU
- * translation fetches will obtain correct data.
- *
- * addr: cache-unaligned virtual address
- */
-	.align	5
-ENTRY(cpu_arm925_dcache_clean_entry)
-#ifndef CONFIG_CPU_ARM925_WRITETHROUGH
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-#endif
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/* ================================ I-CACHE =============================== */
-
-/*
- * cpu_arm925_icache_invalidate_range(start, end)
- *
- * invalidate a range of virtual addresses from the Icache
- *
- * This is a little misleading, it is not intended to clean out
- * the i-cache but to make sure that any data written to the
- * range is made consistant.  This means that when we execute code
- * in that region, everything works as we expect.
- *
- * This generally means writing back data in the Dcache and
- * write buffer and flushing the Icache over that region
- *
- * start: virtual start address
- * end:   virtual end address
- *
- * NOTE: ICACHELINESIZE == DCACHELINESIZE (so we don't need to
- * loop twice, once for i-cache, once for d-cache)
- */
-	.align	5
-ENTRY(cpu_arm925_icache_invalidate_range)
-	bic	r0, r0, #ICACHELINESIZE - 1	@ Safety check
-	sub	r1, r1, r0
-	cmp	r1, #MAX_AREA_SIZE
-	bhi	cpu_arm925_cache_clean_invalidate_all_r2
-
-	bic	r1, r1, #ICACHELINESIZE - 1
-	add	r1, r1, #ICACHELINESIZE
-
-1:	mcr	p15, 0, r0, c7, c5, 1		@ Clean I entry
-	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
-	add	r0, r0, #ICACHELINESIZE
-	subs	r1, r1, #ICACHELINESIZE
-	bne	1b
-
-	mov	r0, #0
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-
-ENTRY(cpu_arm925_icache_invalidate_page)
-	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-        nop
-        nop
-        nop
-        nop
-	mov	pc, lr
-
-/* ================================== TLB ================================= */
-
-/*
- * cpu_arm925_tlb_invalidate_all()
- *
- * Invalidate all TLB entries
- */
-	.align	5
-ENTRY(cpu_arm925_tlb_invalidate_all)
-	mov	r0, #0
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mcr	p15, 0, r0, c8, c7, 0		@ invalidate I & D TLBs
-	mov	pc, lr
-
-/*
- * cpu_arm925_tlb_invalidate_range(start, end)
- *
- * invalidate TLB entries covering the specified range
- *
- * start: range start address
- * end:   range end address
- */
-	.align	5
-ENTRY(cpu_arm925_tlb_invalidate_range)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-
-	mov	r3, #PAGESIZE
-	sub	r3, r3, #1
-	bic 	r0, r0, r3
-	bic	r1, r1, r3
-
-1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcr	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
-	add	r0, r0, #PAGESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
+#endif
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm925_tlb_invalidate_page(page, flags)
+ *	dma_flush_range(start, end)
  *
- * invalidate the TLB entries for the specified page.
+ *	Clean and invalidate the specified virtual address range.
  *
- * page:  page to invalidate
- * flags: non-zero if we include the I TLB
+ *	- start	- virtual start address
+ *	- end	- virtual end address
  */
-	.align	5
-ENTRY(cpu_arm925_tlb_invalidate_page)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-	teq	r1, #0
-	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcrne	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
+ENTRY(arm925_dma_flush_range)
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+#else
+	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+#endif
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_map_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm925_dma_map_area)
+	add	r1, r1, r0
+	cmp	r2, #DMA_TO_DEVICE
+	beq	arm925_dma_clean_range
+	bcs	arm925_dma_inv_range
+	b	arm925_dma_flush_range
+ENDPROC(arm925_dma_map_area)
+
+/*
+ *	dma_unmap_area(start, size, dir)
+ *	- start	- kernel virtual start address
+ *	- size	- size of region
+ *	- dir	- DMA direction
+ */
+ENTRY(arm925_dma_unmap_area)
+	mov	pc, lr
+ENDPROC(arm925_dma_unmap_area)
+
+	@ define struct cpu_cache_fns (see <asm/cacheflush.h> and proc-macros.S)
+	define_cache_functions arm925
+
+ENTRY(cpu_arm925_dcache_clean_area)
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	subs	r1, r1, #CACHE_DLINESIZE
+	bhi	1b
+#endif
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /* =============================== PageTable ============================== */
 
 /*
- * cpu_arm925_set_pgd(pgd)
+ * cpu_arm925_switch_mm(pgd)
  *
  * Set the translation base pointer to be as described by pgd.
  *
  * pgd: new page tables
  */
 	.align	5
-ENTRY(cpu_arm925_set_pgd)
+ENTRY(cpu_arm925_switch_mm)
+#ifdef CONFIG_MMU
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
-	mcr	p15, 0, ip, c7, c7, 0		@ invalidate I & D cache
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
-/*
- * 'Clean & Invalidate whole DCache'
- * Re-written to use Index Ops.
- * NOTE: Requires TI925T Configuration Register C bit <- 0
- *       for clean and invalidate of both D-Cache sets.
- */
-	mov	r3, #255 << 4		@ 256 entries/set
-					@ ((NSETS - 1) << (CIR[13-12] + 3))
-2:	mcr	p15, 0, r3, c7, c14, 2	@ clean & invalidate D index
+	/* Flush entries in bothe segments at once, see NOTE1 above */
+	mov	r3, #(CACHE_DENTRIES - 1) << 4	@ 256 entries in segment
+2:	mcr	p15, 0, r3, c7, c14, 2		@ clean & invalidate D index
 	subs	r3, r3, #1 << 4
-	bcs	2b			@ entries 255 to 0
+	bcs	2b				@ entries 255 to 0
 #endif
 	mcr	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
-	mov	pc, lr
-
-/*
- * cpu_arm925_set_pmd(pmdp, pmd)
- *
- * Set a level 1 translation table entry, and clean it out of
- * any caches such that the MMUs can load it correctly.
- *
- * pmdp: pointer to PMD entry
- * pmd:  PMD value to store
- */
-	.align	5
-ENTRY(cpu_arm925_set_pmd)
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
-	eor	r2, r1, #0x0a			@ C & Section
-	tst	r2, #0x0b
-	biceq	r1, r1, #4			@ clear bufferable bit
 #endif
-	str	r1, [r0]
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm925_set_pte(ptep, pte)
+ * cpu_arm925_set_pte_ext(ptep, pte, ext)
  *
  * Set a PTE and flush it out
  */
 	.align	5
-ENTRY(cpu_arm925_set_pte)
-	str	r1, [r0], #-1024		@ linux version
-
-	eor	r1, r1, #LPTE_PRESENT | LPTE_YOUNG | LPTE_WRITE | LPTE_DIRTY
-
-	bic	r2, r1, #0xff0
-	bic	r2, r2, #3
-	orr	r2, r2, #HPTE_TYPE_SMALL
-
-	tst	r1, #LPTE_USER			@ User?
-	orrne	r2, r2, #HPTE_AP_READ
-
-	tst	r1, #LPTE_WRITE | LPTE_DIRTY	@ Write and Dirty?
-	orreq	r2, r2, #HPTE_AP_WRITE
-
-	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
-	movne	r2, #0
-
-#ifdef CONFIG_CPU_ARM925_WRITETHROUGH
-	eor	r3, r2, #0x0a			@ C & small page?
-	tst	r3, #0x0b
-	biceq	r2, r2, #4
-#endif
-	str	r2, [r0]			@ hardware version
+ENTRY(cpu_arm925_set_pte_ext)
+#ifdef CONFIG_MMU
+	armv3_set_pte_ext
 	mov	r0, r0
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+#endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+#endif /* CONFIG_MMU */
 	mov	pc, lr
 
+	__CPUINIT
 
-ENTRY(cpu_arm925_name)
-	.ascii	"Arm925T"
-#if defined(CONFIG_CPU_ARM925_CPU_IDLE)
-	.ascii	"s"
-#endif
-#if defined(CONFIG_CPU_ARM925_I_CACHE_ON)
-	.ascii	"i"
-#endif
-#if defined(CONFIG_CPU_ARM925_D_CACHE_ON)
-	.ascii	"d"
-#if defined(CONFIG_CPU_ARM925_WRITETHROUGH)
-	.ascii	"(wt)"
-#else
-	.ascii	"(wb)"
-#endif
-#endif
-	.ascii	"\0"
-
-ENTRY(cpu_arm915_name)
-	.ascii	"Arm915T"
-#if defined(CONFIG_CPU_ARM925_CPU_IDLE)
-	.ascii	"s"
-#endif
-#if defined(CONFIG_CPU_ARM925_I_CACHE_ON)
-	.ascii	"i"
-#endif
-#if defined(CONFIG_CPU_ARM925_D_CACHE_ON)
-	.ascii	"d"
-#if defined(CONFIG_CPU_ARM925_WRITETHROUGH)
-	.ascii	"(wt)"
-#else
-	.ascii	"(wb)"
-#endif
-#endif
-	.ascii	"\0"
-	.align
-
-	.section ".text.init", #alloc, #execinstr
-
+	.type	__arm925_setup, #function
 __arm925_setup:
 	mov	r0, #0
-#if defined(CONFIG_CPU_ARM925_NON_STREAMING_ON)
-        orr     r0,r0,#0x80
+#if defined(CONFIG_CPU_ICACHE_STREAMING_DISABLE)
+        orr     r0,r0,#1 << 7
 #endif
-#if defined(CONFIG_CPU_ARM925_TRANSPARENT_ON)
-        orr     r0,r0,#0x2
-#endif
-	mcr	p15, 0, r0, c15, c1, 0		@ write TI config register
+
+	/* Transparent on, D-cache clean & flush mode. See  NOTE2 above */
+        orr     r0,r0,#1 << 1			@ transparent mode on
+        mcr     p15, 0, r0, c15, c1, 0          @ write TI config register
+
 	mov	r0, #0
 	mcr	p15, 0, r0, c7, c7		@ invalidate I,D caches on v4
 	mcr	p15, 0, r0, c7, c10, 4		@ drain write buffer on v4
+#ifdef CONFIG_MMU
 	mcr	p15, 0, r0, c8, c7		@ invalidate I,D TLBs on v4
-	mcr	p15, 0, r4, c2, c0		@ load page table pointer
-	mov	r0, #0x1f			@ Domains 0, 1 = client
-	mcr	p15, 0, r0, c3, c0		@ load domain access register
-	mrc	p15, 0, r0, c1, c0		@ get control register v4
-/*
- * Clear out 'unwanted' bits (then put them in if we need them)
- */
-						@   VI ZFRS BLDP WCAM
-	bic	r0, r0, #0x0e00
-	bic	r0, r0, #0x0002
-	bic	r0, r0, #0x000c
-	bic	r0, r0, #0x1000			@ ...0 000. .... 000.
-/*
- * Turn on what we want
- */
-	orr	r0, r0, #0x0031
-	orr	r0, r0, #0x2100			@ ..1. ...1 ..11 ...1
+#endif
 
-#ifdef CONFIG_CPU_ARM925_WRITEBUFFER_ON
-	orr	r0, r0, #0x0008			@ .... .... .... 1...
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
+	mov	r0, #4				@ disable write-back on caches explicitly
+	mcr	p15, 7, r0, c15, c0, 0
 #endif
-#ifdef CONFIG_CPU_ARM925_D_CACHE_ON
-	orr	r0, r0, #0x0004			@ .... .... .... .1..
-#endif
-#ifdef CONFIG_CPU_ARM925_I_CACHE_ON
-	orr	r0, r0, #0x1000			@ ...1 .... .... ....
+
+	adr	r5, arm925_crval
+	ldmia	r5, {r5, r6}
+	mrc	p15, 0, r0, c1, c0		@ get control register v4
+	bic	r0, r0, r5
+	orr	r0, r0, r6
+#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
+	orr	r0, r0, #0x4000			@ .1.. .... .... ....
 #endif
 	mov	pc, lr
+	.size	__arm925_setup, . - __arm925_setup
 
-	.text
+	/*
+	 *  R
+	 * .RVI ZFRS BLDP WCAM
+	 * .011 0001 ..11 1101
+	 * 
+	 */
+	.type	arm925_crval, #object
+arm925_crval:
+	crval	clear=0x00007f3f, mmuset=0x0000313d, ucset=0x00001130
 
-/*
- * Purpose : Function pointers used to access above functions - all calls
- *	     come through these
- */
-	.type	arm925_processor_functions, #object
-arm925_processor_functions:
-	.word	cpu_arm925_data_abort
-	.word	cpu_arm925_check_bugs
-	.word	cpu_arm925_proc_init
-	.word	cpu_arm925_proc_fin
-	.word	cpu_arm925_reset
-	.word   cpu_arm925_do_idle
+	__INITDATA
+	@ define struct processor (see <asm/proc-fns.h> and proc-macros.S)
+	define_processor_functions arm925, dabort=v4t_early_abort, pabort=legacy_pabort
 
-	/* cache */
-	.word	cpu_arm925_cache_clean_invalidate_all
-	.word	cpu_arm925_cache_clean_invalidate_range
-	.word	cpu_arm925_flush_ram_page
+	.section ".rodata"
 
-	/* dcache */
-	.word	cpu_arm925_dcache_invalidate_range
-	.word	cpu_arm925_dcache_clean_range
-	.word	cpu_arm925_dcache_clean_page
-	.word	cpu_arm925_dcache_clean_entry
+	string	cpu_arch_name, "armv4t"
+	string	cpu_elf_name, "v4"
+	string	cpu_arm925_name, "ARM925T"
 
-	/* icache */
-	.word	cpu_arm925_icache_invalidate_range
-	.word	cpu_arm925_icache_invalidate_page
-
-	/* tlb */
-	.word	cpu_arm925_tlb_invalidate_all
-	.word	cpu_arm925_tlb_invalidate_range
-	.word	cpu_arm925_tlb_invalidate_page
-
-	/* pgtable */
-	.word	cpu_arm925_set_pgd
-	.word	cpu_arm925_set_pmd
-	.word	cpu_arm925_set_pte
-	.size	arm925_processor_functions, . - arm925_processor_functions
-
-	.type	cpu_arm925_info, #object
-cpu_arm925_info:
-	.long	0
-	.long	cpu_arm925_name
-	.size	cpu_arm925_info, . - cpu_arm925_info
-
-	.type	cpu_arm915_info, #object
-cpu_arm915_info:
-	.long	cpu_manu_name
-	.long	cpu_arm915_name
-	.size	cpu_arm915_info, . - cpu_arm915_info
-
-	.type	cpu_arch_name, #object
-cpu_arch_name:
-	.asciz	"armv4"
-	.size	cpu_arch_name, . - cpu_arch_name
-
-	.type	cpu_elf_name, #object
-cpu_elf_name:
-	.asciz	"v4"
-	.size	cpu_elf_name, . - cpu_elf_name
 	.align
 
-#if	defined(CONFIG_CPU_ARM925_WRITETHROUGH)
-#  define	MMU_FLAGS	0x00000c1a
-#else
-#  define	MMU_FLAGS	0x00000c1e
-#endif
-	.section ".proc.info", #alloc, #execinstr
+	.section ".proc.info.init", #alloc, #execinstr
 
-	.type	__arm925_proc_info,#object
-__arm925_proc_info:
-	.long	0x54029252
-	.long	0xffffffff
-	.long	MMU_FLAGS
+.macro arm925_proc_info name:req, cpu_val:req, cpu_mask:req, cpu_name:req, cache
+	.type	__\name\()_proc_info,#object
+__\name\()_proc_info:
+	.long	\cpu_val
+	.long	\cpu_mask
+	.long   PMD_TYPE_SECT | \
+		PMD_BIT4 | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
+	.long   PMD_TYPE_SECT | \
+		PMD_BIT4 | \
+		PMD_SECT_AP_WRITE | \
+		PMD_SECT_AP_READ
 	b	__arm925_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
 	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
-	.long	cpu_arm925_info
+	.long	cpu_arm925_name
 	.long	arm925_processor_functions
-	.size	__arm925_proc_info, . - __arm925_proc_info
+	.long	v4wbi_tlb_fns
+	.long	v4wb_user_fns
+	.long	arm925_cache_fns
+	.size	__\name\()_proc_info, . - __\name\()_proc_info
+.endm
 
-	.type	__arm915_proc_info,#object
-__arm915_proc_info:
-	.long	0x54029152
-	.long	0xffffffff
-	.long	MMU_FLAGS
-	b	__arm925_setup
-	.long	cpu_arch_name
-	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
-	.long	cpu_arm915_info
-	.long	arm925_processor_functions
-	.size	__arm925_proc_info, . - __arm925_proc_info
+	arm925_proc_info arm925, 0x54029250, 0xfffffff0, cpu_arm925_name
+	arm925_proc_info arm915, 0x54029150, 0xfffffff0, cpu_arm925_name

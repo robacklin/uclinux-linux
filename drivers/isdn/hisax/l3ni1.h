@@ -1,16 +1,16 @@
-/* $Id: l3ni1.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: l3ni1.h,v 2.3.6.2 2001/09/23 22:24:50 kai Exp $
  *
  * NI1 D-channel protocol
  *
  * Author       Matt Henderson & Guy Ellis
  * Copyright    by Traverse Technologies Pty Ltd, www.travers.com.au
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
- * 2000.6.6 Initial implementation of routines for US NI1 
- * Layer 3 protocol based on the EURO/DSS1 D-channel protocol 
- * driver written by Karsten Keil et al.  Thanks also for the 
+ * 2000.6.6 Initial implementation of routines for US NI1
+ * Layer 3 protocol based on the EURO/DSS1 D-channel protocol
+ * driver written by Karsten Keil et al.  Thanks also for the
  * code provided by Ragnar Paulson.
  *
  */
@@ -119,18 +119,18 @@
 
 /* l3ni1 specific data in l3 process */
 typedef struct
-  { unsigned char invoke_id; /* used invoke id in remote ops, 0 = not active */
-    ulong ll_id; /* remebered ll id */
-    u_char remote_operation; /* handled remote operation, 0 = not active */ 
-    int proc; /* rememered procedure */  
-    ulong remote_result; /* result of remote operation for statcallb */
-    char uus1_data[35]; /* data send during alerting or disconnect */
-  } ni1_proc_priv;
+{ unsigned char invoke_id; /* used invoke id in remote ops, 0 = not active */
+	ulong ll_id; /* remebered ll id */
+	u8 remote_operation; /* handled remote operation, 0 = not active */
+	int proc; /* rememered procedure */
+	ulong remote_result; /* result of remote operation for statcallb */
+	char uus1_data[35]; /* data send during alerting or disconnect */
+} ni1_proc_priv;
 
 /* l3dni1 specific data in protocol stack */
 typedef struct
-  { unsigned char last_invoke_id; /* last used value for invoking */
-    unsigned char invoke_used[32]; /* 256 bits for 256 values */
-  } ni1_stk_priv;        
+{ unsigned char last_invoke_id; /* last used value for invoking */
+	unsigned char invoke_used[32]; /* 256 bits for 256 values */
+} ni1_stk_priv;
 
 #endif /* only l3dni1_process */

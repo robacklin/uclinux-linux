@@ -1,23 +1,22 @@
+NOTE: ksymoops is useless on 2.6.  Please use the Oops in its original format
+(from dmesg, etc).  Ignore any references in this or other docs to "decoding
+the Oops" or "running it through ksymoops".  If you post an Oops from 2.6 that
+has been run through ksymoops, people will just tell you to repost it.
+
 Quick Summary
 -------------
 
-Install ksymoops from
-ftp://ftp.<country>.kernel.org/pub/linux/utils/kernel/ksymoops
-Read the ksymoops man page.
-ksymoops < the_oops.txt
-
-and send the output the maintainer of the kernel area that seems to be
-involved with the problem, not to the ksymoops maintainer. Don't worry
-too much about getting the wrong person. If you are unsure send it to
-the person responsible for the code relevant to what you were doing.
-If it occurs repeatably try and describe how to recreate it. Thats
-worth even more than the oops
+Find the Oops and send it to the maintainer of the kernel area that seems to be
+involved with the problem.  Don't worry too much about getting the wrong person.
+If you are unsure send it to the person responsible for the code relevant to
+what you were doing.  If it occurs repeatably try and describe how to recreate
+it.  That's worth even more than the oops.
 
 If you are totally stumped as to whom to send the report, send it to 
 linux-kernel@vger.kernel.org. Thanks for your help in making Linux as
 stable as humanly possible.
 
-Where is the_oops.txt?
+Where is the Oops?
 ----------------------
 
 Normally the Oops text is read from the kernel buffers by klogd and
@@ -31,28 +30,30 @@ the disk is not available then you have three options :-
 
 (1) Hand copy the text from the screen and type it in after the machine
     has restarted.  Messy but it is the only option if you have not
-    planned for a crash.
+    planned for a crash. Alternatively, you can take a picture of
+    the screen with a digital camera - not nice, but better than
+    nothing.  If the messages scroll off the top of the console, you
+    may find that booting with a higher resolution (eg, vga=791)
+    will allow you to read more of the text. (Caveat: This needs vesafb,
+    so won't help for 'early' oopses)
 
 (2) Boot with a serial console (see Documentation/serial-console.txt),
     run a null modem to a second machine and capture the output there
     using your favourite communication program.  Minicom works well.
 
-(3) Patch the kernel with one of the crash dump patches.  These save
-    data to a floppy disk or video rom or a swap partition.  None of
-    these are standard kernel patches so you have to find and apply
-    them yourself.  Search kernel archives for kmsgdump, lkcd and
-    oops+smram.
-
-No matter how you capture the log output, feed the resulting file to
-ksymoops along with /proc/ksyms and /proc/modules that applied at the
-time of the crash.  /var/log/ksymoops can be useful to capture the
-latter, man ksymoops for details.
+(3) Use Kdump (see Documentation/kdump/kdump.txt),
+    extract the kernel ring buffer from old memory with using dmesg
+    gdbmacro in Documentation/kdump/gdbmacros.txt.
 
 
 Full Information
 ----------------
 
-From: Linus Torvalds <torvalds@transmeta.com>
+NOTE: the message from Linus below applies to 2.4 kernel.  I have preserved it
+for historical reasons, and because some of the information in it still
+applies.  Especially, please ignore any references to ksymoops. 
+
+From: Linus Torvalds <torvalds@osdl.org>
 
 How to track down an Oops.. [originally a mail to linux-kernel]
 
@@ -84,6 +85,20 @@ and compile it with gcc -g and then do "disassemble str" (where the "XX"
 stuff are the values reported by the Oops - you can just cut-and-paste 
 and do a replace of spaces to "\x" - that's what I do, as I'm too lazy 
 to write a program to automate this all).
+
+Alternatively, you can use the shell script in scripts/decodecode.
+Its usage is:  decodecode < oops.txt
+
+The hex bytes that follow "Code:" may (in some architectures) have a series
+of bytes that precede the current instruction pointer as well as bytes at and
+following the current instruction pointer.  In some cases, one instruction
+byte or word is surrounded by <> or (), as in "<86>" or "(f00d)".  These
+<> or () markings indicate the current instruction pointer.  Example from
+i386, split into multiple lines for readability:
+
+Code: f9 0f 8d f9 00 00 00 8d 42 0c e8 dd 26 11 c7 a1 60 ea 2b f9 8b 50 08 a1
+64 ea 2b f9 8d 34 82 8b 1e 85 db 74 6d 8b 15 60 ea 2b f9 <8b> 43 04 39 42 54
+7e 04 40 89 42 54 8b 43 04 3b 05 00 f6 52 c0
 
 Finally, if you want to see where the code comes from, you can do
 
@@ -207,8 +222,8 @@ Phone: 701-234-7556
 Tainted kernels:
 
 Some oops reports contain the string 'Tainted: ' after the program
-counter, this indicates that the kernel has been tainted by some
-mechanism.  The string is followed by a series of position sensitive
+counter. This indicates that the kernel has been tainted by some
+mechanism.  The string is followed by a series of position-sensitive
 characters, each representing a particular tainted value.
 
   1: 'G' if all modules loaded have a GPL or compatible license, 'P' if
@@ -216,11 +231,42 @@ characters, each representing a particular tainted value.
      MODULE_LICENSE or with a MODULE_LICENSE that is not recognised by
      insmod as GPL compatible are assumed to be proprietary.
 
-  2: 'F' if any module was force loaded by insmod -f, ' ' if all
+  2: 'F' if any module was force loaded by "insmod -f", ' ' if all
      modules were loaded normally.
+
+  3: 'S' if the oops occurred on an SMP kernel running on hardware that
+     hasn't been certified as safe to run multiprocessor.
+     Currently this occurs only on various Athlons that are not
+     SMP capable.
+
+  4: 'R' if a module was force unloaded by "rmmod -f", ' ' if all
+     modules were unloaded normally.
+
+  5: 'M' if any processor has reported a Machine Check Exception,
+     ' ' if no Machine Check Exceptions have occurred.
+
+  6: 'B' if a page-release function has found a bad page reference or
+     some unexpected page flags.
+
+  7: 'U' if a user or user application specifically requested that the
+     Tainted flag be set, ' ' otherwise.
+
+  8: 'D' if the kernel has died recently, i.e. there was an OOPS or BUG.
+
+  9: 'A' if the ACPI table has been overridden.
+
+ 10: 'W' if a warning has previously been issued by the kernel.
+     (Though some warnings may set more specific taint flags.)
+
+ 11: 'C' if a staging driver has been loaded.
+
+ 12: 'I' if the kernel is working around a severe bug in the platform
+     firmware (BIOS or similar).
+
+ 13: 'O' if an externally-built ("out-of-tree") module has been loaded.
 
 The primary reason for the 'Tainted: ' string is to tell kernel
 debuggers if this is a clean kernel or if anything unusual has
-occurred.  Tainting is permanent, even if an offending module is
-unloading the tainted value remains to indicate that the kernel is not
+occurred.  Tainting is permanent: even if an offending module is
+unloaded, the tainted value remains to indicate that the kernel is not
 trustworthy.

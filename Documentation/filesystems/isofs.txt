@@ -9,9 +9,9 @@ when using discs encoded using Microsoft's Joliet extensions.
   iocharset=name Character set to use for converting from Unicode to
 		ASCII.  Joliet filenames are stored in Unicode format, but
 		Unix for the most part doesn't know how to deal with Unicode.
-		There is also an option of doing UTF8 translations with the
+		There is also an option of doing UTF-8 translations with the
 		utf8 option.
-  utf8          Encode Unicode names in UTF8 format. Default is no.
+  utf8          Encode Unicode names in UTF-8 format. Default is no.
 
 Mount options unique to the isofs filesystem.
   block=512     Set the block size for the disk to 512 bytes
@@ -23,15 +23,25 @@ Mount options unique to the isofs filesystem.
   map=off       Do not map non-Rock Ridge filenames to lower case
   map=normal    Map non-Rock Ridge filenames to lower case
   map=acorn     As map=normal but also apply Acorn extensions if present
-  mode=xxx      Sets the permissions on files to xxx
+  mode=xxx      Sets the permissions on files to xxx unless Rock Ridge
+		extensions set the permissions otherwise
+  dmode=xxx     Sets the permissions on directories to xxx unless Rock Ridge
+		extensions set the permissions otherwise
+  overriderockperm Set permissions on files and directories according to
+		'mode' and 'dmode' even though Rock Ridge extensions are
+		present.
   nojoliet      Ignore Joliet extensions if they are present.
   norock        Ignore Rock Ridge extensions if they are present.
-  unhide        Show hidden files.
+  hide		Completely strip hidden files from the file system.
+  showassoc	Show files marked with the 'associated' bit
+  unhide	Deprecated; showing hidden files is now default;
+		If given, it is a synonym for 'showassoc' which will
+		recreate previous unhide behavior
   session=x     Select number of session on multisession CD
   sbsector=xxx  Session begins from sector xxx
 
 Recommended documents about ISO 9660 standard are located at:
-http://www.y-adagio.com/public/standards/iso_cdromr/tocont.htm
+http://www.y-adagio.com/
 ftp://ftp.ecma.ch/ecma-st/Ecma-119.pdf
 Quoting from the PDF "This 2nd Edition of Standard ECMA-119 is technically 
 identical with ISO 9660.", so it is a valid and gratis substitute of the

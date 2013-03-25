@@ -1,24 +1,22 @@
-/* $Id: sun_uflash.c,v 1.4 2001/10/02 15:05:14 dwmw2 Exp $
- *
- * sun_uflash - Driver implementation for user-programmable flash
- * present on many Sun Microsystems SME boardsets.
+/* sun_uflash.c - Driver for user-programmable flash on
+ *                Sun Microsystems SME boardsets.
  *
  * This driver does NOT provide access to the OBP-flash for
  * safety reasons-- use <linux>/drivers/sbus/char/flash.c instead.
  *
  * Copyright (c) 2001 Eric Brower (ebrower@usa.net)
- *
  */
 
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
-#include <asm/ebus.h>
-#include <asm/oplib.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
+#include <linux/slab.h>
+#include <asm/prom.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -26,201 +24,138 @@
 #include <linux/mtd/map.h>
 
 #define UFLASH_OBPNAME	"flashprom"
-#define UFLASH_DEVNAME 	"userflash"
+#define DRIVER_NAME	"sun_uflash"
+#define PFX		DRIVER_NAME ": "
 
 #define UFLASH_WINDOW_SIZE	0x200000
 #define UFLASH_BUSWIDTH		1			/* EBus is 8-bit */
 
-MODULE_AUTHOR
-	("Eric Brower <ebrower@usa.net>");
-MODULE_DESCRIPTION
-	("User-programmable flash device on Sun Microsystems boardsets");
-MODULE_SUPPORTED_DEVICE
-	("userflash");
-MODULE_LICENSE
-	("GPL");
+MODULE_AUTHOR("Eric Brower <ebrower@usa.net>");
+MODULE_DESCRIPTION("User-programmable flash device on Sun Microsystems boardsets");
+MODULE_SUPPORTED_DEVICE(DRIVER_NAME);
+MODULE_LICENSE("GPL");
+MODULE_VERSION("2.1");
 
-static LIST_HEAD(device_list);
 struct uflash_dev {
-	char *			name;	/* device name */
+	const char		*name;	/* device name */
 	struct map_info 	map;	/* mtd map info */
-	struct mtd_info *	mtd;	/* mtd info */
-	struct list_head	list;
+	struct mtd_info		*mtd;	/* mtd info */
 };
-
-__u8 uflash_read8(struct map_info *map, unsigned long ofs)
-{
-	return(__raw_readb(map->map_priv_1 + ofs));
-}
-
-__u16 uflash_read16(struct map_info *map, unsigned long ofs)
-{
-	return(__raw_readw(map->map_priv_1 + ofs));
-}
-
-__u32 uflash_read32(struct map_info *map, unsigned long ofs)
-{
-	return(__raw_readl(map->map_priv_1 + ofs));
-}
-
-void uflash_copy_from(struct map_info *map, void *to, unsigned long from, 
-		      ssize_t len)
-{
-	memcpy_fromio(to, map->map_priv_1 + from, len);
-}
-
-void uflash_write8(struct map_info *map, __u8 d, unsigned long adr)
-{
-	__raw_writeb(d, map->map_priv_1 + adr);
-}
-
-void uflash_write16(struct map_info *map, __u16 d, unsigned long adr)
-{
-	__raw_writew(d, map->map_priv_1 + adr);
-}
-
-void uflash_write32(struct map_info *map, __u32 d, unsigned long adr)
-{
-	__raw_writel(d, map->map_priv_1 + adr);
-}
-
-void uflash_copy_to(struct map_info *map, unsigned long to, const void *from,
-		    ssize_t len)
-{
-	memcpy_toio(map->map_priv_1 + to, from, len);
-}
 
 struct map_info uflash_map_templ = {
-		name:		"SUNW,???-????",
-		size:		UFLASH_WINDOW_SIZE,
-		buswidth:	UFLASH_BUSWIDTH,
-		read8:		uflash_read8,
-		read16:		uflash_read16,
-		read32:		uflash_read32,
-		copy_from:	uflash_copy_from,
-		write8:		uflash_write8,
-		write16:	uflash_write16,
-		write32:	uflash_write32,
-		copy_to:	uflash_copy_to
+	.name =		"SUNW,???-????",
+	.size =		UFLASH_WINDOW_SIZE,
+	.bankwidth =	UFLASH_BUSWIDTH,
 };
 
-int uflash_devinit(struct linux_ebus_device* edev)
+int uflash_devinit(struct platform_device *op, struct device_node *dp)
 {
-	int iTmp, nregs;
-	struct linux_prom_registers regs[2];
-	struct uflash_dev *pdev;
+	struct uflash_dev *up;
 
-	iTmp = prom_getproperty(
-		edev->prom_node, "reg", (void *)regs, sizeof(regs));
-	if ((iTmp % sizeof(regs[0])) != 0) {
-		printk("%s: Strange reg property size %d\n", 
-			UFLASH_DEVNAME, iTmp);
-		return -ENODEV;
-	}
-
-	nregs = iTmp / sizeof(regs[0]);
-
-	if (nregs != 1) {
+	if (op->resource[1].flags) {
 		/* Non-CFI userflash device-- once I find one we
 		 * can work on supporting it.
 		 */
-		printk("%s: unsupported device at 0x%lx (%d regs): " \
-			"email ebrower@usa.net\n", 
-			UFLASH_DEVNAME, edev->resource[0].start, nregs);
+		printk(KERN_ERR PFX "Unsupported device at %s, 0x%llx\n",
+		       dp->full_name, (unsigned long long)op->resource[0].start);
+
 		return -ENODEV;
 	}
 
-	if(0 == (pdev = kmalloc(sizeof(struct uflash_dev), GFP_KERNEL))) {
-		printk("%s: unable to kmalloc new device\n", UFLASH_DEVNAME);
-		return(-ENOMEM);
+	up = kzalloc(sizeof(struct uflash_dev), GFP_KERNEL);
+	if (!up) {
+		printk(KERN_ERR PFX "Cannot allocate struct uflash_dev\n");
+		return -ENOMEM;
 	}
-	
+
 	/* copy defaults and tweak parameters */
-	memcpy(&pdev->map, &uflash_map_templ, sizeof(uflash_map_templ));
-	pdev->map.size = regs[0].reg_size;
+	memcpy(&up->map, &uflash_map_templ, sizeof(uflash_map_templ));
 
-	iTmp = prom_getproplen(edev->prom_node, "model");
-	pdev->name = kmalloc(iTmp, GFP_KERNEL);
-	prom_getstring(edev->prom_node, "model", pdev->name, iTmp);
-	if(0 != pdev->name && 0 < strlen(pdev->name)) {
-		pdev->map.name = pdev->name;
+	up->map.size = resource_size(&op->resource[0]);
+
+	up->name = of_get_property(dp, "model", NULL);
+	if (up->name && 0 < strlen(up->name))
+		up->map.name = (char *)up->name;
+
+	up->map.phys = op->resource[0].start;
+
+	up->map.virt = of_ioremap(&op->resource[0], 0, up->map.size,
+				  DRIVER_NAME);
+	if (!up->map.virt) {
+		printk(KERN_ERR PFX "Failed to map device.\n");
+		kfree(up);
+
+		return -EINVAL;
 	}
 
-	pdev->map.map_priv_1 = 
-		(unsigned long)ioremap_nocache(edev->resource[0].start, pdev->map.size);
-	if(0 == pdev->map.map_priv_1) {
-		printk("%s: failed to map device\n", __FUNCTION__);
-		kfree(pdev->name);
-		kfree(pdev);
-		return(-1);
-	}
+	simple_map_init(&up->map);
 
 	/* MTD registration */
-	pdev->mtd = do_map_probe("cfi_probe", &pdev->map);
-	if(0 == pdev->mtd) {
-		iounmap((void *)pdev->map.map_priv_1);
-		kfree(pdev->name);
-		kfree(pdev);
-		return(-ENXIO);
+	up->mtd = do_map_probe("cfi_probe", &up->map);
+	if (!up->mtd) {
+		of_iounmap(&op->resource[0], up->map.virt, up->map.size);
+		kfree(up);
+
+		return -ENXIO;
 	}
 
-	list_add(&pdev->list, &device_list);
+	up->mtd->owner = THIS_MODULE;
 
-	pdev->mtd->module = THIS_MODULE;
+	mtd_device_register(up->mtd, NULL, 0);
 
-	add_mtd_device(pdev->mtd);
-	return(0);
+	dev_set_drvdata(&op->dev, up);
+
+	return 0;
 }
 
-static int __init uflash_init(void)
+static int __devinit uflash_probe(struct platform_device *op)
 {
-	struct linux_ebus *ebus = NULL;
-	struct linux_ebus_device *edev = NULL;
+	struct device_node *dp = op->dev.of_node;
 
-	for_each_ebus(ebus) {
-		for_each_ebusdev(edev, ebus) {
-			if (!strcmp(edev->prom_name, UFLASH_OBPNAME)) {
-				if(0 > prom_getproplen(edev->prom_node, "user")) {
-					DEBUG(2, "%s: ignoring device at 0x%lx\n",
-							UFLASH_DEVNAME, edev->resource[0].start);
-				} else {
-					uflash_devinit(edev);
-				}
-			}
-		}
-	}
-
-	if(list_empty(&device_list)) {
-		printk("%s: unable to locate device\n", UFLASH_DEVNAME);
+	/* Flashprom must have the "user" property in order to
+	 * be used by this driver.
+	 */
+	if (!of_find_property(dp, "user", NULL))
 		return -ENODEV;
-	}
-	return(0);
+
+	return uflash_devinit(op, dp);
 }
 
-static void __exit uflash_cleanup(void)
+static int __devexit uflash_remove(struct platform_device *op)
 {
-	struct list_head *udevlist;
-	struct uflash_dev *udev;
+	struct uflash_dev *up = dev_get_drvdata(&op->dev);
 
-	list_for_each(udevlist, &device_list) {
-		udev = list_entry(udevlist, struct uflash_dev, list);
-		DEBUG(2, "%s: removing device %s\n", 
-			UFLASH_DEVNAME, udev->name);
+	if (up->mtd) {
+		mtd_device_unregister(up->mtd);
+		map_destroy(up->mtd);
+	}
+	if (up->map.virt) {
+		of_iounmap(&op->resource[0], up->map.virt, up->map.size);
+		up->map.virt = NULL;
+	}
 
-		if(0 != udev->mtd) {
-			del_mtd_device(udev->mtd);
-			map_destroy(udev->mtd);
-		}
-		if(0 != udev->map.map_priv_1) {
-			iounmap((void*)udev->map.map_priv_1);
-			udev->map.map_priv_1 = 0;
-		}
-		if(0 != udev->name) {
-			kfree(udev->name);
-		}
-		kfree(udev);
-	}	
+	kfree(up);
+
+	return 0;
 }
 
-module_init(uflash_init);
-module_exit(uflash_cleanup);
+static const struct of_device_id uflash_match[] = {
+	{
+		.name = UFLASH_OBPNAME,
+	},
+	{},
+};
+
+MODULE_DEVICE_TABLE(of, uflash_match);
+
+static struct platform_driver uflash_driver = {
+	.driver = {
+		.name = DRIVER_NAME,
+		.owner = THIS_MODULE,
+		.of_match_table = uflash_match,
+	},
+	.probe		= uflash_probe,
+	.remove		= __devexit_p(uflash_remove),
+};
+
+module_platform_driver(uflash_driver);

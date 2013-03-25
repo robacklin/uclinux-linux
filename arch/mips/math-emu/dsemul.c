@@ -2,7 +2,6 @@
 #include <linux/mm.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 
 #include <asm/asm.h>
 #include <asm/bootinfo.h>
@@ -13,13 +12,11 @@
 #include <asm/uaccess.h>
 #include <asm/branch.h>
 #include <asm/mipsregs.h>
-#include <asm/system.h>
-#include <asm/pgtable.h>
+#include <asm/cacheflush.h>
 
 #include <asm/fpu_emulator.h>
 
 #include "ieee754.h"
-#include "dsemul.h"
 
 /* Strap kernel emulator for full MIPS IV emulation */
 
@@ -28,16 +25,13 @@
 #endif
 #define __mips 4
 
-extern struct mips_fpu_emulator_private fpuemuprivate;
-
-
 /*
  * Emulate the arbritrary instruction ir at xcp->cp0_epc.  Required when
  * we have to emulate the instruction in a COP1 branch delay slot.  Do
  * not change cp0_epc due to the instruction
  *
  * According to the spec:
- * 1) it shouldnt be a branch :-)
+ * 1) it shouldn't be a branch :-)
  * 2) it can be a COP instruction :-(
  * 3) if we are tring to run a protected memory space we must take
  *    special care on memory access instructions :-(
@@ -52,14 +46,13 @@ struct emuframe {
 	mips_instruction	emul;
 	mips_instruction	badinst;
 	mips_instruction	cookie;
-	gpreg_t			epc;
+	unsigned long		epc;
 };
 
-int mips_dsemul(struct pt_regs *regs, mips_instruction ir, gpreg_t cpc)
+int mips_dsemul(struct pt_regs *regs, mips_instruction ir, unsigned long cpc)
 {
 	extern asmlinkage void handle_dsemulret(void);
-	mips_instruction *dsemul_insns;
-	struct emuframe *fr;
+	struct emuframe __user *fr;
 	int err;
 
 	if (ir == 0) {		/* a nop is easy */
@@ -91,24 +84,24 @@ int mips_dsemul(struct pt_regs *regs, mips_instruction ir, gpreg_t cpc)
 	 */
 
 	/* Ensure that the two instructions are in the same cache line */
-	dsemul_insns = (mips_instruction *) REG_TO_VA ((regs->regs[29] - sizeof(struct emuframe)) & ~0x7);
-	fr = (struct emuframe *) dsemul_insns;
+	fr = (struct emuframe __user *)
+		((regs->regs[29] - sizeof(struct emuframe)) & ~0x7);
 
 	/* Verify that the stack pointer is not competely insane */
-	if (unlikely(verify_area(VERIFY_WRITE, fr, sizeof(struct emuframe))))
+	if (unlikely(!access_ok(VERIFY_WRITE, fr, sizeof(struct emuframe))))
 		return SIGBUS;
 
 	err = __put_user(ir, &fr->emul);
-	err |= __put_user((mips_instruction)BADINST, &fr->badinst);
+	err |= __put_user((mips_instruction)BREAK_MATH, &fr->badinst);
 	err |= __put_user((mips_instruction)BD_COOKIE, &fr->cookie);
 	err |= __put_user(cpc, &fr->epc);
 
 	if (unlikely(err)) {
-		fpuemuprivate.stats.errors++;
+		MIPS_FPU_EMU_INC_STATS(errors);
 		return SIGBUS;
 	}
 
-	regs->cp0_epc = VA_TO_REG & fr->emul;
+	regs->cp0_epc = (unsigned long) &fr->emul;
 
 	flush_cache_sigtramp((unsigned long)&fr->badinst);
 
@@ -117,32 +110,32 @@ int mips_dsemul(struct pt_regs *regs, mips_instruction ir, gpreg_t cpc)
 
 int do_dsemulret(struct pt_regs *xcp)
 {
-	struct emuframe *fr;
-	gpreg_t epc;
+	struct emuframe __user *fr;
+	unsigned long epc;
 	u32 insn, cookie;
 	int err = 0;
 
-	fr = (struct emuframe *) (xcp->cp0_epc - sizeof(mips_instruction));
+	fr = (struct emuframe __user *)
+		(xcp->cp0_epc - sizeof(mips_instruction));
 
 	/*
 	 * If we can't even access the area, something is very wrong, but we'll
 	 * leave that to the default handling
 	 */
-	if (verify_area(VERIFY_READ, fr, sizeof(struct emuframe)))
+	if (!access_ok(VERIFY_READ, fr, sizeof(struct emuframe)))
 		return 0;
 
 	/*
 	 * Do some sanity checking on the stackframe:
 	 *
-	 *  - Is the instruction pointed to by the EPC an BADINST?
+	 *  - Is the instruction pointed to by the EPC an BREAK_MATH?
 	 *  - Is the following memory word the BD_COOKIE?
 	 */
 	err = __get_user(insn, &fr->badinst);
 	err |= __get_user(cookie, &fr->cookie);
 
-	if (unlikely(err || (insn != BADINST) || (cookie != BD_COOKIE))) {
-		fpuemuprivate.stats.errors++;
-
+	if (unlikely(err || (insn != BREAK_MATH) || (cookie != BD_COOKIE))) {
+		MIPS_FPU_EMU_INC_STATS(errors);
 		return 0;
 	}
 

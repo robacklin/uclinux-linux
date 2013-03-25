@@ -6,11 +6,19 @@
 
 #ifndef _ROSE_H
 #define _ROSE_H 
+
 #include <linux/rose.h>
+#include <net/sock.h>
 
 #define	ROSE_ADDR_LEN			5
 
 #define	ROSE_MIN_LEN			3
+
+#define	ROSE_CALL_REQ_ADDR_LEN_OFF	3
+#define	ROSE_CALL_REQ_ADDR_LEN_VAL	0xAA	/* each address is 10 digits */
+#define	ROSE_CALL_REQ_DEST_ADDR_OFF	4
+#define	ROSE_CALL_REQ_SRC_ADDR_OFF	9
+#define	ROSE_CALL_REQ_FACILITIES_OFF	14
 
 #define	ROSE_GFI			0x10
 #define	ROSE_Q_BIT			0x80
@@ -47,14 +55,14 @@ enum {
 	ROSE_STATE_5			/* Deferred Call Acceptance */
 };
 
-#define ROSE_DEFAULT_T0			(180 * HZ)	/* Default T10 T20 value */
-#define ROSE_DEFAULT_T1			(200 * HZ)	/* Default T11 T21 value */
-#define ROSE_DEFAULT_T2			(180 * HZ)	/* Default T12 T22 value */
-#define	ROSE_DEFAULT_T3			(180 * HZ)	/* Default T13 T23 value */
-#define	ROSE_DEFAULT_HB			(5 * HZ)	/* Default Holdback value */
-#define	ROSE_DEFAULT_IDLE		(0 * 60 * HZ)	/* No Activity Timeout - none */
+#define ROSE_DEFAULT_T0			180000		/* Default T10 T20 value */
+#define ROSE_DEFAULT_T1			200000		/* Default T11 T21 value */
+#define ROSE_DEFAULT_T2			180000		/* Default T12 T22 value */
+#define	ROSE_DEFAULT_T3			180000		/* Default T13 T23 value */
+#define	ROSE_DEFAULT_HB			5000		/* Default Holdback value */
+#define	ROSE_DEFAULT_IDLE		0		/* No Activity Timeout - none */
 #define	ROSE_DEFAULT_ROUTING		1		/* Default routing flag */
-#define	ROSE_DEFAULT_FAIL_TIMEOUT	(120 * HZ)	/* Time until link considered usable */
+#define	ROSE_DEFAULT_FAIL_TIMEOUT	120000		/* Time until link considered usable */
 #define	ROSE_DEFAULT_MAXVC		50		/* Maximum number of VCs per neighbour */
 #define	ROSE_DEFAULT_WINDOW_SIZE	7		/* Default window size */
 
@@ -114,7 +122,8 @@ struct rose_route {
 	unsigned int		rand;
 };
 
-typedef struct {
+struct rose_sock {
+	struct sock		sock;
 	rose_address		source_addr,   dest_addr;
 	ax25_address		source_call,   dest_call;
 	unsigned char		source_ndigis, dest_ndigis;
@@ -135,8 +144,9 @@ typedef struct {
 	struct rose_facilities_struct facilities;
 	struct timer_list	timer;
 	struct timer_list	idletimer;
-	struct sock		*sk;		/* Backlink to socket */
-} rose_cb;
+};
+
+#define rose_sk(sk) ((struct rose_sock *)(sk))
 
 /* af_rose.c */
 extern ax25_address rose_callsign;
@@ -152,7 +162,7 @@ extern int  sysctl_rose_maximum_vcs;
 extern int  sysctl_rose_window_size;
 extern int  rosecmp(rose_address *, rose_address *);
 extern int  rosecmpm(rose_address *, rose_address *, unsigned short);
-extern char *rose2asc(rose_address *);
+extern char *rose2asc(char *buf, const rose_address *);
 extern struct sock *rose_find_socket(unsigned int, struct rose_neigh *);
 extern void rose_kill_by_neigh(struct rose_neigh *);
 extern unsigned int rose_new_lci(struct rose_neigh *);
@@ -160,23 +170,17 @@ extern int  rose_rx_call_request(struct sk_buff *, struct net_device *, struct r
 extern void rose_destroy_socket(struct sock *);
 
 /* rose_dev.c */
-extern int  rose_rx_ip(struct sk_buff *, struct net_device *);
-extern int  rose_init(struct net_device *);
+extern void  rose_setup(struct net_device *);
 
 /* rose_in.c */
 extern int  rose_process_rx_frame(struct sock *, struct sk_buff *);
 
 /* rose_link.c */
 extern void rose_start_ftimer(struct rose_neigh *);
-extern void rose_start_t0timer(struct rose_neigh *);
 extern void rose_stop_ftimer(struct rose_neigh *);
 extern void rose_stop_t0timer(struct rose_neigh *);
 extern int  rose_ftimer_running(struct rose_neigh *);
-extern int  rose_t0timer_running(struct rose_neigh *);
 extern void rose_link_rx_restart(struct sk_buff *, struct rose_neigh *, unsigned short);
-extern void rose_transmit_restart_request(struct rose_neigh *);
-extern void rose_transmit_restart_confirmation(struct rose_neigh *);
-extern void rose_transmit_diagnostic(struct rose_neigh *, unsigned char);
 extern void rose_transmit_clear_request(struct rose_neigh *, unsigned int, unsigned char, unsigned char);
 extern void rose_transmit_link(struct sk_buff *, struct rose_neigh *);
 
@@ -191,23 +195,22 @@ extern void rose_enquiry_response(struct sock *);
 
 /* rose_route.c */
 extern struct rose_neigh *rose_loopback_neigh;
+extern const struct file_operations rose_neigh_fops;
+extern const struct file_operations rose_nodes_fops;
+extern const struct file_operations rose_routes_fops;
 
-extern int  rose_add_loopback_neigh(void);
-extern int  rose_add_loopback_node(rose_address *);
+extern void rose_add_loopback_neigh(void);
+extern int __must_check rose_add_loopback_node(rose_address *);
 extern void rose_del_loopback_node(rose_address *);
 extern void rose_rt_device_down(struct net_device *);
 extern void rose_link_device_down(struct net_device *);
 extern struct net_device *rose_dev_first(void);
 extern struct net_device *rose_dev_get(rose_address *);
 extern struct rose_route *rose_route_free_lci(unsigned int, struct rose_neigh *);
-extern struct net_device *rose_ax25_dev_get(char *);
-extern struct rose_neigh *rose_get_neigh(rose_address *, unsigned char *, unsigned char *);
-extern int  rose_rt_ioctl(unsigned int, void *);
+extern struct rose_neigh *rose_get_neigh(rose_address *, unsigned char *, unsigned char *, int);
+extern int  rose_rt_ioctl(unsigned int, void __user *);
 extern void rose_link_failed(ax25_cb *, int);
 extern int  rose_route_frame(struct sk_buff *, ax25_cb *);
-extern int  rose_nodes_get_info(char *, char **, off_t, int);
-extern int  rose_neigh_get_info(char *, char **, off_t, int);
-extern int  rose_routes_get_info(char *, char **, off_t, int);
 extern void rose_rt_free(void);
 
 /* rose_subr.c */
@@ -217,8 +220,7 @@ extern void rose_requeue_frames(struct sock *);
 extern int  rose_validate_nr(struct sock *, unsigned short);
 extern void rose_write_internal(struct sock *, int);
 extern int  rose_decode(struct sk_buff *, int *, int *, int *, int *, int *);
-extern int  rose_parse_facilities(unsigned char *, struct rose_facilities_struct *);
-extern int  rose_create_facilities(unsigned char *, rose_cb *);
+extern int  rose_parse_facilities(unsigned char *, unsigned int, struct rose_facilities_struct *);
 extern void rose_disconnect(struct sock *, int, int, int);
 
 /* rose_timer.c */

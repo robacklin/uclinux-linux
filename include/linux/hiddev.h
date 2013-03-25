@@ -2,8 +2,6 @@
 #define _HIDDEV_H
 
 /*
- * $Id: hiddev.h,v 1.2 2001/04/26 11:26:09 vojtech Exp $
- *
  *  Copyright (c) 1999-2000 Vojtech Pavlik
  *
  *  Sponsored by SuSE
@@ -28,6 +26,8 @@
  * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
+
+#include <linux/types.h>
 
 /*
  * The event structure itself
@@ -71,9 +71,9 @@ struct hiddev_report_info {
 /* To do a GUSAGE/SUSAGE, fill in at least usage_code,  report_type and 
  * report_id.  Set report_id to REPORT_ID_UNKNOWN if the rest of the fields 
  * are unknown.  Otherwise use a usage_ref struct filled in from a previous 
- * successful GUSAGE/SUSAGE call to save time.  To actually send a value
- * to the device, perform a SUSAGE first, followed by a SREPORT.  If an
- * INITREPORT is done, a GREPORT isn't necessary before a GUSAGE.
+ * successful GUSAGE call to save time.  To actually send a value to the
+ * device, perform a SUSAGE first, followed by a SREPORT.  An INITREPORT or a
+ * GREPORT isn't necessary for a GUSAGE to return valid data.
  */
 #define HID_REPORT_ID_UNKNOWN 0xffffffff
 #define HID_REPORT_ID_FIRST   0x00000100
@@ -128,10 +128,11 @@ struct hiddev_usage_ref {
 
 /* hiddev_usage_ref_multi is used for sending multiple bytes to a control.
  * It really manifests itself as setting the value of consecutive usages */
+#define HID_MAX_MULTI_USAGES 1024
 struct hiddev_usage_ref_multi {
 	struct hiddev_usage_ref uref;
 	__u32 num_values;
-	__s32 values[HID_MAX_USAGES];
+	__s32 values[HID_MAX_MULTI_USAGES];
 };
 
 /* FIELD_INDEX_NONE is returned in read() data from the kernel when flags
@@ -167,11 +168,11 @@ struct hiddev_usage_ref_multi {
 #define HIDIOCSFLAG		_IOW('H', 0x0F, int)
 #define HIDIOCGCOLLECTIONINDEX	_IOW('H', 0x10, struct hiddev_usage_ref)
 #define HIDIOCGCOLLECTIONINFO	_IOWR('H', 0x11, struct hiddev_collection_info)
+#define HIDIOCGPHYS(len)	_IOC(_IOC_READ, 'H', 0x12, len)
 
 /* For writing/reading to multiple/consecutive usages */
-#define HIDIOCGUSAGES		_IOWR('H', 0x12, struct hiddev_usage_ref_multi)
-#define HIDIOCSUSAGES		_IOW('H', 0x13, struct hiddev_usage_ref_multi)
-
+#define HIDIOCGUSAGES		_IOWR('H', 0x13, struct hiddev_usage_ref_multi)
+#define HIDIOCSUSAGES		_IOW('H', 0x14, struct hiddev_usage_ref_multi)
 
 /* 
  * Flags to be used in HIDIOCSFLAG
@@ -183,26 +184,28 @@ struct hiddev_usage_ref_multi {
 /* To traverse the input report descriptor info for a HID device, perform the 
  * following:
  *
- *  rinfo.report_type = HID_REPORT_TYPE_INPUT;
- *  rinfo.report_id = HID_REPORT_ID_FIRST;
- *  ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
+ * rinfo.report_type = HID_REPORT_TYPE_INPUT;
+ * rinfo.report_id = HID_REPORT_ID_FIRST;
+ * ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
  *
- *  while (ret >= 0) {
- *      for (i = 0; i < rinfo.num_fields; i++) { 
- *	    finfo.report_type = rinfo.report_type;
- *          finfo.report_id = rinfo.report_id;
- *          finfo.field_index = i;
- *          ioctl(fd, HIDIOCGFIELDINFO, &finfo);
- *          for (j = 0; j < finfo.maxusage; j++) {
- *              uref.field_index = i;
- *		uref.usage_index = j;
- *		ioctl(fd, HIDIOCGUCODE, &uref);
- *		ioctl(fd, HIDIOCGUSAGE, &uref);
- *          }
- *	}
- *	uref.report_id |= HID_REPORT_ID_NEXT;
- *	ret = ioctl(fd, HIDIOCGREPORTINFO, &uref);
- *  }
+ * while (ret >= 0) {
+ * 	for (i = 0; i < rinfo.num_fields; i++) {
+ * 		finfo.report_type = rinfo.report_type;
+ * 		finfo.report_id = rinfo.report_id;
+ * 		finfo.field_index = i;
+ * 		ioctl(fd, HIDIOCGFIELDINFO, &finfo);
+ * 		for (j = 0; j < finfo.maxusage; j++) {
+ * 			uref.report_type = rinfo.report_type;
+ * 			uref.report_id = rinfo.report_id;
+ * 			uref.field_index = i;
+ * 			uref.usage_index = j;
+ * 			ioctl(fd, HIDIOCGUCODE, &uref);
+ * 			ioctl(fd, HIDIOCGUSAGE, &uref);
+ * 		}
+ * 	}
+ * 	rinfo.report_id |= HID_REPORT_ID_NEXT;
+ * 	ret = ioctl(fd, HIDIOCGREPORTINFO, &rinfo);
+ * }
  */
 
 
@@ -212,25 +215,25 @@ struct hiddev_usage_ref_multi {
  * In-kernel definitions.
  */
 
+struct hid_device;
+struct hid_usage;
+struct hid_field;
+struct hid_report;
+
 #ifdef CONFIG_USB_HIDDEV
-int hiddev_connect(struct hid_device *);
+int hiddev_connect(struct hid_device *hid, unsigned int force);
 void hiddev_disconnect(struct hid_device *);
 void hiddev_hid_event(struct hid_device *hid, struct hid_field *field,
 		      struct hid_usage *usage, __s32 value);
 void hiddev_report_event(struct hid_device *hid, struct hid_report *report);
-int __init hiddev_init(void);
-void __exit hiddev_exit(void);
 #else
-static inline int hiddev_connect(struct hid_device *hid) { return -1; }
+static inline int hiddev_connect(struct hid_device *hid,
+		unsigned int force)
+{ return -1; }
 static inline void hiddev_disconnect(struct hid_device *hid) { }
-static inline void hiddev_hid_event(struct hid_device *hid, 
-                                         struct hid_field *field,
-                                         struct hid_usage *usage,
-                                         __s32 value) { }
-static inline void hiddev_report_event(struct hid_device *hid,
-                                       struct hid_report *report) { }
-static inline int hiddev_init(void) { return 0; }
-static inline void hiddev_exit(void) { }
+static inline void hiddev_hid_event(struct hid_device *hid, struct hid_field *field,
+		      struct hid_usage *usage, __s32 value) { }
+static inline void hiddev_report_event(struct hid_device *hid, struct hid_report *report) { }
 #endif
 
 #endif

@@ -54,32 +54,26 @@
  */
 
 #include <linux/module.h>
+#include <linux/slab.h>
 
-#include <linux/sched.h>
-#include <linux/fs.h>
-#include <linux/fcntl.h>
-#include <linux/kernel.h>
-#include <linux/timer.h>
 #include <linux/fd.h>
 #include <linux/hdreg.h>
-#include <linux/errno.h>
-#include <linux/types.h>
 #include <linux/delay.h>
-#include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/mutex.h>
 #include <linux/amifdreg.h>
 #include <linux/amifd.h>
-#include <linux/ioport.h>
+#include <linux/fs.h>
+#include <linux/blkdev.h>
+#include <linux/elevator.h>
+#include <linux/interrupt.h>
+#include <linux/platform_device.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 #include <asm/irq.h>
-
-#define MAJOR_NR FLOPPY_MAJOR
-#include <linux/blk.h>
 
 #undef DEBUG /* print _LOTS_ of infos */
 
@@ -115,9 +109,10 @@
 #define FD_HD_3 	0x55555555  /* high-density 3.5" (1760K) drive */
 #define FD_DD_5 	0xaaaaaaaa  /* double-density 5.25" (440K) drive */
 
-static long int fd_def_df0 = FD_DD_3;     /* default for df0 if it doesn't identify */
+static DEFINE_MUTEX(amiflop_mutex);
+static unsigned long int fd_def_df0 = FD_DD_3;     /* default for df0 if it doesn't identify */
 
-MODULE_PARM(fd_def_df0,"l");
+module_param(fd_def_df0, ulong, 0);
 MODULE_LICENSE("GPL");
 
 /*
@@ -137,12 +132,7 @@ static struct fd_drive_type drive_types[] = {
 { FD_DD_5,	"DD 5.25", 40, 2, 14716, 13630, 1, 40, 81, 6, 30, 2},
 { FD_NODRIVE, "No Drive", 0, 0,     0,     0, 0,  0,  0,  0,  0, 0}
 };
-static int num_dr_types = sizeof(drive_types) / sizeof(drive_types[0]);
-
-/* defaults for 3 1/2" HD-Disks */
-static int floppy_sizes[256]={880,880,880,880,720,720,720,720,};
-static int floppy_blocksizes[256];
-/* hardsector size assumed to be 512 */
+static int num_dr_types = ARRAY_SIZE(drive_types);
 
 static int amiga_read(int), dos_read(int);
 static void amiga_write(int), dos_write(int);
@@ -166,13 +156,16 @@ static volatile int fdc_busy = -1;
 static volatile int fdc_nested;
 static DECLARE_WAIT_QUEUE_HEAD(fdc_wait);
  
-static DECLARE_WAIT_QUEUE_HEAD(motor_wait);
+static DECLARE_COMPLETION(motor_on_completion);
 
 static volatile int selected = -1;	/* currently selected drive */
 
 static int writepending;
 static int writefromint;
 static char *raw_buf;
+static int fdc_queue;
+
+static DEFINE_SPINLOCK(amiflop_lock);
 
 #define RAW_BUF_SIZE 30000  /* size of raw disk data */
 
@@ -192,8 +185,7 @@ static unsigned char mfmencode[16]={
 static unsigned char mfmdecode[128];
 
 /* floppy internal millisecond timer stuff */
-static volatile int ms_busy = -1;
-static DECLARE_WAIT_QUEUE_HEAD(ms_wait);
+static DECLARE_COMPLETION(ms_wait_completion);
 #define MS_TICKS ((amiga_eclock+50)/1000)
 
 /*
@@ -203,20 +195,11 @@ static DECLARE_WAIT_QUEUE_HEAD(ms_wait);
  */
 #define MAX_ERRORS 12
 
+#define custom amiga_custom
+
 /* Prevent "aliased" accesses. */
 static int fd_ref[4] = { 0,0,0,0 };
-static int fd_device[4] = { 0,0,0,0 };
-
-/*
- * Current device number. Taken either from the block header or from the
- * format request descriptor.
- */
-#define CURRENT_DEVICE (CURRENT->rq_dev)
-
-/* Current error count. */
-#define CURRENT_ERRORS (CURRENT->errors)
-
-
+static int fd_device[4] = { 0, 0, 0, 0 };
 
 /*
  * Here come the actual hardware access and helper functions.
@@ -226,30 +209,27 @@ static int fd_device[4] = { 0,0,0,0 };
 
 /* Milliseconds timer */
 
-static void ms_isr(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t ms_isr(int irq, void *dummy)
 {
-	ms_busy = -1;
-	wake_up(&ms_wait);
+	complete(&ms_wait_completion);
+	return IRQ_HANDLED;
 }
 
 /* all waits are queued up 
    A more generic routine would do a schedule a la timer.device */
 static void ms_delay(int ms)
 {
-	unsigned long flags;
 	int ticks;
+	static DEFINE_MUTEX(mutex);
+
 	if (ms > 0) {
-		save_flags(flags);
-		cli();
-		while (ms_busy == 0)
-			sleep_on(&ms_wait);
-		ms_busy = 0;
-		restore_flags(flags);
+		mutex_lock(&mutex);
 		ticks = MS_TICKS*ms-1;
 		ciaa.tblo=ticks%256;
 		ciaa.tbhi=ticks/256;
 		ciaa.crb=0x19; /*count eclock, force load, one-shoot, start */
-		sleep_on(&ms_wait);
+		wait_for_completion(&ms_wait_completion);
+		mutex_unlock(&mutex);
 	}
 }
 
@@ -270,13 +250,11 @@ static void get_fdc(int drive)
 #ifdef DEBUG
 	printk("get_fdc: drive %d  fdc_busy %d  fdc_nested %d\n",drive,fdc_busy,fdc_nested);
 #endif
-	save_flags(flags);
-	cli();
-	while (!try_fdc(drive))
-		sleep_on(&fdc_wait);
+	local_irq_save(flags);
+	wait_event(fdc_wait, try_fdc(drive));
 	fdc_busy = drive;
 	fdc_nested++;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static inline void rel_fdc(void)
@@ -332,8 +310,7 @@ static void fd_deselect (int drive)
 	}
 
 	get_fdc(drive);
-	save_flags (flags);
-	cli();
+	local_irq_save(flags);
 
 	selected = -1;
 
@@ -341,7 +318,7 @@ static void fd_deselect (int drive)
 	prb |= (SELMASK(0)|SELMASK(1)|SELMASK(2)|SELMASK(3));
 	ciab.prb = prb;
 
-	restore_flags (flags);
+	local_irq_restore (flags);
 	rel_fdc();
 
 }
@@ -349,7 +326,7 @@ static void fd_deselect (int drive)
 static void motor_on_callback(unsigned long nr)
 {
 	if (!(ciaa.pra & DSKRDY) || --on_attempts == 0) {
-		wake_up (&motor_wait);
+		complete_all(&motor_on_completion);
 	} else {
 		motor_on_timer.expires = jiffies + HZ/10;
 		add_timer(&motor_on_timer);
@@ -366,11 +343,12 @@ static int fd_motor_on(int nr)
 		unit[nr].motor = 1;
 		fd_select(nr);
 
+		INIT_COMPLETION(motor_on_completion);
 		motor_on_timer.data = nr;
 		mod_timer(&motor_on_timer, jiffies + HZ/2);
 
 		on_attempts = 10;
-		sleep_on (&motor_wait);
+		wait_for_completion(&motor_on_completion);
 		fd_deselect(nr);
 	}
 
@@ -408,16 +386,6 @@ static void fd_motor_off(unsigned long drive)
 	fd_select(drive);
 	udelay (1);
 	fd_deselect(drive);
-
-#ifdef MODULE
-/*
-  this is the last interrupt for any drive access, happens after
-  release (from floppy_off). So we have to wait until now to decrease
-  the use count.
-*/
-	if (decusecount)
-		MOD_DEC_USE_COUNT;
-#endif
 }
 
 static void floppy_off (unsigned int nr)
@@ -589,7 +557,7 @@ static unsigned long fd_get_drive_id(int drive)
 	return (id);
 }
 
-static void fd_block_done(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t fd_block_done(int irq, void *dummy)
 {
 	if (block_flag)
 		custom.dsklen = 0x4000;
@@ -604,14 +572,14 @@ static void fd_block_done(int irq, void *dummy, struct pt_regs *fp)
 		block_flag = 0;
 		wake_up (&wait_fd_block);
 	}
+	return IRQ_HANDLED;
 }
 
 static void raw_read(int drive)
 {
 	drive&=3;
 	get_fdc(drive);
-	while (block_flag)
-		sleep_on(&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 	fd_select(drive);
 	/* setup adkcon bits correctly */
 	custom.adkcon = ADK_MSBSYNC;
@@ -626,8 +594,7 @@ static void raw_read(int drive)
 
 	block_flag = 1;
 
-	while (block_flag)
-		sleep_on (&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 
 	custom.dsklen = 0;
 	fd_deselect(drive);
@@ -644,8 +611,7 @@ static int raw_write(int drive)
 		rel_fdc();
 		return 0;
 	}
-	while (block_flag)
-		sleep_on(&wait_fd_block);
+	wait_event(wait_fd_block, !block_flag);
 	fd_select(drive);
 	/* clear adkcon bits */
 	custom.adkcon = ADK_PRECOMP1|ADK_PRECOMP0|ADK_WORDSYNC|ADK_MSBSYNC;
@@ -1312,10 +1278,9 @@ static int non_int_flush_track (unsigned long nr)
 		rel_fdc();
 		return 0;
 	}
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	if (writepending != 2) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		(*unit[nr].dtype->write_fkt)(nr);
 		if (!raw_write(nr)) {
 			printk (KERN_NOTICE "floppy disk write protected "
@@ -1323,11 +1288,10 @@ static int non_int_flush_track (unsigned long nr)
 			writepending = 0;
 			return 0;
 		}
-		while (block_flag == 2)
-			sleep_on (&wait_fd_block);
+		wait_event(wait_fd_block, block_flag != 2);
 	}
 	else {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		ms_delay(2); /* 2 ms post_write delay */
 		post_write(nr);
 	}
@@ -1370,141 +1334,148 @@ static int get_track(int drive, int track)
 	return -1;
 }
 
+/*
+ * Round-robin between our available drives, doing one request from each
+ */
+static struct request *set_next_request(void)
+{
+	struct request_queue *q;
+	int cnt = FD_MAX_UNITS;
+	struct request *rq = NULL;
+
+	/* Find next queue we can dispatch from */
+	fdc_queue = fdc_queue + 1;
+	if (fdc_queue == FD_MAX_UNITS)
+		fdc_queue = 0;
+
+	for(cnt = FD_MAX_UNITS; cnt > 0; cnt--) {
+
+		if (unit[fdc_queue].type->code == FD_NODRIVE) {
+			if (++fdc_queue == FD_MAX_UNITS)
+				fdc_queue = 0;
+			continue;
+		}
+
+		q = unit[fdc_queue].gendisk->queue;
+		if (q) {
+			rq = blk_fetch_request(q);
+			if (rq)
+				break;
+		}
+
+		if (++fdc_queue == FD_MAX_UNITS)
+			fdc_queue = 0;
+	}
+
+	return rq;
+}
+
 static void redo_fd_request(void)
 {
+	struct request *rq;
 	unsigned int cnt, block, track, sector;
-	int device, drive;
+	int drive;
 	struct amiga_floppy_struct *floppy;
 	char *data;
 	unsigned long flags;
+	int err;
 
-	if (!QUEUE_EMPTY && CURRENT->rq_status == RQ_INACTIVE){
-		return;
-	}
-
- repeat:
-	if (QUEUE_EMPTY) {
+next_req:
+	rq = set_next_request();
+	if (!rq) {
 		/* Nothing left to do */
 		return;
 	}
 
-	if (MAJOR(CURRENT->rq_dev) != MAJOR_NR)
-		panic(DEVICE_NAME ": request list destroyed");
+	floppy = rq->rq_disk->private_data;
+	drive = floppy - unit;
 
-	if (CURRENT->bh && !buffer_locked(CURRENT->bh))
-		panic(DEVICE_NAME ": block not locked");
-
-	device = MINOR(CURRENT_DEVICE);
-	if (device < 8) {
-		/* manual selection */
-		drive = device & 3;
-		floppy = unit + drive;
-	} else {
-		/* Auto-detection */
-#ifdef DEBUG
-		printk("redo_fd_request: can't handle auto detect\n");
-		printk("redo_fd_request: default to normal\n");
-#endif
-		drive = device & 3;
-		floppy = unit + drive;
-	}
-
+next_segment:
 	/* Here someone could investigate to be more efficient */
-	for (cnt = 0; cnt < CURRENT->current_nr_sectors; cnt++) { 
+	for (cnt = 0, err = 0; cnt < blk_rq_cur_sectors(rq); cnt++) {
 #ifdef DEBUG
 		printk("fd: sector %ld + %d requested for %s\n",
-		       CURRENT->sector,cnt,
-		       (CURRENT->cmd==READ)?"read":"write");
+		       blk_rq_pos(rq), cnt,
+		       (rq_data_dir(rq) == READ) ? "read" : "write");
 #endif
-		block = CURRENT->sector + cnt;
+		block = blk_rq_pos(rq) + cnt;
 		if ((int)block > floppy->blocks) {
-			end_request(0);
-			goto repeat;
+			err = -EIO;
+			break;
 		}
 
 		track = block / (floppy->dtype->sects * floppy->type->sect_mult);
 		sector = block % (floppy->dtype->sects * floppy->type->sect_mult);
-		data = CURRENT->buffer + 512 * cnt;
+		data = rq->buffer + 512 * cnt;
 #ifdef DEBUG
 		printk("access to track %d, sector %d, with buffer at "
 		       "0x%08lx\n", track, sector, data);
 #endif
 
-		if ((CURRENT->cmd != READ) && (CURRENT->cmd != WRITE)) {
-			printk(KERN_WARNING "do_fd_request: unknown command\n");
-			end_request(0);
-			goto repeat;
-		}
 		if (get_track(drive, track) == -1) {
-			end_request(0);
-			goto repeat;
+			err = -EIO;
+			break;
 		}
 
-		switch (CURRENT->cmd) {
-		case READ:
-			memcpy(data, unit[drive].trackbuf + sector * 512, 512);
-			break;
-
-		case WRITE:
-			memcpy(unit[drive].trackbuf + sector * 512, data, 512);
+		if (rq_data_dir(rq) == READ) {
+			memcpy(data, floppy->trackbuf + sector * 512, 512);
+		} else {
+			memcpy(floppy->trackbuf + sector * 512, data, 512);
 
 			/* keep the drive spinning while writes are scheduled */
 			if (!fd_motor_on(drive)) {
-				end_request(0);
-				goto repeat;
+				err = -EIO;
+				break;
 			}
 			/*
 			 * setup a callback to write the track buffer
 			 * after a short (1 tick) delay.
 			 */
-			save_flags (flags);
-			cli();
+			local_irq_save(flags);
 
-			unit[drive].dirty = 1;
+			floppy->dirty = 1;
 		        /* reset the timer */
-			mod_timer(flush_track_timer + drive, jiffies + 1);
-			restore_flags (flags);
-			break;
+			mod_timer (flush_track_timer + drive, jiffies + 1);
+			local_irq_restore(flags);
 		}
 	}
-	CURRENT->nr_sectors -= CURRENT->current_nr_sectors;
-	CURRENT->sector += CURRENT->current_nr_sectors;
 
-	end_request(1);
-	goto repeat;
+	if (__blk_end_request_cur(rq, err))
+		goto next_segment;
+	goto next_req;
 }
 
-static void do_fd_request(request_queue_t * q)
+static void do_fd_request(struct request_queue * q)
 {
 	redo_fd_request();
 }
 
-static int fd_ioctl(struct inode *inode, struct file *filp,
+static int fd_getgeo(struct block_device *bdev, struct hd_geometry *geo)
+{
+	int drive = MINOR(bdev->bd_dev) & 3;
+
+	geo->heads = unit[drive].type->heads;
+	geo->sectors = unit[drive].dtype->sects * unit[drive].type->sect_mult;
+	geo->cylinders = unit[drive].type->tracks;
+	return 0;
+}
+
+static int fd_locked_ioctl(struct block_device *bdev, fmode_t mode,
 		    unsigned int cmd, unsigned long param)
 {
-	int drive = inode->i_rdev & 3;
+	struct amiga_floppy_struct *p = bdev->bd_disk->private_data;
+	int drive = p - unit;
 	static struct floppy_struct getprm;
+	void __user *argp = (void __user *)param;
 
 	switch(cmd){
-	case HDIO_GETGEO:
-	{
-		struct hd_geometry loc;
-		loc.heads = unit[drive].type->heads;
-		loc.sectors = unit[drive].dtype->sects * unit[drive].type->sect_mult;
-		loc.cylinders = unit[drive].type->tracks;
-		loc.start = 0;
-		if (copy_to_user((void *)param, (void *)&loc,
-				 sizeof(struct hd_geometry)))
-			return -EFAULT;
-		break;
-	}
 	case FDFMTBEG:
 		get_fdc(drive);
 		if (fd_ref[drive] > 1) {
 			rel_fdc();
 			return -EBUSY;
 		}
-		fsync_dev(inode->i_rdev);
+		fsync_bdev(bdev);
 		if (fd_motor_on(drive) == 0) {
 			rel_fdc();
 			return -ENODEV;
@@ -1517,12 +1488,12 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		rel_fdc();
 		break;
 	case FDFMTTRK:
-		if (param < unit[drive].type->tracks * unit[drive].type->heads)
+		if (param < p->type->tracks * p->type->heads)
 		{
 			get_fdc(drive);
 			if (fd_seek(drive,param) != 0){
-				memset(unit[drive].trackbuf, FD_FILL_BYTE,
-				       unit[drive].dtype->sects * unit[drive].type->sect_mult * 512);
+				memset(p->trackbuf, FD_FILL_BYTE,
+				       p->dtype->sects * p->type->sect_mult * 512);
 				non_int_flush_track(drive);
 			}
 			floppy_off(drive);
@@ -1533,24 +1504,16 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 	case FDFMTEND:
 		floppy_off(drive);
-		invalidate_device(inode->i_rdev, 0);
+		invalidate_bdev(bdev);
 		break;
 	case FDGETPRM:
 		memset((void *)&getprm, 0, sizeof (getprm));
-		getprm.track=unit[drive].type->tracks;
-		getprm.head=unit[drive].type->heads;
-		getprm.sect=unit[drive].dtype->sects * unit[drive].type->sect_mult;
-		getprm.size=unit[drive].blocks;
-		if (copy_to_user((void *)param,
-				 (void *)&getprm,
-				 sizeof(struct floppy_struct)))
+		getprm.track=p->type->tracks;
+		getprm.head=p->type->heads;
+		getprm.sect=p->dtype->sects * p->type->sect_mult;
+		getprm.size=p->blocks;
+		if (copy_to_user(argp, &getprm, sizeof(struct floppy_struct)))
 			return -EFAULT;
-		break;
-	case BLKGETSIZE:
-		return put_user(unit[drive].blocks,(unsigned long *)param);
-		break;
-	case BLKGETSIZE64:
-		return put_user((u64)unit[drive].blocks << 9, (u64 *)param);
 		break;
 	case FDSETPRM:
 	case FDDEFPRM:
@@ -1561,11 +1524,10 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		break;
 #ifdef RAW_IOCTL
 	case IOCTL_RAW_TRACK:
-		if (copy_to_user((void *)param, raw_buf,
-				 unit[drive].type->read_size))
+		if (copy_to_user(argp, raw_buf, p->type->read_size))
 			return -EFAULT;
 		else
-			return unit[drive].type->read_size;
+			return p->type->read_size;
 #endif
 	default:
 		printk(KERN_DEBUG "fd_ioctl: unknown cmd %d for drive %d.",
@@ -1573,6 +1535,18 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		return -ENOSYS;
 	}
 	return 0;
+}
+
+static int fd_ioctl(struct block_device *bdev, fmode_t mode,
+			     unsigned int cmd, unsigned long param)
+{
+	int ret;
+
+	mutex_lock(&amiflop_mutex);
+	ret = fd_locked_ioctl(bdev, mode, cmd, param);
+	mutex_unlock(&amiflop_mutex);
+
+	return ret;
 }
 
 static void fd_probe(int dev)
@@ -1610,26 +1584,24 @@ static void fd_probe(int dev)
  * /dev/PS0 etc), and disallows simultaneous access to the same
  * drive with different device numbers.
  */
-static int floppy_open(struct inode *inode, struct file *filp)
+static int floppy_open(struct block_device *bdev, fmode_t mode)
 {
-	int drive;
+	int drive = MINOR(bdev->bd_dev) & 3;
+	int system =  (MINOR(bdev->bd_dev) & 4) >> 2;
 	int old_dev;
-	int system;
 	unsigned long flags;
 
-	drive = MINOR(inode->i_rdev) & 3;
+	mutex_lock(&amiflop_mutex);
 	old_dev = fd_device[drive];
 
-	if (fd_ref[drive])
-		if (old_dev != inode->i_rdev)
-			return -EBUSY;
+	if (fd_ref[drive] && old_dev != system) {
+		mutex_unlock(&amiflop_mutex);
+		return -EBUSY;
+	}
 
-	if (unit[drive].type->code == FD_NODRIVE)
-		return -ENODEV;
-
-	if (filp && filp->f_mode & 3) {
-		check_disk_change(inode->i_rdev);
-		if (filp->f_mode & 2 ) {
+	if (mode & (FMODE_READ|FMODE_WRITE)) {
+		check_disk_change(bdev);
+		if (mode & FMODE_WRITE) {
 			int wrprot;
 
 			get_fdc(drive);
@@ -1638,40 +1610,36 @@ static int floppy_open(struct inode *inode, struct file *filp)
 			fd_deselect (drive);
 			rel_fdc();
 
-			if (wrprot)
+			if (wrprot) {
+				mutex_unlock(&amiflop_mutex);
 				return -EROFS;
+			}
 		}
 	}
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	fd_ref[drive]++;
-	fd_device[drive] = inode->i_rdev;
-#ifdef MODULE
-	if (unit[drive].motor == 0)
-		MOD_INC_USE_COUNT;
-#endif
-	restore_flags(flags);
+	fd_device[drive] = system;
+	local_irq_restore(flags);
 
-	if (old_dev && old_dev != inode->i_rdev)
-		invalidate_buffers(old_dev);
-
-	system=(inode->i_rdev & 4)>>2;
 	unit[drive].dtype=&data_types[system];
 	unit[drive].blocks=unit[drive].type->heads*unit[drive].type->tracks*
 		data_types[system].sects*unit[drive].type->sect_mult;
-	floppy_sizes[MINOR(inode->i_rdev)] = unit[drive].blocks >> 1;
+	set_capacity(unit[drive].gendisk, unit[drive].blocks);
 
 	printk(KERN_INFO "fd%d: accessing %s-disk with %s-layout\n",drive,
 	       unit[drive].type->name, data_types[system].name);
 
+	mutex_unlock(&amiflop_mutex);
 	return 0;
 }
 
-static int floppy_release(struct inode * inode, struct file * filp)
+static int floppy_release(struct gendisk *disk, fmode_t mode)
 {
-	int drive = MINOR(inode->i_rdev) & 3;
+	struct amiga_floppy_struct *p = disk->private_data;
+	int drive = p - unit;
 
+	mutex_lock(&amiflop_mutex);
 	if (unit[drive].dirty == 1) {
 		del_timer (flush_track_timer + drive);
 		non_int_flush_track (drive);
@@ -1685,25 +1653,22 @@ static int floppy_release(struct inode * inode, struct file * filp)
 /* the mod_use counter is handled this way */
 	floppy_off (drive | 0x40000000);
 #endif
+	mutex_unlock(&amiflop_mutex);
 	return 0;
 }
 
 /*
- * floppy-change is never called from an interrupt, so we can relax a bit
+ * check_events is never called from an interrupt, so we can relax a bit
  * here, sleep etc. Note that floppy-on tries to set current_DOR to point
  * to the desired drive, but it will probably not survive the sleep if
  * several floppies are used at the same time: thus the loop.
  */
-static int amiga_floppy_change(kdev_t dev)
+static unsigned amiga_check_events(struct gendisk *disk, unsigned int clearing)
 {
-	int drive = MINOR(dev) & 3;
+	struct amiga_floppy_struct *p = disk->private_data;
+	int drive = p - unit;
 	int changed;
 	static int first_time = 1;
-
-	if (MAJOR(dev) != MAJOR_NR) {
-		printk(KERN_CRIT "floppy_change: not a floppy\n");
-		return 0;
-	}
 
 	if (first_time)
 		changed = first_time--;
@@ -1717,48 +1682,64 @@ static int amiga_floppy_change(kdev_t dev)
 
 	if (changed) {
 		fd_probe(drive);
-		unit[drive].track = -1;
-		unit[drive].dirty = 0;
+		p->track = -1;
+		p->dirty = 0;
 		writepending = 0; /* if this was true before, too bad! */
 		writefromint = 0;
-		return 1;
+		return DISK_EVENT_MEDIA_CHANGE;
 	}
 	return 0;
 }
 
-static struct block_device_operations floppy_fops = {
-	owner:			THIS_MODULE,
-	open:			floppy_open,
-	release:		floppy_release,
-	ioctl:			fd_ioctl,
-	check_media_change:	amiga_floppy_change,
+static const struct block_device_operations floppy_fops = {
+	.owner		= THIS_MODULE,
+	.open		= floppy_open,
+	.release	= floppy_release,
+	.ioctl		= fd_ioctl,
+	.getgeo		= fd_getgeo,
+	.check_events	= amiga_check_events,
 };
-
-void __init amiga_floppy_setup (char *str, int *ints)
-{
-	printk (KERN_INFO "amiflop: Setting default df0 to %x\n", ints[1]);
-	fd_def_df0 = ints[1];
-}
 
 static int __init fd_probe_drives(void)
 {
 	int drive,drives,nomem;
 
-	printk(KERN_INFO "FD: probing units\n" KERN_INFO "found ");
+	printk(KERN_INFO "FD: probing units\nfound ");
 	drives=0;
 	nomem=0;
 	for(drive=0;drive<FD_MAX_UNITS;drive++) {
+		struct gendisk *disk;
 		fd_probe(drive);
-		if (unit[drive].type->code != FD_NODRIVE) {
-			drives++;
-			if ((unit[drive].trackbuf = kmalloc(FLOPPY_MAX_SECTORS * 512, GFP_KERNEL)) == NULL) {
-				printk("no mem for ");
-				unit[drive].type = &drive_types[num_dr_types - 1]; /* FD_NODRIVE */
-				drives--;
-				nomem = 1;
-			}
-			printk("fd%d ",drive);
+		if (unit[drive].type->code == FD_NODRIVE)
+			continue;
+		disk = alloc_disk(1);
+		if (!disk) {
+			unit[drive].type->code = FD_NODRIVE;
+			continue;
 		}
+		unit[drive].gendisk = disk;
+
+		disk->queue = blk_init_queue(do_fd_request, &amiflop_lock);
+		if (!disk->queue) {
+			unit[drive].type->code = FD_NODRIVE;
+			continue;
+		}
+
+		drives++;
+		if ((unit[drive].trackbuf = kmalloc(FLOPPY_MAX_SECTORS * 512, GFP_KERNEL)) == NULL) {
+			printk("no mem for ");
+			unit[drive].type = &drive_types[num_dr_types - 1]; /* FD_NODRIVE */
+			drives--;
+			nomem = 1;
+		}
+		printk("fd%d ",drive);
+		disk->major = FLOPPY_MAJOR;
+		disk->first_minor = drive;
+		disk->fops = &floppy_fops;
+		sprintf(disk->disk_name, "fd%d", drive);
+		disk->private_data = &unit[drive];
+		set_capacity(disk, 880*2);
+		add_disk(disk);
 	}
 	if ((drives > 0) || (nomem == 0)) {
 		if (drives == 0)
@@ -1769,57 +1750,47 @@ static int __init fd_probe_drives(void)
 	printk("\n");
 	return -ENOMEM;
 }
-
-int __init amiga_floppy_init(void)
+ 
+static struct kobject *floppy_find(dev_t dev, int *part, void *data)
 {
-	int i;
+	int drive = *part & 3;
+	if (unit[drive].type->code == FD_NODRIVE)
+		return NULL;
+	*part = 0;
+	return get_disk(unit[drive].gendisk);
+}
 
-	if (!AMIGAHW_PRESENT(AMI_FLOPPY))
-		return -ENXIO;
+static int __init amiga_floppy_probe(struct platform_device *pdev)
+{
+	int i, ret;
 
-	if (register_blkdev(MAJOR_NR,"fd",&floppy_fops)) {
-		printk("fd: Unable to get major %d for floppy\n",MAJOR_NR);
+	if (register_blkdev(FLOPPY_MAJOR,"fd"))
 		return -EBUSY;
-	}
-	/*
-	 *  We request DSKPTR, DSKLEN and DSKDATA only, because the other
-	 *  floppy registers are too spreaded over the custom register space
-	 */
-	if (!request_mem_region(CUSTOM_PHYSADDR+0x20, 8, "amiflop [Paula]")) {
-		printk("fd: cannot get floppy registers\n");
-		unregister_blkdev(MAJOR_NR,"fd");
-		return -EBUSY;
-	}
-	if ((raw_buf = (char *)amiga_chip_alloc (RAW_BUF_SIZE, "Floppy")) ==
-	    NULL) {
+
+	ret = -ENOMEM;
+	raw_buf = amiga_chip_alloc(RAW_BUF_SIZE, "Floppy");
+	if (!raw_buf) {
 		printk("fd: cannot get chip mem buffer\n");
-		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
-		unregister_blkdev(MAJOR_NR,"fd");
-		return -ENOMEM;
+		goto out_blkdev;
 	}
+
+	ret = -EBUSY;
 	if (request_irq(IRQ_AMIGA_DSKBLK, fd_block_done, 0, "floppy_dma", NULL)) {
 		printk("fd: cannot get irq for dma\n");
-		amiga_chip_free(raw_buf);
-		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
-		unregister_blkdev(MAJOR_NR,"fd");
-		return -EBUSY;
+		goto out_irq;
 	}
+
 	if (request_irq(IRQ_AMIGA_CIAA_TB, ms_isr, 0, "floppy_timer", NULL)) {
 		printk("fd: cannot get irq for timer\n");
-		free_irq(IRQ_AMIGA_DSKBLK, NULL);
-		amiga_chip_free(raw_buf);
-		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
-		unregister_blkdev(MAJOR_NR,"fd");
-		return -EBUSY;
+		goto out_irq2;
 	}
-	if (fd_probe_drives() < 1) { /* No usable drives */
-		free_irq(IRQ_AMIGA_CIAA_TB, NULL);
-		free_irq(IRQ_AMIGA_DSKBLK, NULL);
-		amiga_chip_free(raw_buf);
-		release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
-		unregister_blkdev(MAJOR_NR,"fd");
-		return -ENXIO;
-	}
+
+	ret = -ENODEV;
+	if (fd_probe_drives() < 1) /* No usable drives */
+		goto out_probe;
+
+	blk_register_region(MKDEV(FLOPPY_MAJOR, 0), 256, THIS_MODULE,
+				floppy_find, NULL, NULL);
 
 	/* initialize variables */
 	init_timer(&motor_on_timer);
@@ -1844,10 +1815,6 @@ int __init amiga_floppy_init(void)
 	post_write_timer.data = 0;
 	post_write_timer.function = post_write;
   
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	blksize_size[MAJOR_NR] = floppy_blocksizes;
-	blk_size[MAJOR_NR] = floppy_sizes;
-
 	for (i = 0; i < 128; i++)
 		mfmdecode[i]=255;
 	for (i = 0; i < 16; i++)
@@ -1858,36 +1825,71 @@ int __init amiga_floppy_init(void)
 
 	/* init ms timer */
 	ciaa.crb = 8; /* one-shot, stop */
-
-	(void)do_floppy; /* avoid warning about unused variable */
 	return 0;
+
+out_probe:
+	free_irq(IRQ_AMIGA_CIAA_TB, NULL);
+out_irq2:
+	free_irq(IRQ_AMIGA_DSKBLK, NULL);
+out_irq:
+	amiga_chip_free(raw_buf);
+out_blkdev:
+	unregister_blkdev(FLOPPY_MAJOR,"fd");
+	return ret;
 }
 
-#ifdef MODULE
-#include <linux/version.h>
-
-int init_module(void)
-{
-	if (!MACH_IS_AMIGA)
-		return -ENXIO;
-	return amiga_floppy_init();
-}
-
-void cleanup_module(void)
+#if 0 /* not safe to unload */
+static int __exit amiga_floppy_remove(struct platform_device *pdev)
 {
 	int i;
 
-	for( i = 0; i < FD_MAX_UNITS; i++)
-		if (unit[i].type->code != FD_NODRIVE)
+	for( i = 0; i < FD_MAX_UNITS; i++) {
+		if (unit[i].type->code != FD_NODRIVE) {
+			struct request_queue *q = unit[i].gendisk->queue;
+			del_gendisk(unit[i].gendisk);
+			put_disk(unit[i].gendisk);
 			kfree(unit[i].trackbuf);
+			if (q)
+				blk_cleanup_queue(q);
+		}
+	}
+	blk_unregister_region(MKDEV(FLOPPY_MAJOR, 0), 256);
 	free_irq(IRQ_AMIGA_CIAA_TB, NULL);
 	free_irq(IRQ_AMIGA_DSKBLK, NULL);
 	custom.dmacon = DMAF_DISK; /* disable DMA */
 	amiga_chip_free(raw_buf);
-	blk_size[MAJOR_NR] = NULL;
-	blksize_size[MAJOR_NR] = NULL;
-	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
-	release_mem_region(CUSTOM_PHYSADDR+0x20, 8);
-	unregister_blkdev(MAJOR_NR, "fd");
+	unregister_blkdev(FLOPPY_MAJOR, "fd");
 }
 #endif
+
+static struct platform_driver amiga_floppy_driver = {
+	.driver   = {
+		.name	= "amiga-floppy",
+		.owner	= THIS_MODULE,
+	},
+};
+
+static int __init amiga_floppy_init(void)
+{
+	return platform_driver_probe(&amiga_floppy_driver, amiga_floppy_probe);
+}
+
+module_init(amiga_floppy_init);
+
+#ifndef MODULE
+static int __init amiga_floppy_setup (char *str)
+{
+	int n;
+	if (!MACH_IS_AMIGA)
+		return 0;
+	if (!get_option(&str, &n))
+		return 0;
+	printk (KERN_INFO "amiflop: Setting default df0 to %x\n", n);
+	fd_def_df0 = n;
+	return 1;
+}
+
+__setup("floppy=", amiga_floppy_setup);
+#endif
+
+MODULE_ALIAS("platform:amiga-floppy");

@@ -44,10 +44,10 @@ struct sembuf {
 /* arg for semctl system calls. */
 union semun {
 	int val;			/* value for SETVAL */
-	struct semid_ds *buf;		/* buffer for IPC_STAT & IPC_SET */
-	unsigned short *array;		/* array for GETALL & SETALL */
-	struct seminfo *__buf;		/* buffer for IPC_INFO */
-	void *__pad;
+	struct semid_ds __user *buf;	/* buffer for IPC_STAT & IPC_SET */
+	unsigned short __user *array;	/* array for GETALL & SETALL */
+	struct seminfo __user *__buf;	/* buffer for IPC_INFO */
+	void __user *__pad;
 };
 
 struct  seminfo {
@@ -77,55 +77,50 @@ struct  seminfo {
 #define SEMUSZ  20		/* sizeof struct sem_undo */
 
 #ifdef __KERNEL__
+#include <linux/atomic.h>
+#include <linux/rcupdate.h>
+#include <linux/cache.h>
 
-/* One semaphore structure for each semaphore in the system. */
-struct sem {
-	int	semval;		/* current value */
-	int	sempid;		/* pid of last operation */
-};
+struct task_struct;
 
 /* One sem_array data structure for each set of semaphores in the system. */
 struct sem_array {
-	struct kern_ipc_perm	sem_perm;	/* permissions .. see ipc.h */
+	struct kern_ipc_perm	____cacheline_aligned_in_smp
+				sem_perm;	/* permissions .. see ipc.h */
 	time_t			sem_otime;	/* last semop time */
 	time_t			sem_ctime;	/* last change time */
 	struct sem		*sem_base;	/* ptr to first semaphore in array */
-	struct sem_queue	*sem_pending;	/* pending operations to be processed */
-	struct sem_queue	**sem_pending_last; /* last pending operation */
-	struct sem_undo		*undo;		/* undo requests on this array */
-	unsigned long		sem_nsems;	/* no. of semaphores in array */
+	struct list_head	sem_pending;	/* pending operations to be processed */
+	struct list_head	list_id;	/* undo requests on this array */
+	int			sem_nsems;	/* no. of semaphores in array */
+	int			complex_count;	/* pending complex operations */
 };
 
-/* One queue for each sleeping process in the system. */
-struct sem_queue {
-	struct sem_queue *	next;	 /* next entry in the queue */
-	struct sem_queue **	prev;	 /* previous entry in the queue, *(q->prev) == q */
-	struct task_struct*	sleeper; /* this process */
-	struct sem_undo *	undo;	 /* undo structure */
-	int    			pid;	 /* process id of requesting process */
-	int    			status;	 /* completion status of operation */
-	struct sem_array *	sma;	 /* semaphore array for operations */
-	int			id;	 /* internal sem id */
-	struct sembuf *		sops;	 /* array of pending operations */
-	int			nsops;	 /* number of operations */
-	int			alter;	 /* operation will alter semaphore */
+#ifdef CONFIG_SYSVIPC
+
+struct sysv_sem {
+	struct sem_undo_list *undo_list;
 };
 
-/* Each task has a list of undo requests. They are executed automatically
- * when the process exits.
- */
-struct sem_undo {
-	struct sem_undo *	proc_next;	/* next entry on this process */
-	struct sem_undo *	id_next;	/* next entry on this semaphore set */
-	int			semid;		/* semaphore set identifier */
-	short *			semadj;		/* array of adjustments, one per semaphore */
+extern int copy_semundo(unsigned long clone_flags, struct task_struct *tsk);
+extern void exit_sem(struct task_struct *tsk);
+
+#else
+
+struct sysv_sem {
+	/* empty */
 };
 
-asmlinkage long sys_semget (key_t key, int nsems, int semflg);
-asmlinkage long sys_semop (int semid, struct sembuf *sops, unsigned nsops);
-asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg);
-asmlinkage long sys_semtimedop (int semid, struct sembuf *sops, 
-			unsigned nsops, const struct timespec *timeout);
+static inline int copy_semundo(unsigned long clone_flags, struct task_struct *tsk)
+{
+	return 0;
+}
+
+static inline void exit_sem(struct task_struct *tsk)
+{
+	return;
+}
+#endif
 
 #endif /* __KERNEL__ */
 

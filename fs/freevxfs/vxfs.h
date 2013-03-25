@@ -30,8 +30,6 @@
 #ifndef _VXFS_SUPER_H_
 #define _VXFS_SUPER_H_
 
-#ident "$Id: vxfs.h 1.12 2001/12/28 19:48:03 hch Exp $"
-
 /*
  * Veritas filesystem driver - superblock structure.
  *
@@ -39,7 +37,6 @@
  * superblocks of the Veritas Filesystem.
  */
 #include <linux/types.h>
-#include "vxfs_kcompat.h"
 
 
 /*
@@ -162,11 +159,11 @@ struct vxfs_sb {
  * In core superblock filesystem private data for VxFS.
  */
 struct vxfs_sb_info {
-	struct vxfs_sb		*vsi_raw;	/* raw (on disk) supeblock */
+	struct vxfs_sb		*vsi_raw;	/* raw (on disk) superblock */
 	struct buffer_head	*vsi_bp;	/* buffer for raw superblock*/
 	struct inode		*vsi_fship;	/* fileset header inode */
 	struct inode		*vsi_ilist;	/* inode list inode */
-	struct inode		*vsi_stilist;	/* structual inode list inode */
+	struct inode		*vsi_stilist;	/* structural inode list inode */
 	u_long			vsi_iext;	/* initial inode list */
 	ino_t			vsi_fshino;	/* fileset header inode */
 	daddr_t			vsi_oltext;	/* OLT extent */
@@ -255,12 +252,12 @@ enum {
  * Get filesystem private data from VFS inode.
  */
 #define VXFS_INO(ip) \
-	((struct vxfs_inode_info *)(ip)->u.generic_ip)
+	((struct vxfs_inode_info *)(ip)->i_private)
 
 /*
  * Get filesystem private data from VFS superblock.
  */
 #define VXFS_SBI(sbp) \
-	((struct vxfs_sb_info *)(sbp)->u.generic_sbp)
+	((struct vxfs_sb_info *)(sbp)->s_fs_info)
 
 #endif /* _VXFS_SUPER_H_ */

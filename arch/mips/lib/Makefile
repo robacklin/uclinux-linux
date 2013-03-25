@@ -2,25 +2,34 @@
 # Makefile for MIPS-specific library files..
 #
 
-USE_STANDARD_AS_RULE := true
+lib-y	+= csum_partial.o delay.o memcpy.o memcpy-inatomic.o memset.o \
+	   strlen_user.o strncpy_user.o strnlen_user.o uncached.o
 
-L_TARGET = lib.a
+obj-y			+= iomap.o
+obj-$(CONFIG_PCI)	+= iomap-pci.o
 
-obj-y				+= csum_partial.o csum_partial_copy.o \
-				   promlib.o rtc-std.o rtc-no.o memcpy.o \
-				   memset.o watch.o strlen_user.o \
-				   strncpy_user.o strnlen_user.o
+obj-$(CONFIG_CPU_LOONGSON2)	+= dump_tlb.o
+obj-$(CONFIG_CPU_MIPS32)	+= dump_tlb.o
+obj-$(CONFIG_CPU_MIPS64)	+= dump_tlb.o
+obj-$(CONFIG_CPU_NEVADA)	+= dump_tlb.o
+obj-$(CONFIG_CPU_R10000)	+= dump_tlb.o
+obj-$(CONFIG_CPU_R3000)		+= r3k_dump_tlb.o
+obj-$(CONFIG_CPU_R4300)		+= dump_tlb.o
+obj-$(CONFIG_CPU_R4X00)		+= dump_tlb.o
+obj-$(CONFIG_CPU_R5000)		+= dump_tlb.o
+obj-$(CONFIG_CPU_R5432)		+= dump_tlb.o
+obj-$(CONFIG_CPU_R5500)		+= dump_tlb.o
+obj-$(CONFIG_CPU_R6000)		+=
+obj-$(CONFIG_CPU_R8000)		+=
+obj-$(CONFIG_CPU_RM7000)	+= dump_tlb.o
+obj-$(CONFIG_CPU_RM9000)	+= dump_tlb.o
+obj-$(CONFIG_CPU_SB1)		+= dump_tlb.o
+obj-$(CONFIG_CPU_TX39XX)	+= r3k_dump_tlb.o
+obj-$(CONFIG_CPU_TX49XX)	+= dump_tlb.o
+obj-$(CONFIG_CPU_VR41XX)	+= dump_tlb.o
+obj-$(CONFIG_CPU_CAVIUM_OCTEON)	+= dump_tlb.o
+obj-$(CONFIG_CPU_XLR)		+= dump_tlb.o
+obj-$(CONFIG_CPU_XLP)		+= dump_tlb.o
 
-export-objs			:= rtc-std.o rtc-no.o
-
-ifeq ($(CONFIG_CPU_R3000)$(CONFIG_CPU_TX39XX),y)
-  obj-y	+= r3k_dump_tlb.o
-else
-  obj-y	+= dump_tlb.o
-endif
-
-obj-$(CONFIG_BLK_DEV_FD)	+= floppy-no.o floppy-std.o
-obj-$(subst m,y,$(CONFIG_IDE))	+= ide-std.o ide-no.o	# needed for ide module
-obj-$(CONFIG_PC_KEYB)		+= kbd-std.o
-
-include $(TOPDIR)/Rules.make
+# libgcc-style stuff needed in the kernel
+obj-y += ashldi3.o ashrdi3.o cmpdi2.o lshrdi3.o ucmpdi2.o

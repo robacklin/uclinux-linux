@@ -3,8 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -69,7 +68,7 @@ ieee754sp ieee754sp_div(ieee754sp x, ieee754sp y)
 		return x;
 
 
-		/* Infinity handeling
+		/* Infinity handling
 		 */
 
 	case CLPAIR(IEEE754_CLASS_INF, IEEE754_CLASS_INF):
@@ -86,7 +85,7 @@ ieee754sp ieee754sp_div(ieee754sp x, ieee754sp y)
 	case CLPAIR(IEEE754_CLASS_INF, IEEE754_CLASS_DNORM):
 		return ieee754sp_inf(xs ^ ys);
 
-		/* Zero handeling
+		/* Zero handling
 		 */
 
 	case CLPAIR(IEEE754_CLASS_ZERO, IEEE754_CLASS_ZERO):

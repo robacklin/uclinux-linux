@@ -9,14 +9,7 @@
  *
  *  E and F format directory handling
  */
-#include <linux/version.h>
-#include <linux/errno.h>
-#include <linux/fs.h>
-#include <linux/adfs_fs.h>
-#include <linux/sched.h>
-#include <linux/stat.h>
-#include <linux/spinlock.h>
-
+#include <linux/buffer_head.h>
 #include "adfs.h"
 #include "dir_f.h"
 
@@ -52,33 +45,15 @@ static inline int adfs_readname(char *buf, char *ptr, int maxlen)
 {
 	char *old_buf = buf;
 
-	while (*ptr >= ' ' && maxlen--) {
+	while ((unsigned char)*ptr >= ' ' && maxlen--) {
 		if (*ptr == '/')
 			*buf++ = '.';
 		else
 			*buf++ = *ptr;
 		ptr++;
 	}
-	*buf = '\0';
 
 	return buf - old_buf;
-}
-
-static inline void adfs_writename(char *to, char *from, int maxlen)
-{
-	int i;
-
-	for (i = 0; i < maxlen; i++) {
-		if (from[i] == '\0')
-			break;
-		if (from[i] == '.')
-			to[i] = '/';
-		else
-			to[i] = from[i];
-	}
-
-	for (; i < maxlen; i++)
-		to[i] = '\0';
 }
 
 #define ror13(v) ((v >> 13) | (v << 19))
@@ -92,7 +67,7 @@ static inline void adfs_writename(char *to, char *from, int maxlen)
 #define dir_u32(idx)				\
 	({ int _buf = idx >> blocksize_bits;	\
 	   int _off = idx - (_buf << blocksize_bits);\
-	  *(u32 *)(bh[_buf]->b_data + _off);	\
+	  *(__le32 *)(bh[_buf]->b_data + _off);	\
 	})
 
 #define bufoff(_bh,_idx)			\
@@ -111,7 +86,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 {
 	struct buffer_head * const *bh = dir->bh;
 	const int blocksize_bits = dir->sb->s_blocksize_bits;
-	union { u32 *ptr32; u8 *ptr8; } ptr, end;
+	union { __le32 *ptr32; u8 *ptr8; } ptr, end;
 	u32 dircheck = 0;
 	int last = 5 - 26;
 	int i = 0;
@@ -124,7 +99,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 	do {
 		last += 26;
 		do {
-			dircheck = cpu_to_le32(dir_u32(i)) ^ ror13(dircheck);
+			dircheck = le32_to_cpu(dir_u32(i)) ^ ror13(dircheck);
 
 			i += sizeof(u32);
 		} while (i < (last & ~3));
@@ -138,9 +113,9 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 		ptr.ptr8 = bufoff(bh, i);
 		end.ptr8 = ptr.ptr8 + last - i;
 
-		do
+		do {
 			dircheck = *ptr.ptr8++ ^ ror13(dircheck);
-		while (ptr.ptr8 < end.ptr8);
+		} while (ptr.ptr8 < end.ptr8);
 	}
 
 	/*
@@ -154,8 +129,8 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 	end.ptr8 = ptr.ptr8 + 36;
 
 	do {
-		unsigned int v = *ptr.ptr32++;
-		dircheck = cpu_to_le32(v) ^ ror13(dircheck);
+		__le32 v = *ptr.ptr32++;
+		dircheck = le32_to_cpu(v) ^ ror13(dircheck);
 	} while (ptr.ptr32 < end.ptr32);
 
 	return (dircheck ^ (dircheck >> 8) ^ (dircheck >> 16) ^ (dircheck >> 24)) & 0xff;
@@ -164,7 +139,7 @@ adfs_dir_checkbyte(const struct adfs_dir *dir)
 /*
  * Read and check that a directory is valid
  */
-int
+static int
 adfs_dir_read(struct super_block *sb, unsigned long object_id,
 	      unsigned int size, struct adfs_dir *dir)
 {
@@ -232,7 +207,8 @@ release_buffers:
  * convert a disk-based directory entry to a Linux ADFS directory entry
  */
 static inline void
-adfs_dir2obj(struct object_info *obj, struct adfs_direntry *de)
+adfs_dir2obj(struct adfs_dir *dir, struct object_info *obj,
+	struct adfs_direntry *de)
 {
 	obj->name_len =	adfs_readname(obj->name, de->dirobname, ADFS_F_NAME_LEN);
 	obj->file_id  = adfs_readval(de->dirinddiscadd, 3);
@@ -240,6 +216,23 @@ adfs_dir2obj(struct object_info *obj, struct adfs_direntry *de)
 	obj->execaddr = adfs_readval(de->direxec, 4);
 	obj->size     = adfs_readval(de->dirlen,  4);
 	obj->attr     = de->newdiratts;
+	obj->filetype = -1;
+
+	/*
+	 * object is a file and is filetyped and timestamped?
+	 * RISC OS 12-bit filetype is stored in load_address[19:8]
+	 */
+	if ((0 == (obj->attr & ADFS_NDA_DIRECTORY)) &&
+		(0xfff00000 == (0xfff00000 & obj->loadaddr))) {
+		obj->filetype = (__u16) ((0x000fff00 & obj->loadaddr) >> 8);
+
+		/* optionally append the ,xyz hex filetype suffix */
+		if (ADFS_SB(dir->sb)->s_ftsuffix)
+			obj->name_len +=
+				append_filetype_suffix(
+					&obj->name[obj->name_len],
+					obj->filetype);
+	}
 }
 
 /*
@@ -257,9 +250,9 @@ adfs_obj2dir(struct adfs_direntry *de, struct object_info *obj)
 
 /*
  * get a directory entry.  Note that the caller is responsible
- * for holding the relevent locks.
+ * for holding the relevant locks.
  */
-int
+static int
 __adfs_dir_get(struct adfs_dir *dir, int pos, struct object_info *obj)
 {
 	struct super_block *sb = dir->sb;
@@ -284,12 +277,12 @@ __adfs_dir_get(struct adfs_dir *dir, int pos, struct object_info *obj)
 	if (!de.dirobname[0])
 		return -ENOENT;
 
-	adfs_dir2obj(obj, &de);
+	adfs_dir2obj(dir, obj, &de);
 
 	return 0;
 }
 
-int
+static int
 __adfs_dir_put(struct adfs_dir *dir, int pos, struct object_info *obj)
 {
 	struct super_block *sb = dir->sb;
@@ -453,6 +446,22 @@ bad_dir:
 #endif
 }
 
+static int
+adfs_f_sync(struct adfs_dir *dir)
+{
+	int err = 0;
+	int i;
+
+	for (i = dir->nr_buffers - 1; i >= 0; i--) {
+		struct buffer_head *bh = dir->bh[i];
+		sync_dirty_buffer(bh);
+		if (buffer_req(bh) && !buffer_uptodate(bh))
+			err = -EIO;
+	}
+
+	return err;
+}
+
 static void
 adfs_f_free(struct adfs_dir *dir)
 {
@@ -468,11 +477,10 @@ adfs_f_free(struct adfs_dir *dir)
 }
 
 struct adfs_dir_ops adfs_f_dir_ops = {
-	adfs_f_read,
-	adfs_f_setpos,
-	adfs_f_getnext,
-	adfs_f_update,
-	NULL,
-	NULL,
-	adfs_f_free
+	.read		= adfs_f_read,
+	.setpos		= adfs_f_setpos,
+	.getnext	= adfs_f_getnext,
+	.update		= adfs_f_update,
+	.sync		= adfs_f_sync,
+	.free		= adfs_f_free
 };

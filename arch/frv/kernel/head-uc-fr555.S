@@ -9,12 +9,11 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/threads.h>
 #include <linux/linkage.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/spr-regs.h>
 #include <asm/mb86943a.h>
 #include "head.inc"
@@ -31,7 +30,7 @@
 #define __551_LCR	0xfeff1100
 #define __551_LSBR	0xfeff1c00
 
-	.section	.text.init,"ax"
+	__INIT
 	.balign		4
 
 ###############################################################################
@@ -209,7 +208,7 @@ __head_no_DCS2:
 	add		gr25,gr6,gr25
 	addi		gr25,#1,gr25
 __head_no_DCS3:
-	
+
 	slli		gr25,#20,gr25			; shift [11:0] -> [31:20]
 	bralr
 
@@ -228,7 +227,7 @@ __head_fr555_set_protection:
 
 	sethi.p		%hi(0xfff00000),gr11
 	setlo		%lo(0xfff00000),gr11
-		
+
 	# set the I/O region protection registers for FR555
 	sethi.p		%hi(__region_IO),gr7
 	setlo		%lo(__region_IO),gr7

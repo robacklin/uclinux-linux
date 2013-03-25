@@ -19,24 +19,30 @@ At the lowest level are algorithms, which register dynamically with the
 API.
 
 'Transforms' are user-instantiated objects, which maintain state, handle all
-of the implementation logic (e.g. manipulating page vectors), provide an 
-abstraction to the underlying algorithms, and handle common logical 
-operations (e.g. cipher modes, HMAC for digests).  However, at the user 
+of the implementation logic (e.g. manipulating page vectors) and provide an 
+abstraction to the underlying algorithms.  However, at the user 
 level they are very simple.
 
 Conceptually, the API layering looks like this:
 
   [transform api]  (user interface)
-  [transform ops]  (per-type logic glue e.g. cipher.c, digest.c)
+  [transform ops]  (per-type logic glue e.g. cipher.c, compress.c)
   [algorithm api]  (for registering algorithms)
   
 The idea is to make the user interface and algorithm registration API
 very simple, while hiding the core logic from both.  Many good ideas
 from existing APIs such as Cryptoapi and Nettle have been adapted for this.
 
-The API currently supports three types of transforms: Ciphers, Digests and
-Compressors.  The compression algorithms especially seem to be performing
-very well so far.
+The API currently supports five main types of transforms: AEAD (Authenticated
+Encryption with Associated Data), Block Ciphers, Ciphers, Compressors and
+Hashes.
+
+Please note that Block Ciphers is somewhat of a misnomer.  It is in fact
+meant to support all ciphers including stream ciphers.  The difference
+between Block Ciphers and Ciphers is that the latter operates on exactly
+one block while the former can operate on an arbitrary amount of data,
+subject to block size requirements (i.e., non-stream ciphers can only
+process multiples of blocks).
 
 Support for hardware crypto devices via an asynchronous interface is
 under development.
@@ -44,50 +50,38 @@ under development.
 Here's an example of how to use the API:
 
 	#include <linux/crypto.h>
+	#include <linux/err.h>
+	#include <linux/scatterlist.h>
 	
 	struct scatterlist sg[2];
 	char result[128];
-	struct crypto_tfm *tfm;
+	struct crypto_hash *tfm;
+	struct hash_desc desc;
 	
-	tfm = crypto_alloc_tfm("md5", 0);
-	if (tfm == NULL)
+	tfm = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(tfm))
 		fail();
 		
 	/* ... set up the scatterlists ... */
+
+	desc.tfm = tfm;
+	desc.flags = 0;
 	
-	crypto_digest_init(tfm);
-	crypto_digest_update(tfm, &sg, 2);
-	crypto_digest_final(tfm, result);
+	if (crypto_hash_digest(&desc, sg, 2, result))
+		fail();
 	
-	crypto_free_tfm(tfm);
+	crypto_free_hash(tfm);
 
     
 Many real examples are available in the regression test module (tcrypt.c).
 
 
-CONFIGURATION NOTES
-
-As Triple DES is part of the DES module, for those using modular builds,
-add the following line to /etc/modules.conf:
-
-  alias des3_ede des
-
-The Null algorithms reside in the crypto_null module, so these lines
-should also be added:
-
-  alias cipher_null crypto_null
-  alias digest_null crypto_null
-  alias compress_null crypto_null
-
-The SHA384 algorithm shares code within the SHA512 module, so you'll
-also need:
-  alias sha384 sha512
-
-
 DEVELOPER NOTES
 
 Transforms may only be allocated in user context, and cryptographic
-methods may only be called from softirq and user contexts.
+methods may only be called from softirq and user contexts.  For
+transforms with a setkey method it too should only be called from
+user context.
 
 When using the API for ciphers, performance will be optimal if each
 scatterlist contains data which is a multiple of the cipher's block
@@ -126,21 +120,23 @@ might already be working on.
 BUGS
 
 Send bug reports to:
-James Morris <jmorris@intercode.com.au>
-Cc: David S. Miller <davem@redhat.com>
+linux-crypto@vger.kernel.org
+Cc: Herbert Xu <herbert@gondor.apana.org.au>,
+    David S. Miller <davem@redhat.com>
 
 
 FURTHER INFORMATION
 
 For further patches and various updates, including the current TODO
 list, see:
-http://samba.org/~jamesm/crypto/
+http://gondor.apana.org.au/~herbert/crypto/
 
 
 AUTHORS
 
 James Morris
 David S. Miller
+Herbert Xu
 
 
 CREDITS
@@ -172,7 +168,7 @@ Portions of this API were derived from the following projects:
 and;
   
   Nettle (http://www.lysator.liu.se/~nisse/nettle/)
-    Niels Möller
+    Niels MÃ¶ller
 
 Original developers of the crypto algorithms:
 
@@ -188,14 +184,15 @@ Original developers of the crypto algorithms:
   Kartikey Mahendra Bhatt (CAST6)
   Jon Oberheide (ARC4)
   Jouni Malinen (Michael MIC)
+  NTT(Nippon Telegraph and Telephone Corporation) (Camellia)
 
 SHA1 algorithm contributors:
   Jean-Francois Dive
   
 DES algorithm contributors:
   Raimar Falke
-  Gisle Sælensminde
-  Niels Möller
+  Gisle SÃ¦lensminde
+  Niels MÃ¶ller
 
 Blowfish algorithm contributors:
   Herbert Valerio Riedel
@@ -215,8 +212,10 @@ AES algorithm contributors:
   Herbert Valerio Riedel
   Kyle McMartin
   Adam J. Richter
+  Fruhwirth Clemens (i586)
+  Linus Torvalds (i586)
 
-CAST5/CAST6 algorithm contributors:
+CAST5 algorithm contributors:
   Kartikey Mahendra Bhatt (original developers unknown, FSF copyright).
 
 TEA/XTEA algorithm contributors:
@@ -233,8 +232,17 @@ Whirlpool algorithm contributors:
 Anubis algorithm contributors:
   Aaron Grothe
 
+Tiger algorithm contributors:
+  Aaron Grothe
+
+VIA PadLock contributors:
+  Michal Ludvig
+
+Camellia algorithm contributors:
+  NTT(Nippon Telegraph and Telephone Corporation) (Camellia)
+
 Generic scatterwalk code by Adam J. Richter <adam@yggdrasil.com>
 
 Please send any credits updates or corrections to:
-James Morris <jmorris@intercode.com.au>
+Herbert Xu <herbert@gondor.apana.org.au>
 

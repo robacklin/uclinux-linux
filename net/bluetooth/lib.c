@@ -1,4 +1,4 @@
-/* 
+/*
    BlueZ - Bluetooth protocol stack for Linux
    Copyright (C) 2000-2001 Qualcomm Incorporated
 
@@ -12,21 +12,21 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
-/*
- * BlueZ kernel library.
- *
- * $Id: lib.c,v 1.2 2002/06/20 19:55:08 maxk Exp $
- */
+/* Bluetooth kernel library. */
+
+#define pr_fmt(fmt) "Bluetooth: " fmt
+
+#include <linux/module.h>
 
 #include <linux/kernel.h>
 #include <linux/stddef.h>
@@ -35,39 +35,16 @@
 
 #include <net/bluetooth/bluetooth.h>
 
-void bluez_dump(char *pref, __u8 *buf, int count)
-{
-	char *ptr;
-	char line[100];
-	int i;
-
-	printk(KERN_INFO "%s: dump, len %d\n", pref, count);
-
-	ptr = line;
-	*ptr = 0;
-	for (i = 0; i<count; i++) {
-		ptr += sprintf(ptr, " %2.2X", buf[i]);
-
-		if (i && !((i + 1) % 20)) {
-			printk(KERN_INFO "%s:%s\n", pref, line);
-			ptr = line;
-			*ptr = 0;
-		}
-	}
-
-	if (line[0])
-		printk(KERN_INFO "%s:%s\n", pref, line);
-}
-
 void baswap(bdaddr_t *dst, bdaddr_t *src)
 {
 	unsigned char *d = (unsigned char *) dst;
 	unsigned char *s = (unsigned char *) src;
-	int i;
+	unsigned int i;
 
 	for (i = 0; i < 6; i++)
 		d[i] = s[5 - i];
 }
+EXPORT_SYMBOL(baswap);
 
 char *batostr(bdaddr_t *ba)
 {
@@ -76,14 +53,15 @@ char *batostr(bdaddr_t *ba)
 
 	i ^= 1;
 	sprintf(str[i], "%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
-	        ba->b[0], ba->b[1], ba->b[2],
-		ba->b[3], ba->b[4], ba->b[5]);
+		ba->b[5], ba->b[4], ba->b[3],
+		ba->b[2], ba->b[1], ba->b[0]);
 
 	return str[i];
 }
+EXPORT_SYMBOL(batostr);
 
 /* Bluetooth error codes to Unix errno mapping */
-int bterr(__u16 code)
+int bt_to_errno(__u16 code)
 {
 	switch (code) {
 	case 0:
@@ -171,5 +149,44 @@ int bterr(__u16 code)
 
 	default:
 		return ENOSYS;
-	};
+	}
 }
+EXPORT_SYMBOL(bt_to_errno);
+
+int bt_info(const char *format, ...)
+{
+	struct va_format vaf;
+	va_list args;
+	int r;
+
+	va_start(args, format);
+
+	vaf.fmt = format;
+	vaf.va = &args;
+
+	r = pr_info("%pV", &vaf);
+
+	va_end(args);
+
+	return r;
+}
+EXPORT_SYMBOL(bt_info);
+
+int bt_err(const char *format, ...)
+{
+	struct va_format vaf;
+	va_list args;
+	int r;
+
+	va_start(args, format);
+
+	vaf.fmt = format;
+	vaf.va = &args;
+
+	r = pr_err("%pV", &vaf);
+
+	va_end(args);
+
+	return r;
+}
+EXPORT_SYMBOL(bt_err);

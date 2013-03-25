@@ -23,116 +23,75 @@
 # Copyright (C) 1994 by Hamish Macdonald
 #
 
-ARCHDIR = arch/$(ARCH)
-
-CCSPECS	:= $(shell $(CC) -v 2>&1 | grep "^Reading specs from " | head -1 | cut -c20-)
-CCDIR	:= $(strip $(patsubst %/specs,%,$(CCSPECS)))
-CPUCLASS := fr400
-
-# test for cross compiling
-COMPILE_ARCH = $(shell uname -m)
-
-#
-# If you want the kernel build to build modules outside of the tree
-# then define this and pass it to the main linux makefile
-#
-ifdef EXTRA_MODULE_DIRS
-SUBDIRS += $(EXTRA_MODULE_DIRS)
+ifdef CONFIG_MMU
+UTS_SYSNAME = -DUTS_SYSNAME=\"Linux\"
+else
+UTS_SYSNAME = -DUTS_SYSNAME=\"uClinux\"
 endif
 
-UTS_SYSNAME = -DUTS_SYSNAME=\"uClinux\"
+KBUILD_AFLAGS_MODULE += -G0 -mlong-calls
+KBUILD_CFLAGS_MODULE += -G0 -mlong-calls
 
-ARCHMODFLAGS	+= -G0 -mlong-calls
-CFLAGS		+= -G4
-LINKFLAGS	:= -X -T $(ARCHDIR)/vmlinux.ldi -Map linkmap.txt
+ifdef CONFIG_GPREL_DATA_8
+KBUILD_CFLAGS	+= -G8
+else
+ifdef CONFIG_GPREL_DATA_4
+KBUILD_CFLAGS	+= -G4
+else
+ifdef CONFIG_GPREL_DATA_NONE
+KBUILD_CFLAGS	+= -G0
+endif
+endif
+endif
+
+#LDFLAGS_vmlinux	:= -Map linkmap.txt
 
 ifdef CONFIG_GC_SECTIONS
-CFLAGS		+= -ffunction-sections -fdata-sections
-LINKFLAGS	+= --gc-sections
+KBUILD_CFLAGS	+= -ffunction-sections -fdata-sections
 endif
 
-ifndef CONFIG_UCLINUX
-CFLAGS		+= -mcpu=fr450
-AFLAGS		+= -mcpu=fr450
-ASFLAGS		+= -mcpu=fr450
-else
-ifdef CONFIG_FR55x
-CFLAGS		+= -mcpu=fr550 -DNO_MM
-AFLAGS		+= -mcpu=fr550 -DNO_MM
-ASFLAGS		+= -mcpu=fr550 -DNO_MM
-else
-CFLAGS		+= -mcpu=fr400 -DNO_MM
-AFLAGS		+= -mcpu=fr400 -DNO_MM
-ASFLAGS		+= -mcpu=fr400 -DNO_MM
-endif
+ifndef CONFIG_FRAME_POINTER
+KBUILD_CFLAGS	+= -mno-linked-fp
 endif
 
-ifndef CROSS_COMPILE
-ifndef CONFIG_UCLINUX
-CROSS_COMPILE = frv-linux-gnu-
+ifdef CONFIG_CPU_FR451_COMPILE
+KBUILD_CFLAGS	+= -mcpu=fr450
+KBUILD_AFLAGS	+= -mcpu=fr450
 else
-ifdef CONFIG_FR55x
-CROSS_COMPILE = frv550-uclinux-
+ifdef CONFIG_CPU_FR551_COMPILE
+KBUILD_CFLAGS	+= -mcpu=fr550
+KBUILD_AFLAGS	+= -mcpu=fr550
 else
-CROSS_COMPILE = frv400-uclinux-
-endif
+KBUILD_CFLAGS	+= -mcpu=fr400
+KBUILD_AFLAGS	+= -mcpu=fr400
 endif
 endif
 
 # pretend the kernel is going to run on an FR400 with no media-fp unit
 # - reserve CC3 for use with atomic ops
 # - all the extra registers are dealt with only at context switch time
-CFLAGS		+= -mno-fdpic -mgpr-32 -msoft-float -mno-media -ffixed-fcc3 -ffixed-cc3
-AFLAGS		+= -mno-fdpic
-ASFLAGS		+= -mno-fdpic
+KBUILD_CFLAGS	+= -mno-fdpic -mgpr-32 -msoft-float -mno-media
+KBUILD_CFLAGS	+= -ffixed-fcc3 -ffixed-cc3 -ffixed-gr15 -ffixed-icc2
+KBUILD_AFLAGS	+= -mno-fdpic
 
-# Set up the memory model.  RAM or ROM.
-ifdef CONFIG_RAMKERNEL
-MODEL = ram
-endif
-ifdef CONFIG_ROMKERNEL
-MODEL = rom
-endif
-ifdef CONFIG_HIMEMKERNEL
-MODEL = himem
-endif
-export MODEL
-
-
-HEAD := $(ARCHDIR)/kernel/head.o
-
-SUBDIRS += $(ARCHDIR)/kernel $(ARCHDIR)/mm $(ARCHDIR)/lib
-
-CORE_FILES := \
-	$(ARCHDIR)/kernel/entry-table.o \
-	$(ARCHDIR)/kernel/kernel.o \
-	$(ARCHDIR)/mm/mm.o $(CORE_FILES)
-
-ifdef CONFIG_MB93090_MB00
-SUBDIRS		+= $(ARCHDIR)/mb93090-mb00
-CORE_FILES	+= $(ARCHDIR)/mb93090-mb00/motherboard.o
+# make sure the .S files get compiled with debug info
+# and disable optimisations that are unhelpful whilst debugging
+ifdef CONFIG_DEBUG_INFO
+#KBUILD_CFLAGS	+= -O1
+KBUILD_AFLAGS	+= -Wa,--gdwarf2
 endif
 
-LIBS += $(ARCHDIR)/lib/lib.a 
+head-y		:= arch/frv/kernel/head.o arch/frv/kernel/init_task.o
 
+core-y		+= arch/frv/kernel/ arch/frv/mm/
+libs-y		+= arch/frv/lib/
 
-vmlinux: $(ARCHDIR)/vmlinux.ldi
-linux: $(ARCHDIR)/vmlinux.ldi
+core-$(CONFIG_MB93090_MB00)	+= arch/frv/mb93090-mb00/
 
-$(ARCHDIR)/vmlinux.ldi: $(ARCHDIR)/vmlinux.lds
-	cpp -P -nostdinc -I include -D__ASSEMBLY__ -E -o $@ $<
+all: Image
 
-bootstrap:
-	@$(MAKEBOOT) bootstrap
+Image: vmlinux
+	$(Q)$(MAKE) $(build)=arch/frv/boot $@
 
-archmrproper:
-	@$(MAKE) -C $(ARCHDIR)/boot mrproper
-
-archclean: FORCE
-	@$(MAKE) -C $(ARCHDIR)/boot clean
-
-archdep: scripts/mkdep symlinks
-	@$(MAKE) -C $(ARCHDIR)/boot dep
-
-
-.PHONY: FORCE
+archclean:
+	$(Q)$(MAKE) $(clean)=arch/frv/boot

@@ -1,340 +1,283 @@
 /*
- *  arch/s390/kernel/irq.c
+ *    Copyright IBM Corp. 2004,2011
+ *    Author(s): Martin Schwidefsky <schwidefsky@de.ibm.com>,
+ *		 Holger Smolinski <Holger.Smolinski@de.ibm.com>,
+ *		 Thomas Spatzier <tspat@de.ibm.com>,
  *
- *  S390 version
- *    Copyright (C) 1999,2000 IBM Deutschland Entwicklung GmbH, IBM Corporation
- *    Author(s): Ingo Adlung (adlung@de.ibm.com)
- *
- *  Derived from "arch/i386/kernel/irq.c"
- *    Copyright (C) 1992, 1999 Linus Torvalds, Ingo Molnar
- *
- *  S/390 I/O interrupt processing and I/O request processing is
- *   implemented in arch/s390/kernel/s390io.c
+ * This file contains interrupt related functions.
  */
-#include <linux/module.h>
-#include <linux/config.h>
-#include <linux/ptrace.h>
-#include <linux/errno.h>
+
 #include <linux/kernel_stat.h>
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/ioport.h>
 #include <linux/interrupt.h>
-#include <linux/timex.h>
+#include <linux/seq_file.h>
+#include <linux/proc_fs.h>
+#include <linux/profile.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/ftrace.h>
+#include <linux/errno.h>
 #include <linux/slab.h>
-#include <linux/string.h>
-#include <linux/random.h>
-#include <linux/smp.h>
-#include <linux/threads.h>
-#include <linux/smp_lock.h>
-#include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/irq.h>
-#include <asm/bitops.h>
-#include <asm/smp.h>
-#include <asm/pgtable.h>
-#include <asm/delay.h>
+#include <linux/cpu.h>
+#include <asm/irq_regs.h>
+#include <asm/cputime.h>
 #include <asm/lowcore.h>
+#include <asm/irq.h>
+#include "entry.h"
 
-void          s390_init_IRQ   ( void );
-void          s390_free_irq   ( unsigned int irq, void *dev_id);
-int           s390_request_irq( unsigned int irq,
-                     void           (*handler)(int, void *, struct pt_regs *),
-                     unsigned long  irqflags,
-                     const char    *devname,
-                     void          *dev_id);
+struct irq_class {
+	char *name;
+	char *desc;
+};
 
-#if 0
+static const struct irq_class intrclass_names[] = {
+	{.name = "EXT" },
+	{.name = "I/O" },
+	{.name = "CLK", .desc = "[EXT] Clock Comparator" },
+	{.name = "EXC", .desc = "[EXT] External Call" },
+	{.name = "EMS", .desc = "[EXT] Emergency Signal" },
+	{.name = "TMR", .desc = "[EXT] CPU Timer" },
+	{.name = "TAL", .desc = "[EXT] Timing Alert" },
+	{.name = "PFL", .desc = "[EXT] Pseudo Page Fault" },
+	{.name = "DSD", .desc = "[EXT] DASD Diag" },
+	{.name = "VRT", .desc = "[EXT] Virtio" },
+	{.name = "SCP", .desc = "[EXT] Service Call" },
+	{.name = "IUC", .desc = "[EXT] IUCV" },
+	{.name = "CPM", .desc = "[EXT] CPU Measurement" },
+	{.name = "CIO", .desc = "[I/O] Common I/O Layer Interrupt" },
+	{.name = "QAI", .desc = "[I/O] QDIO Adapter Interrupt" },
+	{.name = "DAS", .desc = "[I/O] DASD" },
+	{.name = "C15", .desc = "[I/O] 3215" },
+	{.name = "C70", .desc = "[I/O] 3270" },
+	{.name = "TAP", .desc = "[I/O] Tape" },
+	{.name = "VMR", .desc = "[I/O] Unit Record Devices" },
+	{.name = "LCS", .desc = "[I/O] LCS" },
+	{.name = "CLW", .desc = "[I/O] CLAW" },
+	{.name = "CTC", .desc = "[I/O] CTC" },
+	{.name = "APB", .desc = "[I/O] AP Bus" },
+	{.name = "CSC", .desc = "[I/O] CHSC Subchannel" },
+	{.name = "NMI", .desc = "[NMI] Machine Check" },
+};
+
 /*
- * The following vectors are part of the Linux architecture, there
- * is no hardware IRQ pin equivalent for them, they are triggered
- * through the ICC by us (IPIs), via smp_message_pass():
+ * show_interrupts is needed by /proc/interrupts.
  */
-BUILD_SMP_INTERRUPT(reschedule_interrupt)
-BUILD_SMP_INTERRUPT(invalidate_interrupt)
-BUILD_SMP_INTERRUPT(stop_cpu_interrupt)
-BUILD_SMP_INTERRUPT(mtrr_interrupt)
-BUILD_SMP_INTERRUPT(spurious_interrupt)
+int show_interrupts(struct seq_file *p, void *v)
+{
+	int i = *(loff_t *) v, j;
+
+	get_online_cpus();
+	if (i == 0) {
+		seq_puts(p, "           ");
+		for_each_online_cpu(j)
+			seq_printf(p, "CPU%d       ",j);
+		seq_putc(p, '\n');
+	}
+
+	if (i < NR_IRQS) {
+		seq_printf(p, "%s: ", intrclass_names[i].name);
+#ifndef CONFIG_SMP
+		seq_printf(p, "%10u ", kstat_irqs(i));
+#else
+		for_each_online_cpu(j)
+			seq_printf(p, "%10u ", kstat_cpu(j).irqs[i]);
+#endif
+		if (intrclass_names[i].desc)
+			seq_printf(p, "  %s", intrclass_names[i].desc);
+                seq_putc(p, '\n');
+        }
+	put_online_cpus();
+        return 0;
+}
+
+/*
+ * Switch to the asynchronous interrupt stack for softirq execution.
+ */
+asmlinkage void do_softirq(void)
+{
+	unsigned long flags, old, new;
+
+	if (in_interrupt())
+		return;
+
+	local_irq_save(flags);
+
+	if (local_softirq_pending()) {
+		/* Get current stack pointer. */
+		asm volatile("la %0,0(15)" : "=a" (old));
+		/* Check against async. stack address range. */
+		new = S390_lowcore.async_stack;
+		if (((new - old) >> (PAGE_SHIFT + THREAD_ORDER)) != 0) {
+			/* Need to switch to the async. stack. */
+			new -= STACK_FRAME_OVERHEAD;
+			((struct stack_frame *) new)->back_chain = old;
+
+			asm volatile("   la    15,0(%0)\n"
+				     "   basr  14,%2\n"
+				     "   la    15,0(%1)\n"
+				     : : "a" (new), "a" (old),
+				         "a" (__do_softirq)
+				     : "0", "1", "2", "3", "4", "5", "14",
+				       "cc", "memory" );
+		} else {
+			/* We are already on the async stack. */
+			__do_softirq();
+		}
+	}
+
+	local_irq_restore(flags);
+}
+
+#ifdef CONFIG_PROC_FS
+void init_irq_proc(void)
+{
+	struct proc_dir_entry *root_irq_dir;
+
+	root_irq_dir = proc_mkdir("irq", NULL);
+	create_prof_cpu_mask(root_irq_dir);
+}
 #endif
 
 /*
- * Global interrupt locks for SMP. Allow interrupts to come in on any
- * CPU, yet make cli/sti act globally to protect critical regions..
+ * ext_int_hash[index] is the list head for all external interrupts that hash
+ * to this index.
  */
-#ifdef CONFIG_SMP
-atomic_t global_irq_holder = ATOMIC_INIT(NO_PROC_ID);
-atomic_t global_irq_lock = ATOMIC_INIT(0);
-atomic_t global_irq_count = ATOMIC_INIT(0);
-atomic_t global_bh_count;
+static struct list_head ext_int_hash[256];
 
-/*
- * "global_cli()" is a special case, in that it can hold the
- * interrupts disabled for a longish time, and also because
- * we may be doing TLB invalidates when holding the global
- * IRQ lock for historical reasons. Thus we may need to check
- * SMP invalidate events specially by hand here (but not in
- * any normal spinlocks)
- *
- * Thankfully we don't need this as we can deliver flush tlbs with
- * interrupts disabled DJB :-)
- */
-#define check_smp_invalidate(cpu)
+struct ext_int_info {
+	ext_int_handler_t handler;
+	u16 code;
+	struct list_head entry;
+	struct rcu_head rcu;
+};
 
-static void show(char * str)
+/* ext_int_hash_lock protects the handler lists for external interrupts */
+DEFINE_SPINLOCK(ext_int_hash_lock);
+
+static void __init init_external_interrupts(void)
 {
-	int i;
-	unsigned long *stack;
-	int cpu = smp_processor_id();
+	int idx;
 
-	printk("\n%s, CPU %d:\n", str, cpu);
-	printk("irq:  %d [%d]\n",
-	       atomic_read(&global_irq_count),local_irq_count(smp_processor_id()));
-	printk("bh:   %d [%d]\n",
-	       atomic_read(&global_bh_count),local_bh_count(smp_processor_id()));
-	stack = (unsigned long *) &str;
-	for (i = 40; i ; i--) {
-		unsigned long x = *++stack;
-		if (x > (unsigned long) &init_task_union && x < (unsigned long) &vsprintf) {
-			printk("<[%08lx]> ", x);
-		}
-	}
+	for (idx = 0; idx < ARRAY_SIZE(ext_int_hash); idx++)
+		INIT_LIST_HEAD(&ext_int_hash[idx]);
 }
 
-#define MAXCOUNT 100000000
-
-static inline void wait_on_bh(void)
+static inline int ext_hash(u16 code)
 {
-	int count = MAXCOUNT;
-	do {
-		if (!--count) {
-			show("wait_on_bh");
-			count = ~0;
-		}
-		/* nothing .. wait for the other bh's to go away */
-	} while (atomic_read(&global_bh_count) != 0);
+	return (code + (code >> 9)) & 0xff;
 }
 
-static inline void wait_on_irq(int cpu)
+int register_external_interrupt(u16 code, ext_int_handler_t handler)
 {
-	int count = MAXCOUNT;
-
-	for (;;) {
-
-		/*
-		 * Wait until all interrupts are gone. Wait
-		 * for bottom half handlers unless we're
-		 * already executing in one..
-		 */
-		if (!atomic_read(&global_irq_count)) {
-			if (local_bh_count(cpu)||
-			    !atomic_read(&global_bh_count))
-				break;
-		}
-
-		/* Duh, we have to loop. Release the lock to avoid deadlocks */
-		atomic_set(&global_irq_lock, 0);
-
-		for (;;) {
-			if (!--count) {
-				show("wait_on_irq");
-				count = ~0;
-			}
-			__sti();
-			SYNC_OTHER_CORES(cpu);
-			__cli();
-			check_smp_invalidate(cpu);
-			if (atomic_read(&global_irq_count))
-				continue;
-			if (atomic_read(&global_irq_lock))
-				continue;
-			if (!local_bh_count(cpu)
-			    && atomic_read(&global_bh_count))
-				continue;
-			if (!atomic_compare_and_swap(0, 1, &global_irq_lock))
-				 break;
-		}
-	}
-}
-
-/*
- * This is called when we want to synchronize with
- * bottom half handlers. We need to wait until
- * no other CPU is executing any bottom half handler.
- *
- * Don't wait if we're already running in an interrupt
- * context or are inside a bh handler.
- */
-void synchronize_bh(void)
-{
-	if (atomic_read(&global_bh_count) && !in_interrupt())
-		wait_on_bh();
-}
-
-/*
- * This is called when we want to synchronize with
- * interrupts. We may for example tell a device to
- * stop sending interrupts: but to make sure there
- * are no interrupts that are executing on another
- * CPU we need to call this function.
- */
-void synchronize_irq(void)
-{
-	if (atomic_read(&global_irq_count)) {
-		/* Stupid approach */
-		cli();
-		sti();
-	}
-}
-
-static inline void get_irqlock(int cpu)
-{
-	if (atomic_compare_and_swap(0, 1, &global_irq_lock) != 0) {
-		/* do we already hold the lock? */
-		if ( cpu == atomic_read(&global_irq_holder))
-			return;
-		/* Uhhuh.. Somebody else got it. Wait.. */
-		do {
-			check_smp_invalidate(cpu);
-		} while (atomic_compare_and_swap(0, 1, &global_irq_lock) != 0);
-	}
-	/*
-	 * We also to make sure that nobody else is running
-	 * in an interrupt context.
-	 */
-	wait_on_irq(cpu);
-
-	/*
-	 * Ok, finally..
-	 */
-	atomic_set(&global_irq_holder,cpu);
-}
-
-#define EFLAGS_I_SHIFT 25
-
-/*
- * A global "cli()" while in an interrupt context
- * turns into just a local cli(). Interrupts
- * should use spinlocks for the (very unlikely)
- * case that they ever want to protect against
- * each other.
- *
- * If we already have local interrupts disabled,
- * this will not turn a local disable into a
- * global one (problems with spinlocks: this makes
- * save_flags+cli+sti usable inside a spinlock).
- */
-void __global_cli(void)
-{
+	struct ext_int_info *p;
 	unsigned long flags;
+	int index;
 
-	__save_flags(flags);
-	if (flags & (1 << EFLAGS_I_SHIFT)) {
-		int cpu = smp_processor_id();
-		__cli();
-		if (!in_irq())
-			get_irqlock(cpu);
-	}
+	p = kmalloc(sizeof(*p), GFP_ATOMIC);
+	if (!p)
+		return -ENOMEM;
+	p->code = code;
+	p->handler = handler;
+	index = ext_hash(code);
+
+	spin_lock_irqsave(&ext_int_hash_lock, flags);
+	list_add_rcu(&p->entry, &ext_int_hash[index]);
+	spin_unlock_irqrestore(&ext_int_hash_lock, flags);
+	return 0;
 }
+EXPORT_SYMBOL(register_external_interrupt);
 
-void __global_sti(void)
+int unregister_external_interrupt(u16 code, ext_int_handler_t handler)
 {
-
-	if (!in_irq())
-		release_irqlock(smp_processor_id());
-	__sti();
-}
-
-/*
- * SMP flags value to restore to:
- * 0 - global cli
- * 1 - global sti
- * 2 - local cli
- * 3 - local sti
- */
-unsigned long __global_save_flags(void)
-{
-	int retval;
-	int local_enabled;
+	struct ext_int_info *p;
 	unsigned long flags;
+	int index = ext_hash(code);
 
-	__save_flags(flags);
-	local_enabled = (flags >> EFLAGS_I_SHIFT) & 1;
-	/* default to local */
-	retval = 2 + local_enabled;
-
-	/* check for global flags if we're not in an interrupt */
-	if (!in_irq())
-	{
-		if (local_enabled)
-			retval = 1;
-		if (atomic_read(&global_irq_holder)== smp_processor_id())
-			retval = 0;
+	spin_lock_irqsave(&ext_int_hash_lock, flags);
+	list_for_each_entry_rcu(p, &ext_int_hash[index], entry) {
+		if (p->code == code && p->handler == handler) {
+			list_del_rcu(&p->entry);
+			kfree_rcu(p, rcu);
+		}
 	}
-	return retval;
+	spin_unlock_irqrestore(&ext_int_hash_lock, flags);
+	return 0;
 }
+EXPORT_SYMBOL(unregister_external_interrupt);
 
-void __global_restore_flags(unsigned long flags)
+void __irq_entry do_extint(struct pt_regs *regs, struct ext_code ext_code,
+			   unsigned int param32, unsigned long param64)
 {
-	switch (flags) {
-	case 0:
-		__global_cli();
-		break;
-	case 1:
-		__global_sti();
-		break;
-	case 2:
-		__cli();
-		break;
-	case 3:
-		__sti();
-		break;
-	default:
-		printk("global_restore_flags: %08lx (%08lx)\n",
-		       flags, (&flags)[-1]);
+	struct pt_regs *old_regs;
+	struct ext_int_info *p;
+	int index;
+
+	old_regs = set_irq_regs(regs);
+	irq_enter();
+	if (S390_lowcore.int_clock >= S390_lowcore.clock_comparator) {
+		/* Serve timer interrupts first. */
+		clock_comparator_work();
 	}
+	kstat_cpu(smp_processor_id()).irqs[EXTERNAL_INTERRUPT]++;
+	if (ext_code.code != 0x1004)
+		__get_cpu_var(s390_idle).nohz_delay = 1;
+
+	index = ext_hash(ext_code.code);
+	rcu_read_lock();
+	list_for_each_entry_rcu(p, &ext_int_hash[index], entry)
+		if (likely(p->code == ext_code.code))
+			p->handler(ext_code, param32, param64);
+	rcu_read_unlock();
+	irq_exit();
+	set_irq_regs(old_regs);
 }
-
-#endif
-
 
 void __init init_IRQ(void)
 {
-        s390_init_IRQ();
+	init_external_interrupts();
 }
 
+static DEFINE_SPINLOCK(sc_irq_lock);
+static int sc_irq_refcount;
 
-void free_irq(unsigned int irq, void *dev_id)
+void service_subclass_irq_register(void)
 {
-   s390_free_irq( irq, dev_id);
+	spin_lock(&sc_irq_lock);
+	if (!sc_irq_refcount)
+		ctl_set_bit(0, 9);
+	sc_irq_refcount++;
+	spin_unlock(&sc_irq_lock);
 }
+EXPORT_SYMBOL(service_subclass_irq_register);
 
-
-int request_irq( unsigned int   irq,
-                 void           (*handler)(int, void *, struct pt_regs *),
-                 unsigned long  irqflags,
-                 const char    *devname,
-                 void          *dev_id)
+void service_subclass_irq_unregister(void)
 {
-   return( s390_request_irq( irq, handler, irqflags, devname, dev_id ) );
-
+	spin_lock(&sc_irq_lock);
+	sc_irq_refcount--;
+	if (!sc_irq_refcount)
+		ctl_clear_bit(0, 9);
+	spin_unlock(&sc_irq_lock);
 }
+EXPORT_SYMBOL(service_subclass_irq_unregister);
 
-void init_irq_proc(void)
+static DEFINE_SPINLOCK(ma_subclass_lock);
+static int ma_subclass_refcount;
+
+void measurement_alert_subclass_register(void)
 {
-        /* For now, nothing... */
+	spin_lock(&ma_subclass_lock);
+	if (!ma_subclass_refcount)
+		ctl_set_bit(0, 5);
+	ma_subclass_refcount++;
+	spin_unlock(&ma_subclass_lock);
 }
+EXPORT_SYMBOL(measurement_alert_subclass_register);
 
-#ifdef CONFIG_SMP
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
-EXPORT_SYMBOL(global_irq_holder);
-EXPORT_SYMBOL(global_irq_lock);
-EXPORT_SYMBOL(global_irq_count);
-EXPORT_SYMBOL(global_bh_count);
-#endif
-
-EXPORT_SYMBOL(global_bh_lock);
+void measurement_alert_subclass_unregister(void)
+{
+	spin_lock(&ma_subclass_lock);
+	ma_subclass_refcount--;
+	if (!ma_subclass_refcount)
+		ctl_clear_bit(0, 5);
+	spin_unlock(&ma_subclass_lock);
+}
+EXPORT_SYMBOL(measurement_alert_subclass_unregister);

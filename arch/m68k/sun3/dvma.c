@@ -1,5 +1,11 @@
-
-/* dvma support routines */
+/*
+ * linux/arch/m68k/sun3/dvma.c
+ *
+ * Written by Sam Creasey
+ *
+ * Sun3 IOMMU routines used for dvma accesses.
+ *
+ */
 
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -13,18 +19,18 @@
 
 static unsigned long ptelist[120];
 
-inline unsigned long dvma_page(unsigned long kaddr, unsigned long vaddr)
+static unsigned long dvma_page(unsigned long kaddr, unsigned long vaddr)
 {
 	unsigned long pte;
 	unsigned long j;
 	pte_t ptep;
-	
+
 	j = *(volatile unsigned long *)kaddr;
 	*(volatile unsigned long *)kaddr = j;
 
-	ptep = __mk_pte(kaddr, PAGE_KERNEL);
+	ptep = pfn_pte(virt_to_pfn(kaddr), PAGE_KERNEL);
 	pte = pte_val(ptep);
-//		printk("dvma_remap: addr %lx -> %lx pte %08lx len %x\n", 
+//		printk("dvma_remap: addr %lx -> %lx pte %08lx len %x\n",
 //		       kaddr, vaddr, pte, len);
 	if(ptelist[(vaddr & 0xff000) >> PAGE_SHIFT] != pte) {
 		sun3_put_pte(vaddr, pte);
@@ -35,7 +41,7 @@ inline unsigned long dvma_page(unsigned long kaddr, unsigned long vaddr)
 
 }
 
-int dvma_map_iommu(unsigned long kaddr, unsigned long baddr, 
+int dvma_map_iommu(unsigned long kaddr, unsigned long baddr,
 			      int len)
 {
 
@@ -45,7 +51,7 @@ int dvma_map_iommu(unsigned long kaddr, unsigned long baddr,
 	vaddr = dvma_btov(baddr);
 
 	end = vaddr + len;
-	
+
 	while(vaddr < end) {
 		dvma_page(kaddr, vaddr);
 		kaddr += PAGE_SIZE;

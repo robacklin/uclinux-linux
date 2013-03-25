@@ -7,14 +7,25 @@
  *
  * Copyright (c) 2001 port GmbH Halle/Saale
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_defs.h,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: can_defs.h,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -38,14 +49,27 @@
 * \file can_defs.h
 * \author Name, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
-* Module Desription 
+* Module Desription
 * see Doxygen Doc for all possibilites
 *
 *
 *
 */
+
+/* Configuration defines */
+#define DEBUG 0
+
+#define LDDK_USE_BLKREQUEST 0
+#define CAN4LINUX_PCI 0
+#define LDDK_USE_SYSCTL 0
+#define LDDK_USE_PROCINFO 0
+#define CAN_USE_FILTER 0
+#define LDDK_USE_REGISTER 1
+#define CAN_LOOPBACK_MODE 0
+#define DELAY 1               /* 1 jeffy */
+
 
 #if 0   /* auf uClinux statisch ?? */
 #ifndef NOMODULE
@@ -64,21 +88,19 @@
 #include <linux/module.h>
 
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/major.h>
 
 #include <linux/version.h>
+#include <linux/utsrelease.h>
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,4,12)
 # include <linux/slab.h>
 #else
 # include <linux/malloc.h>
 #endif
-
-#include <linux/wrapper.h>
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,0)
 #include <linux/poll.h>
@@ -93,7 +115,8 @@
 #include <linux/mm.h>
 #include <linux/signal.h>
 #include <linux/timer.h>
-
+#include <linux/miscdevice.h>
+#include <linux/interrupt.h>
 
 #if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,0)
 #include <asm/uaccess.h>
@@ -103,8 +126,6 @@
 
 #else
 
-/* #define __lddk_copy_from_user(a,b,c) memcpy_fromio(a,b,c) */
-/* #define __lddk_copy_to_user(a,b,c) memcpy_toio(a,b,c) */
 #define __lddk_copy_from_user(a,b,c) memcpy_fromfs(a,b,c)
 #define __lddk_copy_to_user(a,b,c) memcpy_tofs(a,b,c)
 
@@ -129,7 +150,6 @@
 # define _BUS_TYPE "ISA-"
 #endif
 
-#if 1 
 #ifdef CAN_PELICANMODE
 
 # ifdef  CAN_PORT_IO
@@ -138,6 +158,8 @@
 #  define __CAN_TYPE__ _BUS_TYPE "PeliCAN-memory mapped "
 # endif
 
+#elif defined(CONFIG_M528x)
+#  define __CAN_TYPE__ _BUS_TYPE "FlexCAN "
 #else
 
 # ifdef  CAN_PORT_IO
@@ -146,15 +168,6 @@
 #  define __CAN_TYPE__ _BUS_TYPE "Philips-Basic-CAN memory mapped "
 # endif
 
-#endif
-#elif defined(MCF5282)
-#   define __CAN_TYPE__ _BUS_TYPE "FlexCAN "
-/* ---------------------------------------------------------------------- */
-#elif defined(UNCTWINCAN)
-#   define __CAN_TYPE__ _BUS_TYPE "TwinCAN "
-/* ---------------------------------------------------------------------- */
-#else 
-/* ---------------------------------------------------------------------- */
 #endif
 
 /* Length of the "version" string entry in /proc/.../version */
@@ -255,8 +268,6 @@
 
 #endif
 
-
-
 /************************************************************************/
 #include "can_debug.h"
 /************************************************************************/
@@ -266,7 +277,7 @@ extern int can_read (__LDDK_READ_PARAM);
 extern __LDDK_WRITE_TYPE can_write (__LDDK_WRITE_PARAM); 
 extern __LDDK_SELECT_TYPE can_select ( __LDDK_SELECT_PARAM ); 
 extern int can_ioctl ( __LDDK_IOCTL_PARAM ); 
-extern int can_open ( __LDDK_OPEN_PARAM ); 
+extern int can_open ( __LDDK_OPEN_PARAM );
 extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM); 
 #endif 
 
@@ -287,7 +298,7 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
 #elif defined(IME_SLIMLINE)
 # define CAN_OUTC_VAL           0xda
 # define IO_MODEL		'm'
-# define STD_MASK		0xFFFFFFFF 
+# define STD_MASK		0xFFFFFFFF
 # include "can_sja1000.h"
 #elif defined(CPC_PCI)
 # define CAN_OUTC_VAL           0xda
@@ -297,7 +308,7 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
 #elif defined(IXXAT_PCI03)
 # define CAN_OUTC_VAL           0x5e
 # define IO_MODEL		'm'
-# define STD_MASK		0xFFFFFFFF 
+# define STD_MASK		0xFFFFFFFF
 # include "can_sja1000.h"
 #elif defined(PCM3680)
 # define CAN_OUTC_VAL           0x5e
@@ -309,11 +320,11 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
 # define IO_MODEL		'm'
 # define STD_MASK		0xFFFFFFFF 
 # include "can_sja1000.h"
-#elif defined(MCF5282)
+#elif defined(CONFIG_M532x) || defined(CONFIG_M5253) || defined(CONFIG_M528x)
 # define CAN_OUTC_VAL           0x5e
 # define IO_MODEL		'm'
 # define STD_MASK		0
-# include "can_mcf5282.h"
+# include "can_mcf.h"
 #else 
 # define CAN_OUTC_VAL           0x00
 # define IO_MODEL		'm'
@@ -332,11 +343,11 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
 
 /* number of supported CAN channels */
 #ifndef MAX_CHANNELS
-# define MAX_CHANNELS 4
+# define MAX_CHANNELS 2
 #endif
 
 /* #define MAX_BUFSIZE 64 */
-#define MAX_BUFSIZE 1000
+#define MAX_BUFSIZE 200
 /* #define MAX_BUFSIZE 4 */
 
 #define BUF_EMPTY    0
@@ -357,7 +368,7 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
 
 
 
-#ifdef CAN_USE_FILTER
+#if CAN_USE_FILTER
  #define MAX_ID_LENGTH 11
  #define MAX_ID_NUMBER (1<<11)
 
@@ -380,7 +391,7 @@ extern __LDDK_CLOSE_TYPE can_close (__LDDK_CLOSE_PARAM);
  extern msg_fifo_t Tx_Buf[];
  extern msg_fifo_t Rx_Buf[];
 
- typedef void (*irqservice_t)(int irq, void *unused, struct pt_regs *ptregs);
+ typedef irqreturn_t (*irqservice_t)(int irq, void *unused, struct pt_regs *ptregs);
 
  extern int Can_RequestIrq(int minor, int irq, irqservice_t handler);
 
@@ -400,13 +411,12 @@ extern int selfreception;			/* flag */
 
 
 /************************************************************************/
-#define LDDK_USE_SYSCTL 1
+/*#define LDDK_USE_SYSCTL 1 */
 #ifdef __KERNEL__
 #include <linux/sysctl.h>
 
 extern ctl_table Can_sysctl_table[];
 extern ctl_table Can_sys_table[];
-
 
 
  /* ------ Global Definitions for version */
@@ -453,7 +463,7 @@ extern  unsigned int AccMask[];
 
 extern  int Timeout[];
 #define SYSCTL_TIMEOUT 9
- 
+
  /* ------ Global Definitions for Outc */
 
 extern  int Outc[];
@@ -484,11 +494,15 @@ extern  int Cnt1[];
 #define SYSCTL_CNT1 15
 extern  int Cnt2[];
 #define SYSCTL_CNT2 16
- 
+
  
 #endif
 /************************************************************************/
 
+
+#ifndef CAN_MODULE
+#define CAN_MODULE 0
+#endif
 
 
 #ifndef Can_MAJOR
@@ -514,10 +528,12 @@ extern int CAN_StartChip(int);
 extern int CAN_StopChip(int);
 extern int CAN_SetMask(int, unsigned int, unsigned int);
 extern int CAN_SetOMode(int,int);
+#if defined(CONFIG_M528x)
 extern int CAN_SetListenOnlyMode(int, int);
+#endif
 extern int CAN_SendMessage(int, canmsg_t *);
 extern int CAN_GetMessage(int , canmsg_t *);
-extern void CAN_Interrupt(int irq, void *unused, struct pt_regs *ptregs );
+extern irqreturn_t CAN_Interrupt(int irq, void *unused, struct pt_regs *ptregs );
 extern int CAN_VendorInit(int);
 
 extern void register_systables(void);
@@ -526,7 +542,7 @@ extern void unregister_systables(void);
 /* can_82c200funcs.c */
 extern int CAN_ShowStat (int board);
 
-/* can_mcf5282funcs.c */
+/* can_mcffuncs.c */
 void mcf_irqreset(void);
 void mcf_irqsetup(void);
 
@@ -546,7 +562,7 @@ extern void Can_StopTimer(void);
 extern void Can_TimerInterrupt(unsigned long unused);
 extern void Can_dump(int minor);
 extern void Can_dump(int minor);
-extern void CAN_register_dump(void);
+extern void CAN_register_dump(int);
 extern void CAN_object_dump(int object);
 extern void print_tty(const char *fmt, ...);
 
@@ -655,64 +671,6 @@ extern int pcimod_scan(void);
 /*________________________E_O_F_____________________________________________*/
 
 
-#if 0
-/*
-There is a special access mode for the 82527 CAN controller
-called fast register access.
-This mode is sometimes used instead of normal Mem-Read/Write
-and substitutes  MEM_In/MEM_Out
-
-*/
-
-u8 MEM_In (unsigned long  adr ) { 
-#if IODEBUG
-        int ret = readb(adr);
-        printk("MIn: 0x%x=0x%x\n", adr, ret);
-        return ret;
-#else
-	SLOW_DOWN_IO;	SLOW_DOWN_IO;
-	return readb(adr);
-#endif
-}
-
-u8 fastMEM_In (unsigned long  adr ) {
-        /* Fast access:
-         * first read desired register,
-         * after that read register 4
-         */
-	int ret = readb(adr);
-        if((adr & 0x000000FF) == 0x02) {
-        	return ret;
-	}
-	/* 250 ns delay, SLOW_DOWN_IO is empty on ELIMA */
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-	ret = readb((adr & 0xFFFFFF00) + 4);
-#if IODEBUG
-        printk("MfIn: 0x%x=0x%x\n", adr, ret);
-#endif
-        return ret;
-}
-
-void MEM_Out(u8 v, unsigned long adr ) {
-#if IODEBUG
-        printk("MOut: 0x%x->0x%x\n", v, adr);
-#endif
-	SLOW_DOWN_IO;
-        writeb(v, adr);
-	SLOW_DOWN_IO; 
-#if defined(CONFIG_PPC)
-	/* 250 ns delay, SLOW_DOWN_IO is empty on ELIMA */
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-	asm volatile("nop;nop;nop;nop");
-#endif
-}
-
-#endif
 
 
 

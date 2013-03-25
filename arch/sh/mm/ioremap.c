@@ -1,101 +1,29 @@
-/* $Id: ioremap.c,v 1.4 2001/06/30 09:18:39 gniibe Exp $
- *
+/*
  * arch/sh/mm/ioremap.c
+ *
+ * (C) Copyright 1995 1996 Linus Torvalds
+ * (C) Copyright 2005 - 2010  Paul Mundt
  *
  * Re-map IO memory to kernel address space so that we can access it.
  * This is needed for high PCI addresses that aren't mapped in the
  * 640k-1MB IO memory area on PC's
  *
- * (C) Copyright 1995 1996 Linus Torvalds
+ * This file is subject to the terms and conditions of the GNU General
+ * Public License. See the file "COPYING" in the main directory of this
+ * archive for more details.
  */
-
 #include <linux/vmalloc.h>
-#include <asm/io.h>
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/mm.h>
+#include <linux/pci.h>
+#include <linux/io.h>
+#include <asm/page.h>
 #include <asm/pgalloc.h>
-
-static inline void remap_area_pte(pte_t * pte, unsigned long address,
-	unsigned long size, unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-	pgprot_t pgprot = __pgprot(_PAGE_PRESENT | _PAGE_RW |
-				   _PAGE_DIRTY | _PAGE_ACCESSED |
-				   _PAGE_HW_SHARED | _PAGE_FLAGS_HARD | flags);
-
-	address &= ~PMD_MASK;
-	end = address + size;
-	if (end > PMD_SIZE)
-		end = PMD_SIZE;
-	if (address >= end)
-		BUG();
-	do {
-		if (!pte_none(*pte)) {
-			printk("remap_area_pte: page already exists\n");
-			BUG();
-		}
-		set_pte(pte, mk_pte_phys(phys_addr, pgprot));
-		address += PAGE_SIZE;
-		phys_addr += PAGE_SIZE;
-		pte++;
-	} while (address && (address < end));
-}
-
-static inline int remap_area_pmd(pmd_t * pmd, unsigned long address,
-	unsigned long size, unsigned long phys_addr, unsigned long flags)
-{
-	unsigned long end;
-
-	address &= ~PGDIR_MASK;
-	end = address + size;
-	if (end > PGDIR_SIZE)
-		end = PGDIR_SIZE;
-	phys_addr -= address;
-	if (address >= end)
-		BUG();
-	do {
-		pte_t * pte = pte_alloc(&init_mm, pmd, address);
-		if (!pte)
-			return -ENOMEM;
-		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address && (address < end));
-	return 0;
-}
-
-int remap_area_pages(unsigned long address, unsigned long phys_addr,
-		     unsigned long size, unsigned long flags)
-{
-	int error;
-	pgd_t * dir;
-	unsigned long end = address + size;
-
-	phys_addr -= address;
-	dir = pgd_offset_k(address);
-	flush_cache_all();
-	if (address >= end)
-		BUG();
-	spin_lock(&init_mm.page_table_lock);
-	do {
-		pmd_t *pmd;
-		pmd = pmd_alloc(&init_mm, dir, address);
-		error = -ENOMEM;
-		if (!pmd)
-			break;
-		if (remap_area_pmd(pmd, address, end - address,
-					phys_addr + address, flags))
-			break;
-		error = 0;
-		address = (address + PGDIR_SIZE) & PGDIR_MASK;
-		dir++;
-	} while (address && (address < end));
-	spin_unlock(&init_mm.page_table_lock);
-	flush_tlb_all();
-	return error;
-}
-
-/*
- * Generic mapping function (not visible outside):
- */
+#include <asm/addrspace.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
+#include <asm/mmu.h>
 
 /*
  * Remap an arbitrary physical address space into the kernel virtual
@@ -106,11 +34,13 @@ int remap_area_pages(unsigned long address, unsigned long phys_addr,
  * have to convert them into an offset in a page-aligned mapping, but the
  * caller shouldn't need to know that small detail.
  */
-void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
+void __iomem * __init_refok
+__ioremap_caller(phys_addr_t phys_addr, unsigned long size,
+		 pgprot_t pgprot, void *caller)
 {
-	void * addr;
-	struct vm_struct * area;
-	unsigned long offset, last_addr;
+	struct vm_struct *area;
+	unsigned long offset, last_addr, addr, orig_addr;
+	void __iomem *mapped;
 
 	/* Don't allow wraparound or zero size */
 	last_addr = phys_addr + size - 1;
@@ -118,40 +48,90 @@ void * p3_ioremap(unsigned long phys_addr, unsigned long size, unsigned long fla
 		return NULL;
 
 	/*
-	 * Don't remap the low PCI/ISA area, it's always mapped..
+	 * If we can't yet use the regular approach, go the fixmap route.
 	 */
-	if (phys_addr >= 0xA0000 && last_addr < 0x100000)
-		return phys_to_virt(phys_addr);
+	if (!mem_init_done)
+		return ioremap_fixed(phys_addr, size, pgprot);
 
 	/*
-	 * Don't allow anybody to remap normal RAM that we're using..
+	 * First try to remap through the PMB.
+	 * PMB entries are all pre-faulted.
 	 */
-	if (phys_addr < virt_to_phys(high_memory))
-		return NULL;
+	mapped = pmb_remap_caller(phys_addr, size, pgprot, caller);
+	if (mapped && !IS_ERR(mapped))
+		return mapped;
 
 	/*
 	 * Mappings have to be page-aligned
 	 */
 	offset = phys_addr & ~PAGE_MASK;
 	phys_addr &= PAGE_MASK;
-	size = PAGE_ALIGN(last_addr) - phys_addr;
+	size = PAGE_ALIGN(last_addr+1) - phys_addr;
 
 	/*
 	 * Ok, go for it..
 	 */
-	area = get_vm_area(size, VM_IOREMAP);
+	area = get_vm_area_caller(size, VM_IOREMAP, caller);
 	if (!area)
 		return NULL;
-	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
-		vfree(addr);
+	area->phys_addr = phys_addr;
+	orig_addr = addr = (unsigned long)area->addr;
+
+	if (ioremap_page_range(addr, addr + size, phys_addr, pgprot)) {
+		vunmap((void *)orig_addr);
 		return NULL;
 	}
-	return (void *) (offset + (char *)addr);
+
+	return (void __iomem *)(offset + (char *)orig_addr);
+}
+EXPORT_SYMBOL(__ioremap_caller);
+
+/*
+ * Simple checks for non-translatable mappings.
+ */
+static inline int iomapping_nontranslatable(unsigned long offset)
+{
+#ifdef CONFIG_29BIT
+	/*
+	 * In 29-bit mode this includes the fixed P1/P2 areas, as well as
+	 * parts of P3.
+	 */
+	if (PXSEG(offset) < P3SEG || offset >= P3_ADDR_MAX)
+		return 1;
+#endif
+
+	return 0;
 }
 
-void p3_iounmap(void *addr)
+void __iounmap(void __iomem *addr)
 {
-	if (addr > high_memory)
-		return vfree((void *) (PAGE_MASK & (unsigned long) addr));
+	unsigned long vaddr = (unsigned long __force)addr;
+	struct vm_struct *p;
+
+	/*
+	 * Nothing to do if there is no translatable mapping.
+	 */
+	if (iomapping_nontranslatable(vaddr))
+		return;
+
+	/*
+	 * There's no VMA if it's from an early fixed mapping.
+	 */
+	if (iounmap_fixed(addr) == 0)
+		return;
+
+	/*
+	 * If the PMB handled it, there's nothing else to do.
+	 */
+	if (pmb_unmap(addr) == 0)
+		return;
+
+	p = remove_vm_area((void *)(vaddr & PAGE_MASK));
+	if (!p) {
+		printk(KERN_ERR "%s: bad address %p\n", __func__, addr);
+		return;
+	}
+
+	kfree(p);
 }
+EXPORT_SYMBOL(__iounmap);

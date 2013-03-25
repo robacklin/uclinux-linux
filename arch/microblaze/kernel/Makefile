@@ -1,62 +1,34 @@
 #
-# arch/microblaze/kernel/Makefile
-#
-#  Copyright (C) 2003       John Williams <jwilliams@itee.uq.edu.au>
-#  Copyright (C) 2001,2002  NEC Corporation
-#  Copyright (C) 2001,2002  Miles Bader <miles@gnu.org>
-#
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# Makefile
 #
 
-EXTRA_CFLAGS		+= -I$(TOPDIR)/arch/microblaze/xilinx_ocp
-
-all: head.o kernel.o
-
-USE_STANDARD_AS_RULE	:= true
-
-O_TARGET := kernel.o
-
-ifdef PLATFORM
-obj-y := process.o syscalls.o time.o semaphore.o \
-	signal.o irq.o ptrace.o bug.o hw_exception_handler.o \
-	exceptions.o
-else
-obj-y := intv.o entry.o process.o syscalls.o time.o semaphore.o setup.o \
-	 signal.o irq.o mach.o ptrace.o bug.o hw_exception_handler.o \
-	exceptions.o
+ifdef CONFIG_FUNCTION_TRACER
+# Do not trace early boot code and low level code
+CFLAGS_REMOVE_timer.o = -pg
+CFLAGS_REMOVE_intc.o = -pg
+CFLAGS_REMOVE_early_printk.o = -pg
+CFLAGS_REMOVE_selfmod.o = -pg
+CFLAGS_REMOVE_heartbeat.o = -pg
+CFLAGS_REMOVE_ftrace.o = -pg
+CFLAGS_REMOVE_process.o = -pg
 endif
 
-obj-y				+= microblaze_intc.o microblaze_timer.o 
+extra-y := head.o vmlinux.lds
 
-export-objs := microblaze_ksyms.o 
+obj-y += dma.o exceptions.o \
+	hw_exception_handler.o init_task.o intc.o irq.o \
+	process.o prom.o prom_parse.o ptrace.o \
+	reset.o setup.o signal.o sys_microblaze.o timer.o traps.o unwind.o
 
-obj-$(CONFIG_MODULES)		+= microblaze_ksyms.o
-# chip-specific code
+obj-y += cpu/
 
-ifdef CONFIG_XILINX_UARTLITE_0_INSTANCE
-	obj-y += xmbserial.o
-endif
+obj-$(CONFIG_EARLY_PRINTK)	+= early_printk.o
+obj-$(CONFIG_SELFMOD)		+= selfmod.o
+obj-$(CONFIG_HEART_BEAT)	+= heartbeat.o
+obj-$(CONFIG_MODULES)		+= microblaze_ksyms.o module.o
+obj-$(CONFIG_MMU)		+= misc.o
+obj-$(CONFIG_STACKTRACE)	+= stacktrace.o
+obj-$(CONFIG_FUNCTION_TRACER)	+= ftrace.o mcount.o
+obj-$(CONFIG_KGDB)		+= kgdb.o
 
-obj-$(CONFIG_PCI) += pci.o pci-dma.o microblaze_pci.o indirect_pci.o pci_auto.o
-
-# platform-specific code
-obj-$(CONFIG_MBVANILLA)		+= mbvanilla.o 
-obj-$(CONFIG_MBEGRET01)		+= mbegret.o
-# feature-specific code
-obj-$(CONFIG_PROC_FS)		+= procfs.o
-
-head.o: head.S microblaze_defs.h
-entry.o: entry.S microblaze_defs.h
-
-microblaze_defs.h: microblaze_defs.c microblaze_defs.head
-	rm -f microblaze_defs.d
-	SUNPRO_DEPENDENCIES="microblaze_defs.d microblaze_defs.h" \
-	$(CC) $(filter-out -MD,$(CFLAGS)) -S microblaze_defs.c
-	cp microblaze_defs.head microblaze_defs.h
-	grep '^#define' microblaze_defs.s >> microblaze_defs.h
-	rm microblaze_defs.s
--include microblaze_defs.d
-
-include $(TOPDIR)/Rules.make
+obj-y	+= entry$(MMU).o

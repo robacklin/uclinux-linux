@@ -14,12 +14,13 @@
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/errno.h>
+#include <asm/domain.h>
 
 		.text
 
 #define PAGE_SHIFT 12
 
-/* Prototype: int __arch_copy_to_user(void *to, const char *from, size_t n)
+/* Prototype: int __copy_to_user(void *to, const char *from, size_t n)
  * Purpose  : copy a block to user memory from kernel memory
  * Params   : to   - user memory
  *          : from - kernel memory
@@ -27,42 +28,42 @@
  * Returns  : Number of bytes NOT copied.
  */
 
-.c2u_dest_not_aligned:
+.Lc2u_dest_not_aligned:
 		rsb	ip, ip, #4
 		cmp	ip, #2
 		ldrb	r3, [r1], #1
-USER(		strbt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strb)	r3, [r0], #1)			@ May fault
 		ldrgeb	r3, [r1], #1
-USER(		strgebt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strgeb) r3, [r0], #1)			@ May fault
 		ldrgtb	r3, [r1], #1
-USER(		strgtbt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strgtb) r3, [r0], #1)			@ May fault
 		sub	r2, r2, ip
-		b	.c2u_dest_aligned
+		b	.Lc2u_dest_aligned
 
-ENTRY(__arch_copy_to_user)
+ENTRY(__copy_to_user)
 		stmfd	sp!, {r2, r4 - r7, lr}
 		cmp	r2, #4
-		blt	.c2u_not_enough
+		blt	.Lc2u_not_enough
 		ands	ip, r0, #3
-		bne	.c2u_dest_not_aligned
-.c2u_dest_aligned:
+		bne	.Lc2u_dest_not_aligned
+.Lc2u_dest_aligned:
 
 		ands	ip, r1, #3
-		bne	.c2u_src_not_aligned
+		bne	.Lc2u_src_not_aligned
 /*
  * Seeing as there has to be at least 8 bytes to copy, we can
  * copy one word, and force a user-mode page fault...
  */
 
-.c2u_0fupi:	subs	r2, r2, #4
+.Lc2u_0fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.c2u_0nowords
+		bmi	.Lc2u_0nowords
 		ldr	r3, [r1], #4
-USER(		strt	r3, [r0], #4)			@ May fault
+USER(	TUSER(	str)	r3, [r0], #4)			@ May fault
 		mov	ip, r0, lsl #32 - PAGE_SHIFT	@ On each page, use a ld/st??t instruction
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.c2u_0fupi
+		beq	.Lc2u_0fupi
 /*
  * ip = max no. of bytes to copy before needing another "strt" insn
  */
@@ -70,15 +71,16 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #32
-		blt	.c2u_0rem8lp
+		blt	.Lc2u_0rem8lp
 
-.c2u_0cpy8lp:	ldmia	r1!, {r3 - r6}
+.Lc2u_0cpy8lp:	ldmia	r1!, {r3 - r6}
 		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		ldmia	r1!, {r3 - r6}
-		stmia	r0!, {r3 - r6}			@ Shouldnt fault
 		subs	ip, ip, #32
-		bpl	.c2u_0cpy8lp
-.c2u_0rem8lp:	cmn	ip, #16
+		stmia	r0!, {r3 - r6}			@ Shouldnt fault
+		bpl	.Lc2u_0cpy8lp
+
+.Lc2u_0rem8lp:	cmn	ip, #16
 		ldmgeia	r1!, {r3 - r6}
 		stmgeia	r0!, {r3 - r6}			@ Shouldnt fault
 		tst	ip, #8
@@ -86,51 +88,52 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		stmneia	r0!, {r3 - r4}			@ Shouldnt fault
 		tst	ip, #4
 		ldrne	r3, [r1], #4
-		strnet	r3, [r0], #4			@ Shouldnt fault
+	TUSER(	strne) r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
-		beq	.c2u_0fupi
-.c2u_0nowords:	teq	ip, #0
-		beq	.c2u_finished
-.c2u_nowords:	cmp	ip, #2
+		beq	.Lc2u_0fupi
+.Lc2u_0nowords:	teq	ip, #0
+		beq	.Lc2u_finished
+.Lc2u_nowords:	cmp	ip, #2
 		ldrb	r3, [r1], #1
-USER(		strbt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strb)	r3, [r0], #1)			@ May fault
 		ldrgeb	r3, [r1], #1
-USER(		strgebt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strgeb) r3, [r0], #1)			@ May fault
 		ldrgtb	r3, [r1], #1
-USER(		strgtbt	r3, [r0], #1)			@ May fault
-		b	.c2u_finished
+USER(	TUSER(	strgtb) r3, [r0], #1)			@ May fault
+		b	.Lc2u_finished
 
-.c2u_not_enough:
+.Lc2u_not_enough:
 		movs	ip, r2
-		bne	.c2u_nowords
-.c2u_finished:	mov	r0, #0
-		LOADREGS(fd,sp!,{r2, r4 - r7, pc})
+		bne	.Lc2u_nowords
+.Lc2u_finished:	mov	r0, #0
+		ldmfd	sp!, {r2, r4 - r7, pc}
 
-.c2u_src_not_aligned:
+.Lc2u_src_not_aligned:
 		bic	r1, r1, #3
 		ldr	r7, [r1], #4
 		cmp	ip, #2
-		bgt	.c2u_3fupi
-		beq	.c2u_2fupi
-.c2u_1fupi:	subs	r2, r2, #4
+		bgt	.Lc2u_3fupi
+		beq	.Lc2u_2fupi
+.Lc2u_1fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.c2u_1nowords
+		bmi	.Lc2u_1nowords
 		mov	r3, r7, pull #8
 		ldr	r7, [r1], #4
 		orr	r3, r3, r7, push #24
-USER(		strt	r3, [r0], #4)			@ May fault
+USER(	TUSER(	str)	r3, [r0], #4)			@ May fault
 		mov	ip, r0, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.c2u_1fupi
+		beq	.Lc2u_1fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.c2u_1rem8lp
+		blt	.Lc2u_1rem8lp
 
-.c2u_1cpy8lp:	mov	r3, r7, pull #8
+.Lc2u_1cpy8lp:	mov	r3, r7, pull #8
 		ldmia	r1!, {r4 - r7}
+		subs	ip, ip, #16
 		orr	r3, r3, r4, push #24
 		mov	r4, r4, pull #8
 		orr	r4, r4, r5, push #24
@@ -139,9 +142,9 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		mov	r6, r6, pull #8
 		orr	r6, r6, r7, push #24
 		stmia	r0!, {r3 - r6}			@ Shouldnt fault
-		subs	ip, ip, #16
-		bpl	.c2u_1cpy8lp
-.c2u_1rem8lp:	tst	ip, #8
+		bpl	.Lc2u_1cpy8lp
+
+.Lc2u_1rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #8
 		ldmneia	r1!, {r4, r7}
 		orrne	r3, r3, r4, push #24
@@ -152,39 +155,40 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		movne	r3, r7, pull #8
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, push #24
-		strnet	r3, [r0], #4			@ Shouldnt fault
+	TUSER(	strne) r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
-		beq	.c2u_1fupi
-.c2u_1nowords:	mov	r3, r7, lsr #byte(1)
+		beq	.Lc2u_1fupi
+.Lc2u_1nowords:	mov	r3, r7, get_byte_1
 		teq	ip, #0
-		beq	.c2u_finished
+		beq	.Lc2u_finished
 		cmp	ip, #2
-USER(		strbt	r3, [r0], #1)			@ May fault
-		movge	r3, r7, lsr #byte(2)
-USER(		strgebt	r3, [r0], #1)			@ May fault
-		movgt	r3, r7, lsr #byte(3)
-USER(		strgtbt	r3, [r0], #1)			@ May fault
-		b	.c2u_finished
+USER(	TUSER(	strb)	r3, [r0], #1)			@ May fault
+		movge	r3, r7, get_byte_2
+USER(	TUSER(	strgeb) r3, [r0], #1)			@ May fault
+		movgt	r3, r7, get_byte_3
+USER(	TUSER(	strgtb) r3, [r0], #1)			@ May fault
+		b	.Lc2u_finished
 
-.c2u_2fupi:	subs	r2, r2, #4
+.Lc2u_2fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.c2u_2nowords
+		bmi	.Lc2u_2nowords
 		mov	r3, r7, pull #16
 		ldr	r7, [r1], #4
 		orr	r3, r3, r7, push #16
-USER(		strt	r3, [r0], #4)			@ May fault
+USER(	TUSER(	str)	r3, [r0], #4)			@ May fault
 		mov	ip, r0, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.c2u_2fupi
+		beq	.Lc2u_2fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.c2u_2rem8lp
+		blt	.Lc2u_2rem8lp
 
-.c2u_2cpy8lp:	mov	r3, r7, pull #16
+.Lc2u_2cpy8lp:	mov	r3, r7, pull #16
 		ldmia	r1!, {r4 - r7}
+		subs	ip, ip, #16
 		orr	r3, r3, r4, push #16
 		mov	r4, r4, pull #16
 		orr	r4, r4, r5, push #16
@@ -193,9 +197,9 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		mov	r6, r6, pull #16
 		orr	r6, r6, r7, push #16
 		stmia	r0!, {r3 - r6}			@ Shouldnt fault
-		subs	ip, ip, #16
-		bpl	.c2u_2cpy8lp
-.c2u_2rem8lp:	tst	ip, #8
+		bpl	.Lc2u_2cpy8lp
+
+.Lc2u_2rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #16
 		ldmneia	r1!, {r4, r7}
 		orrne	r3, r3, r4, push #16
@@ -206,39 +210,40 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		movne	r3, r7, pull #16
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, push #16
-		strnet	r3, [r0], #4			@ Shouldnt fault
+	TUSER(	strne) r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
-		beq	.c2u_2fupi
-.c2u_2nowords:	mov	r3, r7, lsr #byte(2)
+		beq	.Lc2u_2fupi
+.Lc2u_2nowords:	mov	r3, r7, get_byte_2
 		teq	ip, #0
-		beq	.c2u_finished
+		beq	.Lc2u_finished
 		cmp	ip, #2
-USER(		strbt	r3, [r0], #1)			@ May fault
-		movge	r3, r7, lsr #byte(3)
-USER(		strgebt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strb)	r3, [r0], #1)			@ May fault
+		movge	r3, r7, get_byte_3
+USER(	TUSER(	strgeb) r3, [r0], #1)			@ May fault
 		ldrgtb	r3, [r1], #0
-USER(		strgtbt	r3, [r0], #1)			@ May fault
-		b	.c2u_finished
+USER(	TUSER(	strgtb) r3, [r0], #1)			@ May fault
+		b	.Lc2u_finished
 
-.c2u_3fupi:	subs	r2, r2, #4
+.Lc2u_3fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.c2u_3nowords
+		bmi	.Lc2u_3nowords
 		mov	r3, r7, pull #24
 		ldr	r7, [r1], #4
 		orr	r3, r3, r7, push #8
-USER(		strt	r3, [r0], #4)			@ May fault
+USER(	TUSER(	str)	r3, [r0], #4)			@ May fault
 		mov	ip, r0, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.c2u_3fupi
+		beq	.Lc2u_3fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.c2u_3rem8lp
+		blt	.Lc2u_3rem8lp
 
-.c2u_3cpy8lp:	mov	r3, r7, pull #24
+.Lc2u_3cpy8lp:	mov	r3, r7, pull #24
 		ldmia	r1!, {r4 - r7}
+		subs	ip, ip, #16
 		orr	r3, r3, r4, push #8
 		mov	r4, r4, pull #24
 		orr	r4, r4, r5, push #8
@@ -247,9 +252,9 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		mov	r6, r6, pull #24
 		orr	r6, r6, r7, push #8
 		stmia	r0!, {r3 - r6}			@ Shouldnt fault
-		subs	ip, ip, #16
-		bpl	.c2u_3cpy8lp
-.c2u_3rem8lp:	tst	ip, #8
+		bpl	.Lc2u_3cpy8lp
+
+.Lc2u_3rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #24
 		ldmneia	r1!, {r4, r7}
 		orrne	r3, r3, r4, push #8
@@ -260,67 +265,69 @@ USER(		strt	r3, [r0], #4)			@ May fault
 		movne	r3, r7, pull #24
 		ldrne	r7, [r1], #4
 		orrne	r3, r3, r7, push #8
-		strnet	r3, [r0], #4			@ Shouldnt fault
+	TUSER(	strne) r3, [r0], #4			@ Shouldnt fault
 		ands	ip, ip, #3
-		beq	.c2u_3fupi
-.c2u_3nowords:	mov	r3, r7, lsr #byte(3)
+		beq	.Lc2u_3fupi
+.Lc2u_3nowords:	mov	r3, r7, get_byte_3
 		teq	ip, #0
-		beq	.c2u_finished
+		beq	.Lc2u_finished
 		cmp	ip, #2
-USER(		strbt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strb)	r3, [r0], #1)			@ May fault
 		ldrgeb	r3, [r1], #1
-USER(		strgebt	r3, [r0], #1)			@ May fault
+USER(	TUSER(	strgeb) r3, [r0], #1)			@ May fault
 		ldrgtb	r3, [r1], #0
-USER(		strgtbt	r3, [r0], #1)			@ May fault
-		b	.c2u_finished
+USER(	TUSER(	strgtb) r3, [r0], #1)			@ May fault
+		b	.Lc2u_finished
+ENDPROC(__copy_to_user)
 
-		.section .fixup,"ax"
+		.pushsection .fixup,"ax"
 		.align	0
-9001:		LOADREGS(fd,sp!, {r0, r4 - r7, pc})
-		.previous
+9001:		ldmfd	sp!, {r0, r4 - r7, pc}
+		.popsection
 
-/* Prototype: unsigned long __arch_copy_from_user(void *to,const void *from,unsigned long n);
+/* Prototype: unsigned long __copy_from_user(void *to,const void *from,unsigned long n);
  * Purpose  : copy a block from user memory to kernel memory
  * Params   : to   - kernel memory
  *          : from - user memory
  *          : n    - number of bytes to copy
  * Returns  : Number of bytes NOT copied.
  */
-.cfu_dest_not_aligned:
+.Lcfu_dest_not_aligned:
 		rsb	ip, ip, #4
 		cmp	ip, #2
-USER(		ldrbt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrb)	r3, [r1], #1)			@ May fault
 		strb	r3, [r0], #1
-USER(		ldrgebt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgeb) r3, [r1], #1)			@ May fault
 		strgeb	r3, [r0], #1
-USER(		ldrgtbt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgtb) r3, [r1], #1)			@ May fault
 		strgtb	r3, [r0], #1
 		sub	r2, r2, ip
-		b	.cfu_dest_aligned
+		b	.Lcfu_dest_aligned
 
-ENTRY(__arch_copy_from_user)
+ENTRY(__copy_from_user)
 		stmfd	sp!, {r0, r2, r4 - r7, lr}
 		cmp	r2, #4
-		blt	.cfu_not_enough
+		blt	.Lcfu_not_enough
 		ands	ip, r0, #3
-		bne	.cfu_dest_not_aligned
-.cfu_dest_aligned:
+		bne	.Lcfu_dest_not_aligned
+.Lcfu_dest_aligned:
 		ands	ip, r1, #3
-		bne	.cfu_src_not_aligned
+		bne	.Lcfu_src_not_aligned
+
 /*
  * Seeing as there has to be at least 8 bytes to copy, we can
  * copy one word, and force a user-mode page fault...
  */
 
-.cfu_0fupi:	subs	r2, r2, #4
+.Lcfu_0fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.cfu_0nowords
-USER(		ldrt	r3, [r1], #4)
+		bmi	.Lcfu_0nowords
+USER(	TUSER(	ldr)	r3, [r1], #4)
 		str	r3, [r0], #4
 		mov	ip, r1, lsl #32 - PAGE_SHIFT	@ On each page, use a ld/st??t instruction
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.cfu_0fupi
+		beq	.Lcfu_0fupi
 /*
  * ip = max no. of bytes to copy before needing another "strt" insn
  */
@@ -328,68 +335,70 @@ USER(		ldrt	r3, [r1], #4)
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #32
-		blt	.cfu_0rem8lp
+		blt	.Lcfu_0rem8lp
 
-.cfu_0cpy8lp:	ldmia	r1!, {r3 - r6}			@ Shouldnt fault
+.Lcfu_0cpy8lp:	ldmia	r1!, {r3 - r6}			@ Shouldnt fault
 		stmia	r0!, {r3 - r6}
 		ldmia	r1!, {r3 - r6}			@ Shouldnt fault
-		stmia	r0!, {r3 - r6}
 		subs	ip, ip, #32
-		bpl	.cfu_0cpy8lp
-.cfu_0rem8lp:	cmn	ip, #16
+		stmia	r0!, {r3 - r6}
+		bpl	.Lcfu_0cpy8lp
+
+.Lcfu_0rem8lp:	cmn	ip, #16
 		ldmgeia	r1!, {r3 - r6}			@ Shouldnt fault
 		stmgeia	r0!, {r3 - r6}
 		tst	ip, #8
 		ldmneia	r1!, {r3 - r4}			@ Shouldnt fault
 		stmneia	r0!, {r3 - r4}
 		tst	ip, #4
-		ldrnet	r3, [r1], #4			@ Shouldnt fault
+	TUSER(	ldrne) r3, [r1], #4			@ Shouldnt fault
 		strne	r3, [r0], #4
 		ands	ip, ip, #3
-		beq	.cfu_0fupi
-.cfu_0nowords:	teq	ip, #0
-		beq	.cfu_finished
-.cfu_nowords:	cmp	ip, #2
-USER(		ldrbt	r3, [r1], #1)			@ May fault
+		beq	.Lcfu_0fupi
+.Lcfu_0nowords:	teq	ip, #0
+		beq	.Lcfu_finished
+.Lcfu_nowords:	cmp	ip, #2
+USER(	TUSER(	ldrb)	r3, [r1], #1)			@ May fault
 		strb	r3, [r0], #1
-USER(		ldrgebt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgeb) r3, [r1], #1)			@ May fault
 		strgeb	r3, [r0], #1
-USER(		ldrgtbt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgtb) r3, [r1], #1)			@ May fault
 		strgtb	r3, [r0], #1
-		b	.cfu_finished
+		b	.Lcfu_finished
 
-.cfu_not_enough:
+.Lcfu_not_enough:
 		movs	ip, r2
-		bne	.cfu_nowords
-.cfu_finished:	mov	r0, #0
+		bne	.Lcfu_nowords
+.Lcfu_finished:	mov	r0, #0
 		add	sp, sp, #8
-		LOADREGS(fd,sp!,{r4 - r7, pc})
+		ldmfd	sp!, {r4 - r7, pc}
 
-.cfu_src_not_aligned:
+.Lcfu_src_not_aligned:
 		bic	r1, r1, #3
-USER(		ldrt	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldr)	r7, [r1], #4)			@ May fault
 		cmp	ip, #2
-		bgt	.cfu_3fupi
-		beq	.cfu_2fupi
-.cfu_1fupi:	subs	r2, r2, #4
+		bgt	.Lcfu_3fupi
+		beq	.Lcfu_2fupi
+.Lcfu_1fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.cfu_1nowords
+		bmi	.Lcfu_1nowords
 		mov	r3, r7, pull #8
-USER(		ldrt	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldr)	r7, [r1], #4)			@ May fault
 		orr	r3, r3, r7, push #24
 		str	r3, [r0], #4
 		mov	ip, r1, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.cfu_1fupi
+		beq	.Lcfu_1fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.cfu_1rem8lp
+		blt	.Lcfu_1rem8lp
 
-.cfu_1cpy8lp:	mov	r3, r7, pull #8
+.Lcfu_1cpy8lp:	mov	r3, r7, pull #8
 		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
+		subs	ip, ip, #16
 		orr	r3, r3, r4, push #24
 		mov	r4, r4, pull #8
 		orr	r4, r4, r5, push #24
@@ -398,9 +407,9 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		mov	r6, r6, pull #8
 		orr	r6, r6, r7, push #24
 		stmia	r0!, {r3 - r6}
-		subs	ip, ip, #16
-		bpl	.cfu_1cpy8lp
-.cfu_1rem8lp:	tst	ip, #8
+		bpl	.Lcfu_1cpy8lp
+
+.Lcfu_1rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #8
 		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, push #24
@@ -409,41 +418,43 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		stmneia	r0!, {r3 - r4}
 		tst	ip, #4
 		movne	r3, r7, pull #8
-USER(		ldrnet	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldrne) r7, [r1], #4)			@ May fault
 		orrne	r3, r3, r7, push #24
 		strne	r3, [r0], #4
 		ands	ip, ip, #3
-		beq	.cfu_1fupi
-.cfu_1nowords:	mov	r3, r7, lsr #byte(1)
+		beq	.Lcfu_1fupi
+.Lcfu_1nowords:	mov	r3, r7, get_byte_1
 		teq	ip, #0
-		beq	.cfu_finished
+		beq	.Lcfu_finished
 		cmp	ip, #2
 		strb	r3, [r0], #1
-		movge	r3, r7, lsr #byte(2)
+		movge	r3, r7, get_byte_2
 		strgeb	r3, [r0], #1
-		movgt	r3, r7, lsr #byte(3)
+		movgt	r3, r7, get_byte_3
 		strgtb	r3, [r0], #1
-		b	.cfu_finished
+		b	.Lcfu_finished
 
-.cfu_2fupi:	subs	r2, r2, #4
+.Lcfu_2fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.cfu_2nowords
+		bmi	.Lcfu_2nowords
 		mov	r3, r7, pull #16
-USER(		ldrt	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldr)	r7, [r1], #4)			@ May fault
 		orr	r3, r3, r7, push #16
 		str	r3, [r0], #4
 		mov	ip, r1, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.cfu_2fupi
+		beq	.Lcfu_2fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.cfu_2rem8lp
+		blt	.Lcfu_2rem8lp
 
-.cfu_2cpy8lp:	mov	r3, r7, pull #16
+
+.Lcfu_2cpy8lp:	mov	r3, r7, pull #16
 		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
+		subs	ip, ip, #16
 		orr	r3, r3, r4, push #16
 		mov	r4, r4, pull #16
 		orr	r4, r4, r5, push #16
@@ -452,9 +463,9 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		mov	r6, r6, pull #16
 		orr	r6, r6, r7, push #16
 		stmia	r0!, {r3 - r6}
-		subs	ip, ip, #16
-		bpl	.cfu_2cpy8lp
-.cfu_2rem8lp:	tst	ip, #8
+		bpl	.Lcfu_2cpy8lp
+
+.Lcfu_2rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #16
 		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, push #16
@@ -463,40 +474,40 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		stmneia	r0!, {r3 - r4}
 		tst	ip, #4
 		movne	r3, r7, pull #16
-USER(		ldrnet	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldrne) r7, [r1], #4)			@ May fault
 		orrne	r3, r3, r7, push #16
 		strne	r3, [r0], #4
 		ands	ip, ip, #3
-		beq	.cfu_2fupi
-.cfu_2nowords:	mov	r3, r7, lsr #byte(2)
+		beq	.Lcfu_2fupi
+.Lcfu_2nowords:	mov	r3, r7, get_byte_2
 		teq	ip, #0
-		beq	.cfu_finished
+		beq	.Lcfu_finished
 		cmp	ip, #2
 		strb	r3, [r0], #1
-		movge	r3, r7, lsr #byte(3)
+		movge	r3, r7, get_byte_3
 		strgeb	r3, [r0], #1
-USER(		ldrgtbt	r3, [r1], #0)			@ May fault
+USER(	TUSER(	ldrgtb) r3, [r1], #0)			@ May fault
 		strgtb	r3, [r0], #1
-		b	.cfu_finished
+		b	.Lcfu_finished
 
-.cfu_3fupi:	subs	r2, r2, #4
+.Lcfu_3fupi:	subs	r2, r2, #4
 		addmi	ip, r2, #4
-		bmi	.cfu_3nowords
+		bmi	.Lcfu_3nowords
 		mov	r3, r7, pull #24
-USER(		ldrt	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldr)	r7, [r1], #4)			@ May fault
 		orr	r3, r3, r7, push #8
 		str	r3, [r0], #4
 		mov	ip, r1, lsl #32 - PAGE_SHIFT
 		rsb	ip, ip, #0
 		movs	ip, ip, lsr #32 - PAGE_SHIFT
-		beq	.cfu_3fupi
+		beq	.Lcfu_3fupi
 		cmp	r2, ip
 		movlt	ip, r2
 		sub	r2, r2, ip
 		subs	ip, ip, #16
-		blt	.cfu_3rem8lp
+		blt	.Lcfu_3rem8lp
 
-.cfu_3cpy8lp:	mov	r3, r7, pull #24
+.Lcfu_3cpy8lp:	mov	r3, r7, pull #24
 		ldmia	r1!, {r4 - r7}			@ Shouldnt fault
 		orr	r3, r3, r4, push #8
 		mov	r4, r4, pull #24
@@ -507,8 +518,9 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		orr	r6, r6, r7, push #8
 		stmia	r0!, {r3 - r6}
 		subs	ip, ip, #16
-		bpl	.cfu_3cpy8lp
-.cfu_3rem8lp:	tst	ip, #8
+		bpl	.Lcfu_3cpy8lp
+
+.Lcfu_3rem8lp:	tst	ip, #8
 		movne	r3, r7, pull #24
 		ldmneia	r1!, {r4, r7}			@ Shouldnt fault
 		orrne	r3, r3, r4, push #8
@@ -517,23 +529,24 @@ USER(		ldrt	r7, [r1], #4)			@ May fault
 		stmneia	r0!, {r3 - r4}
 		tst	ip, #4
 		movne	r3, r7, pull #24
-USER(		ldrnet	r7, [r1], #4)			@ May fault
+USER(	TUSER(	ldrne) r7, [r1], #4)			@ May fault
 		orrne	r3, r3, r7, push #8
 		strne	r3, [r0], #4
 		ands	ip, ip, #3
-		beq	.cfu_3fupi
-.cfu_3nowords:	mov	r3, r7, lsr #byte(3)
+		beq	.Lcfu_3fupi
+.Lcfu_3nowords:	mov	r3, r7, get_byte_3
 		teq	ip, #0
-		beq	.cfu_finished
+		beq	.Lcfu_finished
 		cmp	ip, #2
 		strb	r3, [r0], #1
-USER(		ldrgebt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgeb) r3, [r1], #1)			@ May fault
 		strgeb	r3, [r0], #1
-USER(		ldrgtbt	r3, [r1], #1)			@ May fault
+USER(	TUSER(	ldrgtb) r3, [r1], #1)			@ May fault
 		strgtb	r3, [r0], #1
-		b	.cfu_finished
+		b	.Lcfu_finished
+ENDPROC(__copy_from_user)
 
-		.section .fixup,"ax"
+		.pushsection .fixup,"ax"
 		.align	0
 		/*
 		 * We took an exception.  r0 contains a pointer to
@@ -544,46 +557,8 @@ USER(		ldrgtbt	r3, [r1], #1)			@ May fault
 		ldr	r1, [sp], #4			@ unsigned long count
 		subs	r4, r1, r2			@ bytes left to copy
 		movne	r1, r4
-		blne	SYMBOL_NAME(__memzero)
+		blne	__memzero
 		mov	r0, r4
-		LOADREGS(fd,sp!, {r4 - r7, pc})
-		.previous
-
-/* Prototype: int __arch_clear_user(void *addr, size_t sz)
- * Purpose  : clear some user memory
- * Params   : addr - user memory address to clear
- *          : sz   - number of bytes to clear
- * Returns  : number of bytes NOT cleared
- */
-ENTRY(__arch_clear_user)
-		stmfd	sp!, {r1, lr}
-		mov	r2, #0
-		cmp	r1, #4
-		blt	2f
-		ands	ip, r0, #3
-		beq	1f
-		cmp	ip, #2
-USER(		strbt	r2, [r0], #1)
-USER(		strlebt	r2, [r0], #1)
-USER(		strltbt	r2, [r0], #1)
-		rsb	ip, ip, #4
-		sub	r1, r1, ip		@  7  6  5  4  3  2  1
-1:		subs	r1, r1, #8		@ -1 -2 -3 -4 -5 -6 -7
-USER(		strplt	r2, [r0], #4)
-USER(		strplt	r2, [r0], #4)
-		bpl	1b
-		adds	r1, r1, #4		@  3  2  1  0 -1 -2 -3
-USER(		strplt	r2, [r0], #4)
-2:		tst	r1, #2			@ 1x 1x 0x 0x 1x 1x 0x
-USER(		strnebt	r2, [r0], #1)
-USER(		strnebt	r2, [r0], #1)
-		tst	r1, #1			@ x1 x0 x1 x0 x1 x0 x1
-USER(		strnebt	r2, [r0], #1)
-		mov	r0, #0
-		LOADREGS(fd,sp!, {r1, pc})
-
-		.section .fixup,"ax"
-		.align	0
-9001:		LOADREGS(fd,sp!, {r0, pc})
-		.previous
+		ldmfd	sp!, {r4 - r7, pc}
+		.popsection
 

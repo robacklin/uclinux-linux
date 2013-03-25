@@ -14,7 +14,6 @@
  * 'Traps.c' handles hardware traps and faults after we have saved some
  * state in 'asm.s'.
  */
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -23,463 +22,465 @@
 #include <linux/timer.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/seq_file.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-
-#include <asm/system.h>
+#include <linux/kdebug.h>
+#include <linux/kallsyms.h>
+#include <linux/reboot.h>
+#include <linux/kprobes.h>
+#include <linux/bug.h>
+#include <linux/utsname.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/mathemu.h>
 #include <asm/cpcmd.h>
-#include <asm/s390_ext.h>
+#include <asm/lowcore.h>
+#include <asm/debug.h>
+#include <asm/ipl.h>
+#include "entry.h"
 
-/* Called from entry.S only */
-extern void handle_per_exception(struct pt_regs *regs);
+void (*pgm_check_table[128])(struct pt_regs *regs);
 
-typedef void pgm_check_handler_t(struct pt_regs *, long);
-pgm_check_handler_t *pgm_check_table[128];
+int show_unhandled_signals = 1;
 
-#ifdef CONFIG_SYSCTL
-#ifdef CONFIG_PROCESS_DEBUG
-int sysctl_userprocess_debug = 1;
-#else
-int sysctl_userprocess_debug = 0;
-#endif
-#endif
+#define stack_pointer ({ void **sp; asm("la %0,0(15)" : "=&d" (sp)); sp; })
 
-extern pgm_check_handler_t do_protection_exception;
-extern pgm_check_handler_t do_segment_exception;
-extern pgm_check_handler_t do_page_exception;
-extern pgm_check_handler_t do_pseudo_page_fault;
-#ifdef CONFIG_PFAULT
-extern int pfault_init(void);
-extern void pfault_fini(void);
-extern void pfault_interrupt(struct pt_regs *regs, __u16 error_code);
-static ext_int_info_t ext_int_pfault;
-#endif
-
-int kstack_depth_to_print = 12;
+#ifndef CONFIG_64BIT
+#define LONG "%08lx "
+#define FOURLONG "%08lx %08lx %08lx %08lx\n"
+static int kstack_depth_to_print = 12;
+#else /* CONFIG_64BIT */
+#define LONG "%016lx "
+#define FOURLONG "%016lx %016lx %016lx %016lx\n"
+static int kstack_depth_to_print = 20;
+#endif /* CONFIG_64BIT */
 
 /*
- * If the address is either in the .text section of the
- * kernel, or in the vmalloc'ed module regions, it *may* 
- * be the address of a calling routine
+ * For show_trace we have tree different stack to consider:
+ *   - the panic stack which is used if the kernel stack has overflown
+ *   - the asynchronous interrupt stack (cpu related)
+ *   - the synchronous kernel stack (process related)
+ * The stack trace can start at any of the three stack and can potentially
+ * touch all of them. The order is: panic stack, async stack, sync stack.
  */
-extern char _stext, _etext;
-
-#ifdef CONFIG_MODULES
-
-extern struct module *module_list;
-extern struct module kernel_module;
-
-static inline int kernel_text_address(unsigned long addr)
+static unsigned long
+__show_trace(unsigned long sp, unsigned long low, unsigned long high)
 {
-	int retval = 0;
-	struct module *mod;
+	struct stack_frame *sf;
+	struct pt_regs *regs;
 
-	if (addr >= (unsigned long) &_stext &&
-	    addr <= (unsigned long) &_etext)
-		return 1;
-
-	for (mod = module_list; mod != &kernel_module; mod = mod->next) {
-		/* mod_bound tests for addr being inside the vmalloc'ed
-		 * module area. Of course it'd be better to test only
-		 * for the .text subset... */
-		if (mod_bound(addr, 0, mod)) {
-			retval = 1;
-			break;
+	while (1) {
+		sp = sp & PSW_ADDR_INSN;
+		if (sp < low || sp > high - sizeof(*sf))
+			return sp;
+		sf = (struct stack_frame *) sp;
+		printk("([<%016lx>] ", sf->gprs[8] & PSW_ADDR_INSN);
+		print_symbol("%s)\n", sf->gprs[8] & PSW_ADDR_INSN);
+		/* Follow the backchain. */
+		while (1) {
+			low = sp;
+			sp = sf->back_chain & PSW_ADDR_INSN;
+			if (!sp)
+				break;
+			if (sp <= low || sp > high - sizeof(*sf))
+				return sp;
+			sf = (struct stack_frame *) sp;
+			printk(" [<%016lx>] ", sf->gprs[8] & PSW_ADDR_INSN);
+			print_symbol("%s\n", sf->gprs[8] & PSW_ADDR_INSN);
 		}
+		/* Zero backchain detected, check for interrupt frame. */
+		sp = (unsigned long) (sf + 1);
+		if (sp <= low || sp > high - sizeof(*regs))
+			return sp;
+		regs = (struct pt_regs *) sp;
+		printk(" [<%016lx>] ", regs->psw.addr & PSW_ADDR_INSN);
+		print_symbol("%s\n", regs->psw.addr & PSW_ADDR_INSN);
+		low = sp;
+		sp = regs->gprs[15];
 	}
-
-	return retval;
 }
 
-#else
-
-static inline int kernel_text_address(unsigned long addr)
+static void show_trace(struct task_struct *task, unsigned long *stack)
 {
-	return (addr >= (unsigned long) &_stext &&
-		addr <= (unsigned long) &_etext);
-}
+	register unsigned long __r15 asm ("15");
+	unsigned long sp;
 
+	sp = (unsigned long) stack;
+	if (!sp)
+		sp = task ? task->thread.ksp : __r15;
+	printk("Call Trace:\n");
+#ifdef CONFIG_CHECK_STACK
+	sp = __show_trace(sp, S390_lowcore.panic_stack - 4096,
+			  S390_lowcore.panic_stack);
 #endif
-
-void show_trace(unsigned long * stack)
-{
-	unsigned long backchain, low_addr, high_addr, ret_addr;
-	int i;
-
-	if (!stack)
-		stack = (unsigned long*)&stack;
-
-	printk("Call Trace: ");
-	low_addr = ((unsigned long) stack) & PSW_ADDR_MASK;
-	high_addr = (low_addr & (-THREAD_SIZE)) + THREAD_SIZE;
-	/* Skip the first frame (biased stack) */
-	backchain = *((unsigned long *) low_addr) & PSW_ADDR_MASK;
-	/* Print up to 8 lines */
-	for (i = 0; i < 8; i++) {
-		if (backchain < low_addr || backchain >= high_addr)
-			break;
-		ret_addr = *((unsigned long *) (backchain+56)) & PSW_ADDR_MASK;
-		if (!kernel_text_address(ret_addr))
-			break;
-		if (i && ((i % 6) == 0))
-			printk("\n   ");
-		printk("[<%08lx>] ", ret_addr);
-		low_addr = backchain;
-		backchain = *((unsigned long *) backchain) & PSW_ADDR_MASK;
-	}
-	printk("\n");
+	sp = __show_trace(sp, S390_lowcore.async_stack - ASYNC_SIZE,
+			  S390_lowcore.async_stack);
+	if (task)
+		__show_trace(sp, (unsigned long) task_stack_page(task),
+			     (unsigned long) task_stack_page(task) + THREAD_SIZE);
+	else
+		__show_trace(sp, S390_lowcore.thread_info,
+			     S390_lowcore.thread_info + THREAD_SIZE);
+	if (!task)
+		task = current;
+	debug_show_held_locks(task);
 }
 
-void show_trace_task(struct task_struct *tsk)
+void show_stack(struct task_struct *task, unsigned long *sp)
 {
-	/*
-	 * We can't print the backtrace of a running process. It is
-	 * unreliable at best and can cause kernel oopses.
-	 */
-	if (task_has_cpu(tsk))
-		return;
-	show_trace((unsigned long *) tsk->thread.ksp);
-}
-
-void show_stack(unsigned long *sp)
-{
+	register unsigned long * __r15 asm ("15");
 	unsigned long *stack;
 	int i;
 
-	// debugging aid: "show_stack(NULL);" prints the
-	// back trace for this cpu.
+	if (!sp)
+		stack = task ? (unsigned long *) task->thread.ksp : __r15;
+	else
+		stack = sp;
 
-	if(sp == NULL)
-		sp = (unsigned long*) &sp;
-
-	stack = sp;
 	for (i = 0; i < kstack_depth_to_print; i++) {
 		if (((addr_t) stack & (THREAD_SIZE-1)) == 0)
 			break;
-		if (i && ((i % 8) == 0))
-			printk("\n       ");
-		printk("%08lx ", *stack++);
+		if ((i * sizeof(long) % 32) == 0)
+			printk("%s       ", i == 0 ? "" : "\n");
+		printk(LONG, *stack++);
 	}
 	printk("\n");
-	show_trace(sp);
+	show_trace(task, sp);
+}
+
+static void show_last_breaking_event(struct pt_regs *regs)
+{
+#ifdef CONFIG_64BIT
+	printk("Last Breaking-Event-Address:\n");
+	printk(" [<%016lx>] ", regs->args[0] & PSW_ADDR_INSN);
+	print_symbol("%s\n", regs->args[0] & PSW_ADDR_INSN);
+#endif
+}
+
+/*
+ * The architecture-independent dump_stack generator
+ */
+void dump_stack(void)
+{
+	printk("CPU: %d %s %s %.*s\n",
+	       task_thread_info(current)->cpu, print_tainted(),
+	       init_utsname()->release,
+	       (int)strcspn(init_utsname()->version, " "),
+	       init_utsname()->version);
+	printk("Process %s (pid: %d, task: %p, ksp: %p)\n",
+	       current->comm, current->pid, current,
+	       (void *) current->thread.ksp);
+	show_stack(NULL, NULL);
+}
+EXPORT_SYMBOL(dump_stack);
+
+static inline int mask_bits(struct pt_regs *regs, unsigned long bits)
+{
+	return (regs->psw.mask & bits) / ((~bits + 1) & bits);
 }
 
 void show_registers(struct pt_regs *regs)
 {
-	mm_segment_t old_fs;
 	char *mode;
-	int i;
 
-	mode = (regs->psw.mask & PSW_PROBLEM_STATE) ? "User" : "Krnl";
-	printk("%s PSW : %08lx %08lx\n",
-	       mode, (unsigned long) regs->psw.mask,
-	       (unsigned long) regs->psw.addr);
-	printk("%s GPRS: %08x %08x %08x %08x\n", mode,
+	mode = (regs->psw.mask & PSW_MASK_PSTATE) ? "User" : "Krnl";
+	printk("%s PSW : %p %p",
+	       mode, (void *) regs->psw.mask,
+	       (void *) regs->psw.addr);
+	print_symbol(" (%s)\n", regs->psw.addr & PSW_ADDR_INSN);
+	printk("           R:%x T:%x IO:%x EX:%x Key:%x M:%x W:%x "
+	       "P:%x AS:%x CC:%x PM:%x", mask_bits(regs, PSW_MASK_PER),
+	       mask_bits(regs, PSW_MASK_DAT), mask_bits(regs, PSW_MASK_IO),
+	       mask_bits(regs, PSW_MASK_EXT), mask_bits(regs, PSW_MASK_KEY),
+	       mask_bits(regs, PSW_MASK_MCHECK), mask_bits(regs, PSW_MASK_WAIT),
+	       mask_bits(regs, PSW_MASK_PSTATE), mask_bits(regs, PSW_MASK_ASC),
+	       mask_bits(regs, PSW_MASK_CC), mask_bits(regs, PSW_MASK_PM));
+#ifdef CONFIG_64BIT
+	printk(" EA:%x", mask_bits(regs, PSW_MASK_EA | PSW_MASK_BA));
+#endif
+	printk("\n%s GPRS: " FOURLONG, mode,
 	       regs->gprs[0], regs->gprs[1], regs->gprs[2], regs->gprs[3]);
-	printk("           %08x %08x %08x %08x\n",
+	printk("           " FOURLONG,
 	       regs->gprs[4], regs->gprs[5], regs->gprs[6], regs->gprs[7]);
-	printk("           %08x %08x %08x %08x\n",
+	printk("           " FOURLONG,
 	       regs->gprs[8], regs->gprs[9], regs->gprs[10], regs->gprs[11]);
-	printk("           %08x %08x %08x %08x\n",
+	printk("           " FOURLONG,
 	       regs->gprs[12], regs->gprs[13], regs->gprs[14], regs->gprs[15]);
-	printk("%s ACRS: %08x %08x %08x %08x\n", mode,
-	       regs->acrs[0], regs->acrs[1], regs->acrs[2], regs->acrs[3]);
-	printk("           %08x %08x %08x %08x\n",
-	       regs->acrs[4], regs->acrs[5], regs->acrs[6], regs->acrs[7]);
-	printk("           %08x %08x %08x %08x\n",
-	       regs->acrs[8], regs->acrs[9], regs->acrs[10], regs->acrs[11]);
-	printk("           %08x %08x %08x %08x\n",
-	       regs->acrs[12], regs->acrs[13], regs->acrs[14], regs->acrs[15]);
 
-	/*
-	 * Print the first 20 byte of the instruction stream at the
-	 * time of the fault.
-	 */
-	old_fs = get_fs();
-	if (regs->psw.mask & PSW_PROBLEM_STATE)
-		set_fs(USER_DS);
-	else
-		set_fs(KERNEL_DS);
-	printk("%s Code: ", mode);
-	for (i = 0; i < 20; i++) {
-		unsigned char c;
-		if (__get_user(c, (char *)(regs->psw.addr + i))) {
-			printk(" Bad PSW.");
-			break;
-		}
-		printk("%02x ", c);
-	}
-	set_fs(old_fs);
-
-	printk("\n");
+	show_code(regs);
 }	
 
-/* This is called from fs/proc/array.c */
-char *task_show_regs(struct task_struct *task, char *buffer)
+void show_regs(struct pt_regs *regs)
 {
-	struct pt_regs *regs;
-
-	regs = __KSTK_PTREGS(task);
-	buffer += sprintf(buffer, "task: %08lx, ksp: %08x\n",
-			  (unsigned long) task, task->thread.ksp);
-	buffer += sprintf(buffer, "User PSW : %08lx %08lx\n",
-			  (unsigned long) regs->psw.mask, 
-			  (unsigned long) regs->psw.addr);
-	buffer += sprintf(buffer, "User GPRS: %08x %08x %08x %08x\n",
-			  regs->gprs[0], regs->gprs[1],
-			  regs->gprs[2], regs->gprs[3]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->gprs[4], regs->gprs[5],
-			  regs->gprs[6], regs->gprs[7]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->gprs[8], regs->gprs[9],
-			  regs->gprs[10], regs->gprs[11]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->gprs[12], regs->gprs[13],
-			  regs->gprs[14], regs->gprs[15]);
-	buffer += sprintf(buffer, "User ACRS: %08x %08x %08x %08x\n",
-			  regs->acrs[0], regs->acrs[1],
-			  regs->acrs[2], regs->acrs[3]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->acrs[4], regs->acrs[5],
-			  regs->acrs[6], regs->acrs[7]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->acrs[8], regs->acrs[9],
-			  regs->acrs[10], regs->acrs[11]);
-	buffer += sprintf(buffer, "           %08x %08x %08x %08x\n",
-			  regs->acrs[12], regs->acrs[13],
-			  regs->acrs[14], regs->acrs[15]);
-	return buffer;
+	print_modules();
+	printk("CPU: %d %s %s %.*s\n",
+	       task_thread_info(current)->cpu, print_tainted(),
+	       init_utsname()->release,
+	       (int)strcspn(init_utsname()->version, " "),
+	       init_utsname()->version);
+	printk("Process %s (pid: %d, task: %p, ksp: %p)\n",
+	       current->comm, current->pid, current,
+	       (void *) current->thread.ksp);
+	show_registers(regs);
+	/* Show stack backtrace if pt_regs is from kernel mode */
+	if (!(regs->psw.mask & PSW_MASK_PSTATE))
+		show_trace(NULL, (unsigned long *) regs->gprs[15]);
+	show_last_breaking_event(regs);
 }
 
-spinlock_t die_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_SPINLOCK(die_lock);
 
-void die(const char * str, struct pt_regs * regs, long err)
+void die(struct pt_regs *regs, const char *str)
 {
-        console_verbose();
-        spin_lock_irq(&die_lock);
+	static int die_counter;
+
+	oops_enter();
+	lgr_info_log();
+	debug_stop_all();
+	console_verbose();
+	spin_lock_irq(&die_lock);
 	bust_spinlocks(1);
-        printk("%s: %04lx\n", str, err & 0xffff);
-        show_regs(regs);
+	printk("%s: %04x [#%d] ", str, regs->int_code & 0xffff, ++die_counter);
+#ifdef CONFIG_PREEMPT
+	printk("PREEMPT ");
+#endif
+#ifdef CONFIG_SMP
+	printk("SMP ");
+#endif
+#ifdef CONFIG_DEBUG_PAGEALLOC
+	printk("DEBUG_PAGEALLOC");
+#endif
+	printk("\n");
+	notify_die(DIE_OOPS, str, regs, 0, regs->int_code & 0xffff, SIGSEGV);
+	show_regs(regs);
 	bust_spinlocks(0);
-        spin_unlock_irq(&die_lock);
-        do_exit(SIGSEGV);
+	add_taint(TAINT_DIE);
+	spin_unlock_irq(&die_lock);
+	if (in_interrupt())
+		panic("Fatal exception in interrupt");
+	if (panic_on_oops)
+		panic("Fatal exception: panic_on_oops");
+	oops_exit();
+	do_exit(SIGSEGV);
 }
 
-static void inline do_trap(long interruption_code, int signr, char *str,
-                           struct pt_regs *regs, siginfo_t *info)
+static inline void report_user_fault(struct pt_regs *regs, int signr)
 {
-	/*
-	 * We got all needed information from the lowcore and can
-	 * now safely switch on interrupts.
-	 */
-        if (regs->psw.mask & PSW_PROBLEM_STATE)
-		__sti();
+	if ((task_pid_nr(current) > 1) && !show_unhandled_signals)
+		return;
+	if (!unhandled_signal(current, signr))
+		return;
+	if (!printk_ratelimit())
+		return;
+	printk("User process fault: interruption code 0x%X ", regs->int_code);
+	print_vma_addr("in ", regs->psw.addr & PSW_ADDR_INSN);
+	printk("\n");
+	show_regs(regs);
+}
 
-        if (regs->psw.mask & PSW_PROBLEM_STATE) {
-                struct task_struct *tsk = current;
+int is_valid_bugaddr(unsigned long addr)
+{
+	return 1;
+}
 
-                tsk->thread.trap_no = interruption_code & 0xffff;
-		if (info)
-			force_sig_info(signr, info, tsk);
-		else
-                	force_sig(signr, tsk);
-#ifndef CONFIG_SYSCTL
-#ifdef CONFIG_PROCESS_DEBUG
-                printk("User process fault: interruption code 0x%lX\n",
-                       interruption_code);
-                show_regs(regs);
-#endif
-#else
-		if (sysctl_userprocess_debug) {
-			printk("User process fault: interruption code 0x%lX\n",
-			       interruption_code);
-			show_regs(regs);
-		}
-#endif
+static inline void __user *get_psw_address(struct pt_regs *regs)
+{
+	return (void __user *)
+		((regs->psw.addr - (regs->int_code >> 16)) & PSW_ADDR_INSN);
+}
+
+static void __kprobes do_trap(struct pt_regs *regs,
+			      int si_signo, int si_code, char *str)
+{
+	siginfo_t info;
+
+	if (notify_die(DIE_TRAP, str, regs, 0,
+		       regs->int_code, si_signo) == NOTIFY_STOP)
+		return;
+
+        if (regs->psw.mask & PSW_MASK_PSTATE) {
+		info.si_signo = si_signo;
+		info.si_errno = 0;
+		info.si_code = si_code;
+		info.si_addr = get_psw_address(regs);
+		force_sig_info(si_signo, &info, current);
+		report_user_fault(regs, si_signo);
         } else {
-                unsigned long fixup = search_exception_table(regs->psw.addr);
+                const struct exception_table_entry *fixup;
+                fixup = search_exception_tables(regs->psw.addr & PSW_ADDR_INSN);
                 if (fixup)
-                        regs->psw.addr = fixup;
-                else
-                        die(str, regs, interruption_code);
+                        regs->psw.addr = fixup->fixup | PSW_ADDR_AMODE;
+		else {
+			enum bug_trap_type btt;
+
+			btt = report_bug(regs->psw.addr & PSW_ADDR_INSN, regs);
+			if (btt == BUG_TRAP_TYPE_WARN)
+				return;
+			die(regs, str);
+		}
         }
 }
 
-static inline void *get_check_address(struct pt_regs *regs)
+void __kprobes do_per_trap(struct pt_regs *regs)
 {
-	return (void *) ADDR_BITS_REMOVE(regs->psw.addr-S390_lowcore.pgm_ilc);
+	siginfo_t info;
+
+	if (notify_die(DIE_SSTEP, "sstep", regs, 0, 0, SIGTRAP) == NOTIFY_STOP)
+		return;
+	if (!current->ptrace)
+		return;
+	info.si_signo = SIGTRAP;
+	info.si_errno = 0;
+	info.si_code = TRAP_HWBKPT;
+	info.si_addr =
+		(void __force __user *) current->thread.per_event.address;
+	force_sig_info(SIGTRAP, &info, current);
 }
 
-int do_debugger_trap(struct pt_regs *regs,int signal)
+static void default_trap_handler(struct pt_regs *regs)
 {
-	if(regs->psw.mask&PSW_PROBLEM_STATE)
-	{
-		if(current->ptrace & PT_PTRACED)
-			force_sig(signal,current);
-		else
-			return 1;
-	}
-	else
-	{
-#if CONFIG_REMOTE_DEBUG
-		if(gdb_stub_initialised)
-		{
-			gdb_stub_handle_exception(regs, signal);
-			return 0;
-		}
-#endif
-		return 1;
-	}
-	return 0;
+        if (regs->psw.mask & PSW_MASK_PSTATE) {
+		report_user_fault(regs, SIGSEGV);
+		do_exit(SIGSEGV);
+	} else
+		die(regs, "Unknown program exception");
 }
 
-#define DO_ERROR(signr, str, name) \
-asmlinkage void name(struct pt_regs * regs, long interruption_code) \
+#define DO_ERROR_INFO(name, signr, sicode, str) \
+static void name(struct pt_regs *regs) \
 { \
-	do_trap(interruption_code, signr, str, regs, NULL); \
+	do_trap(regs, signr, sicode, str); \
 }
 
-#define DO_ERROR_INFO(signr, str, name, sicode, siaddr) \
-asmlinkage void name(struct pt_regs * regs, long interruption_code) \
-{ \
-        siginfo_t info; \
-        info.si_signo = signr; \
-        info.si_errno = 0; \
-        info.si_code = sicode; \
-        info.si_addr = (void *)siaddr; \
-        do_trap(interruption_code, signr, str, regs, &info); \
-}
+DO_ERROR_INFO(addressing_exception, SIGILL, ILL_ILLADR,
+	      "addressing exception")
+DO_ERROR_INFO(execute_exception, SIGILL, ILL_ILLOPN,
+	      "execute exception")
+DO_ERROR_INFO(divide_exception, SIGFPE, FPE_INTDIV,
+	      "fixpoint divide exception")
+DO_ERROR_INFO(overflow_exception, SIGFPE, FPE_INTOVF,
+	      "fixpoint overflow exception")
+DO_ERROR_INFO(hfp_overflow_exception, SIGFPE, FPE_FLTOVF,
+	      "HFP overflow exception")
+DO_ERROR_INFO(hfp_underflow_exception, SIGFPE, FPE_FLTUND,
+	      "HFP underflow exception")
+DO_ERROR_INFO(hfp_significance_exception, SIGFPE, FPE_FLTRES,
+	      "HFP significance exception")
+DO_ERROR_INFO(hfp_divide_exception, SIGFPE, FPE_FLTDIV,
+	      "HFP divide exception")
+DO_ERROR_INFO(hfp_sqrt_exception, SIGFPE, FPE_FLTINV,
+	      "HFP square root exception")
+DO_ERROR_INFO(operand_exception, SIGILL, ILL_ILLOPN,
+	      "operand exception")
+DO_ERROR_INFO(privileged_op, SIGILL, ILL_PRVOPC,
+	      "privileged operation")
+DO_ERROR_INFO(special_op_exception, SIGILL, ILL_ILLOPN,
+	      "special operation exception")
+DO_ERROR_INFO(translation_exception, SIGILL, ILL_ILLOPN,
+	      "translation exception")
 
-DO_ERROR(SIGSEGV, "Unknown program exception", default_trap_handler)
-
-DO_ERROR_INFO(SIGBUS, "addressing exception", addressing_exception,
-	      BUS_ADRERR, get_check_address(regs))
-DO_ERROR_INFO(SIGILL,  "execute exception", execute_exception,
-	      ILL_ILLOPN, get_check_address(regs))
-DO_ERROR_INFO(SIGFPE,  "fixpoint divide exception", divide_exception,
-	      FPE_INTDIV, get_check_address(regs))
-DO_ERROR_INFO(SIGILL,  "operand exception", operand_exception,
-	      ILL_ILLOPN, get_check_address(regs))
-DO_ERROR_INFO(SIGILL,  "privileged operation", privileged_op,
-	      ILL_PRVOPC, get_check_address(regs))
-DO_ERROR_INFO(SIGILL,  "special operation exception", special_op_exception,
-	      ILL_ILLOPN, get_check_address(regs))
-DO_ERROR_INFO(SIGILL,  "translation exception", translation_exception,
-	      ILL_ILLOPN, get_check_address(regs))
-
-static inline void
-do_fp_trap(struct pt_regs *regs, void *location,
-           int fpc, long interruption_code)
+static inline void do_fp_trap(struct pt_regs *regs, int fpc)
 {
-	siginfo_t si;
-
-	si.si_signo = SIGFPE;
-	si.si_errno = 0;
-	si.si_addr = location;
-	si.si_code = 0;
+	int si_code = 0;
 	/* FPC[2] is Data Exception Code */
 	if ((fpc & 0x00000300) == 0) {
 		/* bits 6 and 7 of DXC are 0 iff IEEE exception */
 		if (fpc & 0x8000) /* invalid fp operation */
-			si.si_code = FPE_FLTINV;
+			si_code = FPE_FLTINV;
 		else if (fpc & 0x4000) /* div by 0 */
-			si.si_code = FPE_FLTDIV;
+			si_code = FPE_FLTDIV;
 		else if (fpc & 0x2000) /* overflow */
-			si.si_code = FPE_FLTOVF;
+			si_code = FPE_FLTOVF;
 		else if (fpc & 0x1000) /* underflow */
-			si.si_code = FPE_FLTUND;
+			si_code = FPE_FLTUND;
 		else if (fpc & 0x0800) /* inexact */
-			si.si_code = FPE_FLTRES;
+			si_code = FPE_FLTRES;
 	}
-	current->thread.ieee_instruction_pointer = (addr_t) location;
-	do_trap(interruption_code, SIGFPE,
-		"floating point exception", regs, &si);
+	do_trap(regs, SIGFPE, si_code, "floating point exception");
 }
 
-asmlinkage void illegal_op(struct pt_regs * regs, long interruption_code)
+static void __kprobes illegal_op(struct pt_regs *regs)
 {
+	siginfo_t info;
         __u8 opcode[6];
-	__u16 *location;
+	__u16 __user *location;
 	int signal = 0;
 
-	location = (__u16 *)(regs->psw.addr-S390_lowcore.pgm_ilc);
+	location = get_psw_address(regs);
 
-	/*
-	 * We got all needed information from the lowcore and can
-	 * now safely switch on interrupts.
-	 */
-	if (regs->psw.mask & PSW_PROBLEM_STATE)
-		__sti();
-
-	if (regs->psw.mask & PSW_PROBLEM_STATE)
-		get_user(*((__u16 *) opcode), location);
-	else
-		*((__u16 *)opcode)=*((__u16 *)location);
-	if (*((__u16 *)opcode)==S390_BREAKPOINT_U16)
-        {
-		if(do_debugger_trap(regs,SIGTRAP))
-			signal = SIGILL;
-	}
+	if (regs->psw.mask & PSW_MASK_PSTATE) {
+		if (get_user(*((__u16 *) opcode), (__u16 __user *) location))
+			return;
+		if (*((__u16 *) opcode) == S390_BREAKPOINT_U16) {
+			if (current->ptrace) {
+				info.si_signo = SIGTRAP;
+				info.si_errno = 0;
+				info.si_code = TRAP_BRKPT;
+				info.si_addr = location;
+				force_sig_info(SIGTRAP, &info, current);
+			} else
+				signal = SIGILL;
 #ifdef CONFIG_MATHEMU
-        else if (regs->psw.mask & PSW_PROBLEM_STATE)
-	{
-		if (opcode[0] == 0xb3) {
-			get_user(*((__u16 *) (opcode+2)), location+1);
+		} else if (opcode[0] == 0xb3) {
+			if (get_user(*((__u16 *) (opcode+2)), location+1))
+				return;
 			signal = math_emu_b3(opcode, regs);
                 } else if (opcode[0] == 0xed) {
-			get_user(*((__u32 *) (opcode+2)),
-				 (__u32 *)(location+1));
+			if (get_user(*((__u32 *) (opcode+2)),
+				     (__u32 __user *)(location+1)))
+				return;
 			signal = math_emu_ed(opcode, regs);
 		} else if (*((__u16 *) opcode) == 0xb299) {
-			get_user(*((__u16 *) (opcode+2)), location+1);
+			if (get_user(*((__u16 *) (opcode+2)), location+1))
+				return;
 			signal = math_emu_srnm(opcode, regs);
 		} else if (*((__u16 *) opcode) == 0xb29c) {
-			get_user(*((__u16 *) (opcode+2)), location+1);
+			if (get_user(*((__u16 *) (opcode+2)), location+1))
+				return;
 			signal = math_emu_stfpc(opcode, regs);
 		} else if (*((__u16 *) opcode) == 0xb29d) {
-			get_user(*((__u16 *) (opcode+2)), location+1);
+			if (get_user(*((__u16 *) (opcode+2)), location+1))
+				return;
 			signal = math_emu_lfpc(opcode, regs);
+#endif
 		} else
 			signal = SIGILL;
-        }
-#endif 
-	else
-		signal = SIGILL;
+	} else {
+		/*
+		 * If we get an illegal op in kernel mode, send it through the
+		 * kprobes notifier. If kprobes doesn't pick it up, SIGILL
+		 */
+		if (notify_die(DIE_BPT, "bpt", regs, 0,
+			       3, SIGTRAP) != NOTIFY_STOP)
+			signal = SIGILL;
+	}
+
+#ifdef CONFIG_MATHEMU
         if (signal == SIGFPE)
-		do_fp_trap(regs, location,
-                           current->thread.fp_regs.fpc, interruption_code);
-        else if (signal)
-		do_trap(interruption_code, signal,
-			"illegal operation", regs, NULL);
+		do_fp_trap(regs, current->thread.fp_regs.fpc);
+	else if (signal == SIGSEGV)
+		do_trap(regs, signal, SEGV_MAPERR, "user address fault");
+	else
+#endif
+	if (signal)
+		do_trap(regs, signal, ILL_ILLOPC, "illegal operation");
 }
 
 
-
 #ifdef CONFIG_MATHEMU
-asmlinkage void 
-specification_exception(struct pt_regs * regs, long interruption_code)
+void specification_exception(struct pt_regs *regs)
 {
         __u8 opcode[6];
-	__u16 *location = NULL;
+	__u16 __user *location = NULL;
 	int signal = 0;
 
-	location = (__u16 *) get_check_address(regs);
+	location = (__u16 __user *) get_psw_address(regs);
 
-	/*
-	 * We got all needed information from the lowcore and can
-	 * now safely switch on interrupts.
-	 */
-	if (regs->psw.mask & PSW_PROBLEM_STATE)
-		__sti();
-		
-        if (regs->psw.mask & PSW_PROBLEM_STATE) {
+        if (regs->psw.mask & PSW_MASK_PSTATE) {
 		get_user(*((__u16 *) opcode), location);
 		switch (opcode[0]) {
 		case 0x28: /* LDR Rx,Ry   */
@@ -510,45 +511,30 @@ specification_exception(struct pt_regs * regs, long interruption_code)
                 }
         } else
 		signal = SIGILL;
+
         if (signal == SIGFPE)
-		do_fp_trap(regs, location,
-                           current->thread.fp_regs.fpc, interruption_code);
-        else if (signal) {
-		siginfo_t info;
-		info.si_signo = signal;
-		info.si_errno = 0;
-		info.si_code = ILL_ILLOPN;
-		info.si_addr = location;
-		do_trap(interruption_code, signal, 
-			"specification exception", regs, &info);
-	}
+		do_fp_trap(regs, current->thread.fp_regs.fpc);
+	else if (signal)
+		do_trap(regs, signal, ILL_ILLOPN, "specification exception");
 }
 #else
-DO_ERROR_INFO(SIGILL, "specification exception", specification_exception,
-	      ILL_ILLOPN, get_check_address(regs));
+DO_ERROR_INFO(specification_exception, SIGILL, ILL_ILLOPN,
+	      "specification exception");
 #endif
 
-asmlinkage void data_exception(struct pt_regs * regs, long interruption_code)
+static void data_exception(struct pt_regs *regs)
 {
-        __u8 opcode[6];
-	__u16 *location;
+	__u16 __user *location;
 	int signal = 0;
 
-	location = (__u16 *) get_check_address(regs);
-
-	/*
-	 * We got all needed information from the lowcore and can
-	 * now safely switch on interrupts.
-	 */
-	if (regs->psw.mask & PSW_PROBLEM_STATE)
-		__sti();
+	location = get_psw_address(regs);
 
 	if (MACHINE_HAS_IEEE)
-		__asm__ volatile ("stfpc %0\n\t" 
-				  : "=m" (current->thread.fp_regs.fpc));
+		asm volatile("stfpc %0" : "=m" (current->thread.fp_regs.fpc));
 
 #ifdef CONFIG_MATHEMU
-        else if (regs->psw.mask & PSW_PROBLEM_STATE) {
+        else if (regs->psw.mask & PSW_MASK_PSTATE) {
+        	__u8 opcode[6];
 		get_user(*((__u16 *) opcode), location);
 		switch (opcode[0]) {
 		case 0x28: /* LDR Rx,Ry   */
@@ -579,7 +565,7 @@ asmlinkage void data_exception(struct pt_regs * regs, long interruption_code)
 			break;
                 case 0xed:
 			get_user(*((__u32 *) (opcode+2)),
-				 (__u32 *)(location+1));
+				 (__u32 __user *)(location+1));
 			signal = math_emu_ed(opcode, regs);
 			break;
 	        case 0xb2:
@@ -606,20 +592,28 @@ asmlinkage void data_exception(struct pt_regs * regs, long interruption_code)
 	else
 		signal = SIGILL;
         if (signal == SIGFPE)
-		do_fp_trap(regs, location,
-                           current->thread.fp_regs.fpc, interruption_code);
-        else if (signal) {
-		siginfo_t info;
-		info.si_signo = signal;
-		info.si_errno = 0;
-		info.si_code = ILL_ILLOPN;
-		info.si_addr = location;
-		do_trap(interruption_code, signal, 
-			"data exception", regs, &info);
-	}
+		do_fp_trap(regs, current->thread.fp_regs.fpc);
+	else if (signal)
+		do_trap(regs, signal, ILL_ILLOPN, "data exception");
 }
 
+static void space_switch_exception(struct pt_regs *regs)
+{
+	/* Set user psw back to home space mode. */
+	if (regs->psw.mask & PSW_MASK_PSTATE)
+		regs->psw.mask |= PSW_ASC_HOME;
+	/* Send SIGILL. */
+	do_trap(regs, SIGILL, ILL_PRVOPC, "space switch event");
+}
 
+void __kprobes kernel_stack_overflow(struct pt_regs * regs)
+{
+	bust_spinlocks(1);
+	printk("Kernel stack overflow.\n");
+	show_regs(regs);
+	bust_spinlocks(0);
+	panic("Corrupt kernel stack, can't continue.");
+}
 
 /* init is done in lowcore.S and head.S */
 
@@ -636,56 +630,27 @@ void __init trap_init(void)
         pgm_check_table[5] = &addressing_exception;
         pgm_check_table[6] = &specification_exception;
         pgm_check_table[7] = &data_exception;
+        pgm_check_table[8] = &overflow_exception;
         pgm_check_table[9] = &divide_exception;
-        pgm_check_table[0x10] = &do_segment_exception;
-        pgm_check_table[0x11] = &do_page_exception;
+        pgm_check_table[0x0A] = &overflow_exception;
+        pgm_check_table[0x0B] = &divide_exception;
+        pgm_check_table[0x0C] = &hfp_overflow_exception;
+        pgm_check_table[0x0D] = &hfp_underflow_exception;
+        pgm_check_table[0x0E] = &hfp_significance_exception;
+        pgm_check_table[0x0F] = &hfp_divide_exception;
+        pgm_check_table[0x10] = &do_dat_exception;
+        pgm_check_table[0x11] = &do_dat_exception;
         pgm_check_table[0x12] = &translation_exception;
         pgm_check_table[0x13] = &special_op_exception;
- 	pgm_check_table[0x14] = &do_pseudo_page_fault;
+#ifdef CONFIG_64BIT
+	pgm_check_table[0x38] = &do_asce_exception;
+	pgm_check_table[0x39] = &do_dat_exception;
+	pgm_check_table[0x3A] = &do_dat_exception;
+        pgm_check_table[0x3B] = &do_dat_exception;
+#endif /* CONFIG_64BIT */
         pgm_check_table[0x15] = &operand_exception;
-        pgm_check_table[0x1C] = &privileged_op;
-#ifdef CONFIG_PFAULT
-	if (MACHINE_IS_VM) {
-		/* request the 0x2603 external interrupt */
-		if (register_early_external_interrupt(0x2603, pfault_interrupt,
-						      &ext_int_pfault) != 0)
-			panic("Couldn't request external interrupt 0x2603");
-		/*
-		 * First try to get pfault pseudo page faults going.
-		 * If this isn't available turn on pagex page faults.
-		 */
-		if (pfault_init() != 0) {
-			/* Tough luck, no pfault. */
-			unregister_early_external_interrupt(0x2603,
-							    pfault_interrupt,
-							    &ext_int_pfault);
-			cpcmd("SET PAGEX ON", NULL, 0);
-		}
-	}
-#else
-	if (MACHINE_IS_VM)
-		cpcmd("SET PAGEX ON", NULL, 0);
-#endif
+        pgm_check_table[0x1C] = &space_switch_exception;
+        pgm_check_table[0x1D] = &hfp_sqrt_exception;
+	/* Enable machine checks early. */
+	local_mcck_enable();
 }
-
-
-void handle_per_exception(struct pt_regs *regs)
-{
-	if(regs->psw.mask&PSW_PROBLEM_STATE)
-	{
-		per_struct *per_info=&current->thread.per_info;
-		per_info->lowcore.words.perc_atmid=S390_lowcore.per_perc_atmid;
-		per_info->lowcore.words.address=S390_lowcore.per_address;
-		per_info->lowcore.words.access_id=S390_lowcore.per_access_id;
-	}
-	if(do_debugger_trap(regs,SIGTRAP))
-	{
-		/* I've seen this possibly a task structure being reused ? */
-		printk("Spurious per exception detected\n");
-		printk("switching off per tracing for this task.\n");
-		show_regs(regs);
-		/* Hopefully switching off per tracing will help us survive */
-		regs->psw.mask &= ~PSW_PER_MASK;
-	}
-}
-

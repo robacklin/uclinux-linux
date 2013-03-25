@@ -1,4 +1,4 @@
-/* 
+/*
  * linux/arch/m68k/mm/sun3mmu.c
  *
  * Implementations of mm routines specific to the sun3 MMU.
@@ -7,7 +7,6 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -16,16 +15,12 @@
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/init.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
 #include <linux/bootmem.h>
 
 #include <asm/setup.h>
 #include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 
@@ -33,8 +28,6 @@ extern void mmu_emu_init (unsigned long bootmem_end);
 
 const char bad_pmd_string[] = "Bad pmd in pte_alloc: %08lx\n";
 
-extern unsigned long empty_bad_page_table;
-extern unsigned long empty_bad_page;
 extern unsigned long num_pages;
 
 void free_initmem(void)
@@ -52,17 +45,13 @@ void __init paging_init(void)
 	unsigned long address;
 	unsigned long next_pgtable;
 	unsigned long bootmem_end;
-	unsigned long zones_size[3] = {0, 0, 0};
+	unsigned long zones_size[MAX_NR_ZONES] = { 0, };
 	unsigned long size;
-
 
 #ifdef TEST_VERIFY_AREA
 	wp_works_ok = 0;
 #endif
-	empty_bad_page_table = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_bad_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_zero_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
+	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
 
 	address = PAGE_OFFSET;
 	pg_dir = swapper_pg_dir;
@@ -71,12 +60,12 @@ void __init paging_init(void)
 
 	size = num_pages * sizeof(pte_t);
 	size = (size + PAGE_SIZE) & ~(PAGE_SIZE-1);
-	
+
 	next_pgtable = (unsigned long)alloc_bootmem_pages(size);
 	bootmem_end = (next_pgtable + size + PAGE_SIZE) & PAGE_MASK;
 
 	/* Map whole memory from PAGE_OFFSET (0x0E000000) */
-	pg_dir += PAGE_OFFSET >> PGDIR_SHIFT; 
+	pg_dir += PAGE_OFFSET >> PGDIR_SHIFT;
 
 	while (address < (unsigned long)high_memory) {
 		pg_table = (pte_t *) __pa (next_pgtable);
@@ -87,7 +76,7 @@ void __init paging_init(void)
 		/* now change pg_table to kernel virtual addresses */
 		pg_table = (pte_t *) __va ((unsigned long) pg_table);
 		for (i=0; i<PTRS_PER_PTE; ++i, ++pg_table) {
-			pte_t pte = __mk_pte(address, PAGE_INIT);
+			pte_t pte = pfn_pte(virt_to_pfn(address), PAGE_INIT);
 			if (address >= (unsigned long)high_memory)
 				pte_val (pte) = 0;
 			set_pte (pg_table, pte);
@@ -100,10 +89,13 @@ void __init paging_init(void)
 	current->mm = NULL;
 
 	/* memory sizing is a hack stolen from motorola.c..  hope it works for us */
-	zones_size[0] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
-	zones_size[1] = 0;
-	
-	free_area_init(zones_size);
+	zones_size[ZONE_DMA] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
+
+	/* I really wish I knew why the following change made things better...  -- Sam */
+/*	free_area_init(zones_size); */
+	free_area_init_node(0, zones_size,
+			    (__pa(PAGE_OFFSET) >> PAGE_SHIFT) + 1, NULL);
+
 
 }
 

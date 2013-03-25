@@ -13,7 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/rtc.h>
 
-#include <asm/system.h>
+#include <asm/errno.h>
 #include <asm/rtc.h>
 #include <asm/intersil.h>
 
@@ -24,35 +24,8 @@
 
 /* does this need to be implemented? */
 unsigned long sun3_gettimeoffset(void)
-{ 
-  return 1;
-}
-
-void sun3_gettod (int *yearp, int *monp, int *dayp,
-                   int *hourp, int *minp, int *secp)
 {
-	unsigned char wday;
-	volatile struct intersil_dt* todintersil;
-	unsigned long flags;
-
-        todintersil = (struct intersil_dt *) &intersil_clock->counter;
-
-	save_and_cli(flags);
-
-	intersil_clock->cmd_reg = STOP_VAL;
-
-	*secp  = todintersil->csec;
-        *hourp = todintersil->hour;
-        *minp  = todintersil->minute;
-        *secp  = todintersil->second; 
-        *monp  = todintersil->month;
-        *dayp  = todintersil->day;
-        *yearp = todintersil->year+68; /* The base year for sun3 is 1968 */
-	wday = todintersil->weekday;
-
-	intersil_clock->cmd_reg = START_VAL;
-
-	restore_flags(flags);
+  return 1;
 }
 
 
@@ -65,7 +38,7 @@ int sun3_hwclk(int set, struct rtc_time *t)
 
         todintersil = (struct intersil_dt *) &intersil_clock->counter;
 
-	save_and_cli(flags);
+	local_irq_save(flags);
 
 	intersil_clock->cmd_reg = STOP_VAL;
 
@@ -93,7 +66,7 @@ int sun3_hwclk(int set, struct rtc_time *t)
 
 	intersil_clock->cmd_reg = START_VAL;
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	return 0;
 

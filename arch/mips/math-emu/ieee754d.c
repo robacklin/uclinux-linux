@@ -3,8 +3,7 @@
  *
  * MIPS floating point support
  *
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
@@ -135,4 +134,3 @@ ieee754sp ieee754sp_dump(char *m, ieee754sp x)
 	printk("\n");
 	return x;
 }
-

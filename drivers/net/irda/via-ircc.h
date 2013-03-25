@@ -33,6 +33,7 @@ this program; if not, write to the Free Software Foundation, Inc.,
 #include <linux/time.h>
 #include <linux/spinlock.h>
 #include <linux/pm.h>
+#include <linux/types.h>
 #include <asm/io.h>
 
 #define MAX_TX_WINDOW 7
@@ -53,13 +54,13 @@ struct st_fifo {
 
 struct frame_cb {
 	void *start;		/* Start of frame in DMA mem */
-	int len;		/* Lenght of frame in DMA mem */
+	int len;		/* Length of frame in DMA mem */
 };
 
 struct tx_fifo {
 	struct frame_cb queue[MAX_TX_WINDOW + 2];	/* Info about frames in queue */
 	int ptr;		/* Currently being sent */
-	int len;		/* Lenght of queue */
+	int len;		/* Length of queue */
 	int free;		/* Next free slot */
 	void *tail;		/* Next free start in DMA mem */
 };
@@ -94,7 +95,6 @@ struct via_ircc_cb {
 	struct tx_fifo tx_fifo;	/* Info about frames to be transmitted */
 
 	struct net_device *netdev;	/* Yes! we are some kind of netdevice */
-	struct net_device_stats stats;
 
 	struct irlap_cb *irlap;	/* The link layer we are binded to */
 	struct qos_info qos;	/* QoS capabilities for this device */
@@ -102,6 +102,8 @@ struct via_ircc_cb {
 	chipio_t io;		/* IrDA controller information */
 	iobuff_t tx_buff;	/* Transmit buffer */
 	iobuff_t rx_buff;	/* Receive buffer */
+	dma_addr_t tx_buff_dma;
+	dma_addr_t rx_buff_dma;
 
 	__u8 ier;		/* Interrupt enable register */
 
@@ -115,7 +117,6 @@ struct via_ircc_cb {
 	int index;		/* Instance index */
 
 	struct eventflag EventFlag;
-	struct pm_dev *dev;
 	unsigned int chip_id;	/* to remember chip id */
 	unsigned int RetryCount;
 	unsigned int RxDataReady;
@@ -167,17 +168,6 @@ struct via_ircc_cb {
 			// Sets bit to 1
 #define ResetBit(val,bit) val= (unsigned char ) (val & ~(0x1 << bit))
 			// Sets bit to 0
-#define PCI_CONFIG_ADDRESS 0xcf8
-#define PCI_CONFIG_DATA    0xcfc
-
-#define VenderID    0x1106
-#define DeviceID1   0x8231
-#define DeviceID2   0x3109
-#define DeviceID3   0x3074
-//F01_S
-#define DeviceID4   0x3147
-#define DeviceID5   0x3177
-//F01_E
 
 #define OFF   0
 #define ON   1
@@ -194,14 +184,7 @@ struct via_ircc_cb {
 #define Rd_Valid 0x08
 #define RxBit 0x08
 
-__u8 ReadPCIByte(__u8, __u8, __u8, __u8);
-__u32 ReadPCI(__u8, __u8, __u8, __u8);
-void WritePCI(__u8, __u8, __u8, __u8, __u32);
-void WritePCIByte(__u8, __u8, __u8, __u8, __u8);
-int mySearchPCI(__u8 *, __u16, __u16);
-
-
-void DisableDmaChannel(unsigned int channel)
+static void DisableDmaChannel(unsigned int channel)
 {
 	switch (channel) {	// 8 Bit DMA channels DMAC1
 	case 0:
@@ -227,10 +210,10 @@ void DisableDmaChannel(unsigned int channel)
 		break;
 	default:
 		break;
-	};			//Switch
+	}
 }
 
-unsigned char ReadLPCReg(int iRegNum)
+static unsigned char ReadLPCReg(int iRegNum)
 {
 	unsigned char iVal;
 
@@ -243,7 +226,7 @@ unsigned char ReadLPCReg(int iRegNum)
 	return iVal;
 }
 
-void WriteLPCReg(int iRegNum, unsigned char iVal)
+static void WriteLPCReg(int iRegNum, unsigned char iVal)
 {
 
 	outb(0x87, 0x2e);
@@ -253,17 +236,17 @@ void WriteLPCReg(int iRegNum, unsigned char iVal)
 	outb(0xAA, 0x2e);
 }
 
-__u8 ReadReg(unsigned int BaseAddr, int iRegNum)
+static __u8 ReadReg(unsigned int BaseAddr, int iRegNum)
 {
-	return ((__u8) inb(BaseAddr + iRegNum));
+	return (__u8) inb(BaseAddr + iRegNum);
 }
 
-void WriteReg(unsigned int BaseAddr, int iRegNum, unsigned char iVal)
+static void WriteReg(unsigned int BaseAddr, int iRegNum, unsigned char iVal)
 {
 	outb(iVal, BaseAddr + iRegNum);
 }
 
-int WriteRegBit(unsigned int BaseAddr, unsigned char RegNum,
+static int WriteRegBit(unsigned int BaseAddr, unsigned char RegNum,
 		unsigned char BitPos, unsigned char value)
 {
 	__u8 Rtemp, Wtemp;
@@ -286,7 +269,7 @@ int WriteRegBit(unsigned int BaseAddr, unsigned char RegNum,
 	return 0;
 }
 
-__u8 CheckRegBit(unsigned int BaseAddr, unsigned char RegNum,
+static __u8 CheckRegBit(unsigned int BaseAddr, unsigned char RegNum,
 		 unsigned char BitPos)
 {
 	__u8 temp;
@@ -300,122 +283,7 @@ __u8 CheckRegBit(unsigned int BaseAddr, unsigned char RegNum,
 	return GetBit(temp, BitPos);
 }
 
-__u8 ReadPCIByte(__u8 bus, __u8 device, __u8 fun, __u8 reg)
-{
-	__u32 dTmp;
-	__u8 bData, bTmp;
-
-	bTmp = reg & ~0x03;
-	dTmp = ReadPCI(bus, device, fun, bTmp);
-	bTmp = reg & 0x03;
-	bData = (__u8) (dTmp >> bTmp);
-	return bData;
-}
-
-__u32 ReadPCI(__u8 bus, __u8 device, __u8 fun, __u8 reg)
-{
-	__u32 CONFIG_ADDR, temp, data;
-
-	if ((bus == 0xff) || (device == 0xff) || (fun == 0xff))
-		return 0xffffffff;
-	CONFIG_ADDR = 0x80000000;
-	temp = (__u32) reg << 2;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) fun << 8;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) device << 11;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) bus << 16;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-
-	outl(PCI_CONFIG_ADDRESS, CONFIG_ADDR);
-	data = inl(PCI_CONFIG_DATA);
-	return data;
-}
-
-
-void WritePCIByte(__u8 bus, __u8 device, __u8 fun, __u8 reg,
-		  __u8 CONFIG_DATA)
-{
-	__u32 dTmp, dTmp1 = 0;
-	__u8 bTmp;
-
-	bTmp = reg & ~0x03;
-	dTmp = ReadPCI(bus, device, fun, bTmp);
-	switch (reg & 0x03) {
-	case 0:
-		dTmp1 = (dTmp & ~0xff) | CONFIG_DATA;
-		break;
-	case 1:
-		dTmp = (dTmp & ~0x00ff00);
-		dTmp1 = CONFIG_DATA;
-		dTmp1 = dTmp1 << 8;
-		dTmp1 = dTmp1 | dTmp;
-		break;
-	case 2:
-		dTmp = (dTmp & ~0xff0000);
-		dTmp1 = CONFIG_DATA;
-		dTmp1 = dTmp1 << 16;
-		dTmp1 = dTmp1 | dTmp;
-		break;
-	case 3:
-		dTmp = (dTmp & ~0xff000000);
-		dTmp1 = CONFIG_DATA;
-		dTmp1 = dTmp1 << 24;
-		dTmp1 = dTmp1 | dTmp;
-		break;
-	}
-	WritePCI(bus, device, fun, bTmp, dTmp1);
-}
-
-//------------------
-void WritePCI(__u8 bus, __u8 device, __u8 fun, __u8 reg, __u32 CONFIG_DATA)
-{
-	__u32 CONFIG_ADDR, temp;
-
-	if ((bus == 0xff) || (device == 0xff) || (fun == 0xff))
-		return;
-	CONFIG_ADDR = 0x80000000;
-	temp = (__u32) reg << 2;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) fun << 8;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) device << 11;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-	temp = (__u32) bus << 16;
-	CONFIG_ADDR = CONFIG_ADDR | temp;
-
-	outl(PCI_CONFIG_ADDRESS, CONFIG_ADDR);
-	outl(PCI_CONFIG_DATA, CONFIG_DATA);
-
-}
-
-											// find device with DeviceID and VenderID                                       // if match return three byte buffer (bus,device,function)                      // no found, address={99,99,99} 
-int mySearchPCI(__u8 * SBridpos, __u16 VID, __u16 DID)
-{
-	__u8 i, j, k;
-	__u16 FindDeviceID, FindVenderID;
-
-	for (k = 0; k < 8; k++) {	//scan function
-		i = 0;
-		j = 0x11;
-		k = 0;
-		if (ReadPCI(i, j, k, 0) < 0xffffffff) {	// not empty
-			FindDeviceID = (__u16) (ReadPCI(i, j, k, 0) >> 16);
-			FindVenderID =
-			    (__u16) (ReadPCI(i, j, k, 0) & 0x0000ffff);
-			if ((VID == FindVenderID) && (DID == FindDeviceID)) {
-				SBridpos[0] = i;	// bus
-				SBridpos[1] = j;	//device
-				SBridpos[2] = k;	//func
-				return 1;
-			}
-		}
-	}
-	return 0;
-}
-
-void SetMaxRxPacketSize(__u16 iobase, __u16 size)
+static void SetMaxRxPacketSize(__u16 iobase, __u16 size)
 {
 	__u16 low, high;
 	if ((size & 0xe000) == 0) {
@@ -430,7 +298,7 @@ void SetMaxRxPacketSize(__u16 iobase, __u16 size)
 
 //for both Rx and Tx
 
-void SetFIFO(__u16 iobase, __u16 value)
+static void SetFIFO(__u16 iobase, __u16 value)
 {
 	switch (value) {
 	case 128:
@@ -541,7 +409,7 @@ void SetFIFO(__u16 iobase, __u16 value)
 #define GetFIRVersion(BaseAddr)		ReadReg(BaseAddr,VERSION)
 
 
-void SetTimer(__u16 iobase, __u8 count)
+static void SetTimer(__u16 iobase, __u8 count)
 {
 	EnTimerInt(iobase, OFF);
 	WriteReg(iobase, TIMER, count);
@@ -549,7 +417,7 @@ void SetTimer(__u16 iobase, __u8 count)
 }
 
 
-void SetSendByte(__u16 iobase, __u32 count)
+static void SetSendByte(__u16 iobase, __u32 count)
 {
 	__u32 low, high;
 
@@ -561,7 +429,7 @@ void SetSendByte(__u16 iobase, __u32 count)
 	}
 }
 
-void ResetChip(__u16 iobase, __u8 type)
+static void ResetChip(__u16 iobase, __u8 type)
 {
 	__u8 value;
 
@@ -569,16 +437,7 @@ void ResetChip(__u16 iobase, __u8 type)
 	WriteReg(iobase, RESET, type);
 }
 
-void SetAddrMode(__u16 iobase, __u8 mode)
-{
-	__u8 bTmp = 0;
-	if (mode < 3) {
-		bTmp = (ReadReg(iobase, RX_CT) & 0xcf) | (mode << 4);
-		WriteReg(iobase, RX_CT, bTmp);
-	}
-}
-
-int CkRxRecv(__u16 iobase, struct via_ircc_cb *self)
+static int CkRxRecv(__u16 iobase, struct via_ircc_cb *self)
 {
 	__u8 low, high;
 	__u16 wTmp = 0, wTmp1 = 0, wTmp_new = 0;
@@ -599,7 +458,7 @@ int CkRxRecv(__u16 iobase, struct via_ircc_cb *self)
 
 }
 
-__u16 RxCurCount(__u16 iobase, struct via_ircc_cb * self)
+static __u16 RxCurCount(__u16 iobase, struct via_ircc_cb * self)
 {
 	__u8 low, high;
 	__u16 wTmp = 0, wTmp1 = 0;
@@ -615,7 +474,7 @@ __u16 RxCurCount(__u16 iobase, struct via_ircc_cb * self)
  * for it will update last count.
  */
 
-__u16 GetRecvByte(__u16 iobase, struct via_ircc_cb * self)
+static __u16 GetRecvByte(__u16 iobase, struct via_ircc_cb * self)
 {
 	__u8 low, high;
 	__u16 wTmp, wTmp1, ret;
@@ -645,23 +504,7 @@ __u16 GetRecvByte(__u16 iobase, struct via_ircc_cb * self)
 	return ret;
 }
 
-
-__u16 GetRecvLen(__u16 iobase)
-{
-	__u8 low, high;
-	__u16 temp;
-
-	low = ReadReg(iobase, RX_P_L);
-	high = ReadReg(iobase, RX_P_H);
-
-	if (!(high & 0xe000)) {
-		temp = (high << 8) + low;
-		return temp;
-	} else
-		return 0;
-}
-
-void Sdelay(__u16 scale)
+static void Sdelay(__u16 scale)
 {
 	__u8 bTmp;
 	int i, j;
@@ -674,7 +517,7 @@ void Sdelay(__u16 scale)
 	}
 }
 
-void Tdelay(__u16 scale)
+static void Tdelay(__u16 scale)
 {
 	__u8 bTmp;
 	int i, j;
@@ -688,7 +531,7 @@ void Tdelay(__u16 scale)
 }
 
 
-void ActClk(__u16 iobase, __u8 value)
+static void ActClk(__u16 iobase, __u8 value)
 {
 	__u8 bTmp;
 	bTmp = ReadReg(iobase, 0x34);
@@ -698,18 +541,7 @@ void ActClk(__u16 iobase, __u8 value)
 		WriteReg(iobase, 0x34, bTmp & ~Clk_bit);
 }
 
-void ActTx(__u16 iobase, __u8 value)
-{
-	__u8 bTmp;
-
-	bTmp = ReadReg(iobase, 0x34);
-	if (value)
-		WriteReg(iobase, 0x34, bTmp | Tx_bit);
-	else
-		WriteReg(iobase, 0x34, bTmp & ~Tx_bit);
-}
-
-void ClkTx(__u16 iobase, __u8 Clk, __u8 Tx)
+static void ClkTx(__u16 iobase, __u8 Clk, __u8 Tx)
 {
 	__u8 bTmp;
 
@@ -731,7 +563,7 @@ void ClkTx(__u16 iobase, __u8 Clk, __u8 Tx)
 	WriteReg(iobase, 0x34, bTmp);
 }
 
-void Wr_Byte(__u16 iobase, __u8 data)
+static void Wr_Byte(__u16 iobase, __u8 data)
 {
 	__u8 bData = data;
 //      __u8 btmp;
@@ -757,7 +589,7 @@ void Wr_Byte(__u16 iobase, __u8 data)
 	}
 }
 
-__u8 Rd_Indx(__u16 iobase, __u8 addr, __u8 index)
+static __u8 Rd_Indx(__u16 iobase, __u8 addr, __u8 index)
 {
 	__u8 data = 0, bTmp, data_bit;
 	int i;
@@ -821,7 +653,7 @@ __u8 Rd_Indx(__u16 iobase, __u8 addr, __u8 index)
 	return data;
 }
 
-void Wr_Indx(__u16 iobase, __u8 addr, __u8 index, __u8 data)
+static void Wr_Indx(__u16 iobase, __u8 addr, __u8 index, __u8 data)
 {
 	int i;
 	__u8 bTmp;
@@ -842,7 +674,7 @@ void Wr_Indx(__u16 iobase, __u8 addr, __u8 index, __u8 data)
 	ActClk(iobase, 0);
 }
 
-void ResetDongle(__u16 iobase)
+static void ResetDongle(__u16 iobase)
 {
 	int i;
 	ClkTx(iobase, 0, 0);
@@ -856,7 +688,7 @@ void ResetDongle(__u16 iobase)
 	ActClk(iobase, 0);
 }
 
-void SetSITmode(__u16 iobase)
+static void SetSITmode(__u16 iobase)
 {
 
 	__u8 bTmp;
@@ -868,7 +700,7 @@ void SetSITmode(__u16 iobase)
 	WriteReg(iobase, 0x28, bTmp | 0x80);	// enable All interrupt
 }
 
-void SI_SetMode(__u16 iobase, int mode)
+static void SI_SetMode(__u16 iobase, int mode)
 {
 	//__u32 dTmp;
 	__u8 bTmp;
@@ -883,7 +715,7 @@ void SI_SetMode(__u16 iobase, int mode)
 	bTmp = Rd_Indx(iobase, 0x40, 1);
 }
 
-void InitCard(__u16 iobase)
+static void InitCard(__u16 iobase)
 {
 	ResetChip(iobase, 5);
 	WriteReg(iobase, I_ST_CT_0, 0x00);	// open CHIP on
@@ -891,12 +723,7 @@ void InitCard(__u16 iobase)
 	SetSIREOF(iobase, 0xc1);
 }
 
-void CommonShutDown(__u16 iobase, __u8 TxDMA)
-{
-	DisableDmaChannel(TxDMA);
-}
-
-void CommonInit(__u16 iobase)
+static void CommonInit(__u16 iobase)
 {
 //  EnTXCRC(iobase,0);
 	SwapDMA(iobase, OFF);
@@ -921,7 +748,7 @@ void CommonInit(__u16 iobase)
 	EnableDMA(iobase, ON);
 }
 
-void SetBaudRate(__u16 iobase, __u32 rate)
+static void SetBaudRate(__u16 iobase, __u32 rate)
 {
 	__u8 value = 11, temp;
 
@@ -947,42 +774,42 @@ void SetBaudRate(__u16 iobase, __u32 rate)
 			break;
 		default:
 			break;
-		};
+		}
 	} else if (IsMIROn(iobase)) {
 		value = 0;	// will automatically be fixed in 1.152M
 	} else if (IsFIROn(iobase)) {
 		value = 0;	// will automatically be fixed in 4M
 	}
 	temp = (ReadReg(iobase, I_CF_H_1) & 0x03);
-	temp = temp | (value << 2);
+	temp |= value << 2;
 	WriteReg(iobase, I_CF_H_1, temp);
 }
 
-void SetPulseWidth(__u16 iobase, __u8 width)
+static void SetPulseWidth(__u16 iobase, __u8 width)
 {
 	__u8 temp, temp1, temp2;
 
 	temp = (ReadReg(iobase, I_CF_L_1) & 0x1f);
 	temp1 = (ReadReg(iobase, I_CF_H_1) & 0xfc);
 	temp2 = (width & 0x07) << 5;
-	temp = temp | temp2;
+	temp |= temp2;
 	temp2 = (width & 0x18) >> 3;
-	temp1 = temp1 | temp2;
+	temp1 |= temp2;
 	WriteReg(iobase, I_CF_L_1, temp);
 	WriteReg(iobase, I_CF_H_1, temp1);
 }
 
-void SetSendPreambleCount(__u16 iobase, __u8 count)
+static void SetSendPreambleCount(__u16 iobase, __u8 count)
 {
 	__u8 temp;
 
 	temp = ReadReg(iobase, I_CF_L_1) & 0xe0;
-	temp = temp | count;
+	temp |= count;
 	WriteReg(iobase, I_CF_L_1, temp);
 
 }
 
-void SetVFIR(__u16 BaseAddr, __u8 val)
+static void SetVFIR(__u16 BaseAddr, __u8 val)
 {
 	__u8 tmp;
 
@@ -991,7 +818,7 @@ void SetVFIR(__u16 BaseAddr, __u8 val)
 	WriteRegBit(BaseAddr, I_CF_H_0, 5, val);
 }
 
-void SetFIR(__u16 BaseAddr, __u8 val)
+static void SetFIR(__u16 BaseAddr, __u8 val)
 {
 	__u8 tmp;
 
@@ -1001,7 +828,7 @@ void SetFIR(__u16 BaseAddr, __u8 val)
 	WriteRegBit(BaseAddr, I_CF_L_0, 6, val);
 }
 
-void SetMIR(__u16 BaseAddr, __u8 val)
+static void SetMIR(__u16 BaseAddr, __u8 val)
 {
 	__u8 tmp;
 
@@ -1011,7 +838,7 @@ void SetMIR(__u16 BaseAddr, __u8 val)
 	WriteRegBit(BaseAddr, I_CF_L_0, 5, val);
 }
 
-void SetSIR(__u16 BaseAddr, __u8 val)
+static void SetSIR(__u16 BaseAddr, __u8 val)
 {
 	__u8 tmp;
 
@@ -1020,25 +847,5 @@ void SetSIR(__u16 BaseAddr, __u8 val)
 	WriteReg(BaseAddr, I_CF_L_0, tmp & 0x8f);
 	WriteRegBit(BaseAddr, I_CF_L_0, 4, val);
 }
-
-void ClrHBusy(__u16 iobase)
-{
-
-	EnableDMA(iobase, OFF);
-	EnableDMA(iobase, ON);
-	RXStart(iobase, OFF);
-	RXStart(iobase, ON);
-	RXStart(iobase, OFF);
-	EnableDMA(iobase, OFF);
-	EnableDMA(iobase, ON);
-}
-
-void SetFifo64(__u16 iobase)
-{
-
-	WriteRegBit(iobase, I_CF_H_0, 0, 0);
-	WriteRegBit(iobase, I_CF_H_0, 7, 0);
-}
-
 
 #endif				/* via_IRCC_H */

@@ -1,4 +1,4 @@
-/* $Id: arcofi.h,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: arcofi.h,v 1.6.6.2 2001/09/23 22:24:46 kai Exp $
  *
  * Ansteuerung ARCOFI 2165
  *
@@ -9,7 +9,7 @@
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
- 
+
 #define ARCOFI_USE	1
 
 /* states */

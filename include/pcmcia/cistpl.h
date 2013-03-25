@@ -1,34 +1,21 @@
 /*
- * cistpl.h 1.34 2000/06/19 23:18:12
+ * cistpl.h
  *
- * The contents of this file are subject to the Mozilla Public License
- * Version 1.1 (the "License"); you may not use this file except in
- * compliance with the License. You may obtain a copy of the License
- * at http://www.mozilla.org/MPL/
- *
- * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
- * the License for the specific language governing rights and
- * limitations under the License. 
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
- * Alternatively, the contents of this file may be used under the
- * terms of the GNU General Public License version 2 (the "GPL"), in which
- * case the provisions of the GPL are applicable instead of the
- * above.  If you wish to allow the use of your version of this file
- * only under the terms of the GPL and not to allow others to use
- * your version of this file under the MPL, indicate your decision by
- * deleting the provisions above and replace them with the notice and
- * other provisions required by the GPL.  If you do not delete the
- * provisions above, a recipient may use your version of this file
- * under either the MPL or the GPL.
+ * (C) 1999             David A. Hinds
  */
 
 #ifndef _LINUX_CISTPL_H
 #define _LINUX_CISTPL_H
+
+typedef unsigned char cisdata_t;
 
 #define CISTPL_NULL		0x00
 #define CISTPL_DEVICE		0x01
@@ -588,25 +575,6 @@ typedef struct tuple_t {
 #define TUPLE_RETURN_LINK	0x01
 #define TUPLE_RETURN_COMMON	0x02
 
-/* For ValidateCIS */
-typedef struct cisinfo_t {
-    u_int	Chains;
-} cisinfo_t;
-
 #define CISTPL_MAX_CIS_SIZE	0x200
-
-/* For ReplaceCIS */
-typedef struct cisdump_t {
-    u_int	Length;
-    cisdata_t	Data[CISTPL_MAX_CIS_SIZE];
-} cisdump_t;
-
-int pcmcia_get_first_tuple(client_handle_t handle, tuple_t *tuple);
-int pcmcia_get_next_tuple(client_handle_t handle, tuple_t *tuple);
-int pcmcia_get_tuple_data(client_handle_t handle, tuple_t *tuple);
-int pcmcia_parse_tuple(client_handle_t handle, tuple_t *tuple, cisparse_t *parse);
-
-int pcmcia_validate_cis(client_handle_t handle, cisinfo_t *info);
-int pcmcia_replace_cis(client_handle_t handle, cisdump_t *cis);
 
 #endif /* LINUX_CISTPL_H */

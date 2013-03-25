@@ -23,13 +23,9 @@
 
 #undef ifdebug
 #if defined(RPC_DEBUG) && defined(LOCKD_DEBUG)
-# define ifdebug(flag)		if (nlm_debug & NLMDBG_##flag)
+# define ifdebug(flag)		if (unlikely(nlm_debug & NLMDBG_##flag))
 #else
 # define ifdebug(flag)		if (0)
-#endif
-
-#ifdef LOCKD_DEBUG
-char *		  nlm_procname(u32);
 #endif
 
 #endif /* __KERNEL__ */
@@ -47,15 +43,5 @@ char *		  nlm_procname(u32);
 #define NLMDBG_HOSTCACHE	0x0080
 #define NLMDBG_XDR		0x0100
 #define NLMDBG_ALL		0x7fff
-
-
-/*
- * Support for printing NLM cookies in dprintk()
- */
-#ifdef RPC_DEBUG
-struct nlm_cookie;
-/* Call this function with the BKL held (it uses a static buffer) */
-extern const char *nlmdbg_cookie2a(const struct nlm_cookie *);
-#endif
 
 #endif /* LINUX_LOCKD_DEBUG_H */

@@ -8,398 +8,366 @@
  * device are used to bind the other minor numbers to block devices.
  */
 
+#include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/iobuf.h>
 #include <linux/major.h>
 #include <linux/blkdev.h>
+#include <linux/module.h>
 #include <linux/raw.h>
 #include <linux/capability.h>
-#include <linux/smp_lock.h>
+#include <linux/uio.h>
+#include <linux/cdev.h>
+#include <linux/device.h>
+#include <linux/mutex.h>
+#include <linux/gfp.h>
+#include <linux/compat.h>
+#include <linux/vmalloc.h>
+
 #include <asm/uaccess.h>
 
-#define dprintk(x...) 
-
-typedef struct raw_device_data_s {
+struct raw_device_data {
 	struct block_device *binding;
-	int inuse, sector_size, sector_bits;
-	struct semaphore mutex;
-} raw_device_data_t;
-
-static raw_device_data_t raw_devices[256];
-
-static ssize_t rw_raw_dev(int rw, struct file *, char *, size_t, loff_t *);
-
-ssize_t	raw_read(struct file *, char *, size_t, loff_t *);
-ssize_t	raw_write(struct file *, const char *, size_t, loff_t *);
-int	raw_open(struct inode *, struct file *);
-int	raw_release(struct inode *, struct file *);
-int	raw_ctl_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
-int	raw_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
-
-
-static struct file_operations raw_fops = {
-	read:		raw_read,
-	write:		raw_write,
-	open:		raw_open,
-	release:	raw_release,
-	ioctl:		raw_ioctl,
+	int inuse;
 };
 
-static struct file_operations raw_ctl_fops = {
-	ioctl:		raw_ctl_ioctl,
-	open:		raw_open,
-};
+static struct class *raw_class;
+static struct raw_device_data *raw_devices;
+static DEFINE_MUTEX(raw_mutex);
+static const struct file_operations raw_ctl_fops; /* forward declaration */
 
-static int __init raw_init(void)
-{
-	int i;
-	register_chrdev(RAW_MAJOR, "raw", &raw_fops);
+static int max_raw_minors = MAX_RAW_MINORS;
 
-	for (i = 0; i < 256; i++)
-		init_MUTEX(&raw_devices[i].mutex);
+module_param(max_raw_minors, int, 0);
+MODULE_PARM_DESC(max_raw_minors, "Maximum number of raw devices (1-65536)");
 
-	return 0;
-}
-
-__initcall(raw_init);
-
-/* 
+/*
  * Open/close code for raw IO.
+ *
+ * We just rewrite the i_mapping for the /dev/raw/rawN file descriptor to
+ * point at the blockdev's address_space and set the file handle to use
+ * O_DIRECT.
+ *
+ * Set the device's soft blocksize to the minimum possible.  This gives the
+ * finest possible alignment and has no adverse impact on performance.
  */
-
-int raw_open(struct inode *inode, struct file *filp)
+static int raw_open(struct inode *inode, struct file *filp)
 {
-	int minor;
-	struct block_device * bdev;
-	kdev_t rdev;	/* it should eventually go away */
+	const int minor = iminor(inode);
+	struct block_device *bdev;
 	int err;
-	int sector_size;
-	int sector_bits;
 
-	minor = MINOR(inode->i_rdev);
-	
-	/* 
-	 * Is it the control device? 
-	 */
-	
-	if (minor == 0) {
+	if (minor == 0) {	/* It is the control device */
 		filp->f_op = &raw_ctl_fops;
 		return 0;
 	}
-	
-	if (!filp->f_iobuf) {
-		err = alloc_kiovec(1, &filp->f_iobuf);
-		if (err)
-			return err;
-	}
 
-	down(&raw_devices[minor].mutex);
+	mutex_lock(&raw_mutex);
+
 	/*
-	 * No, it is a normal raw device.  All we need to do on open is
-	 * to check that the device is bound, and force the underlying
-	 * block device to a sector-size blocksize. 
+	 * All we need to do on open is check that the device is bound.
 	 */
-
 	bdev = raw_devices[minor].binding;
 	err = -ENODEV;
 	if (!bdev)
 		goto out;
-
-	atomic_inc(&bdev->bd_count);
-	rdev = to_kdev_t(bdev->bd_dev);
-	err = blkdev_get(bdev, filp->f_mode, 0, BDEV_RAW);
+	igrab(bdev->bd_inode);
+	err = blkdev_get(bdev, filp->f_mode | FMODE_EXCL, raw_open);
 	if (err)
 		goto out;
-	
-	/*
-	 * Don't change the blocksize if we already have users using
-	 * this device 
-	 */
+	err = set_blocksize(bdev, bdev_logical_block_size(bdev));
+	if (err)
+		goto out1;
+	filp->f_flags |= O_DIRECT;
+	filp->f_mapping = bdev->bd_inode->i_mapping;
+	if (++raw_devices[minor].inuse == 1)
+		filp->f_path.dentry->d_inode->i_mapping =
+			bdev->bd_inode->i_mapping;
+	filp->private_data = bdev;
+	mutex_unlock(&raw_mutex);
+	return 0;
 
-	if (raw_devices[minor].inuse++)
-		goto out;
-
-	/* 
-	 * Don't interfere with mounted devices: we cannot safely set
-	 * the blocksize on a device which is already mounted.  
-	 */
-	
-	sector_size = 512;
-	if (is_mounted(rdev)) {
-		if (blksize_size[MAJOR(rdev)])
-			sector_size = blksize_size[MAJOR(rdev)][MINOR(rdev)];
-	} else {
-		if (hardsect_size[MAJOR(rdev)])
-			sector_size = hardsect_size[MAJOR(rdev)][MINOR(rdev)];
-	}
-
-	set_blocksize(rdev, sector_size);
-	raw_devices[minor].sector_size = sector_size;
-
-	for (sector_bits = 0; !(sector_size & 1); )
-		sector_size>>=1, sector_bits++;
-	raw_devices[minor].sector_bits = sector_bits;
-
- out:
-	up(&raw_devices[minor].mutex);
-	
+out1:
+	blkdev_put(bdev, filp->f_mode | FMODE_EXCL);
+out:
+	mutex_unlock(&raw_mutex);
 	return err;
 }
 
-int raw_release(struct inode *inode, struct file *filp)
+/*
+ * When the final fd which refers to this character-special node is closed, we
+ * make its ->mapping point back at its own i_data.
+ */
+static int raw_release(struct inode *inode, struct file *filp)
 {
-	int minor;
+	const int minor= iminor(inode);
 	struct block_device *bdev;
-	
-	minor = MINOR(inode->i_rdev);
-	down(&raw_devices[minor].mutex);
+
+	mutex_lock(&raw_mutex);
 	bdev = raw_devices[minor].binding;
-	raw_devices[minor].inuse--;
-	up(&raw_devices[minor].mutex);
-	blkdev_put(bdev, BDEV_RAW);
+	if (--raw_devices[minor].inuse == 0) {
+		/* Here  inode->i_mapping == bdev->bd_inode->i_mapping  */
+		inode->i_mapping = &inode->i_data;
+		inode->i_mapping->backing_dev_info = &default_backing_dev_info;
+	}
+	mutex_unlock(&raw_mutex);
+
+	blkdev_put(bdev, filp->f_mode | FMODE_EXCL);
 	return 0;
 }
 
-
-
-/* Forward ioctls to the underlying block device. */ 
-int raw_ioctl(struct inode *inode, 
-		  struct file *flip,
-		  unsigned int command, 
-		  unsigned long arg)
+/*
+ * Forward ioctls to the underlying block device.
+ */
+static long
+raw_ioctl(struct file *filp, unsigned int command, unsigned long arg)
 {
-	int minor = minor(inode->i_rdev), err; 
-	struct block_device *b; 
-	if (minor < 1 || minor > 255)
-		return -ENODEV;
+	struct block_device *bdev = filp->private_data;
+	return blkdev_ioctl(bdev, 0, command, arg);
+}
 
-	b = raw_devices[minor].binding;
-	err = -EINVAL; 
-	if (b && b->bd_inode && b->bd_op && b->bd_op->ioctl) { 
-		err = b->bd_op->ioctl(b->bd_inode, NULL, command, arg); 
-	} 
+static int bind_set(int number, u64 major, u64 minor)
+{
+	dev_t dev = MKDEV(major, minor);
+	struct raw_device_data *rawdev;
+	int err = 0;
+
+	if (number <= 0 || number >= max_raw_minors)
+		return -EINVAL;
+
+	if (MAJOR(dev) != major || MINOR(dev) != minor)
+		return -EINVAL;
+
+	rawdev = &raw_devices[number];
+
+	/*
+	 * This is like making block devices, so demand the
+	 * same capability
+	 */
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	/*
+	 * For now, we don't need to check that the underlying
+	 * block device is present or not: we can do that when
+	 * the raw device is opened.  Just check that the
+	 * major/minor numbers make sense.
+	 */
+
+	if (MAJOR(dev) == 0 && dev != 0)
+		return -EINVAL;
+
+	mutex_lock(&raw_mutex);
+	if (rawdev->inuse) {
+		mutex_unlock(&raw_mutex);
+		return -EBUSY;
+	}
+	if (rawdev->binding) {
+		bdput(rawdev->binding);
+		module_put(THIS_MODULE);
+	}
+	if (!dev) {
+		/* unbind */
+		rawdev->binding = NULL;
+		device_destroy(raw_class, MKDEV(RAW_MAJOR, number));
+	} else {
+		rawdev->binding = bdget(dev);
+		if (rawdev->binding == NULL) {
+			err = -ENOMEM;
+		} else {
+			dev_t raw = MKDEV(RAW_MAJOR, number);
+			__module_get(THIS_MODULE);
+			device_destroy(raw_class, raw);
+			device_create(raw_class, NULL, raw, NULL,
+				      "raw%d", number);
+		}
+	}
+	mutex_unlock(&raw_mutex);
 	return err;
-} 
+}
+
+static int bind_get(int number, dev_t *dev)
+{
+	struct raw_device_data *rawdev;
+	struct block_device *bdev;
+
+	if (number <= 0 || number >= MAX_RAW_MINORS)
+		return -EINVAL;
+
+	rawdev = &raw_devices[number];
+
+	mutex_lock(&raw_mutex);
+	bdev = rawdev->binding;
+	*dev = bdev ? bdev->bd_dev : 0;
+	mutex_unlock(&raw_mutex);
+	return 0;
+}
 
 /*
  * Deal with ioctls against the raw-device control interface, to bind
- * and unbind other raw devices.  
+ * and unbind other raw devices.
  */
-
-int raw_ctl_ioctl(struct inode *inode, 
-		  struct file *flip,
-		  unsigned int command, 
-		  unsigned long arg)
+static long raw_ctl_ioctl(struct file *filp, unsigned int command,
+			  unsigned long arg)
 {
 	struct raw_config_request rq;
-	int err = 0;
-	int minor;
-	
+	dev_t dev;
+	int err;
+
 	switch (command) {
 	case RAW_SETBIND:
+		if (copy_from_user(&rq, (void __user *) arg, sizeof(rq)))
+			return -EFAULT;
+
+		return bind_set(rq.raw_minor, rq.block_major, rq.block_minor);
+
 	case RAW_GETBIND:
+		if (copy_from_user(&rq, (void __user *) arg, sizeof(rq)))
+			return -EFAULT;
 
-		/* First, find out which raw minor we want */
-
-		err = copy_from_user(&rq, (void *) arg, sizeof(rq));
+		err = bind_get(rq.raw_minor, &dev);
 		if (err)
-			break;
-		
-		minor = rq.raw_minor;
-		if (minor <= 0 || minor > MINORMASK) {
-			err = -EINVAL;
-			break;
-		}
+			return err;
 
-		if (command == RAW_SETBIND) {
-			/*
-			 * This is like making block devices, so demand the
-			 * same capability
-			 */
-			if (!capable(CAP_SYS_ADMIN)) {
-				err = -EPERM;
-				break;
-			}
+		rq.block_major = MAJOR(dev);
+		rq.block_minor = MINOR(dev);
 
-			/* 
-			 * For now, we don't need to check that the underlying
-			 * block device is present or not: we can do that when
-			 * the raw device is opened.  Just check that the
-			 * major/minor numbers make sense. 
-			 */
+		if (copy_to_user((void __user *)arg, &rq, sizeof(rq)))
+			return -EFAULT;
 
-			if ((rq.block_major == NODEV && 
-			     rq.block_minor != NODEV) ||
-			    rq.block_major > MAX_BLKDEV ||
-			    rq.block_minor > MINORMASK) {
-				err = -EINVAL;
-				break;
-			}
-			
-			down(&raw_devices[minor].mutex);
-			if (raw_devices[minor].inuse) {
-				up(&raw_devices[minor].mutex);
-				err = -EBUSY;
-				break;
-			}
-			if (raw_devices[minor].binding)
-				bdput(raw_devices[minor].binding);
-			raw_devices[minor].binding = 
-				bdget(kdev_t_to_nr(MKDEV(rq.block_major, rq.block_minor)));
-			up(&raw_devices[minor].mutex);
-		} else {
-			struct block_device *bdev;
-			kdev_t dev;
-
-			bdev = raw_devices[minor].binding;
-			if (bdev) {
-				dev = to_kdev_t(bdev->bd_dev);
-				rq.block_major = MAJOR(dev);
-				rq.block_minor = MINOR(dev);
-			} else {
-				rq.block_major = rq.block_minor = 0;
-			}
-			err = copy_to_user((void *) arg, &rq, sizeof(rq));
-		}
-		break;
-		
-	default:
-		err = -EINVAL;
+		return 0;
 	}
-	
-	return err;
+
+	return -EINVAL;
 }
 
+#ifdef CONFIG_COMPAT
+struct raw32_config_request {
+	compat_int_t	raw_minor;
+	compat_u64	block_major;
+	compat_u64	block_minor;
+};
 
-
-ssize_t	raw_read(struct file *filp, char * buf, 
-		 size_t size, loff_t *offp)
+static long raw_ctl_compat_ioctl(struct file *file, unsigned int cmd,
+				unsigned long arg)
 {
-	return rw_raw_dev(READ, filp, buf, size, offp);
-}
+	struct raw32_config_request __user *user_req = compat_ptr(arg);
+	struct raw32_config_request rq;
+	dev_t dev;
+	int err = 0;
 
-ssize_t	raw_write(struct file *filp, const char *buf, 
-		  size_t size, loff_t *offp)
-{
-	return rw_raw_dev(WRITE, filp, (char *) buf, size, offp);
-}
+	switch (cmd) {
+	case RAW_SETBIND:
+		if (copy_from_user(&rq, user_req, sizeof(rq)))
+			return -EFAULT;
 
-#define SECTOR_BITS 9
-#define SECTOR_SIZE (1U << SECTOR_BITS)
-#define SECTOR_MASK (SECTOR_SIZE - 1)
+		return bind_set(rq.raw_minor, rq.block_major, rq.block_minor);
 
-ssize_t	rw_raw_dev(int rw, struct file *filp, char *buf, 
-		   size_t size, loff_t *offp)
-{
-	struct kiobuf * iobuf;
-	int		new_iobuf;
-	int		err = 0;
-	unsigned long	blocknr, blocks;
-	size_t		transferred;
-	int		iosize;
-	int		i;
-	int		minor;
-	kdev_t		dev;
-	unsigned long	limit;
-	loff_t		off = *offp;
+	case RAW_GETBIND:
+		if (copy_from_user(&rq, user_req, sizeof(rq)))
+			return -EFAULT;
 
-	int		sector_size, sector_bits, sector_mask;
-	int		max_sectors;
-	
-	/*
-	 * First, a few checks on device size limits 
-	 */
-
-	minor = MINOR(filp->f_dentry->d_inode->i_rdev);
-
-	new_iobuf = 0;
-	iobuf = filp->f_iobuf;
-	if (test_and_set_bit(0, &filp->f_iobuf_lock)) {
-		/*
-		 * A parallel read/write is using the preallocated iobuf
-		 * so just run slow and allocate a new one.
-		 */
-		err = alloc_kiovec(1, &iobuf);
+		err = bind_get(rq.raw_minor, &dev);
 		if (err)
-			goto out;
-		new_iobuf = 1;
+			return err;
+
+		rq.block_major = MAJOR(dev);
+		rq.block_minor = MINOR(dev);
+
+		if (copy_to_user(user_req, &rq, sizeof(rq)))
+			return -EFAULT;
+
+		return 0;
 	}
 
-	dev = to_kdev_t(raw_devices[minor].binding->bd_dev);
-	sector_size = raw_devices[minor].sector_size;
-	sector_bits = raw_devices[minor].sector_bits;
-	sector_mask = sector_size- 1;
-	max_sectors = KIO_MAX_SECTORS >> (sector_bits - 9);
-	
-	if (blk_size[MAJOR(dev)])
-		limit = (((loff_t) blk_size[MAJOR(dev)][MINOR(dev)]) << BLOCK_SIZE_BITS) >> sector_bits;
-	else
-		limit = INT_MAX;
-	dprintk ("rw_raw_dev: dev %d:%d (+%d)\n",
-		 MAJOR(dev), MINOR(dev), limit);
-	
-	err = -EINVAL;
-	if ((off & sector_mask) || (size & sector_mask))
-		goto out_free;
-	err = 0;
-	if (size)
-		err = -ENXIO;
-	if ((off >> sector_bits) >= limit)
-		goto out_free;
-
-	/*
-	 * Split the IO into KIO_MAX_SECTORS chunks, mapping and
-	 * unmapping the single kiobuf as we go to perform each chunk of
-	 * IO.  
-	 */
-
-	transferred = 0;
-	blocknr = off >> sector_bits;
-	while (size > 0) {
-		blocks = size >> sector_bits;
-		if (blocks > max_sectors)
-			blocks = max_sectors;
-		if (blocks > limit - blocknr)
-			blocks = limit - blocknr;
-		if (!blocks)
-			break;
-
-		iosize = blocks << sector_bits;
-
-		err = map_user_kiobuf(rw, iobuf, (unsigned long) buf, iosize);
-		if (err)
-			break;
-
-		for (i=0; i < blocks; i++) 
-			iobuf->blocks[i] = blocknr++;
-		
-		err = brw_kiovec(rw, 1, &iobuf, dev, iobuf->blocks, sector_size);
-
-		if (rw == READ && err > 0)
-			mark_dirty_kiobuf(iobuf, err);
-		
-		if (err >= 0) {
-			transferred += err;
-			size -= err;
-			buf += err;
-		}
-
-		unmap_kiobuf(iobuf);
-
-		if (err != iosize)
-			break;
-	}
-	
-	if (transferred) {
-		*offp = off + transferred;
-		err = transferred;
-	}
-
- out_free:
-	if (!new_iobuf)
-		clear_bit(0, &filp->f_iobuf_lock);
-	else
-		free_kiovec(1, &iobuf);
- out:	
-	return err;
+	return -EINVAL;
 }
+#endif
+
+static const struct file_operations raw_fops = {
+	.read		= do_sync_read,
+	.aio_read	= generic_file_aio_read,
+	.write		= do_sync_write,
+	.aio_write	= blkdev_aio_write,
+	.fsync		= blkdev_fsync,
+	.open		= raw_open,
+	.release	= raw_release,
+	.unlocked_ioctl = raw_ioctl,
+	.llseek		= default_llseek,
+	.owner		= THIS_MODULE,
+};
+
+static const struct file_operations raw_ctl_fops = {
+	.unlocked_ioctl = raw_ctl_ioctl,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl	= raw_ctl_compat_ioctl,
+#endif
+	.open		= raw_open,
+	.owner		= THIS_MODULE,
+	.llseek		= noop_llseek,
+};
+
+static struct cdev raw_cdev;
+
+static char *raw_devnode(struct device *dev, umode_t *mode)
+{
+	return kasprintf(GFP_KERNEL, "raw/%s", dev_name(dev));
+}
+
+static int __init raw_init(void)
+{
+	dev_t dev = MKDEV(RAW_MAJOR, 0);
+	int ret;
+
+	if (max_raw_minors < 1 || max_raw_minors > 65536) {
+		printk(KERN_WARNING "raw: invalid max_raw_minors (must be"
+			" between 1 and 65536), using %d\n", MAX_RAW_MINORS);
+		max_raw_minors = MAX_RAW_MINORS;
+	}
+
+	raw_devices = vzalloc(sizeof(struct raw_device_data) * max_raw_minors);
+	if (!raw_devices) {
+		printk(KERN_ERR "Not enough memory for raw device structures\n");
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	ret = register_chrdev_region(dev, max_raw_minors, "raw");
+	if (ret)
+		goto error;
+
+	cdev_init(&raw_cdev, &raw_fops);
+	ret = cdev_add(&raw_cdev, dev, max_raw_minors);
+	if (ret) {
+		goto error_region;
+	}
+
+	raw_class = class_create(THIS_MODULE, "raw");
+	if (IS_ERR(raw_class)) {
+		printk(KERN_ERR "Error creating raw class.\n");
+		cdev_del(&raw_cdev);
+		ret = PTR_ERR(raw_class);
+		goto error_region;
+	}
+	raw_class->devnode = raw_devnode;
+	device_create(raw_class, NULL, MKDEV(RAW_MAJOR, 0), NULL, "rawctl");
+
+	return 0;
+
+error_region:
+	unregister_chrdev_region(dev, max_raw_minors);
+error:
+	vfree(raw_devices);
+	return ret;
+}
+
+static void __exit raw_exit(void)
+{
+	device_destroy(raw_class, MKDEV(RAW_MAJOR, 0));
+	class_destroy(raw_class);
+	cdev_del(&raw_cdev);
+	unregister_chrdev_region(MKDEV(RAW_MAJOR, 0), max_raw_minors);
+}
+
+module_init(raw_init);
+module_exit(raw_exit);
+MODULE_LICENSE("GPL");

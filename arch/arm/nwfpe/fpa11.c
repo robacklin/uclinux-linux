@@ -26,15 +26,11 @@
 #include "fpmodule.h"
 #include "fpmodule.inl"
 
-#include <asm/system.h>
-
-/* forward declarations */
-unsigned int EmulateCPDO(const unsigned int);
-unsigned int EmulateCPDT(const unsigned int);
-unsigned int EmulateCPRT(const unsigned int);
+#include <linux/compiler.h>
+#include <linux/string.h>
 
 /* Reset the FPA11 chip.  Called to initialize and reset the emulator. */
-void resetFPA11(void)
+static void resetFPA11(void)
 {
 	int i;
 	FPA11 *fpa11 = GET_FPA11();
@@ -48,82 +44,83 @@ void resetFPA11(void)
 	fpa11->fpsr = FP_EMULATOR | BIT_AC;
 }
 
-void SetRoundingMode(const unsigned int opcode)
+int8 SetRoundingMode(const unsigned int opcode)
 {
 	switch (opcode & MASK_ROUNDING_MODE) {
 	default:
 	case ROUND_TO_NEAREST:
-		float_rounding_mode = float_round_nearest_even;
-		break;
+		return float_round_nearest_even;
 
 	case ROUND_TO_PLUS_INFINITY:
-		float_rounding_mode = float_round_up;
-		break;
+		return float_round_up;
 
 	case ROUND_TO_MINUS_INFINITY:
-		float_rounding_mode = float_round_down;
-		break;
+		return float_round_down;
 
 	case ROUND_TO_ZERO:
-		float_rounding_mode = float_round_to_zero;
-		break;
+		return float_round_to_zero;
 	}
 }
 
-void SetRoundingPrecision(const unsigned int opcode)
+int8 SetRoundingPrecision(const unsigned int opcode)
 {
 #ifdef CONFIG_FPE_NWFPE_XP
 	switch (opcode & MASK_ROUNDING_PRECISION) {
 	case ROUND_SINGLE:
-		floatx80_rounding_precision = 32;
-		break;
+		return 32;
 
 	case ROUND_DOUBLE:
-		floatx80_rounding_precision = 64;
-		break;
+		return 64;
 
 	case ROUND_EXTENDED:
-		floatx80_rounding_precision = 80;
-		break;
+		return 80;
 
 	default:
-		floatx80_rounding_precision = 80;
+		return 80;
 	}
 #endif
+	return 80;
 }
 
-void nwfpe_init_fpa(void)
+void nwfpe_init_fpa(union fp_state *fp)
 {
-	FPA11 *fpa11 = GET_FPA11();
+	FPA11 *fpa11 = (FPA11 *)fp;
 #ifdef NWFPE_DEBUG
 	printk("NWFPE: setting up state.\n");
 #endif
+ 	memset(fpa11, 0, sizeof(FPA11));
 	resetFPA11();
-	SetRoundingMode(ROUND_TO_NEAREST);
-	SetRoundingPrecision(ROUND_EXTENDED);
 	fpa11->initflag = 1;
 }
 
 /* Emulate the instruction in the opcode. */
-unsigned int EmulateAll(const unsigned int opcode)
+unsigned int EmulateAll(unsigned int opcode)
 {
+	unsigned int code;
+
 #ifdef NWFPE_DEBUG
 	printk("NWFPE: emulating opcode %08x\n", opcode);
 #endif
-
-	if (TEST_OPCODE(opcode, MASK_CPRT)) {
-		/* Emulate conversion opcodes. */
-		/* Emulate register transfer opcodes. */
-		/* Emulate comparison opcodes. */
-		return EmulateCPRT(opcode);
-	} else if (TEST_OPCODE(opcode, MASK_CPDO)) {
-		/* Emulate monadic arithmetic opcodes. */
-		/* Emulate dyadic arithmetic opcodes. */
-		return EmulateCPDO(opcode);
-	} else if (TEST_OPCODE(opcode, MASK_CPDT)) {
-		/* Emulate load/store opcodes. */
-		/* Emulate load/store multiple opcodes. */
-		return EmulateCPDT(opcode);
+	code = opcode & 0x00000f00;
+	if (code == 0x00000100 || code == 0x00000200) {
+		/* For coprocessor 1 or 2 (FPA11) */
+		code = opcode & 0x0e000000;
+		if (code == 0x0e000000) {
+			if (opcode & 0x00000010) {
+				/* Emulate conversion opcodes. */
+				/* Emulate register transfer opcodes. */
+				/* Emulate comparison opcodes. */
+				return EmulateCPRT(opcode);
+			} else {
+				/* Emulate monadic arithmetic opcodes. */
+				/* Emulate dyadic arithmetic opcodes. */
+				return EmulateCPDO(opcode);
+			}
+		} else if (code == 0x0c000000) {
+			/* Emulate load/store opcodes. */
+			/* Emulate load/store multiple opcodes. */
+			return EmulateCPDT(opcode);
+		}
 	}
 
 	/* Invalid instruction detected.  Return FALSE. */

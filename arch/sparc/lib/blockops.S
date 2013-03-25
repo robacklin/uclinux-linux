@@ -1,10 +1,9 @@
-/* $Id: blockops.S,v 1.8 1998/01/30 10:58:44 jj Exp $
+/*
  * blockops.S: Common block zero optimized routines.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/cprefix.h>
 #include <asm/page.h>
 
 	/* Zero out 64 bytes of memory at (buf + offset).
@@ -38,7 +37,7 @@
 	 * and (2 * PAGE_SIZE) (for kernel stacks)
 	 * and with a second arg of zero.  We assume in
 	 * all of these cases that the buffer is aligned
-	 * on at least an 8 byte boundry.
+	 * on at least an 8 byte boundary.
 	 *
 	 * Therefore we special case them to make them
 	 * as fast as possible.
@@ -46,9 +45,9 @@
 
 	.text
 	.align	4
-	.globl	C_LABEL(bzero_1page), C_LABEL(__copy_1page)
+	.globl	bzero_1page, __copy_1page
 
-C_LABEL(bzero_1page):
+bzero_1page:
 /* NOTE: If you change the number of insns of this routine, please check
  * arch/sparc/mm/hypersparc.S */
 	/* %o0 = buf */
@@ -67,7 +66,7 @@ C_LABEL(bzero_1page):
 	retl
 	 nop
 
-C_LABEL(__copy_1page):
+__copy_1page:
 /* NOTE: If you change the number of insns of this routine, please check
  * arch/sparc/mm/hypersparc.S */
 	/* %o0 = dst, %o1 = src */

@@ -2,13 +2,6 @@
 # Makefile for the SiS framebuffer device driver
 #
 
-O_TARGET := sisfb.o
+obj-$(CONFIG_FB_SIS) += sisfb.o
 
-export-objs := sis_main.o
-
-obj-y  := sis_main.o init.o init301.o sis_accel.o
-obj-m  := $(O_TARGET)
-
-include $(TOPDIR)/Rules.make
-
-
+sisfb-objs := sis_main.o sis_accel.o init.o init301.o initextlfb.o

@@ -1,334 +1,207 @@
 /*
  * Permedia2 framebuffer driver.
- * Copyright (c) 1998-1999 Ilario Nardinocchi (nardinoc@CS.UniBO.IT)
+ *
+ * 2.5/2.6 driver:
+ * Copyright (c) 2003 Jim Hague (jim.hague@acm.org)
+ *
+ * based on 2.4 driver:
+ * Copyright (c) 1998-2000 Ilario Nardinocchi (nardinoc@CS.UniBO.IT)
  * Copyright (c) 1999 Jakub Jelinek (jakub@redhat.com)
- * Based on linux/drivers/video/skeletonfb.c by Geert Uytterhoeven.
- * --------------------------------------------------------------------------
- * $Id: pm2fb.c,v 1.163 1999/02/21 14:06:49 illo Exp $
- * --------------------------------------------------------------------------
- * TODO multiple boards support
- * --------------------------------------------------------------------------
+ *
+ * and additional input from James Simmon's port of Hannu Mallat's tdfx
+ * driver.
+ *
+ * I have a Creative Graphics Blaster Exxtreme card - pm2fb on x86. I
+ * have no access to other pm2fb implementations. Sparc (and thus
+ * hopefully other big-endian) devices now work, thanks to a lot of
+ * testing work by Ron Murray. I have no access to CVision hardware,
+ * and therefore for now I am omitting the CVision code.
+ *
+ * Multiple boards support has been on the TODO list for ages.
+ * Don't expect this to change.
+ *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file COPYING in the main directory of this archive
- * for more details.
+ * License. See the file COPYING in the main directory of this archive for
+ * more details.
+ *
+ *
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
-#include <linux/vmalloc.h>
 #include <linux/delay.h>
-#include <linux/interrupt.h>
 #include <linux/fb.h>
-#include <linux/selection.h>
-#include <linux/console.h>
 #include <linux/init.h>
 #include <linux/pci.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/uaccess.h>
-#include <video/fbcon.h>
-#include <video/fbcon-cfb8.h>
-#include <video/fbcon-cfb16.h>
-#include <video/fbcon-cfb24.h>
-#include <video/fbcon-cfb32.h>
-#include "pm2fb.h"
-#include "cvisionppc.h"
-#ifdef __sparc__
-#include <asm/pbm.h>
-#include <asm/fbio.h>
+#ifdef CONFIG_MTRR
+#include <asm/mtrr.h>
 #endif
+
+#include <video/permedia2.h>
+#include <video/cvisionppc.h>
 
 #if !defined(__LITTLE_ENDIAN) && !defined(__BIG_ENDIAN)
 #error	"The endianness of the target host has not been defined."
 #endif
 
-#if defined(__BIG_ENDIAN) && !defined(__sparc__)
-#define PM2FB_BE_APERTURE
-#endif
-
-/* Need to debug this some more */
-#undef PM2FB_HW_CURSOR
-
-#if defined(CONFIG_FB_PM2_PCI) && !defined(CONFIG_PCI)
-#undef CONFIG_FB_PM2_PCI
-#warning "support for Permedia2 PCI boards with no generic PCI support!"
+#if !defined(CONFIG_PCI)
+#error "Only generic PCI cards supported."
 #endif
 
 #undef PM2FB_MASTER_DEBUG
 #ifdef PM2FB_MASTER_DEBUG
-#define DPRINTK(a,b...)	printk(KERN_DEBUG "pm2fb: %s: " a, __FUNCTION__ , ## b)
+#define DPRINTK(a, b...)	\
+	printk(KERN_DEBUG "pm2fb: %s: " a, __func__ , ## b)
 #else
-#define DPRINTK(a,b...)
-#endif 
+#define DPRINTK(a, b...)
+#endif
 
-#define PICOS2KHZ(a) (1000000000UL/(a))
-#define KHZ2PICOS(a) (1000000000UL/(a))
+#define PM2_PIXMAP_SIZE	(1600 * 4)
 
 /*
- * The _DEFINITIVE_ memory mapping/unmapping functions.
- * This is due to the fact that they're changing soooo often...
+ * Driver data
  */
-#define MMAP(a,b)	ioremap((unsigned long )(a), b)
-#define UNMAP(a,b)	iounmap(a)
+static int hwcursor = 1;
+static char *mode_option __devinitdata;
 
 /*
- * The _DEFINITIVE_ memory i/o barrier functions.
- * This is due to the fact that they're changing soooo often...
+ * The XFree GLINT driver will (I think to implement hardware cursor
+ * support on TVP4010 and similar where there is no RAMDAC - see
+ * comment in set_video) always request +ve sync regardless of what
+ * the mode requires. This screws me because I have a Sun
+ * fixed-frequency monitor which absolutely has to have -ve sync. So
+ * these flags allow the user to specify that requests for +ve sync
+ * should be silently turned in -ve sync.
  */
-#define DEFW()		wmb()
-#define DEFR()		rmb()
-#define DEFRW()		mb()
-
-#ifndef MIN
-#define MIN(a,b) ((a)<(b)?(a):(b))
-#endif
-
-#ifndef MAX
-#define MAX(a,b) ((a)>(b)?(a):(b))
-#endif
-
-struct pm2fb_par {
-	u32 pixclock;		/* pixclock in KHz */
-	u32 width;		/* width of virtual screen */
-	u32 height;		/* height of virtual screen */
-	u32 hsstart;		/* horiz. sync start */
-	u32 hsend;		/* horiz. sync end */
-	u32 hbend;		/* horiz. blank end (also gate end) */
-	u32 htotal;		/* total width (w/ sync & blank) */
-	u32 vsstart;		/* vert. sync start */
-	u32 vsend;		/* vert. sync end */
-	u32 vbend;		/* vert. blank end */
-	u32 vtotal;		/* total height (w/ sync & blank) */
-	u32 stride;		/* screen stride */
-	u32 base;		/* screen base (xoffset+yoffset) */
-	u32 depth;		/* screen depth (8, 16, 24 or 32) */
-	u32 video;		/* video control (hsync,vsync) */
-};
-
-#define OPTF_OLD_MEM		(1L<<0)
-#define OPTF_YPAN		(1L<<1)
-#define OPTF_VIRTUAL		(1L<<2)
-#define OPTF_USER		(1L<<3)
-static struct {
-	char font[40];
-	u32 flags;
-	struct pm2fb_par user_mode;
-} pm2fb_options =
-#ifdef __sparc__
-	/* For some reason Raptor is not happy with the low-end mode */
-	{"\0", 0L, {31499,640,480,4,20,50,209,0,3,20,499,80,0,8,121}};
-#else
-	{"\0", 0L, {25174,640,480,4,28,40,199,9,11,45,524,80,0,8,121}};
-#endif
-
-static char curblink __initdata = 1;
-
-static struct {
-	char name[16];
-	struct pm2fb_par par;
-} user_mode[] __initdata = {
-	{"640x480-60",
-		{25174,640,480,4,28,40,199,9,11,45,524,80,0,8,121}},
-	{"640x480-72",
-		{31199,640,480,6,16,48,207,8,10,39,518,80,0,8,121}},
-	{"640x480-75",
-		{31499,640,480,4,20,50,209,0,3,20,499,80,0,8,121}},
-	{"640x480-90",
-		{39909,640,480,8,18,48,207,24,38,53,532,80,0,8,121}},
-	{"640x480-100",
-		{44899,640,480,8,40,52,211,21,33,51,530,80,0,8,121}},
-	{"800x600-56",
-		{35999,800,600,6,24,56,255,0,2,25,624,100,0,8,41}},
-	{"800x600-60",
-		{40000,800,600,10,42,64,263,0,4,28,627,100,0,8,41}},
-	{"800x600-70",
-		{44899,800,600,6,42,52,251,8,20,36,635,100,0,8,105}},
-	{"800x600-72",
-		{50000,800,600,14,44,60,259,36,42,66,665,100,0,8,41}},
-	{"800x600-75",
-		{49497,800,600,4,24,64,263,0,3,25,624,100,0,8,41}},
-	{"800x600-90",
-		{56637,800,600,2,18,48,247,7,18,35,634,100,0,8,41}},
-	{"800x600-100",
-		{67499,800,600,0,16,70,269,6,10,25,624,100,0,8,41}},
-	{"1024x768-60",
-		{64998,1024,768,6,40,80,335,2,8,38,805,128,0,8,121}},
-	{"1024x768-70",
-		{74996,1024,768,6,40,76,331,2,8,38,805,128,0,8,121}},
-	{"1024x768-72",
-		{74996,1024,768,6,40,66,321,2,8,38,805,128,0,8,121}},
-	{"1024x768-75",
-		{78932,1024,768,4,28,72,327,0,3,32,799,128,0,8,41}},
-	{"1024x768-90",
-		{100000,1024,768,0,24,72,327,20,35,77,844,128,0,8,121}},
-	{"1024x768-100",
-		{109998,1024,768,0,22,92,347,0,7,24,791,128,0,8,121}},
-	{"1024x768-illo",
-		{120322,1024,768,12,48,120,375,3,7,32,799,128,0,8,41}},
-	{"1152x864-60",
-		{80000,1152,864,16,44,76,363,5,10,52,915,144,0,8,41}},
-	{"1152x864-70",
-		{100000,1152,864,10,48,90,377,12,23,81,944,144,0,8,41}},
-	{"1152x864-75",
-		{109998,1152,864,6,42,78,365,44,52,138,1001,144,0,8,41}},
-	{"1152x864-80",
-		{109998,1152,864,4,32,72,359,29,36,94,957,144,0,8,41}},
-	{"1280x1024-60",
-		{107991,1280,1024,12,40,102,421,0,3,42,1065,160,0,8,41}},
-	{"1280x1024-70",
-		{125992,1280,1024,20,48,102,421,0,5,42,1065,160,0,8,41}},
-	{"1280x1024-74",
-		{134989,1280,1024,8,44,108,427,0,29,40,1063,160,0,8,41}},
-	{"1280x1024-75",
-		{134989,1280,1024,4,40,102,421,0,3,42,1065,160,0,8,41}},
-	{"1600x1200-60",
-		{155981,1600,1200,8,48,112,511,9,17,70,1269,200,0,8,121}},
-	{"1600x1200-66",
-		{171998,1600,1200,10,44,120,519,2,5,53,1252,200,0,8,121}},
-	{"1600x1200-76",
-		{197980,1600,1200,10,44,120,519,2,7,50,1249,200,0,8,121}},
-	{"\0", },
-};
-
-#ifdef CONFIG_FB_PM2_PCI
-struct pm2pci_par {
-	u32 mem_config;
-	u32 mem_control;
-	u32 boot_address;
-	struct pci_dev* dev;
-};
-#endif
-
-#define DEFAULT_CURSOR_BLINK_RATE       (20)
-#define CURSOR_DRAW_DELAY               (2)
-
-struct pm2_cursor {
-    int	enable;
-    int on;
-    int vbl_cnt;
-    int blink_rate;
-    struct {
-        u16 x, y;
-    } pos, hot, size;
-    u8 color[6];
-    u8 bits[8][64];
-    u8 mask[8][64];
-    struct timer_list *timer;
-};
-
-static const char permedia2_name[16]="Permedia2";
-
-static struct pm2fb_info {
-	struct fb_info_gen gen;
-	int board;			/* Permedia2 board index (see
-					   board_table[] below) */
-	pm2type_t type;
-	struct {
-		unsigned long  fb_base;	/* physical framebuffer memory base */
-		u32 fb_size;		/* framebuffer memory size */
-		unsigned long  rg_base;	/* physical register memory base */
-		unsigned long  p_fb;	/* physical address of frame buffer */
-		unsigned char* v_fb;	/* virtual address of frame buffer */
-		unsigned long  p_regs;	/* physical address of registers
-					   region, must be rg_base or
-					   rg_base+PM2_REGS_SIZE depending on
-					   the host endianness */
-		unsigned char* v_regs;	/* virtual address of p_regs */
-	} regions;
-	union {				/* here, the per-board par structs */
-#ifdef CONFIG_FB_PM2_CVPPC
-		struct cvppc_par cvppc;	/* CVisionPPC data */
-#endif
-#ifdef CONFIG_FB_PM2_PCI
-		struct pm2pci_par pci;	/* Permedia2 PCI boards data */
-#endif
-	} board_par;
-	struct pm2fb_par current_par;	/* displayed screen */
-	int current_par_valid;
-	u32 memclock;			/* memclock (set by the per-board
-					   		init routine) */
-	struct display disp;
-	struct {
-		u8 transp;
-		u8 red;
-		u8 green;
-		u8 blue;
-	} palette[256];
-	union {
-#ifdef FBCON_HAS_CFB16
-		u16 cmap16[16];
-#endif
-#ifdef FBCON_HAS_CFB24
-		u32 cmap24[16];
-#endif
-#ifdef FBCON_HAS_CFB32
-		u32 cmap32[16];
-#endif
-	} cmap;
-	struct pm2_cursor *cursor;
-} fb_info;
-
-#ifdef CONFIG_FB_PM2_CVPPC
-static int cvppc_detect(struct pm2fb_info*);
-static void cvppc_init(struct pm2fb_info*);
-#endif
-
-#ifdef CONFIG_FB_PM2_PCI
-static int pm2pci_detect(struct pm2fb_info*);
-static void pm2pci_init(struct pm2fb_info*);
-#endif
-
-#ifdef PM2FB_HW_CURSOR
-static void pm2fb_cursor(struct display *p, int mode, int x, int y);
-static int pm2fb_set_font(struct display *d, int width, int height);
-static struct pm2_cursor *pm2_init_cursor(struct pm2fb_info *fb);
-static void pm2v_set_cursor_color(struct pm2fb_info *fb, u8 *red, u8 *green, u8 *blue);
-static void pm2v_set_cursor_shape(struct pm2fb_info *fb);
-static u8 cursor_color_map[2] = { 0, 0xff };
-#else
-#define pm2fb_cursor NULL
-#define pm2fb_set_font NULL
+static bool lowhsync;
+static bool lowvsync;
+static bool noaccel __devinitdata;
+/* mtrr option */
+#ifdef CONFIG_MTRR
+static bool nomtrr __devinitdata;
 #endif
 
 /*
- * Table of the supported Permedia2 based boards.
- * Three hooks are defined for each board:
- * detect(): should return 1 if the related board has been detected, 0
- *           otherwise. It should also fill the fields 'regions.fb_base',
- *           'regions.fb_size', 'regions.rg_base' and 'memclock' in the
- *           passed pm2fb_info structure.
- * init(): called immediately after the reset of the Permedia2 chip.
- *         It should reset the memory controller if needed (the MClk
- *         is set shortly afterwards by the caller).
- * cleanup(): called after the driver has been unregistered.
- *
- * the init and cleanup pointers can be NULL.
+ * The hardware state of the graphics card that isn't part of the
+ * screeninfo.
  */
-static const struct {
-	int (*detect)(struct pm2fb_info*);
-	void (*init)(struct pm2fb_info*);
-	void (*cleanup)(struct pm2fb_info*);
-	char name[32];
-} board_table[] = {
-#ifdef CONFIG_FB_PM2_PCI
-	{ pm2pci_detect, pm2pci_init, NULL, "Permedia2 PCI board" },
-#endif
-#ifdef CONFIG_FB_PM2_CVPPC
-	{ cvppc_detect, cvppc_init, NULL, "CVisionPPC/BVisionPPC" },
-#endif
-	{ NULL, }
+struct pm2fb_par
+{
+	pm2type_t	type;		/* Board type */
+	unsigned char	__iomem *v_regs;/* virtual address of p_regs */
+	u32		memclock;	/* memclock */
+	u32		video;		/* video flags before blanking */
+	u32		mem_config;	/* MemConfig reg at probe */
+	u32		mem_control;	/* MemControl reg at probe */
+	u32		boot_address;	/* BootAddress reg at probe */
+	u32		palette[16];
+	int		mtrr_handle;
 };
+
+/*
+ * Here we define the default structs fb_fix_screeninfo and fb_var_screeninfo
+ * if we don't use modedb.
+ */
+static struct fb_fix_screeninfo pm2fb_fix __devinitdata = {
+	.id =		"",
+	.type =		FB_TYPE_PACKED_PIXELS,
+	.visual =	FB_VISUAL_PSEUDOCOLOR,
+	.xpanstep =	1,
+	.ypanstep =	1,
+	.ywrapstep =	0,
+	.accel =	FB_ACCEL_3DLABS_PERMEDIA2,
+};
+
+/*
+ * Default video mode. In case the modedb doesn't work.
+ */
+static struct fb_var_screeninfo pm2fb_var __devinitdata = {
+	/* "640x480, 8 bpp @ 60 Hz */
+	.xres =			640,
+	.yres =			480,
+	.xres_virtual =		640,
+	.yres_virtual =		480,
+	.bits_per_pixel =	8,
+	.red =			{0, 8, 0},
+	.blue =			{0, 8, 0},
+	.green =		{0, 8, 0},
+	.activate =		FB_ACTIVATE_NOW,
+	.height =		-1,
+	.width =		-1,
+	.accel_flags =		0,
+	.pixclock =		39721,
+	.left_margin =		40,
+	.right_margin =		24,
+	.upper_margin =		32,
+	.lower_margin =		11,
+	.hsync_len =		96,
+	.vsync_len =		2,
+	.vmode =		FB_VMODE_NONINTERLACED
+};
+
+/*
+ * Utility functions
+ */
+
+static inline u32 pm2_RD(struct pm2fb_par *p, s32 off)
+{
+	return fb_readl(p->v_regs + off);
+}
+
+static inline void pm2_WR(struct pm2fb_par *p, s32 off, u32 v)
+{
+	fb_writel(v, p->v_regs + off);
+}
+
+static inline u32 pm2_RDAC_RD(struct pm2fb_par *p, s32 idx)
+{
+	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
+	mb();
+	return pm2_RD(p, PM2R_RD_INDEXED_DATA);
+}
+
+static inline u32 pm2v_RDAC_RD(struct pm2fb_par *p, s32 idx)
+{
+	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+	mb();
+	return pm2_RD(p,  PM2VR_RD_INDEXED_DATA);
+}
+
+static inline void pm2_RDAC_WR(struct pm2fb_par *p, s32 idx, u32 v)
+{
+	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
+	wmb();
+	pm2_WR(p, PM2R_RD_INDEXED_DATA, v);
+	wmb();
+}
+
+static inline void pm2v_RDAC_WR(struct pm2fb_par *p, s32 idx, u32 v)
+{
+	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
+	wmb();
+	pm2_WR(p, PM2VR_RD_INDEXED_DATA, v);
+	wmb();
+}
+
+#ifdef CONFIG_FB_PM2_FIFO_DISCONNECT
+#define WAIT_FIFO(p, a)
+#else
+static inline void WAIT_FIFO(struct pm2fb_par *p, u32 a)
+{
+	while (pm2_RD(p, PM2R_IN_FIFO_SPACE) < a)
+		cpu_relax();
+}
+#endif
 
 /*
  * partial products for the supported horizontal resolutions.
  */
-#define PACKPP(p0,p1,p2)	(((p2)<<6)|((p1)<<3)|(p0))
+#define PACKPP(p0, p1, p2)	(((p2) << 6) | ((p1) << 3) | (p0))
 static const struct {
 	u16 width;
 	u16 pp;
@@ -351,196 +224,56 @@ static const struct {
 	{ 1792,	PACKPP(6, 5, 4) }, { 2048,	PACKPP(6, 5, 5) },
 	{ 0,	0 } };
 
-static void pm2fb_detect(void);
-static int pm2fb_encode_fix(struct fb_fix_screeninfo* fix,
-				const void* par, struct fb_info_gen* info);
-static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
-					void* par, struct fb_info_gen* info);
-static int pm2fb_encode_var(struct fb_var_screeninfo* var,
-				const void* par, struct fb_info_gen* info);
-static void pm2fb_get_par(void* par, struct fb_info_gen* info);
-static void pm2fb_set_par(const void* par, struct fb_info_gen* info);
-static int pm2fb_getcolreg(unsigned regno,
-			unsigned* red, unsigned* green, unsigned* blue,
-				unsigned* transp, struct fb_info* info);
-static int pm2fb_setcolreg(unsigned regno,
-			unsigned red, unsigned green, unsigned blue,
-				unsigned transp, struct fb_info* info);
-static int pm2fb_blank(int blank_mode, struct fb_info_gen* info);
-static int pm2fb_pan_display(const struct fb_var_screeninfo* var,
-					struct fb_info_gen* info);
-static void pm2fb_set_disp(const void* par, struct display* disp,
-						struct fb_info_gen* info);
-
-static struct fbgen_hwswitch pm2fb_hwswitch={
-	pm2fb_detect, pm2fb_encode_fix, pm2fb_decode_var,
-	pm2fb_encode_var, pm2fb_get_par, pm2fb_set_par,
-	pm2fb_getcolreg, pm2fb_setcolreg, pm2fb_pan_display,
-	pm2fb_blank, pm2fb_set_disp
-};
-
-static struct fb_ops pm2fb_ops={
-	owner:		THIS_MODULE,
-	fb_get_fix:	fbgen_get_fix,
-	fb_get_var:	fbgen_get_var,
-	fb_set_var:	fbgen_set_var,
-	fb_get_cmap:	fbgen_get_cmap,
-	fb_set_cmap:	fbgen_set_cmap,
-	fb_pan_display:	fbgen_pan_display,
-};
-
-/***************************************************************************
- * Begin of Permedia2 specific functions
- ***************************************************************************/
-
-inline static u32 RD32(unsigned char* base, s32 off) {
-
-	return readl(base+off);
-}
-
-inline static void WR32(unsigned char* base, s32 off, u32 v) {
-
-	writel(v, base+off);
-}
-
-inline static u32 pm2_RD(struct pm2fb_info* p, s32 off) {
-
-	return RD32(p->regions.v_regs, off);
-}
-
-inline static void pm2_WR(struct pm2fb_info* p, s32 off, u32 v) {
-
-	WR32(p->regions.v_regs, off, v);
-}
-
-inline static u32 pm2_RDAC_RD(struct pm2fb_info* p, s32 idx) {
-
-	int index = PM2R_RD_INDEXED_DATA;
-	switch (p->type) {
-	case PM2_TYPE_PERMEDIA2:
-		pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
-		break;
-	case PM2_TYPE_PERMEDIA2V:
-		pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
-		index = PM2VR_RD_INDEXED_DATA;
-		break;
-	}	
-	DEFRW();
-	return pm2_RD(p, index);
-}
-
-inline static void pm2_RDAC_WR(struct pm2fb_info* p, s32 idx,
-						u32 v) {
-
-	int index = PM2R_RD_INDEXED_DATA;
-	switch (p->type) {
-	case PM2_TYPE_PERMEDIA2:
-		pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, idx);
-		break;
-	case PM2_TYPE_PERMEDIA2V:
-		pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
-		index = PM2VR_RD_INDEXED_DATA;
-		break;
-	}	
-	DEFRW();
-	pm2_WR(p, index, v);
-}
-
-inline static u32 pm2v_RDAC_RD(struct pm2fb_info* p, s32 idx) {
-
-	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
-	DEFRW();
-	return pm2_RD(p, PM2VR_RD_INDEXED_DATA);
-}
-
-inline static void pm2v_RDAC_WR(struct pm2fb_info* p, s32 idx,
-						u32 v) {
-
-	pm2_WR(p, PM2VR_RD_INDEX_LOW, idx & 0xff);
-	DEFRW();
-	pm2_WR(p, PM2VR_RD_INDEXED_DATA, v);
-}
-
-#ifdef CONFIG_FB_PM2_FIFO_DISCONNECT
-#define WAIT_FIFO(p,a)
-#else
-inline static void WAIT_FIFO(struct pm2fb_info* p, u32 a) {
-
-	while(pm2_RD(p, PM2R_IN_FIFO_SPACE)<a);
-	DEFRW();
-}
-#endif
-
-static u32 partprod(u32 xres) {
+static u32 partprod(u32 xres)
+{
 	int i;
 
-	for (i=0; pp_table[i].width && pp_table[i].width!=xres; i++);
-	if (!pp_table[i].width)
+	for (i = 0; pp_table[i].width && pp_table[i].width != xres; i++)
+		;
+	if (pp_table[i].width == 0)
 		DPRINTK("invalid width %u\n", xres);
 	return pp_table[i].pp;
 }
 
-static u32 to3264(u32 timing, int bpp, int is64) {
-
+static u32 to3264(u32 timing, int bpp, int is64)
+{
 	switch (bpp) {
-		case 8:
-			timing=timing>>(2+is64);
-			break;
-		case 16:
-			timing=timing>>(1+is64);
-			break;
-		case 24:
-			timing=(timing*3)>>(2+is64);
-			break;
-		case 32:
-			if (is64)
-				timing=timing>>1;
-			break;
+	case 24:
+		timing *= 3;
+	case 8:
+		timing >>= 1;
+	case 16:
+		timing >>= 1;
+	case 32:
+		break;
 	}
+	if (is64)
+		timing >>= 1;
 	return timing;
 }
 
-static u32 from3264(u32 timing, int bpp, int is64) {
-
-	switch (bpp) {
-		case 8:
-			timing=timing<<(2+is64);
-			break;
-		case 16:
-			timing=timing<<(1+is64);
-			break;
-		case 24:
-			timing=(timing<<(2+is64))/3;
-			break;
-		case 32:
-			if (is64)
-				timing=timing<<1;
-			break;
-	}
-	return timing;
-}
-
-static void pm2_mnp(u32 clk, unsigned char* mm, unsigned char* nn,
-		unsigned char* pp) {
+static void pm2_mnp(u32 clk, unsigned char *mm, unsigned char *nn,
+		    unsigned char *pp)
+{
 	unsigned char m;
 	unsigned char n;
 	unsigned char p;
 	u32 f;
 	s32 curr;
-	s32 delta=100000;
+	s32 delta = 100000;
 
-	*mm=*nn=*pp=0;
-	for (n=2; n<15; n++) {
-		for (m=2; m; m++) {
-			f=PM2_REFERENCE_CLOCK*m/n;
-			if (f>=150000 && f<=300000) {
-				for (p=0; p<5; p++, f>>=1) {
-					curr=clk>f?clk-f:f-clk;
-					if (curr<delta) {
-						delta=curr;
-						*mm=m;
-						*nn=n;
-						*pp=p;
+	*mm = *nn = *pp = 0;
+	for (n = 2; n < 15; n++) {
+		for (m = 2; m; m++) {
+			f = PM2_REFERENCE_CLOCK * m / n;
+			if (f >= 150000 && f <= 300000) {
+				for (p = 0; p < 5; p++, f >>= 1) {
+					curr = (clk > f) ? clk - f : f - clk;
+					if (curr < delta) {
+						delta = curr;
+						*mm = m;
+						*nn = n;
+						*pp = p;
 					}
 				}
 			}
@@ -548,98 +281,38 @@ static void pm2_mnp(u32 clk, unsigned char* mm, unsigned char* nn,
 	}
 }
 
-static void pm2v_mnp(u32 clk, unsigned char* mm, unsigned char* nn,
-		unsigned char* pp) {
+static void pm2v_mnp(u32 clk, unsigned char *mm, unsigned char *nn,
+		     unsigned char *pp)
+{
 	unsigned char m;
 	unsigned char n;
 	unsigned char p;
 	u32 f;
-	s32 delta=1000;
+	s32 delta = 1000;
 
-	*mm=*nn=*pp=0;
-	for (n=1; n; n++) {
-		for (m=1; m; m++) {
-			for (p=0; p<2; p++) {
-				f=PM2_REFERENCE_CLOCK*n/(m * (1<<(p+1)));
-				if (clk>f-delta && clk<f+delta) {
-					delta=clk>f?clk-f:f-clk;
-					*mm=m;
-					*nn=n;
-					*pp=p;
+	*mm = *nn = *pp = 0;
+	for (m = 1; m < 128; m++) {
+		for (n = 2 * m + 1; n; n++) {
+			for (p = 0; p < 2; p++) {
+				f = (PM2_REFERENCE_CLOCK >> (p + 1)) * n / m;
+				if (clk > f - delta && clk < f + delta) {
+					delta = (clk > f) ? clk - f : f - clk;
+					*mm = m;
+					*nn = n;
+					*pp = p;
 				}
 			}
 		}
 	}
 }
 
-static void wait_pm2(struct pm2fb_info* i) {
-
-	WAIT_FIFO(i, 1);
-	pm2_WR(i, PM2R_SYNC, 0);
-	DEFRW();
-	do {
-		while (pm2_RD(i, PM2R_OUT_FIFO_WORDS)==0);
-		DEFR();
-	} while (pm2_RD(i, PM2R_OUT_FIFO)!=PM2TAG(PM2R_SYNC));
-}
-
-static void pm2_set_memclock(struct pm2fb_info* info, u32 clk) {
-	int i;
-	unsigned char m, n, p;
-
-	pm2_mnp(clk, &m, &n, &p);
-	WAIT_FIFO(info, 10);
-	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_3, 6);
-	DEFW();
-	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_1, m);
-	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_2, n);
-	DEFW();
-	pm2_RDAC_WR(info, PM2I_RD_MEMORY_CLOCK_3, 8|p);
-	DEFW();
-	pm2_RDAC_RD(info, PM2I_RD_MEMORY_CLOCK_STATUS);
-	DEFR();
-	for (i=256; i &&
-		!(pm2_RD(info, PM2R_RD_INDEXED_DATA)&PM2F_PLL_LOCKED); i--);
-}
-
-static void pm2_set_pixclock(struct pm2fb_info* info, u32 clk) {
-	int i;
-	unsigned char m, n, p;
-
-	switch (info->type) {
-	case PM2_TYPE_PERMEDIA2:
-		pm2_mnp(clk, &m, &n, &p);
-		WAIT_FIFO(info, 10);
-		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 0);
-		DEFW();
-		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A1, m);
-		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A2, n);
-		DEFW();
-		pm2_RDAC_WR(info, PM2I_RD_PIXEL_CLOCK_A3, 8|p);
-		DEFW();
-		pm2_RDAC_RD(info, PM2I_RD_PIXEL_CLOCK_STATUS);
-		DEFR();
-		for (i=256; i &&
-		     !(pm2_RD(info, PM2R_RD_INDEXED_DATA)&PM2F_PLL_LOCKED); i--);
-		break;
-	case PM2_TYPE_PERMEDIA2V:
-		pm2v_mnp(clk/2, &m, &n, &p);
-		WAIT_FIFO(info, 8);
-		pm2_WR(info, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CLK0_PRESCALE >> 8);
-		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_PRESCALE, m);
-		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_FEEDBACK, n);
-		pm2v_RDAC_WR(info, PM2VI_RD_CLK0_POSTSCALE, p);
-		pm2_WR(info, PM2VR_RD_INDEX_HIGH, 0);
-		break;
-	}
-}
-
-static void clear_palette(struct pm2fb_info* p) {
-	int i=256;
+static void clear_palette(struct pm2fb_par *p)
+{
+	int i = 256;
 
 	WAIT_FIFO(p, 1);
 	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, 0);
-	DEFW();
+	wmb();
 	while (i--) {
 		WAIT_FIFO(p, 3);
 		pm2_WR(p, PM2R_RD_PALETTE_DATA, 0);
@@ -648,229 +321,47 @@ static void clear_palette(struct pm2fb_info* p) {
 	}
 }
 
-static void set_color(struct pm2fb_info* p, unsigned char regno,
-			unsigned char r, unsigned char g, unsigned char b) {
-
-	WAIT_FIFO(p, 4);
-	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, regno);
-	DEFW();
-	pm2_WR(p, PM2R_RD_PALETTE_DATA, r);
-	DEFW();
-	pm2_WR(p, PM2R_RD_PALETTE_DATA, g);
-	DEFW();
-	pm2_WR(p, PM2R_RD_PALETTE_DATA, b);
-}
-
-static void set_aperture(struct pm2fb_info* i, struct pm2fb_par* p) {
-
-	WAIT_FIFO(i, 2);
-#ifdef __LITTLE_ENDIAN
-	pm2_WR(i, PM2R_APERTURE_ONE, 0);
-	pm2_WR(i, PM2R_APERTURE_TWO, 0);
-#else
-	switch (p->depth) {
-		case 8:
-		case 24:
-			pm2_WR(i, PM2R_APERTURE_ONE, 0);
-			pm2_WR(i, PM2R_APERTURE_TWO, 1);
-			break;
-		case 16:
-			pm2_WR(i, PM2R_APERTURE_ONE, 2);
-			pm2_WR(i, PM2R_APERTURE_TWO, 1);
-			break;
-		case 32:
-			pm2_WR(i, PM2R_APERTURE_ONE, 1);
-			pm2_WR(i, PM2R_APERTURE_TWO, 1);
-			break;
-	}
-#endif
-}
-
-static void set_screen(struct pm2fb_info* i, struct pm2fb_par* p) {
-	u32 clrmode=0;
-	u32 txtmap=0;
-	u32 pixsize=0;
-	u32 clrformat=0;
-	u32 xres;
-	u32 video, tmp;
-
-	if (i->type == PM2_TYPE_PERMEDIA2V) {
-		WAIT_FIFO(i, 1);
-		pm2_WR(i, PM2VR_RD_INDEX_HIGH, 0);
-	}
-	xres=(p->width+31)&~31;
-	set_aperture(i, p);
-	DEFRW();
-	WAIT_FIFO(i, 27);
-	pm2_RDAC_WR(i, PM2I_RD_COLOR_KEY_CONTROL, p->depth==8?0:
-						PM2F_COLOR_KEY_TEST_OFF);
-	switch (p->depth) {
-		case 8:
-			pm2_WR(i, PM2R_FB_READ_PIXEL, 0);
-			clrformat=0x0e;
-			break;
-		case 16:
-			pm2_WR(i, PM2R_FB_READ_PIXEL, 1);
-			clrmode=PM2F_RD_TRUECOLOR|0x06;
-			txtmap=PM2F_TEXTEL_SIZE_16;
-			pixsize=1;
-			clrformat=0x70;
-			break;
-		case 32:
-			pm2_WR(i, PM2R_FB_READ_PIXEL, 2);
-			clrmode=PM2F_RD_TRUECOLOR|0x08;
-			txtmap=PM2F_TEXTEL_SIZE_32;
-			pixsize=2;
-			clrformat=0x20;
-			break;
-		case 24:
-			pm2_WR(i, PM2R_FB_READ_PIXEL, 4);
-			clrmode=PM2F_RD_TRUECOLOR|0x09;
-			txtmap=PM2F_TEXTEL_SIZE_24;
-			pixsize=4;
-			clrformat=0x20;
-			break;
-	}
-	pm2_WR(i, PM2R_SCREEN_SIZE, (p->height<<16)|p->width);
-	pm2_WR(i, PM2R_SCISSOR_MODE, PM2F_SCREEN_SCISSOR_ENABLE);
-	pm2_WR(i, PM2R_FB_WRITE_MODE, PM2F_FB_WRITE_ENABLE);
-	pm2_WR(i, PM2R_FB_READ_MODE, partprod(xres));
-	pm2_WR(i, PM2R_LB_READ_MODE, partprod(xres));
-	pm2_WR(i, PM2R_TEXTURE_MAP_FORMAT, txtmap|partprod(xres));
-	pm2_WR(i, PM2R_H_TOTAL, p->htotal);
-	pm2_WR(i, PM2R_HS_START, p->hsstart);
-	pm2_WR(i, PM2R_HS_END, p->hsend);
-	pm2_WR(i, PM2R_HG_END, p->hbend);
-	pm2_WR(i, PM2R_HB_END, p->hbend);
-	pm2_WR(i, PM2R_V_TOTAL, p->vtotal);
-	pm2_WR(i, PM2R_VS_START, p->vsstart);
-	pm2_WR(i, PM2R_VS_END, p->vsend);
-	pm2_WR(i, PM2R_VB_END, p->vbend);
-	pm2_WR(i, PM2R_SCREEN_STRIDE, p->stride);
-	DEFW();
-	pm2_WR(i, PM2R_SCREEN_BASE, p->base);
-	/* HW cursor needs /VSYNC for recognizing vert retrace */
-	video=p->video & ~(PM2F_HSYNC_ACT_LOW|PM2F_VSYNC_ACT_LOW);
-	video|=PM2F_HSYNC_ACT_HIGH|PM2F_VSYNC_ACT_HIGH;
-	switch (i->type) {
-	case PM2_TYPE_PERMEDIA2:
-		tmp = PM2F_RD_PALETTE_WIDTH_8;
-		pm2_RDAC_WR(i, PM2I_RD_COLOR_MODE, PM2F_RD_COLOR_MODE_RGB|
-						   PM2F_RD_GUI_ACTIVE|clrmode);
-		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
-			tmp |= 4; /* invert hsync */
-		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
-			tmp |= 8; /* invert vsync */
-		pm2_RDAC_WR(i, PM2I_RD_MISC_CONTROL, tmp);
-		break;
-	case PM2_TYPE_PERMEDIA2V:
-		tmp = 0;
-		pm2v_RDAC_WR(i, PM2VI_RD_PIXEL_SIZE, pixsize);
-		pm2v_RDAC_WR(i, PM2VI_RD_COLOR_FORMAT, clrformat);
-		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
-			tmp |= 1; /* invert hsync */
-		if ((p->video & PM2F_HSYNC_ACT_LOW) == PM2F_HSYNC_ACT_LOW)
-			tmp |= 4; /* invert vsync */
-		pm2v_RDAC_WR(i, PM2VI_RD_SYNC_CONTROL, tmp);
-		pm2v_RDAC_WR(i, PM2VI_RD_MISC_CONTROL, 1);
-		break;
-	}
-	pm2_WR(i, PM2R_VIDEO_CONTROL, video);
-	pm2_set_pixclock(i, p->pixclock);
-};
-
-/*
- * copy with packed pixels (8/16bpp only).
- */
-static void pm2fb_pp_copy(struct pm2fb_info* i, s32 xsrc, s32 ysrc,
-					s32 x, s32 y, s32 w, s32 h) {
-	s32 scale=i->current_par.depth==8?2:1;
-	s32 offset;
-
-	if (!w || !h)
-		return;
-	WAIT_FIFO(i, 7);
-	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
-				PM2F_CONFIG_FB_PACKED_DATA|
-				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
-	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
-	pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
-						((xsrc-x)&0xfff));
-	offset=(x&0x3)-(xsrc&0x3);
-	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|(x>>scale));
-	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|((w+7)>>scale));
-	pm2_WR(i, PM2R_PACKED_DATA_LIMITS, (offset<<29)|(x<<16)|(x+w));
-	DEFW();
-	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
-				(x<xsrc?PM2F_INCREASE_X:0)|
-				(y<ysrc?PM2F_INCREASE_Y:0));
-	wait_pm2(i);
-}
-
-/*
- * block operation. copy=0: rectangle fill, copy=1: rectangle copy.
- */
-static void pm2fb_block_op(struct pm2fb_info* i, int copy,
-					s32 xsrc, s32 ysrc,
-					s32 x, s32 y, s32 w, s32 h,
-					u32 color) {
-
-	if (!w || !h)
-		return;
-	WAIT_FIFO(i, 6);
-	pm2_WR(i, PM2R_CONFIG,	PM2F_CONFIG_FB_WRITE_ENABLE|
-				PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
-	pm2_WR(i, PM2R_FB_PIXEL_OFFSET, 0);
-	if (copy)
-		pm2_WR(i, PM2R_FB_SOURCE_DELTA,	((ysrc-y)&0xfff)<<16|
-							((xsrc-x)&0xfff));
-	else
-		pm2_WR(i, PM2R_FB_BLOCK_COLOR, color);
-	pm2_WR(i, PM2R_RECTANGLE_ORIGIN, (y<<16)|x);
-	pm2_WR(i, PM2R_RECTANGLE_SIZE, (h<<16)|w);
-	DEFW();
-	pm2_WR(i, PM2R_RENDER,	PM2F_RENDER_RECTANGLE|
-				(x<xsrc?PM2F_INCREASE_X:0)|
-				(y<ysrc?PM2F_INCREASE_Y:0)|
-				(copy?0:PM2F_RENDER_FASTFILL));
-	wait_pm2(i);
-}
-
-/***************************************************************************
- * Begin of generic initialization functions
- ***************************************************************************/
-
-static void pm2fb_reset(struct pm2fb_info* p) {
-
+static void reset_card(struct pm2fb_par *p)
+{
 	if (p->type == PM2_TYPE_PERMEDIA2V)
 		pm2_WR(p, PM2VR_RD_INDEX_HIGH, 0);
 	pm2_WR(p, PM2R_RESET_STATUS, 0);
-	DEFRW();
-	while (pm2_RD(p, PM2R_RESET_STATUS)&PM2F_BEING_RESET);
-	DEFRW();
+	mb();
+	while (pm2_RD(p, PM2R_RESET_STATUS) & PM2F_BEING_RESET)
+		cpu_relax();
+	mb();
 #ifdef CONFIG_FB_PM2_FIFO_DISCONNECT
 	DPRINTK("FIFO disconnect enabled\n");
 	pm2_WR(p, PM2R_FIFO_DISCON, 1);
-	DEFRW();
+	mb();
 #endif
-	if (board_table[p->board].init)
-		board_table[p->board].init(p);
-	WAIT_FIFO(p, 48);
-	pm2_WR(p, PM2R_CHIP_CONFIG, pm2_RD(p, PM2R_CHIP_CONFIG)&
-					~(PM2F_VGA_ENABLE|PM2F_VGA_FIXED));
+
+	/* Restore stashed memory config information from probe */
+	WAIT_FIFO(p, 3);
+	pm2_WR(p, PM2R_MEM_CONTROL, p->mem_control);
+	pm2_WR(p, PM2R_BOOT_ADDRESS, p->boot_address);
+	wmb();
+	pm2_WR(p, PM2R_MEM_CONFIG, p->mem_config);
+}
+
+static void reset_config(struct pm2fb_par *p)
+{
+	WAIT_FIFO(p, 53);
+	pm2_WR(p, PM2R_CHIP_CONFIG, pm2_RD(p, PM2R_CHIP_CONFIG) &
+			~(PM2F_VGA_ENABLE | PM2F_VGA_FIXED));
 	pm2_WR(p, PM2R_BYPASS_WRITE_MASK, ~(0L));
 	pm2_WR(p, PM2R_FRAMEBUFFER_WRITE_MASK, ~(0L));
 	pm2_WR(p, PM2R_FIFO_CONTROL, 0);
-	pm2_WR(p, PM2R_FILTER_MODE, PM2F_SYNCHRONIZATION);
 	pm2_WR(p, PM2R_APERTURE_ONE, 0);
 	pm2_WR(p, PM2R_APERTURE_TWO, 0);
+	pm2_WR(p, PM2R_RASTERIZER_MODE, 0);
+	pm2_WR(p, PM2R_DELTA_MODE, PM2F_DELTA_ORDER_RGB);
 	pm2_WR(p, PM2R_LB_READ_FORMAT, 0);
-	pm2_WR(p, PM2R_LB_WRITE_FORMAT, 0); 
+	pm2_WR(p, PM2R_LB_WRITE_FORMAT, 0);
 	pm2_WR(p, PM2R_LB_READ_MODE, 0);
 	pm2_WR(p, PM2R_LB_SOURCE_OFFSET, 0);
 	pm2_WR(p, PM2R_FB_SOURCE_OFFSET, 0);
 	pm2_WR(p, PM2R_FB_PIXEL_OFFSET, 0);
-	pm2_WR(p, PM2R_WINDOW_ORIGIN, 0);
 	pm2_WR(p, PM2R_FB_WINDOW_BASE, 0);
 	pm2_WR(p, PM2R_LB_WINDOW_BASE, 0);
 	pm2_WR(p, PM2R_FB_SOFT_WRITE_MASK, ~(0L));
@@ -891,1285 +382,1479 @@ static void pm2fb_reset(struct pm2fb_info* p) {
 	pm2_WR(p, PM2R_LOGICAL_OP_MODE, 0);
 	pm2_WR(p, PM2R_STATISTICS_MODE, 0);
 	pm2_WR(p, PM2R_SCISSOR_MODE, 0);
+	pm2_WR(p, PM2R_FILTER_MODE, PM2F_SYNCHRONIZATION);
+	pm2_WR(p, PM2R_RD_PIXEL_MASK, 0xff);
 	switch (p->type) {
 	case PM2_TYPE_PERMEDIA2:
 		pm2_RDAC_WR(p, PM2I_RD_MODE_CONTROL, 0); /* no overlay */
 		pm2_RDAC_WR(p, PM2I_RD_CURSOR_CONTROL, 0);
 		pm2_RDAC_WR(p, PM2I_RD_MISC_CONTROL, PM2F_RD_PALETTE_WIDTH_8);
+		pm2_RDAC_WR(p, PM2I_RD_COLOR_KEY_CONTROL, 0);
+		pm2_RDAC_WR(p, PM2I_RD_OVERLAY_KEY, 0);
+		pm2_RDAC_WR(p, PM2I_RD_RED_KEY, 0);
+		pm2_RDAC_WR(p, PM2I_RD_GREEN_KEY, 0);
+		pm2_RDAC_WR(p, PM2I_RD_BLUE_KEY, 0);
 		break;
 	case PM2_TYPE_PERMEDIA2V:
 		pm2v_RDAC_WR(p, PM2VI_RD_MISC_CONTROL, 1); /* 8bit */
 		break;
 	}
-	pm2_RDAC_WR(p, PM2I_RD_COLOR_KEY_CONTROL, 0);
-	pm2_RDAC_WR(p, PM2I_RD_OVERLAY_KEY, 0);
-	pm2_RDAC_WR(p, PM2I_RD_RED_KEY, 0);
-	pm2_RDAC_WR(p, PM2I_RD_GREEN_KEY, 0);
-	pm2_RDAC_WR(p, PM2I_RD_BLUE_KEY, 0);
-	clear_palette(p);
-	if (p->memclock)
-		pm2_set_memclock(p, p->memclock);
 }
 
-static int __init pm2fb_conf(struct pm2fb_info* p){
-
-	for (p->board=0; board_table[p->board].detect &&
-			!(board_table[p->board].detect(p)); p->board++);
-	if (!board_table[p->board].detect) {
-		DPRINTK("no board found.\n");
-		return 0;
-	}
-	DPRINTK("found board: %s\n", board_table[p->board].name);
-
-	p->regions.p_fb=p->regions.fb_base;
-	if (!request_mem_region(p->regions.p_fb, p->regions.fb_size,
-		    		"pm2fb")) {
-		printk (KERN_ERR "pm2fb: cannot reserve fb memory, abort\n");
-		return 0;
-	}
-	p->regions.v_fb=MMAP(p->regions.p_fb, p->regions.fb_size);
-
-#ifndef PM2FB_BE_APERTURE
-	p->regions.p_regs=p->regions.rg_base;
+static void set_aperture(struct pm2fb_par *p, u32 depth)
+{
+	/*
+	 * The hardware is little-endian. When used in big-endian
+	 * hosts, the on-chip aperture settings are used where
+	 * possible to translate from host to card byte order.
+	 */
+	WAIT_FIFO(p, 2);
+#ifdef __LITTLE_ENDIAN
+	pm2_WR(p, PM2R_APERTURE_ONE, PM2F_APERTURE_STANDARD);
 #else
-	p->regions.p_regs=p->regions.rg_base+PM2_REGS_SIZE;
+	switch (depth) {
+	case 24:	/* RGB->BGR */
+		/*
+		 * We can't use the aperture to translate host to
+		 * card byte order here, so we switch to BGR mode
+		 * in pm2fb_set_par().
+		 */
+	case 8:		/* B->B */
+		pm2_WR(p, PM2R_APERTURE_ONE, PM2F_APERTURE_STANDARD);
+		break;
+	case 16:	/* HL->LH */
+		pm2_WR(p, PM2R_APERTURE_ONE, PM2F_APERTURE_HALFWORDSWAP);
+		break;
+	case 32:	/* RGBA->ABGR */
+		pm2_WR(p, PM2R_APERTURE_ONE, PM2F_APERTURE_BYTESWAP);
+		break;
+	}
 #endif
-	if (!request_mem_region(p->regions.p_regs, PM2_REGS_SIZE, "pm2fb")) {
-		printk (KERN_ERR "pm2fb: cannot reserve mmio memory, abort\n");
-		UNMAP(p->regions.v_fb, p->regions.fb_size);
-		return 0;
-	}
-	p->regions.v_regs=MMAP(p->regions.p_regs, PM2_REGS_SIZE);
 
-#ifdef PM2FB_HW_CURSOR
-	p->cursor = pm2_init_cursor(p);
-#endif
-	return 1;
+	/* We don't use aperture two, so this may be superflous */
+	pm2_WR(p, PM2R_APERTURE_TWO, PM2F_APERTURE_STANDARD);
 }
 
-/***************************************************************************
- * Begin of per-board initialization functions
- ***************************************************************************/
-
-/*
- * Phase5 CvisionPPC/BVisionPPC
- */
-#ifdef CONFIG_FB_PM2_CVPPC
-static int cvppc_PCI_init(struct cvppc_par* p) {
-	extern u32 powerup_PCI_present;
-
-	if (!powerup_PCI_present) {
-		DPRINTK("no PCI bridge detected\n");
-		return 0;
-	}
-	if (!(p->pci_config=MMAP(CVPPC_PCI_CONFIG, 256))) {
-		DPRINTK("unable to map PCI config region\n");
-		return 0;
-	}
-	if (RD32(p->pci_config, PCI_VENDOR_ID)!=
-			((PCI_DEVICE_ID_TI_TVP4020<<16)|PCI_VENDOR_ID_TI)) {
-		DPRINTK("bad vendorID/deviceID\n");
-		return 0;
-	}
-	if (!(p->pci_bridge=MMAP(CSPPC_PCI_BRIDGE, 256))) {
-		DPRINTK("unable to map PCI bridge\n");
-		return 0;
-	}
-	WR32(p->pci_bridge, CSPPC_BRIDGE_ENDIAN, CSPPCF_BRIDGE_BIG_ENDIAN);
-	DEFW();
-	if (pm2fb_options.flags & OPTF_OLD_MEM)
-		WR32(p->pci_config, PCI_CACHE_LINE_SIZE, 0xff00);
-	WR32(p->pci_config, PCI_BASE_ADDRESS_0, CVPPC_REGS_REGION);
-	WR32(p->pci_config, PCI_BASE_ADDRESS_1, CVPPC_FB_APERTURE_ONE);
-	WR32(p->pci_config, PCI_BASE_ADDRESS_2, CVPPC_FB_APERTURE_TWO);
-	WR32(p->pci_config, PCI_ROM_ADDRESS, CVPPC_ROM_ADDRESS);
-	DEFW();
-	WR32(p->pci_config, PCI_COMMAND, 0xef000000 |
-						PCI_COMMAND_IO |
-						PCI_COMMAND_MEMORY |
-						PCI_COMMAND_MASTER);
-	return 1;
+static void set_color(struct pm2fb_par *p, unsigned char regno,
+		      unsigned char r, unsigned char g, unsigned char b)
+{
+	WAIT_FIFO(p, 4);
+	pm2_WR(p, PM2R_RD_PALETTE_WRITE_ADDRESS, regno);
+	wmb();
+	pm2_WR(p, PM2R_RD_PALETTE_DATA, r);
+	wmb();
+	pm2_WR(p, PM2R_RD_PALETTE_DATA, g);
+	wmb();
+	pm2_WR(p, PM2R_RD_PALETTE_DATA, b);
 }
 
-static int __init cvppc_detect(struct pm2fb_info* p) {
-
-	if (!cvppc_PCI_init(&p->board_par.cvppc))
-		return 0;
-	p->type = PM2_TYPE_PERMEDIA2;
-	p->regions.fb_base=CVPPC_FB_APERTURE_ONE;
-	p->regions.fb_size=CVPPC_FB_SIZE;
-	p->regions.rg_base=CVPPC_REGS_REGION;
-	p->memclock=CVPPC_MEMCLOCK;
-	return 1;
-}
-
-static void cvppc_init(struct pm2fb_info* p) {
-
-	WAIT_FIFO(p, 3);
-	pm2_WR(p, PM2R_MEM_CONTROL, 0);
-	pm2_WR(p, PM2R_BOOT_ADDRESS, 0x30);
-	DEFW();
-	if (pm2fb_options.flags & OPTF_OLD_MEM)
-		pm2_WR(p, PM2R_MEM_CONFIG, CVPPC_MEM_CONFIG_OLD);
-	else
-		pm2_WR(p, PM2R_MEM_CONFIG, CVPPC_MEM_CONFIG_NEW);
-}
-#endif /* CONFIG_FB_PM2_CVPPC */
-
-/*
- * Generic PCI detection routines
- */
-#ifdef CONFIG_FB_PM2_PCI
-struct {
-	unsigned short vendor, device;
-	char *name;
-	pm2type_t type;
-} pm2pci_cards[] __initdata = {
-{ PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_TVP4020, "Texas Instruments TVP4020", PM2_TYPE_PERMEDIA2 },
-{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2, "3dLabs Permedia 2", PM2_TYPE_PERMEDIA2 },
-{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2V, "3dLabs Permedia 2v", PM2_TYPE_PERMEDIA2V },
-{ 0, 0 }
-};
-
-static int __init pm2pci_detect(struct pm2fb_info* p) {
-	struct pm2pci_par* pci=&p->board_par.pci;
-	struct pci_dev* dev;
+static void set_memclock(struct pm2fb_par *par, u32 clk)
+{
 	int i;
-	unsigned char* m;
-#ifdef __sparc__
-	struct pcidev_cookie *pcp;
-#endif
+	unsigned char m, n, p;
 
-	memset(pci, 0, sizeof(struct pm2pci_par));
-	if (!pci_present()) {
-		DPRINTK("no PCI bus found.\n");
-		return 0;
-	}
-	DPRINTK("scanning PCI bus for known chipsets...\n");
-
-	pci_for_each_dev(dev) {
-		for (i = 0; pm2pci_cards[i].vendor; i++)
-			if (pm2pci_cards[i].vendor == dev->vendor &&
-			    pm2pci_cards[i].device == dev->device) {
-				pci->dev = dev;
-				p->type = pm2pci_cards[i].type;
-				DPRINTK("... found %s\n", pm2pci_cards[i].name);
+	switch (par->type) {
+	case PM2_TYPE_PERMEDIA2V:
+		pm2v_mnp(clk/2, &m, &n, &p);
+		WAIT_FIFO(par, 12);
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, PM2VI_RD_MCLK_CONTROL >> 8);
+		pm2v_RDAC_WR(par, PM2VI_RD_MCLK_CONTROL, 0);
+		pm2v_RDAC_WR(par, PM2VI_RD_MCLK_PRESCALE, m);
+		pm2v_RDAC_WR(par, PM2VI_RD_MCLK_FEEDBACK, n);
+		pm2v_RDAC_WR(par, PM2VI_RD_MCLK_POSTSCALE, p);
+		pm2v_RDAC_WR(par, PM2VI_RD_MCLK_CONTROL, 1);
+		rmb();
+		for (i = 256; i; i--)
+			if (pm2v_RDAC_RD(par, PM2VI_RD_MCLK_CONTROL) & 2)
 				break;
-			}
-		if (pci->dev)
-			break;
-	}
-	if (!pci->dev) {
-		DPRINTK("no PCI board found.\n");
-		return 0;
-	}
-	DPRINTK("PCI board @%08lx %08lx %08lx rom %08lx\n",
-			pci->dev->resource[0].start,
-			pci->dev->resource[1].start,
-			pci->dev->resource[2].start,
-			pci->dev->resource[PCI_ROM_RESOURCE].start);
-#ifdef __sparc__
-	p->regions.rg_base= pci->dev->resource[0].start;
-	p->regions.fb_base= pci->dev->resource[1].start;
-	pcp = pci->dev->sysdata;
-	/* If the user has not asked for a particular mode, lets guess */
-	if (pcp->prom_node && !(pm2fb_options.flags & OPTF_USER)) {
-		char timing[256], *q, *r;
-		unsigned long w, h;
-		int i;
-		prom_getstring(pcp->prom_node, "timing-numbers", timing, 256);
-		/* FIXME: Find out what the actual pixclock is and other values as well */
-		if (timing[0]) {
-			w = simple_strtoul(timing, &q, 0);
-			h = 0;
-			if (q == timing) w = 0;
-			if (w) {
-				for (i = 0; i < 3; i++) {
-					for (r = q; *r && (*r < '0' || *r > '9'); r++);
-					simple_strtoul(r, &q, 0);
-					if (r == q) break;
-				}
-				if (i < 3) w = 0;
-			}
-			if (w) {
-				for (r = q; *r && (*r < '0' || *r > '9'); r++);
-				h = simple_strtoul(r, &q, 0);
-				if (r == q) w = 0;
-			}
-			if (w == 640 && h == 480) w = 0;
-			if (w) {
-				for (i=0; user_mode[i].name[0] &&
-					  (w != user_mode[i].par.width ||
-					   h != user_mode[i].par.height); i++);
-				if (user_mode[i].name[0])
-					memcpy(&p->current_par, &user_mode[i].par, sizeof(user_mode[i].par));
-			}
-		}
-	}
-#else
-	if (pm2fb_options.flags & OPTF_VIRTUAL) {
-		p->regions.rg_base = __pa(pci_resource_start(pci->dev, 0));
-		p->regions.fb_base = __pa(pci_resource_start(pci->dev, 1));
-	}
-	else {
-		p->regions.rg_base = pci_resource_start(pci->dev, 0);
-		p->regions.fb_base = pci_resource_start(pci->dev, 1);
-	}
-#endif
-#ifdef PM2FB_BE_APERTURE
-	p->regions.rg_base += PM2_REGS_SIZE;
-#endif
-	if ((m=MMAP(p->regions.rg_base, PM2_REGS_SIZE))) {
-		pci->mem_control=RD32(m, PM2R_MEM_CONTROL);
-		pci->boot_address=RD32(m, PM2R_BOOT_ADDRESS);
-		pci->mem_config=RD32(m, PM2R_MEM_CONFIG);
-		switch (pci->mem_config & PM2F_MEM_CONFIG_RAM_MASK) {
-			case PM2F_MEM_BANKS_1:
-				p->regions.fb_size=0x200000;
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, 0);
+		break;
+	case PM2_TYPE_PERMEDIA2:
+		pm2_mnp(clk, &m, &n, &p);
+		WAIT_FIFO(par, 10);
+		pm2_RDAC_WR(par, PM2I_RD_MEMORY_CLOCK_3, 6);
+		pm2_RDAC_WR(par, PM2I_RD_MEMORY_CLOCK_1, m);
+		pm2_RDAC_WR(par, PM2I_RD_MEMORY_CLOCK_2, n);
+		pm2_RDAC_WR(par, PM2I_RD_MEMORY_CLOCK_3, 8|p);
+		pm2_RDAC_RD(par, PM2I_RD_MEMORY_CLOCK_STATUS);
+		rmb();
+		for (i = 256; i; i--)
+			if (pm2_RD(par, PM2R_RD_INDEXED_DATA) & PM2F_PLL_LOCKED)
 				break;
-			case PM2F_MEM_BANKS_2:
-				p->regions.fb_size=0x400000;
-				break;
-			case PM2F_MEM_BANKS_3:
-				p->regions.fb_size=0x600000;
-				break;
-			case PM2F_MEM_BANKS_4:
-				p->regions.fb_size=0x800000;
-				break;
-		}
-		p->memclock=CVPPC_MEMCLOCK;
-		UNMAP(m, PM2_REGS_SIZE);
-		return 1;
+		break;
 	}
-	DPRINTK("MMAP() failed.\n");
-	return 0;
 }
 
-static void pm2pci_init(struct pm2fb_info* p) {
-	struct pm2pci_par* pci=&p->board_par.pci;
+static void set_pixclock(struct pm2fb_par *par, u32 clk)
+{
+	int i;
+	unsigned char m, n, p;
+
+	switch (par->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_mnp(clk, &m, &n, &p);
+		WAIT_FIFO(par, 10);
+		pm2_RDAC_WR(par, PM2I_RD_PIXEL_CLOCK_A3, 0);
+		pm2_RDAC_WR(par, PM2I_RD_PIXEL_CLOCK_A1, m);
+		pm2_RDAC_WR(par, PM2I_RD_PIXEL_CLOCK_A2, n);
+		pm2_RDAC_WR(par, PM2I_RD_PIXEL_CLOCK_A3, 8|p);
+		pm2_RDAC_RD(par, PM2I_RD_PIXEL_CLOCK_STATUS);
+		rmb();
+		for (i = 256; i; i--)
+			if (pm2_RD(par, PM2R_RD_INDEXED_DATA) & PM2F_PLL_LOCKED)
+				break;
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2v_mnp(clk/2, &m, &n, &p);
+		WAIT_FIFO(par, 8);
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CLK0_PRESCALE >> 8);
+		pm2v_RDAC_WR(par, PM2VI_RD_CLK0_PRESCALE, m);
+		pm2v_RDAC_WR(par, PM2VI_RD_CLK0_FEEDBACK, n);
+		pm2v_RDAC_WR(par, PM2VI_RD_CLK0_POSTSCALE, p);
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, 0);
+		break;
+	}
+}
+
+static void set_video(struct pm2fb_par *p, u32 video)
+{
+	u32 tmp;
+	u32 vsync = video;
+
+	DPRINTK("video = 0x%x\n", video);
+
+	/*
+	 * The hardware cursor needs +vsync to recognise vert retrace.
+	 * We may not be using the hardware cursor, but the X Glint
+	 * driver may well. So always set +hsync/+vsync and then set
+	 * the RAMDAC to invert the sync if necessary.
+	 */
+	vsync &= ~(PM2F_HSYNC_MASK | PM2F_VSYNC_MASK);
+	vsync |= PM2F_HSYNC_ACT_HIGH | PM2F_VSYNC_ACT_HIGH;
 
 	WAIT_FIFO(p, 3);
-	pm2_WR(p, PM2R_MEM_CONTROL, pci->mem_control);
-	pm2_WR(p, PM2R_BOOT_ADDRESS, pci->boot_address);
-	DEFW();
-	pm2_WR(p, PM2R_MEM_CONFIG, pci->mem_config);
-}
-#endif /* CONFIG_FB_PM2_PCI */
+	pm2_WR(p, PM2R_VIDEO_CONTROL, vsync);
 
-/***************************************************************************
- * Console hw acceleration
- ***************************************************************************/
-
-
-static int pm2fb_blank(int blank_mode, struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	u32 video;
-
-	if (!i->current_par_valid)
-		return 1;
-	video=i->current_par.video;
-	if (blank_mode>0) {
-		switch (blank_mode-1) {
-			case VESA_NO_BLANKING:		/* FIXME */
-				video=video&~(PM2F_VIDEO_ENABLE);
-				break;
-			case VESA_HSYNC_SUSPEND:
-				video=video&~(PM2F_HSYNC_MASK|
-						PM2F_BLANK_LOW);
-				break;
-			case VESA_VSYNC_SUSPEND:
-				video=video&~(PM2F_VSYNC_MASK|
-						PM2F_BLANK_LOW);
-				break;
-			case VESA_POWERDOWN:
-				video=video&~(PM2F_VSYNC_MASK|
-						PM2F_HSYNC_MASK|
-						PM2F_BLANK_LOW);
-				break;
-		}
+	switch (p->type) {
+	case PM2_TYPE_PERMEDIA2:
+		tmp = PM2F_RD_PALETTE_WIDTH_8;
+		if ((video & PM2F_HSYNC_MASK) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 4; /* invert hsync */
+		if ((video & PM2F_VSYNC_MASK) == PM2F_VSYNC_ACT_LOW)
+			tmp |= 8; /* invert vsync */
+		pm2_RDAC_WR(p, PM2I_RD_MISC_CONTROL, tmp);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		tmp = 0;
+		if ((video & PM2F_HSYNC_MASK) == PM2F_HSYNC_ACT_LOW)
+			tmp |= 1; /* invert hsync */
+		if ((video & PM2F_VSYNC_MASK) == PM2F_VSYNC_ACT_LOW)
+			tmp |= 4; /* invert vsync */
+		pm2v_RDAC_WR(p, PM2VI_RD_SYNC_CONTROL, tmp);
+		break;
 	}
-	WAIT_FIFO(i, 1);
-	pm2_WR(i, PM2R_VIDEO_CONTROL, video);
-	return 0;
 }
 
-static int pm2fb_pan_display(const struct fb_var_screeninfo* var,
-					struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-
-	if (!i->current_par_valid)
-		return -EINVAL;
-	i->current_par.base=to3264(var->yoffset*i->current_par.width+
-				var->xoffset, i->current_par.depth, 1);
-	WAIT_FIFO(i, 1);
-	pm2_WR(i, PM2R_SCREEN_BASE, i->current_par.base);
-	return 0;
-}
-
-static void pm2fb_pp_bmove(struct display* p, int sy, int sx,
-				int dy, int dx, int height, int width) {
-
-	if (fontwidthlog(p)) {
-		sx=sx<<fontwidthlog(p);
-		dx=dx<<fontwidthlog(p);
-		width=width<<fontwidthlog(p);
-	}
-	else {
-		sx=sx*fontwidth(p);
-		dx=dx*fontwidth(p);
-		width=width*fontwidth(p);
-	}
-	sy=sy*fontheight(p);
-	dy=dy*fontheight(p);
-	height=height*fontheight(p);
-	pm2fb_pp_copy((struct pm2fb_info* )p->fb_info, sx, sy, dx,
-							dy, width, height);
-}
-
-static void pm2fb_bmove(struct display* p, int sy, int sx,
-				int dy, int dx, int height, int width) {
-
-	if (fontwidthlog(p)) {
-		sx=sx<<fontwidthlog(p);
-		dx=dx<<fontwidthlog(p);
-		width=width<<fontwidthlog(p);
-	}
-	else {
-		sx=sx*fontwidth(p);
-		dx=dx*fontwidth(p);
-		width=width*fontwidth(p);
-	}
-	sy=sy*fontheight(p);
-	dy=dy*fontheight(p);
-	height=height*fontheight(p);
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 1, sx, sy, dx, dy,
-							width, height, 0);
-}
-
-#ifdef FBCON_HAS_CFB8
-static void pm2fb_clear8(struct vc_data* conp, struct display* p,
-				int sy, int sx, int height, int width) {
-	u32 c;
-
-	sx=sx*fontwidth(p);
-	width=width*fontwidth(p);
-	sy=sy*fontheight(p);
-	height=height*fontheight(p);
-	c=attr_bgcol_ec(p, conp);
-	c|=c<<8;
-	c|=c<<16;
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0, sx, sy,
-							width, height, c);
-}
-
-static void pm2fb_clear_margins8(struct vc_data* conp, struct display* p,
-							int bottom_only) {
-	u32 c;
-	u32 sx;
-	u32 sy;
-
-	c=attr_bgcol_ec(p, conp);
-	c|=c<<8;
-	c|=c<<16;
-	sx=conp->vc_cols*fontwidth(p);
-	sy=conp->vc_rows*fontheight(p);
-	if (!bottom_only)
-		pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-			sx, 0, (p->var.xres-sx), p->var.yres_virtual, c);
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-				0, p->var.yoffset+sy, sx, p->var.yres-sy, c);
-}
-
-static struct display_switch pm2_cfb8 = {
-	setup:		fbcon_cfb8_setup,
-	bmove:		pm2fb_pp_bmove,
-#ifdef __alpha__
-	/* Not sure why, but this works and the other does not. */
-	/* Also, perhaps we need a separate routine to wait for the
-	   blitter to stop before doing this? */
-	/* In addition, maybe we need to do this for 16 and 32 bit depths? */
-	clear:		fbcon_cfb8_clear,
-#else
-	clear:		pm2fb_clear8,
-#endif
-	putc:		fbcon_cfb8_putc,
-	putcs:		fbcon_cfb8_putcs,
-	revc:		fbcon_cfb8_revc,
-	cursor:		pm2fb_cursor,
-	set_font:	pm2fb_set_font,
-	clear_margins:	pm2fb_clear_margins8,
-	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16) };
-#endif /* FBCON_HAS_CFB8 */
-
-#ifdef FBCON_HAS_CFB16
-static void pm2fb_clear16(struct vc_data* conp, struct display* p,
-				int sy, int sx, int height, int width) {
-	u32 c;
-
-	sx=sx*fontwidth(p);
-	width=width*fontwidth(p);
-	sy=sy*fontheight(p);
-	height=height*fontheight(p);
-	c=((u16 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
-	c|=c<<16;
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0, sx, sy,
-							width, height, c);
-}
-
-static void pm2fb_clear_margins16(struct vc_data* conp, struct display* p,
-							int bottom_only) {
-	u32 c;
-	u32 sx;
-	u32 sy;
-
-	c = ((u16 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
-	c|=c<<16;
-	sx=conp->vc_cols*fontwidth(p);
-	sy=conp->vc_rows*fontheight(p);
-	if (!bottom_only)
-		pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-			sx, 0, (p->var.xres-sx), p->var.yres_virtual, c);
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-				0, p->var.yoffset+sy, sx, p->var.yres-sy, c);
-}
-
-static struct display_switch pm2_cfb16 = {
-	setup:		fbcon_cfb16_setup,
-	bmove:		pm2fb_pp_bmove,
-	clear:		pm2fb_clear16,
-	putc:		fbcon_cfb16_putc,
-	putcs:		fbcon_cfb16_putcs,
-	revc:		fbcon_cfb16_revc,
-	cursor:		pm2fb_cursor,
-	set_font:	pm2fb_set_font,
-	clear_margins:	pm2fb_clear_margins16,
-	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
-};
-#endif /* FBCON_HAS_CFB16 */
-
-#ifdef FBCON_HAS_CFB24
 /*
- * fast fill for 24bpp works only when red==green==blue
+ *	pm2fb_check_var - Optional function. Validates a var passed in.
+ *	@var: frame buffer variable screen structure
+ *	@info: frame buffer structure that represents a single frame buffer
+ *
+ *	Checks to see if the hardware supports the state requested by
+ *	var passed in.
+ *
+ *	Returns negative errno on error, or zero on success.
  */
-static void pm2fb_clear24(struct vc_data* conp, struct display* p,
-				int sy, int sx, int height, int width) {
-	struct pm2fb_info* i=(struct pm2fb_info* )p->fb_info;
-	u32 c;
+static int pm2fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
+{
+	u32 lpitch;
 
-	c=attr_bgcol_ec(p, conp);
-	if (		i->palette[c].red==i->palette[c].green &&
-			i->palette[c].green==i->palette[c].blue) {
-		c=((u32 *)p->dispsw_data)[c];
-		c|=(c&0xff0000)<<8;
-		sx=sx*fontwidth(p);
-		width=width*fontwidth(p);
-		sy=sy*fontheight(p);
-		height=height*fontheight(p);
-		pm2fb_block_op(i, 0, 0, 0, sx, sy, width, height, c);
+	if (var->bits_per_pixel != 8  && var->bits_per_pixel != 16 &&
+	    var->bits_per_pixel != 24 && var->bits_per_pixel != 32) {
+		DPRINTK("depth not supported: %u\n", var->bits_per_pixel);
+		return -EINVAL;
 	}
-	else
-		fbcon_cfb24_clear(conp, p, sy, sx, height, width);
 
-}
-
-static void pm2fb_clear_margins24(struct vc_data* conp, struct display* p,
-							int bottom_only) {
-	struct pm2fb_info* i=(struct pm2fb_info* )p->fb_info;
-	u32 c;
-	u32 sx;
-	u32 sy;
-
-	c=attr_bgcol_ec(p, conp);
-	if (		i->palette[c].red==i->palette[c].green &&
-			i->palette[c].green==i->palette[c].blue) {
-		c=((u32 *)p->dispsw_data)[c];
-		c|=(c&0xff0000)<<8;
-		sx=conp->vc_cols*fontwidth(p);
-		sy=conp->vc_rows*fontheight(p);
-		if (!bottom_only)
-		pm2fb_block_op(i, 0, 0, 0, sx, 0, (p->var.xres-sx),
-							p->var.yres_virtual, c);
-		pm2fb_block_op(i, 0, 0, 0, 0, p->var.yoffset+sy,
-						sx, p->var.yres-sy, c);
+	if (var->xres != var->xres_virtual) {
+		DPRINTK("virtual x resolution != "
+			"physical x resolution not supported\n");
+		return -EINVAL;
 	}
-	else
-		fbcon_cfb24_clear_margins(conp, p, bottom_only);
 
-}
+	if (var->yres > var->yres_virtual) {
+		DPRINTK("virtual y resolution < "
+			"physical y resolution not possible\n");
+		return -EINVAL;
+	}
 
-static struct display_switch pm2_cfb24 = {
-	setup:		fbcon_cfb24_setup,
-	bmove:		pm2fb_bmove,
-	clear:		pm2fb_clear24,
-	putc:		fbcon_cfb24_putc,
-	putcs:		fbcon_cfb24_putcs,
-	revc:		fbcon_cfb24_revc,
-	cursor:		pm2fb_cursor,
-	set_font:	pm2fb_set_font,
-	clear_margins:	pm2fb_clear_margins24,
-	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
-};
-#endif /* FBCON_HAS_CFB24 */
+	/* permedia cannot blit over 2048 */
+	if (var->yres_virtual > 2047) {
+		var->yres_virtual = 2047;
+	}
 
-#ifdef FBCON_HAS_CFB32
-static void pm2fb_clear32(struct vc_data* conp, struct display* p,
-				int sy, int sx, int height, int width) {
-	u32 c;
+	if (var->xoffset) {
+		DPRINTK("xoffset not supported\n");
+		return -EINVAL;
+	}
 
-	sx=sx*fontwidth(p);
-	width=width*fontwidth(p);
-	sy=sy*fontheight(p);
-	height=height*fontheight(p);
-	c=((u32 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0, sx, sy,
-							width, height, c);
-}
+	if ((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED) {
+		DPRINTK("interlace not supported\n");
+		return -EINVAL;
+	}
 
-static void pm2fb_clear_margins32(struct vc_data* conp, struct display* p,
-							int bottom_only) {
-	u32 c;
-	u32 sx;
-	u32 sy;
+	var->xres = (var->xres + 15) & ~15; /* could sometimes be 8 */
+	lpitch = var->xres * ((var->bits_per_pixel + 7) >> 3);
 
-	c = ((u32 *)p->dispsw_data)[attr_bgcol_ec(p, conp)];
-	sx=conp->vc_cols*fontwidth(p);
-	sy=conp->vc_rows*fontheight(p);
-	if (!bottom_only)
-		pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-			sx, 0, (p->var.xres-sx), p->var.yres_virtual, c);
-	pm2fb_block_op((struct pm2fb_info* )p->fb_info, 0, 0, 0,
-				0, p->var.yoffset+sy, sx, p->var.yres-sy, c);
-}
+	if (var->xres < 320 || var->xres > 1600) {
+		DPRINTK("width not supported: %u\n", var->xres);
+		return -EINVAL;
+	}
 
-static struct display_switch pm2_cfb32 = {
-	setup:		fbcon_cfb32_setup,
-	bmove:		pm2fb_bmove,
-	clear:		pm2fb_clear32,
-	putc:		fbcon_cfb32_putc,
-	putcs:		fbcon_cfb32_putcs,
-	revc:		fbcon_cfb32_revc,
-	cursor:		pm2fb_cursor,
-	set_font:	pm2fb_set_font,
-	clear_margins:	pm2fb_clear_margins32,
-	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
-};
-#endif /* FBCON_HAS_CFB32 */
+	if (var->yres < 200 || var->yres > 1200) {
+		DPRINTK("height not supported: %u\n", var->yres);
+		return -EINVAL;
+	}
 
-/***************************************************************************
- * Framebuffer functions
- ***************************************************************************/
+	if (lpitch * var->yres_virtual > info->fix.smem_len) {
+		DPRINTK("no memory for screen (%ux%ux%u)\n",
+			var->xres, var->yres_virtual, var->bits_per_pixel);
+		return -EINVAL;
+	}
 
-static void pm2fb_detect(void) {}
+	if (PICOS2KHZ(var->pixclock) > PM2_MAX_PIXCLOCK) {
+		DPRINTK("pixclock too high (%ldKHz)\n",
+			PICOS2KHZ(var->pixclock));
+		return -EINVAL;
+	}
 
-static int pm2fb_encode_fix(struct fb_fix_screeninfo* fix,
-			const void* par, struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	struct pm2fb_par* p=(struct pm2fb_par* )par;
+	var->transp.offset = 0;
+	var->transp.length = 0;
+	switch (var->bits_per_pixel) {
+	case 8:
+		var->red.length = 8;
+		var->green.length = 8;
+		var->blue.length = 8;
+		break;
+	case 16:
+		var->red.offset   = 11;
+		var->red.length   = 5;
+		var->green.offset = 5;
+		var->green.length = 6;
+		var->blue.offset  = 0;
+		var->blue.length  = 5;
+		break;
+	case 32:
+		var->transp.offset = 24;
+		var->transp.length = 8;
+		var->red.offset	  = 16;
+		var->green.offset = 8;
+		var->blue.offset  = 0;
+		var->red.length = 8;
+		var->green.length = 8;
+		var->blue.length = 8;
+		break;
+	case 24:
+#ifdef __BIG_ENDIAN
+		var->red.offset   = 0;
+		var->blue.offset  = 16;
+#else
+		var->red.offset   = 16;
+		var->blue.offset  = 0;
+#endif
+		var->green.offset = 8;
+		var->red.length = 8;
+		var->green.length = 8;
+		var->blue.length = 8;
+		break;
+	}
+	var->height = -1;
+	var->width = -1;
 
-	strcpy(fix->id, permedia2_name);
-	fix->smem_start=i->regions.p_fb;
-	fix->smem_len=i->regions.fb_size;
-	fix->mmio_start=i->regions.p_regs;
-	fix->mmio_len=PM2_REGS_SIZE;
-	fix->accel=FB_ACCEL_3DLABS_PERMEDIA2;
-	fix->type=FB_TYPE_PACKED_PIXELS;
-	fix->visual=p->depth==8?FB_VISUAL_PSEUDOCOLOR:FB_VISUAL_TRUECOLOR;
-	if (i->current_par_valid)
-		fix->line_length=i->current_par.width*(i->current_par.depth/8);
-	else
-		fix->line_length=0;
-	fix->xpanstep=p->depth==24?8:64/p->depth;
-	fix->ypanstep=1;
-	fix->ywrapstep=0;
+	var->accel_flags = 0;	/* Can't mmap if this is on */
+
+	DPRINTK("Checking graphics mode at %dx%d depth %d\n",
+		var->xres, var->yres, var->bits_per_pixel);
 	return 0;
 }
 
-#ifdef PM2FB_MASTER_DEBUG
-static void pm2fb_display_var(const struct fb_var_screeninfo* var) {
-
-	printk( KERN_DEBUG
-"- struct fb_var_screeninfo ---------------------------------------------------\n");
-	printk( KERN_DEBUG
-		"resolution: %ux%ux%u (virtual %ux%u+%u+%u)\n",
-			var->xres, var->yres, var->bits_per_pixel,
-			var->xres_virtual, var->yres_virtual,
-			var->xoffset, var->yoffset);
-	printk( KERN_DEBUG
-		"color: %c%c "
-		"R(%u,%u,%u), G(%u,%u,%u), B(%u,%u,%u), T(%u,%u,%u)\n",
-			var->grayscale?'G':'C', var->nonstd?'N':'S',
-			var->red.offset, var->red.length, var->red.msb_right,
-			var->green.offset, var->green.length, var->green.msb_right,
-			var->blue.offset, var->blue.length, var->blue.msb_right,
-			var->transp.offset, var->transp.length,
-			var->transp.msb_right);
-	printk( KERN_DEBUG
-		"timings: %ups (%u,%u)-(%u,%u)+%u+%u\n",
-		var->pixclock,
-		var->left_margin, var->upper_margin, var->right_margin,
-		var->lower_margin, var->hsync_len, var->vsync_len);
-	printk(	KERN_DEBUG
-		"activate %08x accel_flags %08x sync %08x vmode %08x\n",
-		var->activate, var->accel_flags, var->sync, var->vmode);
-	printk(	KERN_DEBUG
-"------------------------------------------------------------------------------\n");
-}
-
-#define pm2fb_decode_var pm2fb_wrapped_decode_var
-#endif
-
-static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
-				void* par, struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	struct pm2fb_par p;
-	u32 xres;
+/**
+ *	pm2fb_set_par - Alters the hardware state.
+ *	@info: frame buffer structure that represents a single frame buffer
+ *
+ *	Using the fb_var_screeninfo in fb_info we set the resolution of the
+ *	this particular framebuffer.
+ */
+static int pm2fb_set_par(struct fb_info *info)
+{
+	struct pm2fb_par *par = info->par;
+	u32 pixclock;
+	u32 width = (info->var.xres_virtual + 7) & ~7;
+	u32 height = info->var.yres_virtual;
+	u32 depth = (info->var.bits_per_pixel + 7) & ~7;
+	u32 hsstart, hsend, hbend, htotal;
+	u32 vsstart, vsend, vbend, vtotal;
+	u32 stride;
+	u32 base;
+	u32 video = 0;
+	u32 clrmode = PM2F_RD_COLOR_MODE_RGB | PM2F_RD_GUI_ACTIVE;
+	u32 txtmap = 0;
+	u32 pixsize = 0;
+	u32 clrformat = 0;
+	u32 misc = 1; /* 8-bit DAC */
+	u32 xres = (info->var.xres + 31) & ~31;
 	int data64;
 
-	memset(&p, 0, sizeof(struct pm2fb_par));
-	p.width=(var->xres_virtual+7)&~7;
-	p.height=var->yres_virtual;
-	p.depth=(var->bits_per_pixel+7)&~7;
-	p.depth=p.depth>32?32:p.depth;
-	data64=p.depth>8 || i->type == PM2_TYPE_PERMEDIA2V;
-	xres=(var->xres+31)&~31;
-	if (p.width<xres+var->xoffset)
-		p.width=xres+var->xoffset;
-	if (p.height<var->yres+var->yoffset)
-		p.height=var->yres+var->yoffset;
-	if (!partprod(xres)) {
-		DPRINTK("width not supported: %u\n", xres);
+	reset_card(par);
+	reset_config(par);
+	clear_palette(par);
+	if (par->memclock)
+		set_memclock(par, par->memclock);
+
+	depth = (depth > 32) ? 32 : depth;
+	data64 = depth > 8 || par->type == PM2_TYPE_PERMEDIA2V;
+
+	pixclock = PICOS2KHZ(info->var.pixclock);
+	if (pixclock > PM2_MAX_PIXCLOCK) {
+		DPRINTK("pixclock too high (%uKHz)\n", pixclock);
 		return -EINVAL;
 	}
-	if (p.width>2047) {
-		DPRINTK("virtual width not supported: %u\n", p.width);
-		return -EINVAL;
-	}
-	if (var->yres<200) {
-		DPRINTK("height not supported: %u\n",
-						(u32 )var->yres);
-		return -EINVAL;
-	}
-	if (p.height<200 || p.height>2047) {
-		DPRINTK("virtual height not supported: %u\n", p.height);
-		return -EINVAL;
-	}
-	if (p.depth>32) {
-		DPRINTK("depth not supported: %u\n", p.depth);
-		return -EINVAL;
-	}
-	if (p.width*p.height*p.depth/8>i->regions.fb_size) {
-		DPRINTK("no memory for screen (%ux%ux%u)\n",
-						p.width, p.height, p.depth);
-		return -EINVAL;
-	}
-	p.pixclock=PICOS2KHZ(var->pixclock);
-	if (p.pixclock>PM2_MAX_PIXCLOCK) {
-		DPRINTK("pixclock too high (%uKHz)\n", p.pixclock);
-		return -EINVAL;
-	}
-	p.hsstart=to3264(var->right_margin, p.depth, data64);
-	p.hsend=p.hsstart+to3264(var->hsync_len, p.depth, data64);
-	p.hbend=p.hsend+to3264(var->left_margin, p.depth, data64);
-	p.htotal=to3264(xres, p.depth, data64)+p.hbend-1;
-	p.vsstart=var->lower_margin?var->lower_margin-1:0;	/* FIXME! */
-	p.vsend=var->lower_margin+var->vsync_len-1;
-	p.vbend=var->lower_margin+var->vsync_len+var->upper_margin;
-	p.vtotal=var->yres+p.vbend-1;
-	p.stride=to3264(p.width, p.depth, 1);
-	p.base=to3264(var->yoffset*xres+var->xoffset, p.depth, 1);
+
+	hsstart = to3264(info->var.right_margin, depth, data64);
+	hsend = hsstart + to3264(info->var.hsync_len, depth, data64);
+	hbend = hsend + to3264(info->var.left_margin, depth, data64);
+	htotal = to3264(xres, depth, data64) + hbend - 1;
+	vsstart = (info->var.lower_margin)
+		? info->var.lower_margin - 1
+		: 0;	/* FIXME! */
+	vsend = info->var.lower_margin + info->var.vsync_len - 1;
+	vbend = info->var.lower_margin + info->var.vsync_len +
+		info->var.upper_margin;
+	vtotal = info->var.yres + vbend - 1;
+	stride = to3264(width, depth, 1);
+	base = to3264(info->var.yoffset * xres + info->var.xoffset, depth, 1);
 	if (data64)
-		p.video|=PM2F_DATA_64_ENABLE;
-	if (var->sync & FB_SYNC_HOR_HIGH_ACT)
-		p.video|=PM2F_HSYNC_ACT_HIGH;
-	else
-		p.video|=PM2F_HSYNC_ACT_LOW;
-	if (var->sync & FB_SYNC_VERT_HIGH_ACT)
-		p.video|=PM2F_VSYNC_ACT_HIGH;
-	else
-		p.video|=PM2F_VSYNC_ACT_LOW;
-	if ((var->vmode & FB_VMODE_MASK)==FB_VMODE_INTERLACED) {
+		video |= PM2F_DATA_64_ENABLE;
+
+	if (info->var.sync & FB_SYNC_HOR_HIGH_ACT) {
+		if (lowhsync) {
+			DPRINTK("ignoring +hsync, using -hsync.\n");
+			video |= PM2F_HSYNC_ACT_LOW;
+		} else
+			video |= PM2F_HSYNC_ACT_HIGH;
+	} else
+		video |= PM2F_HSYNC_ACT_LOW;
+
+	if (info->var.sync & FB_SYNC_VERT_HIGH_ACT) {
+		if (lowvsync) {
+			DPRINTK("ignoring +vsync, using -vsync.\n");
+			video |= PM2F_VSYNC_ACT_LOW;
+		} else
+			video |= PM2F_VSYNC_ACT_HIGH;
+	} else
+		video |= PM2F_VSYNC_ACT_LOW;
+
+	if ((info->var.vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED) {
 		DPRINTK("interlaced not supported\n");
 		return -EINVAL;
 	}
-	if ((var->vmode & FB_VMODE_MASK)==FB_VMODE_DOUBLE)
-		p.video|=PM2F_LINE_DOUBLE;
-	if (var->activate==FB_ACTIVATE_NOW)
-		p.video|=PM2F_VIDEO_ENABLE;
-	*((struct pm2fb_par* )par)=p;
+	if ((info->var.vmode & FB_VMODE_MASK) == FB_VMODE_DOUBLE)
+		video |= PM2F_LINE_DOUBLE;
+	if ((info->var.activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW)
+		video |= PM2F_VIDEO_ENABLE;
+	par->video = video;
+
+	info->fix.visual =
+		(depth == 8) ? FB_VISUAL_PSEUDOCOLOR : FB_VISUAL_TRUECOLOR;
+	info->fix.line_length = info->var.xres * depth / 8;
+	info->cmap.len = 256;
+
+	/*
+	 * Settings calculated. Now write them out.
+	 */
+	if (par->type == PM2_TYPE_PERMEDIA2V) {
+		WAIT_FIFO(par, 1);
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, 0);
+	}
+
+	set_aperture(par, depth);
+
+	mb();
+	WAIT_FIFO(par, 19);
+	switch (depth) {
+	case 8:
+		pm2_WR(par, PM2R_FB_READ_PIXEL, 0);
+		clrformat = 0x2e;
+		break;
+	case 16:
+		pm2_WR(par, PM2R_FB_READ_PIXEL, 1);
+		clrmode |= PM2F_RD_TRUECOLOR | PM2F_RD_PIXELFORMAT_RGB565;
+		txtmap = PM2F_TEXTEL_SIZE_16;
+		pixsize = 1;
+		clrformat = 0x70;
+		misc |= 8;
+		break;
+	case 32:
+		pm2_WR(par, PM2R_FB_READ_PIXEL, 2);
+		clrmode |= PM2F_RD_TRUECOLOR | PM2F_RD_PIXELFORMAT_RGBA8888;
+		txtmap = PM2F_TEXTEL_SIZE_32;
+		pixsize = 2;
+		clrformat = 0x20;
+		misc |= 8;
+		break;
+	case 24:
+		pm2_WR(par, PM2R_FB_READ_PIXEL, 4);
+		clrmode |= PM2F_RD_TRUECOLOR | PM2F_RD_PIXELFORMAT_RGB888;
+		txtmap = PM2F_TEXTEL_SIZE_24;
+		pixsize = 4;
+		clrformat = 0x20;
+		misc |= 8;
+		break;
+	}
+	pm2_WR(par, PM2R_FB_WRITE_MODE, PM2F_FB_WRITE_ENABLE);
+	pm2_WR(par, PM2R_FB_READ_MODE, partprod(xres));
+	pm2_WR(par, PM2R_LB_READ_MODE, partprod(xres));
+	pm2_WR(par, PM2R_TEXTURE_MAP_FORMAT, txtmap | partprod(xres));
+	pm2_WR(par, PM2R_H_TOTAL, htotal);
+	pm2_WR(par, PM2R_HS_START, hsstart);
+	pm2_WR(par, PM2R_HS_END, hsend);
+	pm2_WR(par, PM2R_HG_END, hbend);
+	pm2_WR(par, PM2R_HB_END, hbend);
+	pm2_WR(par, PM2R_V_TOTAL, vtotal);
+	pm2_WR(par, PM2R_VS_START, vsstart);
+	pm2_WR(par, PM2R_VS_END, vsend);
+	pm2_WR(par, PM2R_VB_END, vbend);
+	pm2_WR(par, PM2R_SCREEN_STRIDE, stride);
+	wmb();
+	pm2_WR(par, PM2R_WINDOW_ORIGIN, 0);
+	pm2_WR(par, PM2R_SCREEN_SIZE, (height << 16) | width);
+	pm2_WR(par, PM2R_SCISSOR_MODE, PM2F_SCREEN_SCISSOR_ENABLE);
+	wmb();
+	pm2_WR(par, PM2R_SCREEN_BASE, base);
+	wmb();
+	set_video(par, video);
+	WAIT_FIFO(par, 10);
+	switch (par->type) {
+	case PM2_TYPE_PERMEDIA2:
+		pm2_RDAC_WR(par, PM2I_RD_COLOR_MODE, clrmode);
+		pm2_RDAC_WR(par, PM2I_RD_COLOR_KEY_CONTROL,
+				(depth == 8) ? 0 : PM2F_COLOR_KEY_TEST_OFF);
+		break;
+	case PM2_TYPE_PERMEDIA2V:
+		pm2v_RDAC_WR(par, PM2VI_RD_DAC_CONTROL, 0);
+		pm2v_RDAC_WR(par, PM2VI_RD_PIXEL_SIZE, pixsize);
+		pm2v_RDAC_WR(par, PM2VI_RD_COLOR_FORMAT, clrformat);
+		pm2v_RDAC_WR(par, PM2VI_RD_MISC_CONTROL, misc);
+		pm2v_RDAC_WR(par, PM2VI_RD_OVERLAY_KEY, 0);
+		break;
+	}
+	set_pixclock(par, pixclock);
+	DPRINTK("Setting graphics mode at %dx%d depth %d\n",
+		info->var.xres, info->var.yres, info->var.bits_per_pixel);
 	return 0;
 }
 
-#ifdef PM2FB_MASTER_DEBUG
-#undef pm2fb_decode_var
+/**
+ *	pm2fb_setcolreg - Sets a color register.
+ *	@regno: boolean, 0 copy local, 1 get_user() function
+ *	@red: frame buffer colormap structure
+ *	@green: The green value which can be up to 16 bits wide
+ *	@blue:  The blue value which can be up to 16 bits wide.
+ *	@transp: If supported the alpha value which can be up to 16 bits wide.
+ *	@info: frame buffer info structure
+ *
+ *	Set a single color register. The values supplied have a 16 bit
+ *	magnitude which needs to be scaled in this function for the hardware.
+ *	Pretty much a direct lift from tdfxfb.c.
+ *
+ *	Returns negative errno on error, or zero on success.
+ */
+static int pm2fb_setcolreg(unsigned regno, unsigned red, unsigned green,
+			   unsigned blue, unsigned transp,
+			   struct fb_info *info)
+{
+	struct pm2fb_par *par = info->par;
 
-static int pm2fb_decode_var(const struct fb_var_screeninfo* var,
-				void* par, struct fb_info_gen* info) {
-	int result;
+	if (regno >= info->cmap.len)  /* no. of hw registers */
+		return -EINVAL;
+	/*
+	 * Program hardware... do anything you want with transp
+	 */
 
-	result=pm2fb_wrapped_decode_var(var, par, info);
-	pm2fb_display_var(var);
-	return result;
+	/* grayscale works only partially under directcolor */
+	/* grayscale = 0.30*R + 0.59*G + 0.11*B */
+	if (info->var.grayscale)
+		red = green = blue = (red * 77 + green * 151 + blue * 28) >> 8;
+
+	/* Directcolor:
+	 *   var->{color}.offset contains start of bitfield
+	 *   var->{color}.length contains length of bitfield
+	 *   {hardwarespecific} contains width of DAC
+	 *   cmap[X] is programmed to
+	 *   (X << red.offset) | (X << green.offset) | (X << blue.offset)
+	 *   RAMDAC[X] is programmed to (red, green, blue)
+	 *
+	 * Pseudocolor:
+	 *    uses offset = 0 && length = DAC register width.
+	 *    var->{color}.offset is 0
+	 *    var->{color}.length contains width of DAC
+	 *    cmap is not used
+	 *    DAC[X] is programmed to (red, green, blue)
+	 * Truecolor:
+	 *    does not use RAMDAC (usually has 3 of them).
+	 *    var->{color}.offset contains start of bitfield
+	 *    var->{color}.length contains length of bitfield
+	 *    cmap is programmed to
+	 *    (red << red.offset) | (green << green.offset) |
+	 *    (blue << blue.offset) | (transp << transp.offset)
+	 *    RAMDAC does not exist
+	 */
+#define CNVT_TOHW(val, width) ((((val) << (width)) + 0x7FFF -(val)) >> 16)
+	switch (info->fix.visual) {
+	case FB_VISUAL_TRUECOLOR:
+	case FB_VISUAL_PSEUDOCOLOR:
+		red = CNVT_TOHW(red, info->var.red.length);
+		green = CNVT_TOHW(green, info->var.green.length);
+		blue = CNVT_TOHW(blue, info->var.blue.length);
+		transp = CNVT_TOHW(transp, info->var.transp.length);
+		break;
+	case FB_VISUAL_DIRECTCOLOR:
+		/* example here assumes 8 bit DAC. Might be different
+		 * for your hardware */
+		red = CNVT_TOHW(red, 8);
+		green = CNVT_TOHW(green, 8);
+		blue = CNVT_TOHW(blue, 8);
+		/* hey, there is bug in transp handling... */
+		transp = CNVT_TOHW(transp, 8);
+		break;
+	}
+#undef CNVT_TOHW
+	/* Truecolor has hardware independent palette */
+	if (info->fix.visual == FB_VISUAL_TRUECOLOR) {
+		u32 v;
+
+		if (regno >= 16)
+			return -EINVAL;
+
+		v = (red << info->var.red.offset) |
+			(green << info->var.green.offset) |
+			(blue << info->var.blue.offset) |
+			(transp << info->var.transp.offset);
+
+		switch (info->var.bits_per_pixel) {
+		case 8:
+			break;
+		case 16:
+		case 24:
+		case 32:
+			par->palette[regno] = v;
+			break;
+		}
+		return 0;
+	} else if (info->fix.visual == FB_VISUAL_PSEUDOCOLOR)
+		set_color(par, regno, red, green, blue);
+
+	return 0;
 }
-#endif
 
-static int pm2fb_encode_var(struct fb_var_screeninfo* var,
-				const void* par, struct fb_info_gen* info) {
-	struct pm2fb_par* p=(struct pm2fb_par* )par;
-	struct fb_var_screeninfo v;
+/**
+ *	pm2fb_pan_display - Pans the display.
+ *	@var: frame buffer variable screen structure
+ *	@info: frame buffer structure that represents a single frame buffer
+ *
+ *	Pan (or wrap, depending on the `vmode' field) the display using the
+ *	`xoffset' and `yoffset' fields of the `var' structure.
+ *	If the values don't fit, return -EINVAL.
+ *
+ *	Returns negative errno on error, or zero on success.
+ *
+ */
+static int pm2fb_pan_display(struct fb_var_screeninfo *var,
+			     struct fb_info *info)
+{
+	struct pm2fb_par *p = info->par;
 	u32 base;
+	u32 depth = (info->var.bits_per_pixel + 7) & ~7;
+	u32 xres = (info->var.xres + 31) & ~31;
 
-	memset(&v, 0, sizeof(struct fb_var_screeninfo));
-	v.xres_virtual=p->width;
-	v.yres_virtual=p->height;
-	v.xres=(p->htotal+1)-p->hbend;
-	v.yres=(p->vtotal+1)-p->vbend;
-	v.right_margin=p->hsstart;
-	v.hsync_len=p->hsend-p->hsstart;
-	v.left_margin=p->hbend-p->hsend;
-	v.lower_margin=p->vsstart+1;
-	v.vsync_len=p->vsend-v.lower_margin+1;
-	v.upper_margin=p->vbend-v.lower_margin-v.vsync_len;
-	v.bits_per_pixel=p->depth;
-	if (p->video & PM2F_DATA_64_ENABLE) {
-		v.xres=v.xres<<1;
-		v.right_margin=v.right_margin<<1;
-		v.hsync_len=v.hsync_len<<1;
-		v.left_margin=v.left_margin<<1;
-	}
-	switch (p->depth) {
-		case 8:
-			v.red.length=v.green.length=v.blue.length=8;
-			v.xres=v.xres<<2;
-			v.right_margin=v.right_margin<<2;
-			v.hsync_len=v.hsync_len<<2;
-			v.left_margin=v.left_margin<<2;
-			break;
-		case 16:
-			v.red.offset=11;
-			v.red.length=5;
-			v.green.offset=5;
-			v.green.length=6;
-			v.blue.length=5;
-			v.xres=v.xres<<1;
-			v.right_margin=v.right_margin<<1;
-			v.hsync_len=v.hsync_len<<1;
-			v.left_margin=v.left_margin<<1;
-			break;
-		case 32:
-			v.transp.offset=24;
-			v.red.offset=16;
-			v.green.offset=8;
-			v.red.length=v.green.length=v.blue.length=
-							v.transp.length=8;
-			break;
-		case 24:
-			v.blue.offset=16;
-			v.green.offset=8;
-			v.red.length=v.green.length=v.blue.length=8;
-			v.xres=(v.xres<<2)/3;
-			v.right_margin=(v.right_margin<<2)/3;
-			v.hsync_len=(v.hsync_len<<2)/3;
-			v.left_margin=(v.left_margin<<2)/3;
-			break;
-	}
-	base=from3264(p->base, p->depth, 1);
-	v.xoffset=base%v.xres;
-	v.yoffset=base/v.xres;
-	v.height=v.width=-1;
-	v.pixclock=KHZ2PICOS(p->pixclock);
-	if ((p->video & PM2F_HSYNC_MASK)==PM2F_HSYNC_ACT_HIGH)
-		v.sync|=FB_SYNC_HOR_HIGH_ACT;
-	if ((p->video & PM2F_VSYNC_MASK)==PM2F_VSYNC_ACT_HIGH)
-		v.sync|=FB_SYNC_VERT_HIGH_ACT;
-	if (p->video & PM2F_LINE_DOUBLE)
-		v.vmode=FB_VMODE_DOUBLE;
-	*var=v;
+	depth = (depth > 32) ? 32 : depth;
+	base = to3264(var->yoffset * xres + var->xoffset, depth, 1);
+	WAIT_FIFO(p, 1);
+	pm2_WR(p, PM2R_SCREEN_BASE, base);
 	return 0;
 }
 
-static void set_user_mode(struct pm2fb_info* i) {
+/**
+ *	pm2fb_blank - Blanks the display.
+ *	@blank_mode: the blank mode we want.
+ *	@info: frame buffer structure that represents a single frame buffer
+ *
+ *	Blank the screen if blank_mode != 0, else unblank. Return 0 if
+ *	blanking succeeded, != 0 if un-/blanking failed due to e.g. a
+ *	video mode which doesn't support it. Implements VESA suspend
+ *	and powerdown modes on hardware that supports disabling hsync/vsync:
+ *	blank_mode == 2: suspend vsync
+ *	blank_mode == 3: suspend hsync
+ *	blank_mode == 4: powerdown
+ *
+ *	Returns negative errno on error, or zero on success.
+ *
+ */
+static int pm2fb_blank(int blank_mode, struct fb_info *info)
+{
+	struct pm2fb_par *par = info->par;
+	u32 video = par->video;
 
-	if (pm2fb_options.flags & OPTF_YPAN) {
-		int h = i->current_par.height;
-		i->current_par.height=i->regions.fb_size/
-			(i->current_par.width*i->current_par.depth/8);
-		i->current_par.height=MIN(i->current_par.height,2047);
-		i->current_par.height=MAX(i->current_par.height,h);
+	DPRINTK("blank_mode %d\n", blank_mode);
+
+	switch (blank_mode) {
+	case FB_BLANK_UNBLANK:
+		/* Screen: On */
+		video |= PM2F_VIDEO_ENABLE;
+		break;
+	case FB_BLANK_NORMAL:
+		/* Screen: Off */
+		video &= ~PM2F_VIDEO_ENABLE;
+		break;
+	case FB_BLANK_VSYNC_SUSPEND:
+		/* VSync: Off */
+		video &= ~(PM2F_VSYNC_MASK | PM2F_BLANK_LOW);
+		break;
+	case FB_BLANK_HSYNC_SUSPEND:
+		/* HSync: Off */
+		video &= ~(PM2F_HSYNC_MASK | PM2F_BLANK_LOW);
+		break;
+	case FB_BLANK_POWERDOWN:
+		/* HSync: Off, VSync: Off */
+		video &= ~(PM2F_VSYNC_MASK | PM2F_HSYNC_MASK | PM2F_BLANK_LOW);
+		break;
+	}
+	set_video(par, video);
+	return 0;
+}
+
+static int pm2fb_sync(struct fb_info *info)
+{
+	struct pm2fb_par *par = info->par;
+
+	WAIT_FIFO(par, 1);
+	pm2_WR(par, PM2R_SYNC, 0);
+	mb();
+	do {
+		while (pm2_RD(par, PM2R_OUT_FIFO_WORDS) == 0)
+			cpu_relax();
+	} while (pm2_RD(par, PM2R_OUT_FIFO) != PM2TAG(PM2R_SYNC));
+
+	return 0;
+}
+
+static void pm2fb_fillrect(struct fb_info *info,
+				const struct fb_fillrect *region)
+{
+	struct pm2fb_par *par = info->par;
+	struct fb_fillrect modded;
+	int vxres, vyres;
+	u32 color = (info->fix.visual == FB_VISUAL_TRUECOLOR) ?
+		((u32 *)info->pseudo_palette)[region->color] : region->color;
+
+	if (info->state != FBINFO_STATE_RUNNING)
+		return;
+	if ((info->flags & FBINFO_HWACCEL_DISABLED) ||
+		region->rop != ROP_COPY ) {
+		cfb_fillrect(info, region);
+		return;
+	}
+
+	vxres = info->var.xres_virtual;
+	vyres = info->var.yres_virtual;
+
+	memcpy(&modded, region, sizeof(struct fb_fillrect));
+
+	if (!modded.width || !modded.height ||
+	    modded.dx >= vxres || modded.dy >= vyres)
+		return;
+
+	if (modded.dx + modded.width  > vxres)
+		modded.width  = vxres - modded.dx;
+	if (modded.dy + modded.height > vyres)
+		modded.height = vyres - modded.dy;
+
+	if (info->var.bits_per_pixel == 8)
+		color |= color << 8;
+	if (info->var.bits_per_pixel <= 16)
+		color |= color << 16;
+
+	WAIT_FIFO(par, 3);
+	pm2_WR(par, PM2R_CONFIG, PM2F_CONFIG_FB_WRITE_ENABLE);
+	pm2_WR(par, PM2R_RECTANGLE_ORIGIN, (modded.dy << 16) | modded.dx);
+	pm2_WR(par, PM2R_RECTANGLE_SIZE, (modded.height << 16) | modded.width);
+	if (info->var.bits_per_pixel != 24) {
+		WAIT_FIFO(par, 2);
+		pm2_WR(par, PM2R_FB_BLOCK_COLOR, color);
+		wmb();
+		pm2_WR(par, PM2R_RENDER,
+				PM2F_RENDER_RECTANGLE | PM2F_RENDER_FASTFILL);
+	} else {
+		WAIT_FIFO(par, 4);
+		pm2_WR(par, PM2R_COLOR_DDA_MODE, 1);
+		pm2_WR(par, PM2R_CONSTANT_COLOR, color);
+		wmb();
+		pm2_WR(par, PM2R_RENDER,
+				PM2F_RENDER_RECTANGLE |
+				PM2F_INCREASE_X | PM2F_INCREASE_Y );
+		pm2_WR(par, PM2R_COLOR_DDA_MODE, 0);
 	}
 }
 
-static void pm2fb_get_par(void* par, struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	
-	if (!i->current_par_valid) {
-		set_user_mode(i);
-		pm2fb_reset(i);
-		set_screen(i, &i->current_par);
-		i->current_par_valid=1;
+static void pm2fb_copyarea(struct fb_info *info,
+				const struct fb_copyarea *area)
+{
+	struct pm2fb_par *par = info->par;
+	struct fb_copyarea modded;
+	u32 vxres, vyres;
+
+	if (info->state != FBINFO_STATE_RUNNING)
+		return;
+	if (info->flags & FBINFO_HWACCEL_DISABLED) {
+		cfb_copyarea(info, area);
+		return;
 	}
-	*((struct pm2fb_par* )par)=i->current_par;
+
+	memcpy(&modded, area, sizeof(struct fb_copyarea));
+
+	vxres = info->var.xres_virtual;
+	vyres = info->var.yres_virtual;
+
+	if (!modded.width || !modded.height ||
+	    modded.sx >= vxres || modded.sy >= vyres ||
+	    modded.dx >= vxres || modded.dy >= vyres)
+		return;
+
+	if (modded.sx + modded.width > vxres)
+		modded.width = vxres - modded.sx;
+	if (modded.dx + modded.width > vxres)
+		modded.width = vxres - modded.dx;
+	if (modded.sy + modded.height > vyres)
+		modded.height = vyres - modded.sy;
+	if (modded.dy + modded.height > vyres)
+		modded.height = vyres - modded.dy;
+
+	WAIT_FIFO(par, 5);
+	pm2_WR(par, PM2R_CONFIG, PM2F_CONFIG_FB_WRITE_ENABLE |
+		PM2F_CONFIG_FB_READ_SOURCE_ENABLE);
+	pm2_WR(par, PM2R_FB_SOURCE_DELTA,
+			((modded.sy - modded.dy) & 0xfff) << 16 |
+			((modded.sx - modded.dx) & 0xfff));
+	pm2_WR(par, PM2R_RECTANGLE_ORIGIN, (modded.dy << 16) | modded.dx);
+	pm2_WR(par, PM2R_RECTANGLE_SIZE, (modded.height << 16) | modded.width);
+	wmb();
+	pm2_WR(par, PM2R_RENDER, PM2F_RENDER_RECTANGLE |
+				(modded.dx < modded.sx ? PM2F_INCREASE_X : 0) |
+				(modded.dy < modded.sy ? PM2F_INCREASE_Y : 0));
 }
 
-static void pm2fb_set_par(const void* par, struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	struct pm2fb_par* p;
+static void pm2fb_imageblit(struct fb_info *info, const struct fb_image *image)
+{
+	struct pm2fb_par *par = info->par;
+	u32 height = image->height;
+	u32 fgx, bgx;
+	const u32 *src = (const u32 *)image->data;
+	u32 xres = (info->var.xres + 31) & ~31;
+	int raster_mode = 1; /* invert bits */
 
-	p=(struct pm2fb_par* )par;
-	if (i->current_par_valid) {
-		i->current_par.base=p->base;
-		if (!memcmp(p, &i->current_par, sizeof(struct pm2fb_par))) {
-			WAIT_FIFO(i, 1);
-			pm2_WR(i, PM2R_SCREEN_BASE, p->base);
-			return;
+#ifdef __LITTLE_ENDIAN
+	raster_mode |= 3 << 7; /* reverse byte order */
+#endif
+
+	if (info->state != FBINFO_STATE_RUNNING)
+		return;
+	if (info->flags & FBINFO_HWACCEL_DISABLED || image->depth != 1) {
+		cfb_imageblit(info, image);
+		return;
+	}
+	switch (info->fix.visual) {
+	case FB_VISUAL_PSEUDOCOLOR:
+		fgx = image->fg_color;
+		bgx = image->bg_color;
+		break;
+	case FB_VISUAL_TRUECOLOR:
+	default:
+		fgx = par->palette[image->fg_color];
+		bgx = par->palette[image->bg_color];
+		break;
+	}
+	if (info->var.bits_per_pixel == 8) {
+		fgx |= fgx << 8;
+		bgx |= bgx << 8;
+	}
+	if (info->var.bits_per_pixel <= 16) {
+		fgx |= fgx << 16;
+		bgx |= bgx << 16;
+	}
+
+	WAIT_FIFO(par, 13);
+	pm2_WR(par, PM2R_FB_READ_MODE, partprod(xres));
+	pm2_WR(par, PM2R_SCISSOR_MIN_XY,
+			((image->dy & 0xfff) << 16) | (image->dx & 0x0fff));
+	pm2_WR(par, PM2R_SCISSOR_MAX_XY,
+			(((image->dy + image->height) & 0x0fff) << 16) |
+			((image->dx + image->width) & 0x0fff));
+	pm2_WR(par, PM2R_SCISSOR_MODE, 1);
+	/* GXcopy & UNIT_ENABLE */
+	pm2_WR(par, PM2R_LOGICAL_OP_MODE, (0x3 << 1) | 1);
+	pm2_WR(par, PM2R_RECTANGLE_ORIGIN,
+			((image->dy & 0xfff) << 16) | (image->dx & 0x0fff));
+	pm2_WR(par, PM2R_RECTANGLE_SIZE,
+			((image->height & 0x0fff) << 16) |
+			((image->width) & 0x0fff));
+	if (info->var.bits_per_pixel == 24) {
+		pm2_WR(par, PM2R_COLOR_DDA_MODE, 1);
+		/* clear area */
+		pm2_WR(par, PM2R_CONSTANT_COLOR, bgx);
+		pm2_WR(par, PM2R_RENDER,
+			PM2F_RENDER_RECTANGLE |
+			PM2F_INCREASE_X | PM2F_INCREASE_Y);
+		/* BitMapPackEachScanline */
+		pm2_WR(par, PM2R_RASTERIZER_MODE, raster_mode | (1 << 9));
+		pm2_WR(par, PM2R_CONSTANT_COLOR, fgx);
+		pm2_WR(par, PM2R_RENDER,
+			PM2F_RENDER_RECTANGLE |
+			PM2F_INCREASE_X | PM2F_INCREASE_Y |
+			PM2F_RENDER_SYNC_ON_BIT_MASK);
+	} else {
+		pm2_WR(par, PM2R_COLOR_DDA_MODE, 0);
+		/* clear area */
+		pm2_WR(par, PM2R_FB_BLOCK_COLOR, bgx);
+		pm2_WR(par, PM2R_RENDER,
+			PM2F_RENDER_RECTANGLE |
+			PM2F_RENDER_FASTFILL |
+			PM2F_INCREASE_X | PM2F_INCREASE_Y);
+		pm2_WR(par, PM2R_RASTERIZER_MODE, raster_mode);
+		pm2_WR(par, PM2R_FB_BLOCK_COLOR, fgx);
+		pm2_WR(par, PM2R_RENDER,
+			PM2F_RENDER_RECTANGLE |
+			PM2F_INCREASE_X | PM2F_INCREASE_Y |
+			PM2F_RENDER_FASTFILL |
+			PM2F_RENDER_SYNC_ON_BIT_MASK);
+	}
+
+	while (height--) {
+		int width = ((image->width + 7) >> 3)
+				+ info->pixmap.scan_align - 1;
+		width >>= 2;
+		WAIT_FIFO(par, width);
+		while (width--) {
+			pm2_WR(par, PM2R_BIT_MASK_PATTERN, *src);
+			src++;
 		}
 	}
-	set_screen(i, p);
-	i->current_par=*p;
-	i->current_par_valid=1;
-#ifdef PM2FB_HW_CURSOR	
-	if (i->cursor) {
-		pm2v_set_cursor_color(i, cursor_color_map, cursor_color_map, cursor_color_map);
-		pm2v_set_cursor_shape(i);
-	}
-#endif
+	WAIT_FIFO(par, 3);
+	pm2_WR(par, PM2R_RASTERIZER_MODE, 0);
+	pm2_WR(par, PM2R_COLOR_DDA_MODE, 0);
+	pm2_WR(par, PM2R_SCISSOR_MODE, 0);
 }
 
-static int pm2fb_getcolreg(unsigned regno,
-			unsigned* red, unsigned* green, unsigned* blue,
-				unsigned* transp, struct fb_info* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-
-	if (regno<256) {
-		*red=i->palette[regno].red<<8|i->palette[regno].red;
-		*green=i->palette[regno].green<<8|i->palette[regno].green;
-		*blue=i->palette[regno].blue<<8|i->palette[regno].blue;
-		*transp=i->palette[regno].transp<<8|i->palette[regno].transp;
-	}
-	return regno>255;
-}
-
-static int pm2fb_setcolreg(unsigned regno,
-			unsigned red, unsigned green, unsigned blue,
-				unsigned transp, struct fb_info* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-
-	if (regno<16) {
-		switch (i->current_par.depth) {
-#ifdef FBCON_HAS_CFB8
-			case 8:
-				break;
-#endif
-#ifdef FBCON_HAS_CFB16
-			case 16:
-				i->cmap.cmap16[regno]=
-					((u32 )red & 0xf800) |
-					(((u32 )green & 0xfc00)>>5) |
-					(((u32 )blue & 0xf800)>>11);
-				break;
-#endif
-#ifdef FBCON_HAS_CFB24
-			case 24:
-				i->cmap.cmap24[regno]=
-					(((u32 )blue & 0xff00) << 8) |
-					((u32 )green & 0xff00) |
-					(((u32 )red & 0xff00) >> 8);
-				break;
-#endif
-#ifdef FBCON_HAS_CFB32
-			case 32:
-	   			i->cmap.cmap32[regno]=
-					(((u32 )transp & 0xff00) << 16) |
-		    			(((u32 )red & 0xff00) << 8) |
-					(((u32 )green & 0xff00)) |
-			 		(((u32 )blue & 0xff00) >> 8);
-				break;
-#endif
-			default:
-				DPRINTK("bad depth %u\n",
-						i->current_par.depth);
-				break;
-		}
-	}
-	if (regno<256) {
-		i->palette[regno].red=red >> 8;
-		i->palette[regno].green=green >> 8;
-		i->palette[regno].blue=blue >> 8;
-		i->palette[regno].transp=transp >> 8;
-		if (i->current_par.depth==8)
-			set_color(i, regno, red>>8, green>>8, blue>>8);
-	}
-	return regno>255;
-}
-
-static void pm2fb_set_disp(const void* par, struct display* disp,
-						   struct fb_info_gen* info) {
-	struct pm2fb_info* i=(struct pm2fb_info* )info;
-	unsigned long flags;
-	unsigned long depth;
-
-	save_flags(flags);
-	cli();
-	disp->screen_base = i->regions.v_fb;
-	switch (depth=((struct pm2fb_par* )par)->depth) {
-#ifdef FBCON_HAS_CFB8
-		case 8:
-			disp->dispsw=&pm2_cfb8;
-			break;
-#endif
-#ifdef FBCON_HAS_CFB16
-		case 16:
-			disp->dispsw=&pm2_cfb16;
-			disp->dispsw_data=i->cmap.cmap16;
-			break;
-#endif
-#ifdef FBCON_HAS_CFB24
-		case 24:
-			disp->dispsw=&pm2_cfb24;
-			disp->dispsw_data=i->cmap.cmap24;
-			break;
-#endif
-#ifdef FBCON_HAS_CFB32
-		case 32:
-			disp->dispsw=&pm2_cfb32;
-			disp->dispsw_data=i->cmap.cmap32;
-			break;
-#endif
-		default:
-			disp->dispsw=&fbcon_dummy;
-			break;
-	}
-	restore_flags(flags);
-}
-
-#ifdef PM2FB_HW_CURSOR
-/***************************************************************************
- * Hardware cursor support
- ***************************************************************************/
- 
-static u8 cursor_bits_lookup[16] = {
+/*
+ *	Hardware cursor support.
+ */
+static const u8 cursor_bits_lookup[16] = {
 	0x00, 0x40, 0x10, 0x50, 0x04, 0x44, 0x14, 0x54,
 	0x01, 0x41, 0x11, 0x51, 0x05, 0x45, 0x15, 0x55
 };
 
-static u8 cursor_mask_lookup[16] = {
-	0x00, 0x80, 0x20, 0xa0, 0x08, 0x88, 0x28, 0xa8,
-	0x02, 0x82, 0x22, 0xa2, 0x0a, 0x8a, 0x2a, 0xaa
+static int pm2vfb_cursor(struct fb_info *info, struct fb_cursor *cursor)
+{
+	struct pm2fb_par *par = info->par;
+	u8 mode = PM2F_CURSORMODE_TYPE_X;
+	int x = cursor->image.dx - info->var.xoffset;
+	int y = cursor->image.dy - info->var.yoffset;
+
+	if (cursor->enable)
+		mode |= PM2F_CURSORMODE_CURSOR_ENABLE;
+
+	pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_MODE, mode);
+
+	if (!cursor->enable)
+		x = 2047;	/* push it outside display */
+	pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_X_LOW, x & 0xff);
+	pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_X_HIGH, (x >> 8) & 0xf);
+	pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_Y_LOW, y & 0xff);
+	pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_Y_HIGH, (y >> 8) & 0xf);
+
+	/*
+	 * If the cursor is not be changed this means either we want the
+	 * current cursor state (if enable is set) or we want to query what
+	 * we can do with the cursor (if enable is not set)
+	 */
+	if (!cursor->set)
+		return 0;
+
+	if (cursor->set & FB_CUR_SETHOT) {
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_X_HOT,
+			     cursor->hot.x & 0x3f);
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_Y_HOT,
+			     cursor->hot.y & 0x3f);
+	}
+
+	if (cursor->set & FB_CUR_SETCMAP) {
+		u32 fg_idx = cursor->image.fg_color;
+		u32 bg_idx = cursor->image.bg_color;
+		struct fb_cmap cmap = info->cmap;
+
+		/* the X11 driver says one should use these color registers */
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CURSOR_PALETTE >> 8);
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 0,
+			     cmap.red[bg_idx] >> 8 );
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 1,
+			     cmap.green[bg_idx] >> 8 );
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 2,
+			     cmap.blue[bg_idx] >> 8 );
+
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 3,
+			     cmap.red[fg_idx] >> 8 );
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 4,
+			     cmap.green[fg_idx] >> 8 );
+		pm2v_RDAC_WR(par, PM2VI_RD_CURSOR_PALETTE + 5,
+			     cmap.blue[fg_idx] >> 8 );
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, 0);
+	}
+
+	if (cursor->set & (FB_CUR_SETSHAPE | FB_CUR_SETIMAGE)) {
+		u8 *bitmap = (u8 *)cursor->image.data;
+		u8 *mask = (u8 *)cursor->mask;
+		int i;
+		int pos = PM2VI_RD_CURSOR_PATTERN;
+
+		for (i = 0; i < cursor->image.height; i++) {
+			int j = (cursor->image.width + 7) >> 3;
+			int k = 8 - j;
+
+			pm2_WR(par, PM2VR_RD_INDEX_HIGH, pos >> 8);
+
+			for (; j > 0; j--) {
+				u8 data = *bitmap ^ *mask;
+
+				if (cursor->rop == ROP_COPY)
+					data = *mask & *bitmap;
+				/* Upper 4 bits of bitmap data */
+				pm2v_RDAC_WR(par, pos++,
+					cursor_bits_lookup[data >> 4] |
+					(cursor_bits_lookup[*mask >> 4] << 1));
+				/* Lower 4 bits of bitmap */
+				pm2v_RDAC_WR(par, pos++,
+					cursor_bits_lookup[data & 0xf] |
+					(cursor_bits_lookup[*mask & 0xf] << 1));
+				bitmap++;
+				mask++;
+			}
+			for (; k > 0; k--) {
+				pm2v_RDAC_WR(par, pos++, 0);
+				pm2v_RDAC_WR(par, pos++, 0);
+			}
+		}
+
+		while (pos < (1024 + PM2VI_RD_CURSOR_PATTERN)) {
+			pm2_WR(par, PM2VR_RD_INDEX_HIGH, pos >> 8);
+			pm2v_RDAC_WR(par, pos++, 0);
+		}
+
+		pm2_WR(par, PM2VR_RD_INDEX_HIGH, 0);
+	}
+	return 0;
+}
+
+static int pm2fb_cursor(struct fb_info *info, struct fb_cursor *cursor)
+{
+	struct pm2fb_par *par = info->par;
+	u8 mode;
+
+	if (!hwcursor)
+		return -EINVAL;	/* just to force soft_cursor() call */
+
+	/* Too large of a cursor or wrong bpp :-( */
+	if (cursor->image.width > 64 ||
+	    cursor->image.height > 64 ||
+	    cursor->image.depth > 1)
+		return -EINVAL;
+
+	if (par->type == PM2_TYPE_PERMEDIA2V)
+		return pm2vfb_cursor(info, cursor);
+
+	mode = 0x40;
+	if (cursor->enable)
+		 mode = 0x43;
+
+	pm2_RDAC_WR(par, PM2I_RD_CURSOR_CONTROL, mode);
+
+	/*
+	 * If the cursor is not be changed this means either we want the
+	 * current cursor state (if enable is set) or we want to query what
+	 * we can do with the cursor (if enable is not set)
+	 */
+	if (!cursor->set)
+		return 0;
+
+	if (cursor->set & FB_CUR_SETPOS) {
+		int x = cursor->image.dx - info->var.xoffset + 63;
+		int y = cursor->image.dy - info->var.yoffset + 63;
+
+		WAIT_FIFO(par, 4);
+		pm2_WR(par, PM2R_RD_CURSOR_X_LSB, x & 0xff);
+		pm2_WR(par, PM2R_RD_CURSOR_X_MSB, (x >> 8) & 0x7);
+		pm2_WR(par, PM2R_RD_CURSOR_Y_LSB, y & 0xff);
+		pm2_WR(par, PM2R_RD_CURSOR_Y_MSB, (y >> 8) & 0x7);
+	}
+
+	if (cursor->set & FB_CUR_SETCMAP) {
+		u32 fg_idx = cursor->image.fg_color;
+		u32 bg_idx = cursor->image.bg_color;
+
+		WAIT_FIFO(par, 7);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_ADDRESS, 1);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.red[bg_idx] >> 8);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.green[bg_idx] >> 8);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.blue[bg_idx] >> 8);
+
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.red[fg_idx] >> 8);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.green[fg_idx] >> 8);
+		pm2_WR(par, PM2R_RD_CURSOR_COLOR_DATA,
+			info->cmap.blue[fg_idx] >> 8);
+	}
+
+	if (cursor->set & (FB_CUR_SETSHAPE | FB_CUR_SETIMAGE)) {
+		u8 *bitmap = (u8 *)cursor->image.data;
+		u8 *mask = (u8 *)cursor->mask;
+		int i;
+
+		WAIT_FIFO(par, 1);
+		pm2_WR(par, PM2R_RD_PALETTE_WRITE_ADDRESS, 0);
+
+		for (i = 0; i < cursor->image.height; i++) {
+			int j = (cursor->image.width + 7) >> 3;
+			int k = 8 - j;
+
+			WAIT_FIFO(par, 8);
+			for (; j > 0; j--) {
+				u8 data = *bitmap ^ *mask;
+
+				if (cursor->rop == ROP_COPY)
+					data = *mask & *bitmap;
+				/* bitmap data */
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, data);
+				bitmap++;
+				mask++;
+			}
+			for (; k > 0; k--)
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, 0);
+		}
+		for (; i < 64; i++) {
+			int j = 8;
+			WAIT_FIFO(par, 8);
+			while (j-- > 0)
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, 0);
+		}
+
+		mask = (u8 *)cursor->mask;
+		for (i = 0; i < cursor->image.height; i++) {
+			int j = (cursor->image.width + 7) >> 3;
+			int k = 8 - j;
+
+			WAIT_FIFO(par, 8);
+			for (; j > 0; j--) {
+				/* mask */
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, *mask);
+				mask++;
+			}
+			for (; k > 0; k--)
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, 0);
+		}
+		for (; i < 64; i++) {
+			int j = 8;
+			WAIT_FIFO(par, 8);
+			while (j-- > 0)
+				pm2_WR(par, PM2R_RD_CURSOR_DATA, 0);
+		}
+	}
+	return 0;
+}
+
+/* ------------ Hardware Independent Functions ------------ */
+
+/*
+ *  Frame buffer operations
+ */
+
+static struct fb_ops pm2fb_ops = {
+	.owner		= THIS_MODULE,
+	.fb_check_var	= pm2fb_check_var,
+	.fb_set_par	= pm2fb_set_par,
+	.fb_setcolreg	= pm2fb_setcolreg,
+	.fb_blank	= pm2fb_blank,
+	.fb_pan_display	= pm2fb_pan_display,
+	.fb_fillrect	= pm2fb_fillrect,
+	.fb_copyarea	= pm2fb_copyarea,
+	.fb_imageblit	= pm2fb_imageblit,
+	.fb_sync	= pm2fb_sync,
+	.fb_cursor	= pm2fb_cursor,
 };
 
-static void pm2v_set_cursor_color(struct pm2fb_info *fb, u8 *red, u8 *green, u8 *blue)
-{
-	struct pm2_cursor *c = fb->cursor;
-	int i;
+/*
+ * PCI stuff
+ */
 
-	for (i = 0; i < 2; i++) {
-		c->color[3*i] = red[i];
-		c->color[3*i+1] = green[i];
-		c->color[3*i+2] = blue[i];
+
+/**
+ * Device initialisation
+ *
+ * Initialise and allocate resource for PCI device.
+ *
+ * @param	pdev	PCI device.
+ * @param	id	PCI device ID.
+ */
+static int __devinit pm2fb_probe(struct pci_dev *pdev,
+				 const struct pci_device_id *id)
+{
+	struct pm2fb_par *default_par;
+	struct fb_info *info;
+	int err;
+	int retval = -ENXIO;
+
+	err = pci_enable_device(pdev);
+	if (err) {
+		printk(KERN_WARNING "pm2fb: Can't enable pdev: %d\n", err);
+		return err;
 	}
 
-	WAIT_FIFO(fb, 14);
-	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CURSOR_PALETTE >> 8);
-	for (i = 0; i < 6; i++)
-		pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PALETTE+i, c->color[i]);
-	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, 0);
-}
+	info = framebuffer_alloc(sizeof(struct pm2fb_par), &pdev->dev);
+	if (!info)
+		return -ENOMEM;
+	default_par = info->par;
 
-static void pm2v_set_cursor_shape(struct pm2fb_info *fb)
-{
-	struct pm2_cursor *c = fb->cursor;
-	u8 m, b;
-	int i, x, y;
-
-	WAIT_FIFO(fb, 1);
-	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, PM2VI_RD_CURSOR_PATTERN >> 8);
-	for (y = 0, i = 0; y < c->size.y; y++) {
-		WAIT_FIFO(fb, 32);
-		for (x = 0; x < c->size.x >> 3; x++) {
-			m = c->mask[x][y];
-			b = c->bits[x][y];
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i,
-				     cursor_mask_lookup[m >> 4] |
-				     cursor_bits_lookup[(b & m) >> 4]);
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1,
-				     cursor_mask_lookup[m & 0x0f] |
-				     cursor_bits_lookup[(b & m) & 0x0f]);
-			i+=2;
-		}
-		for ( ; x < 8; x++) {
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i, 0);
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1, 0);
-			i+=2;
-		}
-	}
-	for (; y < 64; y++) {
-		WAIT_FIFO(fb, 32);
-		for (x = 0; x < 8; x++) {
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i, 0);
-			pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_PATTERN + i + 1, 0);
-			i+=2;
-		}
-	}
-	WAIT_FIFO(fb, 1);
-	pm2_WR(fb, PM2VR_RD_INDEX_HIGH, 0);
-}
-
-static void pm2v_set_cursor(struct pm2fb_info *fb, int on)
-{
-	struct pm2_cursor *c = fb->cursor;
-	int x = c->pos.x;
-
-	if (!on) x = 4000;
-	WAIT_FIFO(fb, 14);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_LOW, x & 0xff);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_HIGH, (x >> 8) & 0x0f);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_LOW, c->pos.y & 0xff);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_HIGH, (c->pos.y >> 8) & 0x0f);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_X_HOT, c->hot.x & 0x3f);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_Y_HOT, c->hot.y & 0x3f);
-	pm2v_RDAC_WR(fb, PM2VI_RD_CURSOR_MODE, 0x11);
-}
-
-static void pm2_cursor_timer_handler(unsigned long dev_addr)
-{
-	struct pm2fb_info *fb = (struct pm2fb_info *)dev_addr;
-
-	if (!fb->cursor->enable)
-		goto out;
-
-	if (fb->cursor->vbl_cnt && --fb->cursor->vbl_cnt == 0) {
-		fb->cursor->on ^= 1;
-		pm2v_set_cursor(fb, fb->cursor->on);
-		fb->cursor->vbl_cnt = fb->cursor->blink_rate;
-	}
-
-out:
-	fb->cursor->timer->expires = jiffies + (HZ / 50);
-	add_timer(fb->cursor->timer);
-}
-
-static void pm2fb_cursor(struct display *p, int mode, int x, int y)
-{
-	struct pm2fb_info *fb = (struct pm2fb_info *)p->fb_info;
-	struct pm2_cursor *c = fb->cursor;
-
-	if (!c) return;
-
-	x *= fontwidth(p);
-	y *= fontheight(p);
-	if (c->pos.x == x && c->pos.y == y && (mode == CM_ERASE) == !c->enable)
-		return;
-
-	c->enable = 0;
-	if (c->on)
-		pm2v_set_cursor(fb, 0);
-	c->pos.x = x;
-	c->pos.y = y;
-
-	switch (mode) {
-	case CM_ERASE:
-		c->on = 0;
+	switch (pdev->device) {
+	case  PCI_DEVICE_ID_TI_TVP4020:
+		strcpy(pm2fb_fix.id, "TVP4020");
+		default_par->type = PM2_TYPE_PERMEDIA2;
 		break;
+	case  PCI_DEVICE_ID_3DLABS_PERMEDIA2:
+		strcpy(pm2fb_fix.id, "Permedia2");
+		default_par->type = PM2_TYPE_PERMEDIA2;
+		break;
+	case  PCI_DEVICE_ID_3DLABS_PERMEDIA2V:
+		strcpy(pm2fb_fix.id, "Permedia2v");
+		default_par->type = PM2_TYPE_PERMEDIA2V;
+		break;
+	}
 
-	case CM_DRAW:
-	case CM_MOVE:
-		if (c->on)
-			pm2v_set_cursor(fb, 1);
+	pm2fb_fix.mmio_start = pci_resource_start(pdev, 0);
+	pm2fb_fix.mmio_len = PM2_REGS_SIZE;
+
+#if defined(__BIG_ENDIAN)
+	/*
+	 * PM2 has a 64k register file, mapped twice in 128k. Lower
+	 * map is little-endian, upper map is big-endian.
+	 */
+	pm2fb_fix.mmio_start += PM2_REGS_SIZE;
+	DPRINTK("Adjusting register base for big-endian.\n");
+#endif
+	DPRINTK("Register base at 0x%lx\n", pm2fb_fix.mmio_start);
+
+	/* Registers - request region and map it. */
+	if (!request_mem_region(pm2fb_fix.mmio_start, pm2fb_fix.mmio_len,
+				"pm2fb regbase")) {
+		printk(KERN_WARNING "pm2fb: Can't reserve regbase.\n");
+		goto err_exit_neither;
+	}
+	default_par->v_regs =
+		ioremap_nocache(pm2fb_fix.mmio_start, pm2fb_fix.mmio_len);
+	if (!default_par->v_regs) {
+		printk(KERN_WARNING "pm2fb: Can't remap %s register area.\n",
+		       pm2fb_fix.id);
+		release_mem_region(pm2fb_fix.mmio_start, pm2fb_fix.mmio_len);
+		goto err_exit_neither;
+	}
+
+	/* Stash away memory register info for use when we reset the board */
+	default_par->mem_control = pm2_RD(default_par, PM2R_MEM_CONTROL);
+	default_par->boot_address = pm2_RD(default_par, PM2R_BOOT_ADDRESS);
+	default_par->mem_config = pm2_RD(default_par, PM2R_MEM_CONFIG);
+	DPRINTK("MemControl 0x%x BootAddress 0x%x MemConfig 0x%x\n",
+		default_par->mem_control, default_par->boot_address,
+		default_par->mem_config);
+
+	if (default_par->mem_control == 0 &&
+		default_par->boot_address == 0x31 &&
+		default_par->mem_config == 0x259fffff) {
+		default_par->memclock = CVPPC_MEMCLOCK;
+		default_par->mem_control = 0;
+		default_par->boot_address = 0x20;
+		default_par->mem_config = 0xe6002021;
+		if (pdev->subsystem_vendor == 0x1048 &&
+			pdev->subsystem_device == 0x0a31) {
+			DPRINTK("subsystem_vendor: %04x, "
+				"subsystem_device: %04x\n",
+				pdev->subsystem_vendor, pdev->subsystem_device);
+			DPRINTK("We have not been initialized by VGA BIOS and "
+				"are running on an Elsa Winner 2000 Office\n");
+			DPRINTK("Initializing card timings manually...\n");
+			default_par->memclock = 100000;
+		}
+		if (pdev->subsystem_vendor == 0x3d3d &&
+			pdev->subsystem_device == 0x0100) {
+			DPRINTK("subsystem_vendor: %04x, "
+				"subsystem_device: %04x\n",
+				pdev->subsystem_vendor, pdev->subsystem_device);
+			DPRINTK("We have not been initialized by VGA BIOS and "
+				"are running on an 3dlabs reference board\n");
+			DPRINTK("Initializing card timings manually...\n");
+			default_par->memclock = 74894;
+		}
+	}
+
+	/* Now work out how big lfb is going to be. */
+	switch (default_par->mem_config & PM2F_MEM_CONFIG_RAM_MASK) {
+	case PM2F_MEM_BANKS_1:
+		pm2fb_fix.smem_len = 0x200000;
+		break;
+	case PM2F_MEM_BANKS_2:
+		pm2fb_fix.smem_len = 0x400000;
+		break;
+	case PM2F_MEM_BANKS_3:
+		pm2fb_fix.smem_len = 0x600000;
+		break;
+	case PM2F_MEM_BANKS_4:
+		pm2fb_fix.smem_len = 0x800000;
+		break;
+	}
+	pm2fb_fix.smem_start = pci_resource_start(pdev, 1);
+
+	/* Linear frame buffer - request region and map it. */
+	if (!request_mem_region(pm2fb_fix.smem_start, pm2fb_fix.smem_len,
+				"pm2fb smem")) {
+		printk(KERN_WARNING "pm2fb: Can't reserve smem.\n");
+		goto err_exit_mmio;
+	}
+	info->screen_base =
+		ioremap_nocache(pm2fb_fix.smem_start, pm2fb_fix.smem_len);
+	if (!info->screen_base) {
+		printk(KERN_WARNING "pm2fb: Can't ioremap smem area.\n");
+		release_mem_region(pm2fb_fix.smem_start, pm2fb_fix.smem_len);
+		goto err_exit_mmio;
+	}
+
+#ifdef CONFIG_MTRR
+	default_par->mtrr_handle = -1;
+	if (!nomtrr)
+		default_par->mtrr_handle =
+			mtrr_add(pm2fb_fix.smem_start,
+				 pm2fb_fix.smem_len,
+				 MTRR_TYPE_WRCOMB, 1);
+#endif
+
+	info->fbops		= &pm2fb_ops;
+	info->fix		= pm2fb_fix;
+	info->pseudo_palette	= default_par->palette;
+	info->flags		= FBINFO_DEFAULT |
+				  FBINFO_HWACCEL_YPAN |
+				  FBINFO_HWACCEL_COPYAREA |
+				  FBINFO_HWACCEL_IMAGEBLIT |
+				  FBINFO_HWACCEL_FILLRECT;
+
+	info->pixmap.addr = kmalloc(PM2_PIXMAP_SIZE, GFP_KERNEL);
+	if (!info->pixmap.addr) {
+		retval = -ENOMEM;
+		goto err_exit_pixmap;
+	}
+	info->pixmap.size = PM2_PIXMAP_SIZE;
+	info->pixmap.buf_align = 4;
+	info->pixmap.scan_align = 4;
+	info->pixmap.access_align = 32;
+	info->pixmap.flags = FB_PIXMAP_SYSTEM;
+
+	if (noaccel) {
+		printk(KERN_DEBUG "disabling acceleration\n");
+		info->flags |= FBINFO_HWACCEL_DISABLED;
+		info->pixmap.scan_align = 1;
+	}
+
+	if (!mode_option)
+		mode_option = "640x480@60";
+
+	err = fb_find_mode(&info->var, info, mode_option, NULL, 0, NULL, 8);
+	if (!err || err == 4)
+		info->var = pm2fb_var;
+
+	retval = fb_alloc_cmap(&info->cmap, 256, 0);
+	if (retval < 0)
+		goto err_exit_both;
+
+	retval = register_framebuffer(info);
+	if (retval < 0)
+		goto err_exit_all;
+
+	printk(KERN_INFO "fb%d: %s frame buffer device, memory = %dK.\n",
+	       info->node, info->fix.id, pm2fb_fix.smem_len / 1024);
+
+	/*
+	 * Our driver data
+	 */
+	pci_set_drvdata(pdev, info);
+
+	return 0;
+
+ err_exit_all:
+	fb_dealloc_cmap(&info->cmap);
+ err_exit_both:
+	kfree(info->pixmap.addr);
+ err_exit_pixmap:
+	iounmap(info->screen_base);
+	release_mem_region(pm2fb_fix.smem_start, pm2fb_fix.smem_len);
+ err_exit_mmio:
+	iounmap(default_par->v_regs);
+	release_mem_region(pm2fb_fix.mmio_start, pm2fb_fix.mmio_len);
+ err_exit_neither:
+	framebuffer_release(info);
+	return retval;
+}
+
+/**
+ * Device removal.
+ *
+ * Release all device resources.
+ *
+ * @param	pdev	PCI device to clean up.
+ */
+static void __devexit pm2fb_remove(struct pci_dev *pdev)
+{
+	struct fb_info *info = pci_get_drvdata(pdev);
+	struct fb_fix_screeninfo *fix = &info->fix;
+	struct pm2fb_par *par = info->par;
+
+	unregister_framebuffer(info);
+
+#ifdef CONFIG_MTRR
+	if (par->mtrr_handle >= 0)
+		mtrr_del(par->mtrr_handle, info->fix.smem_start,
+			 info->fix.smem_len);
+#endif /* CONFIG_MTRR */
+	iounmap(info->screen_base);
+	release_mem_region(fix->smem_start, fix->smem_len);
+	iounmap(par->v_regs);
+	release_mem_region(fix->mmio_start, fix->mmio_len);
+
+	pci_set_drvdata(pdev, NULL);
+	fb_dealloc_cmap(&info->cmap);
+	kfree(info->pixmap.addr);
+	framebuffer_release(info);
+}
+
+static struct pci_device_id pm2fb_id_table[] = {
+	{ PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_TVP4020,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ PCI_VENDOR_ID_3DLABS, PCI_DEVICE_ID_3DLABS_PERMEDIA2V,
+	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
+	{ 0, }
+};
+
+static struct pci_driver pm2fb_driver = {
+	.name		= "pm2fb",
+	.id_table	= pm2fb_id_table,
+	.probe		= pm2fb_probe,
+	.remove		= __devexit_p(pm2fb_remove),
+};
+
+MODULE_DEVICE_TABLE(pci, pm2fb_id_table);
+
+
+#ifndef MODULE
+/**
+ * Parse user specified options.
+ *
+ * This is, comma-separated options following `video=pm2fb:'.
+ */
+static int __init pm2fb_setup(char *options)
+{
+	char *this_opt;
+
+	if (!options || !*options)
+		return 0;
+
+	while ((this_opt = strsep(&options, ",")) != NULL) {
+		if (!*this_opt)
+			continue;
+		if (!strcmp(this_opt, "lowhsync"))
+			lowhsync = 1;
+		else if (!strcmp(this_opt, "lowvsync"))
+			lowvsync = 1;
+		else if (!strncmp(this_opt, "hwcursor=", 9))
+			hwcursor = simple_strtoul(this_opt + 9, NULL, 0);
+#ifdef CONFIG_MTRR
+		else if (!strncmp(this_opt, "nomtrr", 6))
+			nomtrr = 1;
+#endif
+		else if (!strncmp(this_opt, "noaccel", 7))
+			noaccel = 1;
 		else
-			c->vbl_cnt = CURSOR_DRAW_DELAY;
-		c->enable = 1;
-		break;
-	}
-}
-
-static struct pm2_cursor * __init pm2_init_cursor(struct pm2fb_info *fb)
-{
-	struct pm2_cursor *cursor;
-
-	if (fb->type != PM2_TYPE_PERMEDIA2V)
-		return 0; /* FIXME: Support hw cursor everywhere */
-
-	cursor = kmalloc(sizeof(struct pm2_cursor), GFP_ATOMIC);
-	if (!cursor)
-		return 0;
-	memset(cursor, 0, sizeof(*cursor));
-
-	cursor->timer = kmalloc(sizeof(*cursor->timer), GFP_KERNEL);
-	if (!cursor->timer) {
-		kfree(cursor);
-		return 0;
-	}
-	memset(cursor->timer, 0, sizeof(*cursor->timer));
-
-	cursor->blink_rate = DEFAULT_CURSOR_BLINK_RATE;
-
-	if (curblink) {
-		init_timer(cursor->timer);
-		cursor->timer->expires = jiffies + (HZ / 50);
-		cursor->timer->data = (unsigned long)fb;
-		cursor->timer->function = pm2_cursor_timer_handler;
-		add_timer(cursor->timer);
-	}
-
-	return cursor;
-}
-
-static int pm2fb_set_font(struct display *d, int width, int height)
-{
-	struct pm2fb_info *fb = (struct pm2fb_info *)d->fb_info;
-	struct pm2_cursor *c = fb->cursor;
-	int i, j;
-
-	if (c) {
-		if (!width || !height) {
-			width = 8;
-			height = 16;
-		}
-
-		c->hot.x = 0;
-		c->hot.y = 0;
-		c->size.x = width;
-		c->size.y = height;
-
-		memset(c->bits, 0xff, sizeof(c->bits));
-		memset(c->mask, 0, sizeof(c->mask));
-
-		for (i = 0, j = width; j >= 0; j -= 8, i++) {
-			c->mask[i][height-2] = (j >= 8) ? 0xff : (0xff << (8 - j));
-			c->mask[i][height-1] = (j >= 8) ? 0xff : (0xff << (8 - j));
-		}
-
-		pm2v_set_cursor_color(fb, cursor_color_map, cursor_color_map, cursor_color_map);
-		pm2v_set_cursor_shape(fb);
-	}
-	return 1;
-}
-#endif /* PM2FB_HW_CURSOR */
-
-/***************************************************************************
- * Begin of public functions
- ***************************************************************************/
-
-#ifdef MODULE
-static void pm2fb_cleanup(void) {
-	struct pm2fb_info* i = &fb_info;
-
-	unregister_framebuffer((struct fb_info *)i);
-	pm2fb_reset(i);
-
-	UNMAP(i->regions.v_fb, i->regions.fb_size);
-	release_mem_region(i->regions.p_fb, i->regions.fb_size);
-
-	UNMAP(i->regions.v_regs, PM2_REGS_SIZE);
-	release_mem_region(i->regions.p_regs, PM2_REGS_SIZE);
-
-	if (board_table[i->board].cleanup)
-		board_table[i->board].cleanup(i);
-}
-#endif /* MODULE */
-
-int __init pm2fb_init(void){
-
-	MOD_INC_USE_COUNT;
-	memset(&fb_info, 0, sizeof(fb_info));
-	memcpy(&fb_info.current_par, &pm2fb_options.user_mode, sizeof(fb_info.current_par));
-	if (!pm2fb_conf(&fb_info)) {
-		MOD_DEC_USE_COUNT;
-		return -ENXIO;
-	}
-	pm2fb_reset(&fb_info);
-	fb_info.disp.scrollmode=SCROLL_YNOMOVE;
-	fb_info.gen.parsize=sizeof(struct pm2fb_par);
-	fb_info.gen.fbhw=&pm2fb_hwswitch;
-	strcpy(fb_info.gen.info.modename, permedia2_name);
-	fb_info.gen.info.flags=FBINFO_FLAG_DEFAULT;
-	fb_info.gen.info.fbops=&pm2fb_ops;
-	fb_info.gen.info.disp=&fb_info.disp;
-	strcpy(fb_info.gen.info.fontname, pm2fb_options.font);
-	fb_info.gen.info.switch_con=&fbgen_switch;
-	fb_info.gen.info.updatevar=&fbgen_update_var;
-	fb_info.gen.info.blank=&fbgen_blank;
-	fbgen_get_var(&fb_info.disp.var, -1, &fb_info.gen.info);
-	fbgen_do_set_var(&fb_info.disp.var, 1, &fb_info.gen);
-	fbgen_set_disp(-1, &fb_info.gen);
-	fbgen_install_cmap(0, &fb_info.gen);
-	if (register_framebuffer(&fb_info.gen.info)<0) {
-		printk(KERN_ERR "pm2fb: unable to register.\n");
-		MOD_DEC_USE_COUNT;
-		return -EINVAL;
-	}
-	printk(KERN_INFO "fb%d: %s (%s), using %uK of video memory.\n",
-				GET_FB_IDX(fb_info.gen.info.node),
-				board_table[fb_info.board].name,
-				permedia2_name,
-				(u32 )(fb_info.regions.fb_size>>10));
-	return 0;
-}
-
-static void __init pm2fb_mode_setup(char* options){
-	int i;
-
-	for (i=0; user_mode[i].name[0] &&
-		strcmp(options, user_mode[i].name); i++);
-	if (user_mode[i].name[0]) {
-		memcpy(&pm2fb_options.user_mode, &user_mode[i].par,
-					sizeof(pm2fb_options.user_mode));
-		pm2fb_options.flags |= OPTF_USER;
-	}
-}
-
-static void __init pm2fb_font_setup(char* options){
-
-	strncpy(pm2fb_options.font, options, sizeof(pm2fb_options.font));
-	pm2fb_options.font[sizeof(pm2fb_options.font)-1]='\0';
-}
-
-int __init pm2fb_setup(char* options){
-	char* next;
-
-	while (options) {
-		if ((next=strchr(options, ',')))
-			*(next++)='\0';
-		if (!strncmp(options, "font:", 5))
-			pm2fb_font_setup(options+5);
-		else if (!strncmp(options, "mode:", 5))
-			pm2fb_mode_setup(options+5);
-		else if (!strcmp(options, "ypan"))
-			pm2fb_options.flags |= OPTF_YPAN;
-		else if (!strcmp(options, "oldmem"))
-			pm2fb_options.flags |= OPTF_OLD_MEM;
-		else if (!strcmp(options, "virtual"))
-			pm2fb_options.flags |= OPTF_VIRTUAL;
-		else if (!strcmp(options, "noblink"))
-			curblink = 0;
-		options=next;
+			mode_option = this_opt;
 	}
 	return 0;
 }
+#endif
 
-/***************************************************************************
- * Begin of module functions
- ***************************************************************************/
+
+static int __init pm2fb_init(void)
+{
+#ifndef MODULE
+	char *option = NULL;
+
+	if (fb_get_options("pm2fb", &option))
+		return -ENODEV;
+	pm2fb_setup(option);
+#endif
+
+	return pci_register_driver(&pm2fb_driver);
+}
+
+module_init(pm2fb_init);
 
 #ifdef MODULE
+/*
+ *  Cleanup
+ */
 
+static void __exit pm2fb_exit(void)
+{
+	pci_unregister_driver(&pm2fb_driver);
+}
+#endif
+
+#ifdef MODULE
+module_exit(pm2fb_exit);
+
+module_param(mode_option, charp, 0);
+MODULE_PARM_DESC(mode_option, "Initial video mode e.g. '648x480-8@60'");
+module_param_named(mode, mode_option, charp, 0);
+MODULE_PARM_DESC(mode, "Initial video mode e.g. '648x480-8@60' (deprecated)");
+module_param(lowhsync, bool, 0);
+MODULE_PARM_DESC(lowhsync, "Force horizontal sync low regardless of mode");
+module_param(lowvsync, bool, 0);
+MODULE_PARM_DESC(lowvsync, "Force vertical sync low regardless of mode");
+module_param(noaccel, bool, 0);
+MODULE_PARM_DESC(noaccel, "Disable acceleration");
+module_param(hwcursor, int, 0644);
+MODULE_PARM_DESC(hwcursor, "Enable hardware cursor "
+			"(1=enable, 0=disable, default=1)");
+#ifdef CONFIG_MTRR
+module_param(nomtrr, bool, 0);
+MODULE_PARM_DESC(nomtrr, "Disable MTRR support (0 or 1=disabled) (default=0)");
+#endif
+
+MODULE_AUTHOR("Jim Hague <jim.hague@acm.org>");
+MODULE_DESCRIPTION("Permedia2 framebuffer device driver");
 MODULE_LICENSE("GPL");
-
-static char *mode = NULL;
-
-MODULE_PARM(mode, "s");
-
-int __init init_module(void) {
-
-	if (mode) pm2fb_mode_setup(mode);
-	return pm2fb_init();
-}
-
-void cleanup_module(void) {
-
-	pm2fb_cleanup();
-}
-#endif /* MODULE */
-
-/***************************************************************************
- * That's all folks!
- ***************************************************************************/
+#endif

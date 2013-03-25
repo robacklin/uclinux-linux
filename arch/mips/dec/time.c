@@ -1,6 +1,4 @@
 /*
- *  linux/arch/mips/dec/time.c
- *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  *  Copyright (C) 2000, 2003  Maciej W. Rozycki
  *
@@ -8,41 +6,25 @@
  * found in some MIPS systems.
  *
  */
+#include <linux/bcd.h>
 #include <linux/init.h>
-#include <linux/interrupt.h>
-#include <linux/irq.h>
-#include <linux/kernel.h>
 #include <linux/mc146818rtc.h>
 #include <linux/param.h>
-#include <linux/time.h>
 
-#include <asm/processor.h>
+#include <asm/cpu-features.h>
+#include <asm/ds1287.h>
 #include <asm/time.h>
-
 #include <asm/dec/interrupts.h>
 #include <asm/dec/ioasic.h>
-#include <asm/dec/ioasic_addrs.h>
 #include <asm/dec/machtype.h>
 
-
-static unsigned long dec_rtc_get_time(void)
+void read_persistent_clock(struct timespec *ts)
 {
 	unsigned int year, mon, day, hour, min, sec, real_year;
-	int i;
+	unsigned long flags;
 
-	/* The Linux interpretation of the DS1287 clock register contents:
-	 * When the Update-In-Progress (UIP) flag goes from 1 to 0, the
-	 * RTC registers show the second which has precisely just started.
-	 * Let's hope other operating systems interpret the RTC the same way.
-	 */
-	/* read RTC exactly on falling edge of update flag */
-	for (i = 0; i < 1000000; i++)	/* may take up to 1 second... */
-		if (CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP)
-			break;
-	for (i = 0; i < 1000000; i++)	/* must try at least 2.228 ms */
-		if (!(CMOS_READ(RTC_FREQ_SELECT) & RTC_UIP))
-			break;
-	/* Isn't this overkill?  UIP above should guarantee consistency */
+	spin_lock_irqsave(&rtc_lock, flags);
+
 	do {
 		sec = CMOS_READ(RTC_SECONDS);
 		min = CMOS_READ(RTC_MINUTES);
@@ -50,39 +32,46 @@ static unsigned long dec_rtc_get_time(void)
 		day = CMOS_READ(RTC_DAY_OF_MONTH);
 		mon = CMOS_READ(RTC_MONTH);
 		year = CMOS_READ(RTC_YEAR);
+		/*
+		 * The PROM will reset the year to either '72 or '73.
+		 * Therefore we store the real year separately, in one
+		 * of unused BBU RAM locations.
+		 */
+		real_year = CMOS_READ(RTC_DEC_YEAR);
 	} while (sec != CMOS_READ(RTC_SECONDS));
+
+	spin_unlock_irqrestore(&rtc_lock, flags);
+
 	if (!(CMOS_READ(RTC_CONTROL) & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-		BCD_TO_BIN(sec);
-		BCD_TO_BIN(min);
-		BCD_TO_BIN(hour);
-		BCD_TO_BIN(day);
-		BCD_TO_BIN(mon);
-		BCD_TO_BIN(year);
+		sec = bcd2bin(sec);
+		min = bcd2bin(min);
+		hour = bcd2bin(hour);
+		day = bcd2bin(day);
+		mon = bcd2bin(mon);
+		year = bcd2bin(year);
 	}
-	/*
-	 * The PROM will reset the year to either '72 or '73.
-	 * Therefore we store the real year separately, in one
-	 * of unused BBU RAM locations.
-	 */
-	real_year = CMOS_READ(RTC_DEC_YEAR);
+
 	year += real_year - 72 + 2000;
 
-	return mktime(year, mon, day, hour, min, sec);
+	ts->tv_sec = mktime(year, mon, day, hour, min, sec);
+	ts->tv_nsec = 0;
 }
 
 /*
- * In order to set the CMOS clock precisely, dec_rtc_set_mmss has to
+ * In order to set the CMOS clock precisely, rtc_mips_set_mmss has to
  * be called 500 ms after the second nowtime has started, because when
  * nowtime is written into the registers of the CMOS clock, it will
  * jump to the next second precisely 500 ms later.  Check the Dallas
  * DS1287 data sheet for details.
  */
-static int dec_rtc_set_mmss(unsigned long nowtime)
+int rtc_mips_set_mmss(unsigned long nowtime)
 {
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
 	unsigned char save_control, save_freq_select;
 
+	/* irq are locally disabled here */
+	spin_lock(&rtc_lock);
 	/* tell the clock it's being set */
 	save_control = CMOS_READ(RTC_CONTROL);
 	CMOS_WRITE((save_control | RTC_SET), RTC_CONTROL);
@@ -93,7 +82,7 @@ static int dec_rtc_set_mmss(unsigned long nowtime)
 
 	cmos_minutes = CMOS_READ(RTC_MINUTES);
 	if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD)
-		BCD_TO_BIN(cmos_minutes);
+		cmos_minutes = bcd2bin(cmos_minutes);
 
 	/*
 	 * since we're only adjusting minutes and seconds,
@@ -109,13 +98,13 @@ static int dec_rtc_set_mmss(unsigned long nowtime)
 
 	if (abs(real_minutes - cmos_minutes) < 30) {
 		if (!(save_control & RTC_DM_BINARY) || RTC_ALWAYS_BCD) {
-			BIN_TO_BCD(real_seconds);
-			BIN_TO_BCD(real_minutes);
+			real_seconds = bin2bcd(real_seconds);
+			real_minutes = bin2bcd(real_minutes);
 		}
 		CMOS_WRITE(real_seconds, RTC_SECONDS);
 		CMOS_WRITE(real_minutes, RTC_MINUTES);
 	} else {
-		printk(KERN_WARNING
+		printk_once(KERN_NOTICE
 		       "set_rtc_mmss: can't update from %d to %d\n",
 		       cmos_minutes, real_minutes);
 		retval = -1;
@@ -129,58 +118,37 @@ static int dec_rtc_set_mmss(unsigned long nowtime)
 	 */
 	CMOS_WRITE(save_control, RTC_CONTROL);
 	CMOS_WRITE(save_freq_select, RTC_FREQ_SELECT);
+	spin_unlock(&rtc_lock);
 
 	return retval;
 }
 
-
-static int dec_timer_state(void)
+void __init plat_time_init(void)
 {
-	return (CMOS_READ(RTC_REG_C) & RTC_PF) != 0;
-}
+	u32 start, end;
+	int i = HZ / 10;
 
-static void dec_timer_ack(void)
-{
-	CMOS_READ(RTC_REG_C);			/* Ack the RTC interrupt.  */
-}
+	/* Set up the rate of periodic DS1287 interrupts. */
+	ds1287_set_base_clock(HZ);
 
-static unsigned int dec_ioasic_hpt_read(void)
-{
-	/*
-	 * The free-running counter is 32-bit which is good for about
-	 * 2 minutes, 50 seconds at possible count rates of up to 25MHz.
-	 */
-	return ioasic_read(IO_REG_FCTR);
-}
+	if (cpu_has_counter) {
+		while (!ds1287_timer_state())
+			;
 
-static void dec_ioasic_hpt_init(unsigned int count)
-{
-	ioasic_write(IO_REG_FCTR, ioasic_read(IO_REG_FCTR) - count);
-}
+		start = read_c0_count();
 
+		while (i--)
+			while (!ds1287_timer_state())
+				;
 
-void __init dec_time_init(void)
-{
-	rtc_get_time = dec_rtc_get_time;
-	rtc_set_mmss = dec_rtc_set_mmss;
+		end = read_c0_count();
 
-	mips_timer_state = dec_timer_state;
-	mips_timer_ack = dec_timer_ack;
-
-	if (!cpu_has_counter && IOASIC) {
+		mips_hpt_frequency = (end - start) * 10;
+		printk(KERN_INFO "MIPS counter frequency %dHz\n",
+			mips_hpt_frequency);
+	} else if (IOASIC)
 		/* For pre-R4k systems we use the I/O ASIC's counter.  */
-		mips_hpt_read = dec_ioasic_hpt_read;
-		mips_hpt_init = dec_ioasic_hpt_init;
-	}
+		dec_ioasic_clocksource_init();
 
-	/* Set up the rate of periodic DS1287 interrupts.  */
-	CMOS_WRITE(RTC_REF_CLCK_32KHZ | (16 - LOG_2_HZ), RTC_REG_A);
-}
-
-void __init dec_timer_setup(struct irqaction *irq)
-{
-	setup_irq(dec_interrupt[DEC_IRQ_RTC], irq);
-
-	/* Enable periodic DS1287 interrupts.  */
-	CMOS_WRITE(CMOS_READ(RTC_REG_B) | RTC_PIE, RTC_REG_B);
+	ds1287_clockevent_init(dec_interrupt[DEC_IRQ_RTC]);
 }

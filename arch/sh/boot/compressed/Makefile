@@ -4,40 +4,78 @@
 # create a compressed vmlinux image from the original vmlinux
 #
 
-HEAD = head.o
-SYSTEM = $(TOPDIR)/vmlinux
+targets		:= vmlinux vmlinux.bin vmlinux.bin.gz \
+		   vmlinux.bin.bz2 vmlinux.bin.lzma \
+		   vmlinux.bin.xz vmlinux.bin.lzo \
+		   head_$(BITS).o misc.o piggy.o
 
-OBJECTS = $(HEAD) misc.o
+OBJECTS = $(obj)/head_$(BITS).o $(obj)/misc.o $(obj)/cache.o
 
-ifdef CONFIG_SH_STANDARD_BIOS
-OBJECTS += ../../kernel/sh_bios.o
+GCOV_PROFILE := n
+
+#
+# IMAGE_OFFSET is the load offset of the compression loader
+#
+ifeq ($(CONFIG_32BIT),y)
+IMAGE_OFFSET	:= $(shell /bin/bash -c 'printf "0x%08x" \
+		     $$[$(CONFIG_MEMORY_START)  + \
+			$(CONFIG_BOOT_LINK_OFFSET)]')
+else
+IMAGE_OFFSET	:= $(shell /bin/bash -c 'printf "0x%08x" \
+		     $$[$(CONFIG_PAGE_OFFSET)  + \
+			$(KERNEL_MEMORY) + \
+			$(CONFIG_BOOT_LINK_OFFSET)]')
 endif
 
-ZLDFLAGS = -e startup -T $(TOPDIR)/arch/sh/vmlinux.lds
+ifeq ($(CONFIG_MCOUNT),y)
+ORIG_CFLAGS := $(KBUILD_CFLAGS)
+KBUILD_CFLAGS = $(subst -pg, , $(ORIG_CFLAGS))
+endif
+
+LDFLAGS_vmlinux := --oformat $(ld-bfd) -Ttext $(IMAGE_OFFSET) -e startup \
+		   -T $(obj)/../../kernel/vmlinux.lds
 
 #
-# ZIMAGE_OFFSET is the load offset of the compression loader
+# Pull in the necessary libgcc bits from the in-kernel implementation.
 #
-ZIMAGE_OFFSET = $(shell printf "0x%8x" $$[0x80000000+0x$(CONFIG_MEMORY_START)+0x$(CONFIG_BOOT_LINK_OFFSET)])
+lib1funcs-$(CONFIG_SUPERH32)	:= ashiftrt.S ashldi3.c ashrsi3.S ashlsi3.S \
+				   lshrsi3.S
+lib1funcs-obj			:= \
+	$(addsuffix .o, $(basename $(addprefix $(obj)/, $(lib1funcs-y))))
 
-ZLINKFLAGS  = -Ttext $(ZIMAGE_OFFSET)  $(ZLDFLAGS)
+lib1funcs-dir		:= $(srctree)/arch/$(SRCARCH)/lib
+ifeq ($(BITS),64)
+	lib1funcs-dir 	:= $(addsuffix $(BITS), $(lib1funcs-dir))
+endif
 
-all: vmlinux
+KBUILD_CFLAGS += -I$(lib1funcs-dir)
 
-vmlinux: piggy.o $(OBJECTS)
-	$(LD) $(ZLINKFLAGS) -o vmlinux $(OBJECTS) piggy.o
+$(addprefix $(obj)/,$(lib1funcs-y)): $(obj)/%: $(lib1funcs-dir)/% FORCE
+	$(call cmd,shipped)
 
-head.o: head.S
-	$(CC) $(AFLAGS) -traditional -c head.S
+$(obj)/vmlinux: $(OBJECTS) $(obj)/piggy.o $(lib1funcs-obj) FORCE
+	$(call if_changed,ld)
+	@:
 
-piggy.o:	$(SYSTEM)
-	tmppiggy=_tmp_$$$$piggy; \
-	rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk; \
-	$(OBJCOPY) -R .empty_zero_page $(SYSTEM) $$tmppiggy; \
-	gzip -f -9 < $$tmppiggy > $$tmppiggy.gz; \
-	echo "SECTIONS { .data : { input_len = .; LONG(input_data_end - input_data) input_data = .; *(.data) input_data_end = .; }}" > $$tmppiggy.lnk; \
-	$(LD) -r -o piggy.o -b binary $$tmppiggy.gz -b elf32-sh-linux -T $$tmppiggy.lnk; \
-	rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk
+$(obj)/vmlinux.bin: vmlinux FORCE
+	$(call if_changed,objcopy)
 
-clean:
-	rm -f vmlinux _tmp_*
+vmlinux.bin.all-y := $(obj)/vmlinux.bin
+
+$(obj)/vmlinux.bin.gz: $(vmlinux.bin.all-y) FORCE
+	$(call if_changed,gzip)
+$(obj)/vmlinux.bin.bz2: $(vmlinux.bin.all-y) FORCE
+	$(call if_changed,bzip2)
+$(obj)/vmlinux.bin.lzma: $(vmlinux.bin.all-y) FORCE
+	$(call if_changed,lzma)
+$(obj)/vmlinux.bin.xz: $(vmlinux.bin.all-y) FORCE
+	$(call if_changed,xzkern)
+$(obj)/vmlinux.bin.lzo: $(vmlinux.bin.all-y) FORCE
+	$(call if_changed,lzo)
+
+OBJCOPYFLAGS += -R .empty_zero_page
+
+LDFLAGS_piggy.o := -r --format binary --oformat $(ld-bfd) -T
+
+$(obj)/piggy.o: $(obj)/vmlinux.scr $(obj)/vmlinux.bin.$(suffix-y) FORCE
+	$(call if_changed,ld)

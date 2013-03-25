@@ -17,6 +17,9 @@
 #include <linux/init.h>
 #include <linux/parport.h>
 #include <linux/ioport.h>
+#include <linux/interrupt.h>
+#include <linux/platform_device.h>
+
 #include <asm/setup.h>
 #include <asm/amigahw.h>
 #include <asm/irq.h>
@@ -30,7 +33,6 @@
 #define DPRINTK(x...)	do { } while (0)
 #endif
 
-static struct parport *this_port = NULL;
 
 static void amiga_write_data(struct parport *p, unsigned char data)
 {
@@ -136,12 +138,6 @@ static unsigned char amiga_read_status(struct parport *p)
 	return status;
 }
 
-/* as this ports irq handling is already done, we use a generic funktion */
-static void amiga_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	parport_generic_irq(irq, (struct parport *) dev_id, regs);
-}
-
 static void amiga_enable_irq(struct parport *p)
 {
 	enable_irq(IRQ_AMIGA_CIAA_FLG);
@@ -194,66 +190,48 @@ static void amiga_restore_state(struct parport *p, struct parport_state *s)
 	mb();
 }
 
-static void amiga_inc_use_count(void)
-{
-	MOD_INC_USE_COUNT;
-}
-
-static void amiga_dec_use_count(void)
-{
-	MOD_DEC_USE_COUNT;
-}
-
 static struct parport_operations pp_amiga_ops = {
-	amiga_write_data,
-	amiga_read_data,
+	.write_data	= amiga_write_data,
+	.read_data	= amiga_read_data,
 
-	amiga_write_control,
-	amiga_read_control,
-	amiga_frob_control,
+	.write_control	= amiga_write_control,
+	.read_control	= amiga_read_control,
+	.frob_control	= amiga_frob_control,
 
-	amiga_read_status,
+	.read_status	= amiga_read_status,
 
-	amiga_enable_irq,
-	amiga_disable_irq,
+	.enable_irq	= amiga_enable_irq,
+	.disable_irq	= amiga_disable_irq,
 
-	amiga_data_forward,
-	amiga_data_reverse,
+	.data_forward	= amiga_data_forward,
+	.data_reverse	= amiga_data_reverse,
 
-	amiga_init_state,
-	amiga_save_state,
-	amiga_restore_state,
+	.init_state	= amiga_init_state,
+	.save_state	= amiga_save_state,
+	.restore_state	= amiga_restore_state,
 
-	amiga_inc_use_count,
-	amiga_dec_use_count,
+	.epp_write_data	= parport_ieee1284_epp_write_data,
+	.epp_read_data	= parport_ieee1284_epp_read_data,
+	.epp_write_addr	= parport_ieee1284_epp_write_addr,
+	.epp_read_addr	= parport_ieee1284_epp_read_addr,
 
-	parport_ieee1284_epp_write_data,
-	parport_ieee1284_epp_read_data,
-	parport_ieee1284_epp_write_addr,
-	parport_ieee1284_epp_read_addr,
+	.ecp_write_data	= parport_ieee1284_ecp_write_data,
+	.ecp_read_data	= parport_ieee1284_ecp_read_data,
+	.ecp_write_addr	= parport_ieee1284_ecp_write_addr,
 
-	parport_ieee1284_ecp_write_data,
-	parport_ieee1284_ecp_read_data,
-	parport_ieee1284_ecp_write_addr,
+	.compat_write_data	= parport_ieee1284_write_compat,
+	.nibble_read_data	= parport_ieee1284_read_nibble,
+	.byte_read_data		= parport_ieee1284_read_byte,
 
-	parport_ieee1284_write_compat,
-	parport_ieee1284_read_nibble,
-	parport_ieee1284_read_byte,
+	.owner		= THIS_MODULE,
 };
 
 /* ----------- Initialisation code --------------------------------- */
 
-int __init parport_amiga_init(void)
+static int __init amiga_parallel_probe(struct platform_device *pdev)
 {
 	struct parport *p;
 	int err;
-
-	if (!MACH_IS_AMIGA || !AMIGAHW_PRESENT(AMI_PARALLEL))
-		return -ENODEV;
-
-	err = -EBUSY;
-	if (!request_mem_region(CIAA_PHYSADDR-1+0x100, 0x100, "parallel"))
-		goto out_mem;
 
 	ciaa.ddrb = 0xff;
 	ciab.ddra &= 0xf8;
@@ -262,43 +240,63 @@ int __init parport_amiga_init(void)
 	p = parport_register_port((unsigned long)&ciaa.prb, IRQ_AMIGA_CIAA_FLG,
 				   PARPORT_DMA_NONE, &pp_amiga_ops);
 	if (!p)
-		goto out_port;
+		return -EBUSY;
 
-	err = request_irq(IRQ_AMIGA_CIAA_FLG, amiga_interrupt, 0, p->name, p);
+	err = request_irq(IRQ_AMIGA_CIAA_FLG, parport_irq_handler, 0, p->name,
+			  p);
 	if (err)
 		goto out_irq;
 
-	this_port = p;
 	printk(KERN_INFO "%s: Amiga built-in port using irq\n", p->name);
 	/* XXX: set operating mode */
-	parport_proc_register(p);
-
 	parport_announce_port(p);
+
+	platform_set_drvdata(pdev, p);
 
 	return 0;
 
 out_irq:
-	parport_unregister_port(p);
-out_port:
-	release_mem_region(CIAA_PHYSADDR-1+0x100, 0x100);
-out_mem:
+	parport_put_port(p);
 	return err;
 }
 
-void __exit parport_amiga_exit(void)
+static int __exit amiga_parallel_remove(struct platform_device *pdev)
 {
-	if (this_port->irq != PARPORT_IRQ_NONE)
-		free_irq(IRQ_AMIGA_CIAA_FLG, this_port);
-	parport_proc_unregister(this_port);
-	parport_unregister_port(this_port);
-	release_mem_region(CIAA_PHYSADDR-1+0x100, 0x100);
+	struct parport *port = platform_get_drvdata(pdev);
+
+	parport_remove_port(port);
+	if (port->irq != PARPORT_IRQ_NONE)
+		free_irq(IRQ_AMIGA_CIAA_FLG, port);
+	parport_put_port(port);
+	platform_set_drvdata(pdev, NULL);
+	return 0;
 }
 
+static struct platform_driver amiga_parallel_driver = {
+	.remove = __exit_p(amiga_parallel_remove),
+	.driver   = {
+		.name	= "amiga-parallel",
+		.owner	= THIS_MODULE,
+	},
+};
+
+static int __init amiga_parallel_init(void)
+{
+	return platform_driver_probe(&amiga_parallel_driver,
+				     amiga_parallel_probe);
+}
+
+module_init(amiga_parallel_init);
+
+static void __exit amiga_parallel_exit(void)
+{
+	platform_driver_unregister(&amiga_parallel_driver);
+}
+
+module_exit(amiga_parallel_exit);
 
 MODULE_AUTHOR("Joerg Dorchain <joerg@dorchain.net>");
 MODULE_DESCRIPTION("Parport Driver for Amiga builtin Port");
 MODULE_SUPPORTED_DEVICE("Amiga builtin Parallel Port");
 MODULE_LICENSE("GPL");
-
-module_init(parport_amiga_init)
-module_exit(parport_amiga_exit)
+MODULE_ALIAS("platform:amiga-parallel");

@@ -34,7 +34,7 @@
 #include <linux/hil.h>
 #include <linux/time.h>
 #include <linux/interrupt.h>
-#include <asm/semaphore.h>
+#include <linux/semaphore.h>
 #include <linux/serio.h>
 #include <linux/list.h>
 
@@ -153,14 +153,11 @@ struct hil_mlc {
 
 	int			di_map[7]; /* Maps below items to live devs */
 	struct hil_mlc_devinfo	di[HIL_MLC_DEVMEM];
-	struct serio		serio[HIL_MLC_DEVMEM];
+	struct serio		*serio[HIL_MLC_DEVMEM];
 	struct hil_mlc_serio_map serio_map[HIL_MLC_DEVMEM];
 	hil_packet		serio_opacket[HIL_MLC_DEVMEM];
 	int			serio_oidx[HIL_MLC_DEVMEM];
 	struct hil_mlc_devinfo	di_scratch; /* Temporary area */
-
-	void			(*inc_use_count)(void);
-	void			(*dec_use_count)(void);
 
 	int			opercnt;
 

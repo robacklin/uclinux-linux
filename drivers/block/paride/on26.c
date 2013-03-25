@@ -19,6 +19,7 @@
 #define ON26_VERSION      "1.04"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -65,7 +66,7 @@ static int on26_read_regr( PIA *pi, int cont, int regr )
 	case 3:
         case 4: w3(1); w3(1); w2(5); w4(r); w2(4);
 		w3(0); w3(0); w2(0x24); a = r4(); w2(4);
-		w2(0x24); r4(); w2(4);
+		w2(0x24); (void)r4(); w2(4);
                 return a;
 
         }
@@ -286,46 +287,33 @@ static void on26_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void on26_init_proto( PIA *pi)
+static struct pi_protocol on26 = {
+	.owner		= THIS_MODULE,
+	.name		= "on26",
+	.max_mode	= 5,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= on26_write_regr,
+	.read_regr	= on26_read_regr,
+	.write_block	= on26_write_block,
+	.read_block	= on26_read_block,
+	.connect	= on26_connect,
+	.disconnect	= on26_disconnect,
+	.test_port	= on26_test_port,
+	.log_adapter	= on26_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init on26_init(void)
+{
+	return paride_register(&on26);
 }
 
-static void on26_release_proto( PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit on26_exit(void)
+{
+	paride_unregister(&on26);
 }
-
-struct pi_protocol on26 = {"on26",0,5,2,1,1,
-                           on26_write_regr,
-                           on26_read_regr,
-                           on26_write_block,
-                           on26_read_block,
-                           on26_connect,
-                           on26_disconnect,
-                           on26_test_port,
-                           0,
-                           0,
-                           on26_log_adapter,
-                           on26_init_proto,
-                           on26_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &on26 ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &on26 );
-}
-
-#endif
-
-/* end of on26.c */
 
 MODULE_LICENSE("GPL");
+module_init(on26_init)
+module_exit(on26_exit)

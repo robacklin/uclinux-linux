@@ -6,8 +6,8 @@ a bit looser, e.g. it doesn't care if the <file_data> items are
 swapped around (though it does care that directory entries (inodes) in
 a given directory are contiguous, as this is used by readdir).
 
-All data is in little-endian format; user-space tools and the kernel do
-swabbing on big-endian systems.  (See section `Byte Order' below.)
+All data is currently in host-endian format; neither mkcramfs nor the
+kernel ever do swabbing.  (See section `Block Size' below.)
 
 <filesystem>:
 	<superblock>
@@ -71,27 +71,6 @@ kernels up to at least 2.3.39 didn't support holes.  Run mkcramfs
 with -z if you want it to create files that can have holes in them.
 
 
-Byte Order
-----------
-
-When defining the cramfs filesystem, the two options for byte order were
-`always use little-endian' (like ext2fs) or `writer chooses endianness;
-kernel adapts at runtime'.  Little-endian wins because of code
-simplicity and little CPU overhead even on big-endian machines.
-
-While cramfs has always been defined to be little-endian, this
-implementation originally required that cramfs filesystems be written
-and read with architectures of the same endianness; big-endian machines
-would write and read cramfs filesystems with big-endian byte order (the
-"incorrect" byte order for cramfs filesystems).
-
-Now, only little-endian cramfs filesystems are supported for both
-little-endian and big-endian machines.  If you need to support
-big-endian cramfs filesystems for a legacy application on a big-endian
-machine, you could remove the byte-swapping, but it would probably be
-better to write a one-time byte order conversion program.
-
-
 Tools
 -----
 
@@ -129,8 +108,17 @@ kernels, not even necessarily kernels of the same architecture if
 PAGE_CACHE_SIZE is subject to change between kernel versions
 (currently possible with arm and ia64).
 
-The remaining options try to make cramfs more sharable by choosing a
-block size.  The options are:
+The remaining options try to make cramfs more sharable.
+
+One part of that is addressing endianness.  The two options here are
+`always use little-endian' (like ext2fs) or `writer chooses
+endianness; kernel adapts at runtime'.  Little-endian wins because of
+code simplicity and little CPU overhead even on big-endian machines.
+
+The cost of swabbing is changing the code to use the le32_to_cpu
+etc. macros as used by ext2fs.  We don't need to swab the compressed
+data, only the superblock, inodes and block pointers.
+
 
 The other part of making cramfs more sharable is choosing a block
 size.  The options are:
@@ -164,6 +152,7 @@ The main advantage of option 3 over 1, 2, is better compression.  The
 cost is greater complexity.  Probably not worth it, but I hope someone
 will disagree.  (If it is implemented, then I'll re-use that code in
 e2compr.)
+
 
 Another cost of 2 and 3 over 1 is making mkcramfs use a different
 block size, but that just means adding and parsing a -b option.

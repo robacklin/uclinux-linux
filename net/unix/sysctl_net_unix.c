@@ -10,36 +10,54 @@
  */
 
 #include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/sysctl.h>
 
-extern int sysctl_unix_max_dgram_qlen;
+#include <net/af_unix.h>
 
-ctl_table unix_table[] = {
-	{NET_UNIX_MAX_DGRAM_QLEN, "max_dgram_qlen",
-	&sysctl_unix_max_dgram_qlen, sizeof(int), 0644, NULL, 
-	 &proc_dointvec },
-	{0}
+static ctl_table unix_table[] = {
+	{
+		.procname	= "max_dgram_qlen",
+		.data		= &init_net.unx.sysctl_max_dgram_qlen,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+	{ }
 };
 
-static ctl_table unix_net_table[] = {
-	{NET_UNIX, "unix", NULL, 0, 0555, unix_table},
-	{0}
+static struct ctl_path unix_path[] = {
+	{ .procname = "net", },
+	{ .procname = "unix", },
+	{ },
 };
 
-static ctl_table unix_root_table[] = {
-	{CTL_NET, "net", NULL, 0, 0555, unix_net_table},
-	{0}
-};
-
-static struct ctl_table_header * unix_sysctl_header;
-
-void unix_sysctl_register(void)
+int __net_init unix_sysctl_register(struct net *net)
 {
-	unix_sysctl_header = register_sysctl_table(unix_root_table, 0);
+	struct ctl_table *table;
+
+	table = kmemdup(unix_table, sizeof(unix_table), GFP_KERNEL);
+	if (table == NULL)
+		goto err_alloc;
+
+	table[0].data = &net->unx.sysctl_max_dgram_qlen;
+	net->unx.ctl = register_net_sysctl_table(net, unix_path, table);
+	if (net->unx.ctl == NULL)
+		goto err_reg;
+
+	return 0;
+
+err_reg:
+	kfree(table);
+err_alloc:
+	return -ENOMEM;
 }
 
-void unix_sysctl_unregister(void)
+void unix_sysctl_unregister(struct net *net)
 {
-	unregister_sysctl_table(unix_sysctl_header);
-}
+	struct ctl_table *table;
 
+	table = net->unx.ctl->ctl_table_arg;
+	unregister_sysctl_table(net->unx.ctl);
+	kfree(table);
+}

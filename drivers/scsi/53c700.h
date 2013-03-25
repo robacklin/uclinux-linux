@@ -8,16 +8,28 @@
 #ifndef _53C700_H
 #define _53C700_H
 
+#include <linux/interrupt.h>
+#include <asm/io.h>
+
+#include <scsi/scsi_device.h>
+#include <scsi/scsi_cmnd.h>
+
 /* Turn on for general debugging---too verbose for normal use */
-#undef NCR_700_DEBUG
+#undef	NCR_700_DEBUG
 /* Debug the tag queues, checking hash queue allocation and deallocation
  * and search for duplicate tags */
 #undef NCR_700_TAG_DEBUG
 
 #ifdef NCR_700_DEBUG
 #define DEBUG(x)	printk x
+#define DDEBUG(prefix, sdev, fmt, a...) \
+	sdev_printk(prefix, sdev, fmt, ##a)
+#define CDEBUG(prefix, scmd, fmt, a...) \
+	scmd_printk(prefix, scmd, fmt, ##a)
 #else
-#define DEBUG(x)
+#define DEBUG(x)	do {} while (0)
+#define DDEBUG(prefix, scmd, fmt, a...) do {} while (0)
+#define CDEBUG(prefix, scmd, fmt, a...) do {} while (0)
 #endif
 
 /* The number of available command slots */
@@ -27,44 +39,25 @@
 /* The maximum number of luns (make this of the form 2^n) */
 #define NCR_700_MAX_LUNS		32
 #define NCR_700_LUN_MASK		(NCR_700_MAX_LUNS - 1)
-/* Alter this with care: too many tags won't give the elevator a chance to
- * work; too few will cause the device to operate less efficiently */
+/* Maximum number of tags the driver ever allows per device */
 #define NCR_700_MAX_TAGS		16
+/* Tag depth the driver starts out with (can be altered in sysfs) */
+#define NCR_700_DEFAULT_TAGS		4
+/* This is the default number of commands per LUN in the untagged case.
+ * two is a good value because it means we can have one command active and
+ * one command fully prepared and waiting
+ */
+#define NCR_700_CMD_PER_LUN		2
 /* magic byte identifying an internally generated REQUEST_SENSE command */
 #define NCR_700_INTERNAL_SENSE_MAGIC	0x42
-
-/* WARNING: Leave this in for now: the dependency preprocessor doesn't
- * pick up file specific flags, so must define here if they are not
- * set */
-#if !defined(CONFIG_53C700_IO_MAPPED) && !defined(CONFIG_53C700_MEM_MAPPED)
-#error "Config.in must define either CONFIG_53C700_IO_MAPPED or CONFIG_53C700_MEM_MAPPED to use this scsi core."
-#endif
-
-/* macros for consistent memory allocation */
-
-#ifdef CONFIG_53C700_USE_CONSISTENT
-#define NCR_700_dma_cache_wback(mem, size) \
-	if(!hostdata->consistent) \
-		dma_cache_wback(mem, size)
-#define NCR_700_dma_cache_inv(mem, size) \
-	if(!hostdata->consistent) \
-		dma_cache_inv(mem, size)
-#define NCR_700_dma_cache_wback_inv(mem, size) \
-	if(!hostdata->consistent) \
-		dma_cache_wback_inv(mem, size)
-#else
-#define NCR_700_dma_cache_wback(mem, size) dma_cache_wback(mem,size)
-#define NCR_700_dma_cache_inv(mem, size) dma_cache_inv(mem,size)
-#define NCR_700_dma_cache_wback_inv(mem, size) dma_cache_wback_inv(mem,size)
-#endif
-
 
 struct NCR_700_Host_Parameters;
 
 /* These are the externally used routines */
-struct Scsi_Host *NCR_700_detect(Scsi_Host_Template *, struct NCR_700_Host_Parameters *);
+struct Scsi_Host *NCR_700_detect(struct scsi_host_template *,
+		struct NCR_700_Host_Parameters *, struct device *);
 int NCR_700_release(struct Scsi_Host *host);
-void NCR_700_intr(int, void *, struct pt_regs *);
+irqreturn_t NCR_700_intr(int, void *);
 
 
 enum NCR_700_Host_State {
@@ -83,11 +76,16 @@ struct NCR_700_SG_List {
 	#define	SCRIPT_RETURN			0x90080000
 };
 
-/* We use device->hostdata to store negotiated parameters.  This is
- * supposed to be a pointer to a device private area, but we cannot
- * really use it as such since it will never be freed, so just use the
- * 32 bits to cram the information.  The SYNC negotiation sequence looks
- * like:
+struct NCR_700_Device_Parameters {
+	/* space for creating a request sense command. Really, except
+	 * for the annoying SCSI-2 requirement for LUN information in
+	 * cmnd[1], this could be in static storage */
+	unsigned char cmnd[MAX_COMMAND_SIZE];
+	__u8	depth;
+};
+
+
+/* The SYNC negotiation sequence looks like:
  * 
  * If DEV_NEGOTIATED_SYNC not set, tack and SDTR message on to the
  * initial identify for the device and set DEV_BEGIN_SYNC_NEGOTATION
@@ -103,87 +101,69 @@ struct NCR_700_SG_List {
  * 18 device supports tag queueing */
 #define NCR_700_DEV_NEGOTIATED_SYNC	(1<<16)
 #define NCR_700_DEV_BEGIN_SYNC_NEGOTIATION	(1<<17)
-#define NCR_700_DEV_BEGIN_TAG_QUEUEING	(1<<18)
-#define NCR_700_DEV_TAG_STARVATION_WARNED (1<<19)
+#define NCR_700_DEV_PRINT_SYNC_NEGOTIATION (1<<19)
+
+static inline char *NCR_700_get_sense_cmnd(struct scsi_device *SDp)
+{
+	struct NCR_700_Device_Parameters *hostdata = SDp->hostdata;
+
+	return hostdata->cmnd;
+}
 
 static inline void
-NCR_700_set_SXFER(Scsi_Device *SDp, __u8 sxfer)
+NCR_700_set_depth(struct scsi_device *SDp, __u8 depth)
 {
-	long l = (long)SDp->hostdata;
+	struct NCR_700_Device_Parameters *hostdata = SDp->hostdata;
 
-	l &= 0xffffff00;
-	l |= sxfer & 0xff;
-	SDp->hostdata = (void *)l;
-}
-static inline __u8 NCR_700_get_SXFER(Scsi_Device *SDp)
-{
-	return (((unsigned long)SDp->hostdata) & 0xff);
-}
-static inline void
-NCR_700_set_depth(Scsi_Device *SDp, __u8 depth)
-{
-	long l = (long)SDp->hostdata;
-
-	l &= 0xffff00ff;
-	l |= 0xff00 & (depth << 8);
-	SDp->hostdata = (void *)l;
+	hostdata->depth = depth;
 }
 static inline __u8
-NCR_700_get_depth(Scsi_Device *SDp)
+NCR_700_get_depth(struct scsi_device *SDp)
 {
-	return ((((unsigned long)SDp->hostdata) & 0xff00)>>8);
+	struct NCR_700_Device_Parameters *hostdata = SDp->hostdata;
+
+	return hostdata->depth;
 }
 static inline int
-NCR_700_is_flag_set(Scsi_Device *SDp, __u32 flag)
+NCR_700_is_flag_set(struct scsi_device *SDp, __u32 flag)
 {
-	return (((unsigned long)SDp->hostdata) & flag) == flag;
+	return (spi_flags(SDp->sdev_target) & flag) == flag;
 }
 static inline int
-NCR_700_is_flag_clear(Scsi_Device *SDp, __u32 flag)
+NCR_700_is_flag_clear(struct scsi_device *SDp, __u32 flag)
 {
-	return (((unsigned long)SDp->hostdata) & flag) == 0;
+	return (spi_flags(SDp->sdev_target) & flag) == 0;
 }
 static inline void
-NCR_700_set_flag(Scsi_Device *SDp, __u32 flag)
+NCR_700_set_flag(struct scsi_device *SDp, __u32 flag)
 {
-	SDp->hostdata = (void *)((long)SDp->hostdata | (flag & 0xffff0000));
+	spi_flags(SDp->sdev_target) |= flag;
 }
 static inline void
-NCR_700_clear_flag(Scsi_Device *SDp, __u32 flag)
+NCR_700_clear_flag(struct scsi_device *SDp, __u32 flag)
 {
-	SDp->hostdata = (void *)((long)SDp->hostdata & ~(flag & 0xffff0000));
+	spi_flags(SDp->sdev_target) &= ~flag;
 }
 
-/* These represent the Nexus hashing functions.  A Nexus in SCSI terms
- * just means the identification of an outstanding command, by ITL
- * (Initiator Target Lun) or ITLQ (Initiator Target Lun Tag).  I'm not
- * very keen on XOR based hashes, so these are based on number theory
- * instead.  All you need to do is to fix your hash bucket size and
- * then choose reasonable strides which are coprime with the chosen
- * bucket size
- *
- * Note: this mathematical hash can be made very efficient, if the
- * compiler is good at optimising: Choose the number of buckets to be
- * 2^n and the modulo becomes a logical and with (2^n-1).
- * Additionally, if you chose the coprimes of the form 2^n-2^n the
- * multiplication can be done by a shift and an addition. */
-#define MAX_ITL_HASH_BUCKETS	16
-#define ITL_HASH_PRIME		7
+enum NCR_700_tag_neg_state {
+	NCR_700_START_TAG_NEGOTIATION = 0,
+	NCR_700_DURING_TAG_NEGOTIATION = 1,
+	NCR_700_FINISHED_TAG_NEGOTIATION = 2,
+};
 
-#define MAX_ITLQ_HASH_BUCKETS	64
-#define ITLQ_PUN_PRIME		7
-#define ITLQ_LUN_PRIME		3
-
-static inline int
-hash_ITL(__u8 pun, __u8 lun)
+static inline enum NCR_700_tag_neg_state
+NCR_700_get_tag_neg_state(struct scsi_device *SDp)
 {
-	return (pun*ITL_HASH_PRIME + lun) % MAX_ITL_HASH_BUCKETS;
+	return (enum NCR_700_tag_neg_state)((spi_flags(SDp->sdev_target)>>20) & 0x3);
 }
 
-static inline int
-hash_ITLQ(__u8 pun, __u8 lun, __u8 tag)
+static inline void
+NCR_700_set_tag_neg_state(struct scsi_device *SDp,
+			  enum NCR_700_tag_neg_state state)
 {
-	return (pun*ITLQ_PUN_PRIME + lun*ITLQ_LUN_PRIME + tag) % MAX_ITLQ_HASH_BUCKETS;
+	/* clear the slot */
+	spi_flags(SDp->sdev_target) &= ~(0x3 << 20);
+	spi_flags(SDp->sdev_target) |= ((__u32)state) << 20;
 }
 
 struct NCR_700_command_slot {
@@ -195,30 +175,30 @@ struct NCR_700_command_slot {
 	#define NCR_700_SLOT_BUSY (1|NCR_700_SLOT_MAGIC) /* slot has command active on HA */
 	#define NCR_700_SLOT_QUEUED (2|NCR_700_SLOT_MAGIC) /* slot has command to be made active on HA */
 	__u8	state;
-	#define NCR_700_NO_TAG	0xdead
-	__u16	tag;
+	#define NCR_700_FLAG_AUTOSENSE	0x01
+	__u8	flags;
+	__u8	pad1[2];	/* Needed for m68k where min alignment is 2 bytes */
+	int	tag;
 	__u32	resume_offset;
-	Scsi_Cmnd	*cmnd;
+	struct scsi_cmnd *cmnd;
 	/* The pci_mapped address of the actual command in cmnd */
 	dma_addr_t	pCmd;
 	__u32		temp;
 	/* if this command is a pci_single mapping, holds the dma address
 	 * for later unmapping in the done routine */
 	dma_addr_t	dma_handle;
-	/* Doubly linked ITL/ITLQ list kept in strict time order
-	 * (latest at the back) */
+	/* historical remnant, now used to link free commands */
 	struct NCR_700_command_slot *ITL_forw;
-	struct NCR_700_command_slot *ITL_back;
-	struct NCR_700_command_slot *ITLQ_forw;
-	struct NCR_700_command_slot *ITLQ_back;
 };
 
 struct NCR_700_Host_Parameters {
 	/* These must be filled in by the calling driver */
 	int	clock;			/* board clock speed in MHz */
-	unsigned long	base;		/* the base for the port (copied to host) */
-	struct pci_dev	*pci_dev;
+	void __iomem	*base;		/* the base for the port (copied to host) */
+	struct device	*dev;
 	__u32	dmode_extra;	/* adjustable bus settings */
+	__u32	dcntl_extra;	/* adjustable bus settings */
+	__u32	ctest7_extra;	/* adjustable bus settings */
 	__u32	differential:1;	/* if we are differential */
 #ifdef CONFIG_53C700_LE_ON_BE
 	/* This option is for HP only.  Set it if your chip is wired for
@@ -226,26 +206,18 @@ struct NCR_700_Host_Parameters {
 	__u32	force_le_on_be:1;
 #endif
 	__u32	chip710:1;	/* set if really a 710 not 700 */
-	__u32	burst_disable:1;	/* set to 1 to disable 710 bursting */
+	__u32	burst_length:4;	/* set to 0 to disable 710 bursting */
 
 	/* NOTHING BELOW HERE NEEDS ALTERING */
 	__u32	fast:1;		/* if we can alter the SCSI bus clock
                                    speed (so can negiotiate sync) */
-#ifdef CONFIG_53C700_USE_CONSISTENT
-	__u32	consistent:1;
-#endif
-
 	int	sync_clock;	/* The speed of the SYNC core */
 
 	__u32	*script;		/* pointer to script location */
 	__u32	pScript;		/* physical mem addr of script */
 
-	/* This will be the host lock.  Unfortunately, we can't use it
-	 * at the moment because of the necessity of holding the
-	 * io_request_lock */
-	spinlock_t lock;
 	enum NCR_700_Host_State state; /* protected by state lock */
-	Scsi_Cmnd *cmd;
+	struct scsi_cmnd *cmd;
 	/* Note: pScript contains the single consistent block of
 	 * memory.  All the msgin, msgout and status are allocated in
 	 * this memory too (at separate cache lines).  TOTAL_MEM_SIZE
@@ -265,20 +237,16 @@ struct NCR_700_Host_Parameters {
 	__u8	tag_negotiated;
 	__u8	rev;
 	__u8	reselection_id;
-	/* flags for the host */
-
-	/* ITL list.  ALL outstanding commands are hashed here in strict
-	 * order, latest at the back */
-	struct NCR_700_command_slot *ITL_Hash_forw[MAX_ITL_HASH_BUCKETS];
-	struct NCR_700_command_slot *ITL_Hash_back[MAX_ITL_HASH_BUCKETS];
-
-	/* Only tagged outstanding commands are hashed here (also latest
-	 * at the back) */
-	struct NCR_700_command_slot *ITLQ_Hash_forw[MAX_ITLQ_HASH_BUCKETS];
-	struct NCR_700_command_slot *ITLQ_Hash_back[MAX_ITLQ_HASH_BUCKETS];
+	__u8	min_period;
 
 	/* Free list, singly linked by ITL_forw elements */
 	struct NCR_700_command_slot *free_list;
+	/* Completion for waited for ops, like reset, abort or
+	 * device reset.
+	 *
+	 * NOTE: relies on single threading in the error handler to
+	 * have only one outstanding at once */
+	struct completion *eh_complete;
 };
 
 /*
@@ -287,6 +255,7 @@ struct NCR_700_Host_Parameters {
 #ifdef CONFIG_53C700_LE_ON_BE
 #define bE	(hostdata->force_le_on_be ? 0 : 3)
 #define	bSWAP	(hostdata->force_le_on_be)
+#define bEBus	(!hostdata->force_le_on_be)
 #elif defined(__BIG_ENDIAN)
 #define bE	3
 #define bSWAP	0
@@ -295,6 +264,13 @@ struct NCR_700_Host_Parameters {
 #define bSWAP	0
 #else
 #error "__BIG_ENDIAN or __LITTLE_ENDIAN must be defined, did you include byteorder.h?"
+#endif
+#ifndef bEBus
+#ifdef CONFIG_53C700_BE_BUS
+#define bEBus	1
+#else
+#define bEBus	0
+#endif
 #endif
 #define bS_to_cpu(x)	(bSWAP ? le32_to_cpu(x) : (x))
 #define bS_to_host(x)	(bSWAP ? cpu_to_le32(x) : (x))
@@ -379,6 +355,7 @@ struct NCR_700_Host_Parameters {
 #define		SEL_TIMEOUT_DISABLE	0x10 /* 710 only */
 #define         DFP                     0x08
 #define         EVP                     0x04
+#define         CTEST7_TT1              0x02
 #define		DIFF			0x01
 #define CTEST6_REG                      0x1A
 #define	TEMP_REG			0x1C
@@ -412,6 +389,7 @@ struct NCR_700_Host_Parameters {
 #define		SOFTWARE_RESET		0x01
 #define		COMPAT_700_MODE		0x01
 #define 	SCRPTS_16BITS		0x20
+#define		EA_710			0x20
 #define		ASYNC_DIV_2_0		0x00
 #define		ASYNC_DIV_1_5		0x40
 #define		ASYNC_DIV_1_0		0x80
@@ -442,31 +420,31 @@ struct NCR_700_Host_Parameters {
 #define NCR_710_MIN_XFERP	0
 #define NCR_700_MIN_PERIOD	25 /* for SDTR message, 100ns */
 
-#define script_patch_32(script, symbol, value) \
+#define script_patch_32(dev, script, symbol, value) \
 { \
 	int i; \
 	for(i=0; i< (sizeof(A_##symbol##_used) / sizeof(__u32)); i++) { \
 		__u32 val = bS_to_cpu((script)[A_##symbol##_used[i]]) + value; \
 		(script)[A_##symbol##_used[i]] = bS_to_host(val); \
-		dma_cache_wback((unsigned long)&(script)[A_##symbol##_used[i]], 4); \
+		dma_cache_sync((dev), &(script)[A_##symbol##_used[i]], 4, DMA_TO_DEVICE); \
 		DEBUG((" script, patching %s at %d to 0x%lx\n", \
 		       #symbol, A_##symbol##_used[i], (value))); \
 	} \
 }
 
-#define script_patch_32_abs(script, symbol, value) \
+#define script_patch_32_abs(dev, script, symbol, value) \
 { \
 	int i; \
 	for(i=0; i< (sizeof(A_##symbol##_used) / sizeof(__u32)); i++) { \
 		(script)[A_##symbol##_used[i]] = bS_to_host(value); \
-		dma_cache_wback((unsigned long)&(script)[A_##symbol##_used[i]], 4); \
+		dma_cache_sync((dev), &(script)[A_##symbol##_used[i]], 4, DMA_TO_DEVICE); \
 		DEBUG((" script, patching %s at %d to 0x%lx\n", \
 		       #symbol, A_##symbol##_used[i], (value))); \
 	} \
 }
 
 /* Used for patching the SCSI ID in the SELECT instruction */
-#define script_patch_ID(script, symbol, value) \
+#define script_patch_ID(dev, script, symbol, value) \
 { \
 	int i; \
 	for(i=0; i< (sizeof(A_##symbol##_used) / sizeof(__u32)); i++) { \
@@ -474,13 +452,13 @@ struct NCR_700_Host_Parameters {
 		val &= 0xff00ffff; \
 		val |= ((value) & 0xff) << 16; \
 		(script)[A_##symbol##_used[i]] = bS_to_host(val); \
-		dma_cache_wback((unsigned long)&(script)[A_##symbol##_used[i]], 4); \
+		dma_cache_sync((dev), &(script)[A_##symbol##_used[i]], 4, DMA_TO_DEVICE); \
 		DEBUG((" script, patching ID field %s at %d to 0x%x\n", \
 		       #symbol, A_##symbol##_used[i], val)); \
 	} \
 }
 
-#define script_patch_16(script, symbol, value) \
+#define script_patch_16(dev, script, symbol, value) \
 { \
 	int i; \
 	for(i=0; i< (sizeof(A_##symbol##_used) / sizeof(__u32)); i++) { \
@@ -488,109 +466,59 @@ struct NCR_700_Host_Parameters {
 		val &= 0xffff0000; \
 		val |= ((value) & 0xffff); \
 		(script)[A_##symbol##_used[i]] = bS_to_host(val); \
-		dma_cache_wback((unsigned long)&(script)[A_##symbol##_used[i]], 4); \
+		dma_cache_sync((dev), &(script)[A_##symbol##_used[i]], 4, DMA_TO_DEVICE); \
 		DEBUG((" script, patching short field %s at %d to 0x%x\n", \
 		       #symbol, A_##symbol##_used[i], val)); \
 	} \
 }
 
-#endif
 
-#ifdef CONFIG_53C700_MEM_MAPPED
 static inline __u8
 NCR_700_readb(struct Scsi_Host *host, __u32 reg)
 {
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
+	const struct NCR_700_Host_Parameters *hostdata
 		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
 
-	return readb(host->base + (reg^bE));
+	return ioread8(hostdata->base + (reg^bE));
 }
 
 static inline __u32
 NCR_700_readl(struct Scsi_Host *host, __u32 reg)
 {
-	__u32 value = __raw_readl(host->base + reg);
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
+	const struct NCR_700_Host_Parameters *hostdata
 		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
+	__u32 value = bEBus ? ioread32be(hostdata->base + reg) :
+		ioread32(hostdata->base + reg);
 #if 1
 	/* sanity check the register */
-	if((reg & 0x3) != 0)
-		BUG();
+	BUG_ON((reg & 0x3) != 0);
 #endif
 
-	return bS_to_cpu(value);
+	return value;
 }
 
 static inline void
 NCR_700_writeb(__u8 value, struct Scsi_Host *host, __u32 reg)
 {
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
+	const struct NCR_700_Host_Parameters *hostdata
 		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
 
-	writeb(value, host->base + (reg^bE));
+	iowrite8(value, hostdata->base + (reg^bE));
 }
 
 static inline void
 NCR_700_writel(__u32 value, struct Scsi_Host *host, __u32 reg)
 {
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
+	const struct NCR_700_Host_Parameters *hostdata
 		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
 
 #if 1
 	/* sanity check the register */
-	if((reg & 0x3) != 0)
-		BUG();
+	BUG_ON((reg & 0x3) != 0);
 #endif
 
-	__raw_writel(bS_to_host(value), host->base + reg);
-}
-#elif defined(CONFIG_53C700_IO_MAPPED)
-static inline __u8
-NCR_700_readb(struct Scsi_Host *host, __u32 reg)
-{
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
-		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
-
-	return inb(host->base + (reg^bE));
+	bEBus ? iowrite32be(value, hostdata->base + reg): 
+		iowrite32(value, hostdata->base + reg);
 }
 
-static inline __u32
-NCR_700_readl(struct Scsi_Host *host, __u32 reg)
-{
-	__u32 value = inl(host->base + reg);
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
-		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
-
-#if 1
-	/* sanity check the register */
-	if((reg & 0x3) != 0)
-		BUG();
-#endif
-
-	return bS_to_cpu(value);
-}
-
-static inline void
-NCR_700_writeb(__u8 value, struct Scsi_Host *host, __u32 reg)
-{
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
-		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
-
-	outb(value, host->base + (reg^bE));
-}
-
-static inline void
-NCR_700_writel(__u32 value, struct Scsi_Host *host, __u32 reg)
-{
-	const struct NCR_700_Host_Parameters *hostdata __attribute__((unused))
-		= (struct NCR_700_Host_Parameters *)host->hostdata[0];
-
-#if 1
-	/* sanity check the register */
-	if((reg & 0x3) != 0)
-		BUG();
-#endif
-
-	outl(bS_to_host(value), host->base + reg);
-}
 #endif

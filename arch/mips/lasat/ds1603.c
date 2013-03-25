@@ -1,13 +1,14 @@
-/* 
- * Dallas Semiconductors 1603 RTC driver 
+/*
+ * Dallas Semiconductors 1603 RTC driver
  *
- * Brian Murphy <brian@murphy.dk> 
+ * Brian Murphy <brian@murphy.dk>
  *
  */
 #include <linux/kernel.h>
 #include <asm/lasat/lasat.h>
 #include <linux/delay.h>
 #include <asm/lasat/ds1603.h>
+#include <asm/time.h>
 
 #include "ds1603.h"
 
@@ -17,15 +18,15 @@
 #define TRIMMER_VALUE_MASK 0x38
 #define TRIMMER_SHIFT 3
 
-struct ds_defs *ds1603 = NULL;
+struct ds_defs *ds1603;
 
 /* HW specific register functions */
-static void rtc_reg_write(unsigned long val) 
+static void rtc_reg_write(unsigned long val)
 {
 	*ds1603->reg = val;
 }
 
-static unsigned long rtc_reg_read(void) 
+static unsigned long rtc_reg_read(void)
 {
 	unsigned long tmp = *ds1603->reg;
 	return tmp;
@@ -80,7 +81,7 @@ static unsigned int rtc_read_databit(void)
 {
 	unsigned int data;
 
-	data = (rtc_datareg_read() & (1 << ds1603->data_read_shift)) 
+	data = (rtc_datareg_read() & (1 << ds1603->data_read_shift))
 		>> ds1603->data_read_shift;
 	rtc_cycle_clock(rtc_reg_read());
 	return data;
@@ -90,7 +91,7 @@ static void rtc_write_byte(unsigned int byte)
 {
 	int i;
 
-	for (i = 0; i<=7; i++) {
+	for (i = 0; i <= 7; i++) {
 		rtc_write_databit(byte & 1L);
 		byte >>= 1;
 	}
@@ -100,7 +101,7 @@ static void rtc_write_word(unsigned long word)
 {
 	int i;
 
-	for (i = 0; i<=31; i++) {
+	for (i = 0; i <= 31; i++) {
 		rtc_write_databit(word & 1L);
 		word >>= 1;
 	}
@@ -112,7 +113,7 @@ static unsigned long rtc_read_word(void)
 	unsigned long word = 0;
 	unsigned long shift = 0;
 
-	for (i = 0; i<=31; i++) {
+	for (i = 0; i <= 31; i++) {
 		word |= rtc_read_databit() << shift;
 		shift++;
 	}
@@ -134,23 +135,32 @@ static void rtc_end_op(void)
 	lasat_ndelay(1000);
 }
 
-/* interface */
-unsigned long ds1603_read(void)
+void read_persistent_clock(struct timespec *ts)
 {
 	unsigned long word;
+	unsigned long flags;
+
+	spin_lock_irqsave(&rtc_lock, flags);
 	rtc_init_op();
 	rtc_write_byte(READ_TIME_CMD);
 	word = rtc_read_word();
 	rtc_end_op();
-	return word;
+	spin_unlock_irqrestore(&rtc_lock, flags);
+
+	ts->tv_sec = word;
+	ts->tv_nsec = 0;
 }
 
-int ds1603_set(unsigned long time)
+int rtc_mips_set_mmss(unsigned long time)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&rtc_lock, flags);
 	rtc_init_op();
 	rtc_write_byte(SET_TIME_CMD);
 	rtc_write_word(time);
 	rtc_end_op();
+	spin_unlock_irqrestore(&rtc_lock, flags);
 
 	return 0;
 }

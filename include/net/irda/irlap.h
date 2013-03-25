@@ -11,14 +11,14 @@
  * 
  *     Copyright (c) 1998-1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
- *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -27,13 +27,16 @@
 #ifndef IRLAP_H
 #define IRLAP_H
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
 
-#include <net/irda/irlap_event.h>
+#include <net/irda/irqueue.h>		/* irda_queue_t */
+#include <net/irda/qos.h>		/* struct qos_info */
+#include <net/irda/discovery.h>		/* discovery_t */
+#include <net/irda/irlap_event.h>	/* IRLAP_STATE, ... */
+#include <net/irda/irmod.h>		/* struct notify_t */
 
 #define CONFIG_IRDA_DYNAMIC_WINDOW 1
 
@@ -45,6 +48,9 @@
 
 /* May be different when we get VFIR */
 #define LAP_MAX_HEADER (LAP_ADDR_HEADER + LAP_CTRL_HEADER)
+
+/* Each IrDA device gets a random 32 bits IRLAP device address */
+#define LAP_ALEN 4
 
 #define BROADCAST  0xffffffff /* Broadcast device address */
 #define CBROADCAST 0xfe       /* Connection broadcast address */
@@ -84,6 +90,29 @@
 #define NS_EXPECTED     1
 #define NS_UNEXPECTED   0
 #define NS_INVALID     -1
+
+/*
+ *  Meta information passed within the IrLAP state machine
+ */
+struct irlap_info {
+	__u8 caddr;   /* Connection address */
+	__u8 control; /* Frame type */
+        __u8 cmd;
+
+	__u32 saddr;
+	__u32 daddr;
+	
+	int pf;        /* Poll/final bit set */
+
+	__u8  nr;      /* Sequence number of next frame expected */
+	__u8  ns;      /* Sequence number of frame sent */
+
+	int  S;        /* Number of slots */
+	int  slot;     /* Random chosen slot */
+	int  s;        /* Current slot */
+
+	discovery_t *discovery; /* Discovery information */
+};
 
 /* Main structure of IrLAP */
 struct irlap_cb {
@@ -175,13 +204,13 @@ struct irlap_cb {
 
 	notify_t notify; /* Callbacks to IrLMP */
 
-	int    mtt_required;  /* Minumum turnaround time required */
+	int    mtt_required;  /* Minimum turnaround time required */
 	int    xbofs_delay;   /* Nr of XBOF's used to MTT */
 	int    bofs_count;    /* Negotiated extra BOFs */
 	int    next_bofs;     /* Negotiated extra BOFs after next frame */
-};
 
-extern hashbin_t *irlap;
+	int    mode;     /* IrLAP mode (primary, secondary or monitor) */
+};
 
 /* 
  *  Function prototypes 
@@ -190,7 +219,7 @@ int irlap_init(void);
 void irlap_cleanup(void);
 
 struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
-			    char *	hw_name);
+			    const char *hw_name);
 void irlap_close(struct irlap_cb *self);
 
 void irlap_connect_request(struct irlap_cb *self, __u32 daddr, 
@@ -228,10 +257,8 @@ int irlap_validate_ns_received(struct irlap_cb *, int ns);
 int  irlap_generate_rand_time_slot(int S, int s);
 void irlap_initiate_connection_state(struct irlap_cb *);
 void irlap_flush_all_queues(struct irlap_cb *);
-void irlap_change_speed(struct irlap_cb *self, __u32 speed, int now);
 void irlap_wait_min_turn_around(struct irlap_cb *, struct qos_info *);
 
-void irlap_init_qos_capabilities(struct irlap_cb *, struct qos_info *);
 void irlap_apply_default_connection_parameters(struct irlap_cb *self);
 void irlap_apply_connection_parameters(struct irlap_cb *self, int now);
 
@@ -255,7 +282,30 @@ static inline int irlap_is_primary(struct irlap_cb *self)
 	default:
 		ret = -1;
 	}
-	return(ret);
+	return ret;
+}
+
+/* Clear a pending IrLAP disconnect. - Jean II */
+static inline void irlap_clear_disconnect(struct irlap_cb *self)
+{
+	self->disconnect_pending = FALSE;
+}
+
+/*
+ * Function irlap_next_state (self, state)
+ *
+ *    Switches state and provides debug information
+ *
+ */
+static inline void irlap_next_state(struct irlap_cb *self, IRLAP_STATE state)
+{
+	/*
+	if (!self || self->magic != LAP_MAGIC)
+		return;
+
+	IRDA_DEBUG(4, "next LAP state = %s\n", irlap_state[state]);
+	*/
+	self->state = state;
 }
 
 #endif

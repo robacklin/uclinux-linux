@@ -16,13 +16,13 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * BEGIN_DESC
  *
  *  File:
- *	@(#)	pa/spmath/dfadd.c		$Revision: $
+ *	@(#)	pa/spmath/dfadd.c		$Revision: 1.1 $
  *
  *  Purpose:
  *	Double_add: add two double precision values.
@@ -303,7 +303,7 @@ dbl_fadd(
 	if(Dbl_iszero_hidden(resultp1))
 	    {
 	    /* Handle normalization */
-	    /* A straight foward algorithm would now shift the result
+	    /* A straight forward algorithm would now shift the result
 	     * and extension left until the hidden bit becomes one.  Not
 	     * all of the extension bits need participate in the shift.
 	     * Only the two most significant bits (round and guard) are

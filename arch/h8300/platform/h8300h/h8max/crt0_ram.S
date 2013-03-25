@@ -3,16 +3,15 @@
  *
  *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
- *  Platform depend startup for uClinux-2.4.x
+ *  Platform depend startup
  *  Target Archtecture:	H8MAX
  *  Memory Layout     :	RAM
  */
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
-
+	
 #if !defined(CONFIG_BLKDEV_RESERVE)
 #if defined(CONFIG_GDB_DEBUG)
 #define RAMEND (__ramend - 0xc000)
@@ -39,8 +38,8 @@ SYMBOL_NAME_LABEL(_start)
 	ldc	#0x80,ccr
 
 	/* Peripheral Setup */
-
-#if defined(CONFIG_BLK_DEV_BLKMEM)
+	
+#if defined(CONFIG_MTD_UCLINUX)
 	/* move romfs image */
 	jsr	@__move_romfs	
 #endif
@@ -66,8 +65,7 @@ SYMBOL_NAME_LABEL(_start)
 
 	/* uClinux kernel start */
 	ldc	#0x90,ccr	/* running kernel */
-	mov.l	#SYMBOL_NAME(init_task_union),sp
-	mov.l	sp,@SYMBOL_NAME(_current_task)
+	mov.l	#SYMBOL_NAME(init_thread_union),sp
 	add.l	#0x2000,sp
 	jsr	@_start_kernel
 _exit:
@@ -87,11 +85,11 @@ gpio_table:
 	;; P2DDR
 	.byte	0xff,0xff
 	;; P3DDR
-	.byte	0xff,0xff
-	;; P4DDR
-	.byte	0xff,0xff
-	;; P5DDR
 	.byte	0x00,0x00
+	;; P4DDR
+	.byte	0x00,0x00
+	;; P5DDR
+	.byte	0x01,0x01
 	;; P6DDR
 	.byte	0xf6,0xf6
 	;; dummy
@@ -103,7 +101,7 @@ gpio_table:
 	;; PADDR
 	.byte	0x00,0x00
 	;; PBDDR
-	.byte	0x00,0x00
+	.byte	0x30,0x30
 
 __target_name:	
 	.asciz	"H8MAX"

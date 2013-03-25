@@ -1,10 +1,10 @@
-/* $Id: ipac.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: ipac.h,v 1.7.2.2 2004/01/12 22:52:26 keil Exp $
  *
  * IPAC specific defines
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *

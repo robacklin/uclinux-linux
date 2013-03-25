@@ -1,136 +1,73 @@
 /*
- *  linux/arch/arm/mach-ks8695/cpu.c
+ * arch/arm/mach-ks8695/cpu.c
  *
- *  Copyright (C) 2002 Micrel Inc.
+ * Copyright (C) 2006 Ben Dooks <ben@simtec.co.uk>
+ * Copyright (C) 2006 Simtec Electronics
+ *
+ * KS8695 CPU support
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * CPU support functions
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
-#include <linux/types.h>
+
 #include <linux/kernel.h>
-#include <linux/cpufreq.h>
+#include <linux/module.h>
 #include <linux/init.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
+#include <asm/mach/arch.h>
+#include <asm/mach/map.h>
 
-#define CM_ID  	(IO_ADDRESS(KS8695_HDR_BASE)+KS8695_HDR_ID_OFFSET)
-#define CM_OSC	(IO_ADDRESS(KS8695_HDR_BASE)+KS8695_HDR_OSC_OFFSET)
-#define CM_STAT (IO_ADDRESS(KS8695_HDR_BASE)+KS8695_HDR_STAT_OFFSET)
-#define CM_LOCK (IO_ADDRESS(KS8695_HDR_BASE)+KS8695_HDR_LOCK_OFFSET)
+#include <mach/regs-sys.h>
+#include <mach/regs-misc.h>
 
-struct vco {
-	unsigned char vdw;
-	unsigned char od;
+
+static struct __initdata map_desc ks8695_io_desc[] = {
+	{
+		.virtual	= KS8695_IO_VA,
+		.pfn		= __phys_to_pfn(KS8695_IO_PA),
+		.length		= KS8695_IO_SIZE,
+		.type		= MT_DEVICE,
+	}
 };
 
-/*
- * Divisors for each OD setting.
- */
-static unsigned char cc_divisor[8] = { 10, 2, 8, 4, 5, 7, 9, 6 };
-
-static unsigned int vco_to_freq(struct vco vco, int factor)
+static void __init ks8695_processor_info(void)
 {
-	return 2000 * (vco.vdw + 8) / cc_divisor[vco.od] / factor;
+	unsigned long id, rev;
+
+	id = __raw_readl(KS8695_MISC_VA + KS8695_DID);
+	rev = __raw_readl(KS8695_MISC_VA + KS8695_RID);
+
+	printk("KS8695 ID=%04lx  SubID=%02lx  Revision=%02lx\n", (id & DID_ID), (rev & RID_SUBID), (rev & RID_REVISION));
 }
 
-#ifdef CONFIG_CPU_FREQ
-/*
- * Divisor indexes for in ascending divisor order
- */
-static unsigned char s2od[] = { 1, 3, 4, 7, 5, 2, 6, 0 };
+static unsigned int sysclk[8] = { 125000000, 100000000, 62500000, 50000000, 41700000, 33300000, 31300000, 25000000 };
+static unsigned int cpuclk[8] = { 166000000, 166000000, 83000000, 83000000, 55300000, 55300000, 41500000, 41500000 };
 
-static struct vco freq_to_vco(unsigned int freq_khz, int factor)
+static void __init ks8695_clock_info(void)
 {
-	struct vco vco = {0, 0};
-	unsigned int i, f;
+	unsigned int scdc = __raw_readl(KS8695_SYS_VA + KS8695_CLKCON) & CLKCON_SCDC;
 
-	freq_khz *= factor;
-
-	for (i = 0; i < 8; i++) {
-		f = freq_khz * cc_divisor[s2od[i]];
-		/* f must be between 10MHz and 320MHz */
-		if (f > 10000 && f <= 320000)
-			break;
-	}
-
-	vco.od  = s2od[i];
-	vco.vdw = f / 2000 - 8;
-
-	return vco;
+	printk("Clocks: System %u MHz, CPU %u MHz\n",
+			sysclk[scdc] / 1000000, cpuclk[scdc] / 1000000);
 }
 
-/*
- * Validate the speed in khz.  If it is outside our
- * range, then return the lowest.
- */
-unsigned int ks8695_validatespeed(unsigned int freq_khz)
+void __init ks8695_map_io(void)
 {
-	struct vco vco;
+	iotable_init(ks8695_io_desc, ARRAY_SIZE(ks8695_io_desc));
 
-	if (freq_khz < 12000)
-		freq_khz = 12000;
-	if (freq_khz > 160000)
-		freq_khz = 160000;
-
-	vco = freq_to_vco(freq_khz, 1);
-
-	if (vco.vdw < 4 || vco.vdw > 152)
-		return -EINVAL;
-
-	return vco_to_freq(vco, 1);
+	ks8695_processor_info();
+	ks8695_clock_info();
 }
-
-void ks8695_setspeed(unsigned int freq_khz)
-{
-	struct vco vco = freq_to_vco(freq_khz, 1);
-	u_int cm_osc;
-
-	cm_osc = __raw_readl(CM_OSC);
-	cm_osc &= 0xfffff800;
-	cm_osc |= vco.vdw | vco.od << 8;
-
-	__raw_writel(0xa05f, CM_LOCK);
-	__raw_writel(cm_osc, CM_OSC);
-	__raw_writel(0, CM_LOCK);
-}
-#endif
-
-static int __init cpu_init(void)
-{
-	u_int cm_osc, cm_stat, cpu_freq_khz, mem_freq_khz;
-	struct vco vco;
-
-#if 1
-	__asm__("nop");
-(*(volatile u_int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA)) = 0xFF;
-#endif
-	cm_osc = __raw_readl(CM_OSC);
-
-	vco.od  = (cm_osc >> 20) & 7;
-	vco.vdw = (cm_osc >> 12) & 255;
-	mem_freq_khz = vco_to_freq(vco, 2);
-
-	printk(KERN_INFO "Memory clock = %d.%03d MHz\n",
-		mem_freq_khz / 1000, mem_freq_khz % 1000);
-
-	vco.od = (cm_osc >> 8) & 7;
-	vco.vdw = cm_osc & 255;
-	cpu_freq_khz = vco_to_freq(vco, 1);
-
-#ifdef CONFIG_CPU_FREQ
-	cpufreq_init(cpu_freq_khz);
-	cpufreq_setfunctions(ks8695_validatespeed, ks8695_setspeed);
-#endif
-
-	cm_stat = __raw_readl(CM_STAT);
-	printk("Module id: %d\n", cm_stat & 255);
-
-	return 0;
-}
-
-__initcall(cpu_init);

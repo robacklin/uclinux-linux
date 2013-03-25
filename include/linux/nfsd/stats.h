@@ -1,5 +1,5 @@
 /*
- * linux/include/nfsd/stats.h
+ * linux/include/linux/nfsd/stats.h
  *
  * Statistics for NFS server.
  *
@@ -8,6 +8,13 @@
 
 #ifndef LINUX_NFSD_STATS_H
 #define LINUX_NFSD_STATS_H
+
+#include <linux/nfs4.h>
+
+/* thread usage wraps very million seconds (approx one fortnight) */
+#define	NFSD_USAGE_WRAP	(HZ*1000000)
+
+#ifdef __KERNEL__
 
 struct nfsd_stats {
 	unsigned int	rchits;		/* repcache hits */
@@ -27,12 +34,12 @@ struct nfsd_stats {
 	unsigned int	ra_size;	/* size of ra cache */
 	unsigned int	ra_depth[11];	/* number of times ra entry was found that deep
 					 * in the cache (10percentiles). [10] = not found */
+#ifdef CONFIG_NFSD_V4
+	unsigned int	nfs4_opcount[LAST_NFS4_OP + 1];	/* count of individual nfsv4 operations */
+#endif
+
 };
 
-/* thread usage wraps very million seconds (approx one fortnight) */
-#define	NFSD_USAGE_WRAP	(HZ*1000000)
-
-#ifdef __KERNEL__
 
 extern struct nfsd_stats	nfsdstats;
 extern struct svc_stat		nfsd_svcstats;

@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -30,7 +30,7 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 
-#include <net/irda/irda_device.h>
+#include <net/irda/irda_device.h>	/* iobuff_t */
 
 #define BOF  0xc0 /* Beginning of frame */
 #define XBOF 0xff
@@ -42,7 +42,7 @@
 
 #define IRDA_TRANS 0x20    /* Asynchronous transparency modifier */       
 
-/* States for receving a frame in async mode */
+/* States for receiving a frame in async mode */
 enum {
 	OUTSIDE_FRAME, 
 	BEGIN_FRAME, 
@@ -52,8 +52,6 @@ enum {
 
 /* Proto definitions */
 int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize);
-void async_bump(struct net_device *dev, struct net_device_stats *stats,
-		__u8 *buf, int len);
 void async_unwrap_char(struct net_device *dev, struct net_device_stats *stats,
 		       iobuff_t *buf, __u8 byte);
 

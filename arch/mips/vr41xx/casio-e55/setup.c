@@ -1,7 +1,7 @@
 /*
  *  setup.c, Setup for the CASIO CASSIOPEIA E-11/15/55/65.
  *
- *  Copyright (C) 2002-2004  Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ *  Copyright (C) 2002-2006  Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify
  *  it under the terms of the GNU General Public License as published by
@@ -17,39 +17,24 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
-#include <linux/console.h>
-#include <linux/ide.h>
 #include <linux/init.h>
 #include <linux/ioport.h>
 
-#include <asm/time.h>
-#include <asm/vr41xx/e55.h>
+#include <asm/io.h>
 
-void __init casio_e55_setup(void)
+#define E55_ISA_IO_BASE		0x1400c000
+#define E55_ISA_IO_SIZE		0x03ff4000
+#define E55_ISA_IO_START	0
+#define E55_ISA_IO_END		(E55_ISA_IO_SIZE - 1)
+#define E55_IO_PORT_BASE	KSEG1ADDR(E55_ISA_IO_BASE)
+
+static int __init casio_e55_setup(void)
 {
-	set_io_port_base(IO_PORT_BASE);
-	ioport_resource.start = IO_PORT_RESOURCE_START;
-	ioport_resource.end = IO_PORT_RESOURCE_END;
-	iomem_resource.start = IO_MEM_RESOURCE_START;
-	iomem_resource.end = IO_MEM_RESOURCE_END;
+	set_io_port_base(E55_IO_PORT_BASE);
+	ioport_resource.start = E55_ISA_IO_START;
+	ioport_resource.end = E55_ISA_IO_END;
 
-	board_time_init = vr41xx_time_init;
-	board_timer_setup = vr41xx_timer_setup;
-
-#ifdef CONFIG_FB
-	conswitchp = &dummy_con;
-#endif
-
-#if defined(CONFIG_IDE) || defined(CONFIG_IDE_MODULE)
-	ide_ops = &vr41xx_ide_ops;
-#endif
-
-	vr41xx_bcu_init();
-	vr41xx_cmu_init();
-	vr41xx_pmu_init();
-
-#ifdef CONFIG_SERIAL
-	vr41xx_siu_init(SIU_RS232C, 0);
-#endif
+	return 0;
 }
+
+arch_initcall(casio_e55_setup);

@@ -1,8 +1,9 @@
-
 #ifndef _ISOFS_FS_H
 #define _ISOFS_FS_H
 
 #include <linux/types.h>
+#include <linux/magic.h>
+
 /*
  * The isofs filesystem constants/structures
  */
@@ -160,84 +161,5 @@ struct iso_directory_record {
 
 #define ISOFS_BUFFER_SIZE(INODE) ((INODE)->i_sb->s_blocksize)
 #define ISOFS_BUFFER_BITS(INODE) ((INODE)->i_sb->s_blocksize_bits)
-#define ISOFS_ZONE_BITS(INODE)   ((INODE)->i_sb->u.isofs_sb.s_log_zone_size)
 
-#define ISOFS_SUPER_MAGIC 0x9660
-
-#ifdef __KERNEL__
-/* Number conversion inlines, named after the section in ISO 9660
-   they correspond to. */
-
-#include <asm/byteorder.h>
-#include <asm/unaligned.h>
-
-static inline int isonum_711(char *p)
-{
-	return *(u8 *)p;
-}
-static inline int isonum_712(char *p)
-{
-	return *(s8 *)p;
-}
-static inline unsigned int isonum_721(char *p)
-{
-	return le16_to_cpu(get_unaligned((u16 *)p));
-}
-static inline unsigned int isonum_722(char *p)
-{
-	return be16_to_cpu(get_unaligned((u16 *)p));
-}
-static inline unsigned int isonum_723(char *p)
-{
-	/* Ignore bigendian datum due to broken mastering programs */
-	return le16_to_cpu(get_unaligned((u16 *)p));
-}
-static inline unsigned int isonum_731(char *p)
-{
-	return le32_to_cpu(get_unaligned((u32 *)p));
-}
-static inline unsigned int isonum_732(char *p)
-{
-	return be32_to_cpu(get_unaligned((u32 *)p));
-}
-static inline unsigned int isonum_733(char *p)
-{
-	/* Ignore bigendian datum due to broken mastering programs */
-	return le32_to_cpu(get_unaligned((u32 *)p));
-}
-extern int iso_date(char *, int);
-
-struct inode;		/* To make gcc happy */
-
-extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *);
-extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
-extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
-
-extern int find_rock_ridge_relocation(struct iso_directory_record *, struct inode *);
-
-int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
-int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
-
-extern struct dentry *isofs_lookup(struct inode *, struct dentry *);
-extern struct buffer_head *isofs_bread(struct inode *inode, unsigned int block);
-extern int isofs_get_blocks(struct inode *, long, struct buffer_head **, unsigned long);
-
-extern struct inode_operations isofs_dir_inode_operations;
-extern struct file_operations isofs_dir_operations;
-extern struct address_space_operations isofs_symlink_aops;
-
-/* The following macros are used to check for memory leaks. */
-#ifdef LEAK_CHECK
-#define free_s leak_check_free_s
-#define malloc leak_check_malloc
-#define sb_bread leak_check_bread
-#define brelse leak_check_brelse
-extern void * leak_check_malloc(unsigned int size);
-extern void leak_check_free_s(void * obj, int size);
-extern struct buffer_head * leak_check_bread(struct super_block *sb, int block);
-extern void leak_check_brelse(struct buffer_head * bh);
-#endif /* LEAK_CHECK */
-
-#endif /* __KERNEL__ */
-
-#endif
+#endif /* _ISOFS_FS_H */

@@ -35,7 +35,6 @@
  * OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <linux/config.h>
 #include "fp_emu.h"
 
 /*
@@ -49,7 +48,7 @@
  * is currently at that time unused, be careful if you want change
  * something here. %d0 and %d1 is always usable, sometimes %d2 (or
  * only the lower half) most function have to return the %a0
- * unmodified, so that the caller can immediatly reuse it.
+ * unmodified, so that the caller can immediately reuse it.
  */
 
 	.globl	fp_ill, fp_end
@@ -1337,7 +1336,7 @@ fp_finalrounding_single:
 	jra	fp_finaltest
 
 fp_finalrounding_single_fast:
-	addq.l	#8,%sp 
+	addq.l	#8,%sp
 	jsr	fp_normalize_ext
 	jsr	fp_normalize_single_fast
 	jra	fp_finaltest

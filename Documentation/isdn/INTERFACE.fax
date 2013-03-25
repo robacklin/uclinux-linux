@@ -1,4 +1,4 @@
-$Id: INTERFACE.fax,v 1.1.4.1 2001/11/20 14:19:33 kai Exp $
+$Id: INTERFACE.fax,v 1.2 2000/08/06 09:22:50 armin Exp $
 
 
 Description of the fax-subinterface between linklevel and hardwarelevel of 
@@ -26,7 +26,7 @@ Structure T30_s description:
   If the HL-driver receives ISDN_CMD_FAXCMD, all needed information
   is in this struct set by the LL.
   To signal information to the LL, the HL-driver has to set the 
-  the parameters and use ISDN_STAT_FAXIND.
+  parameters and use ISDN_STAT_FAXIND.
   (Please refer to INTERFACE)
 
 Structure T30_s:

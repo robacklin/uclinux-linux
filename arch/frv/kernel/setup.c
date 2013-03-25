@@ -1,22 +1,16 @@
-/*
- *  linux/arch/frvnommu/kernel/setup.c
+/* setup.c: FRV specific setup
  *
- *  Copyleft  ()) 2000       James D. Schettine {james@telos-systems.com}
- *  Copyright (C) 1999-2003  Greg Ungerer (gerg@snapgear.com)
- *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@lineo.ca>
- *  Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
- *  Copyright (C) 1995       Hamish Macdonald
- *  Copyright (C) 2000       Lineo Inc. (www.lineo.com)
- *  Copyright (C) 2001 	     Lineo, Inc. <www.lineo.com>
- *  Copyright (C) 2003 	     David Howells <dhowells@redhat.com>, Red Hat, Inc.
+ * Copyright (C) 2003-5 Red Hat, Inc. All Rights Reserved.
+ * Written by David Howells (dhowells@redhat.com)
+ * - Derived from arch/m68k/kernel/setup.c
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  */
 
-/*
- * This file handles the architecture-dependent parts of system setup
- */
-
-#include <linux/config.h>
-#include <linux/version.h>
+#include <generated/utsrelease.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
@@ -32,13 +26,14 @@
 #include <linux/bootmem.h>
 #include <linux/highmem.h>
 #include <linux/seq_file.h>
-#include <linux/serial_reg.h>
 #include <linux/serial.h>
+#include <linux/serial_core.h>
+#include <linux/serial_reg.h>
+#include <linux/serial_8250.h>
 
 #include <asm/setup.h>
-#include <asm/serial.h>
 #include <asm/irq.h>
-#include <asm/vmlinux.h>
+#include <asm/sections.h>
 #include <asm/pgalloc.h>
 #include <asm/busctl-regs.h>
 #include <asm/serial-regs.h>
@@ -48,12 +43,9 @@
 #include <asm/mb-regs.h>
 #include <asm/mb93493-regs.h>
 #include <asm/gdb-stub.h>
-#include <asm/irq-routing.h>
 #include <asm/io.h>
-#include <asm/mmu_context.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
 #include <asm/pgtable.h>
 #endif
 
@@ -62,17 +54,10 @@
 #ifdef CONFIG_MB93090_MB00
 static void __init mb93090_display(void);
 #endif
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 static void __init setup_linux_memory(void);
 #else
 static void __init setup_uclinux_memory(void);
-#endif
-
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#ifdef CONFIG_FRAMEBUFFER
-extern struct consw fb_con;
-#endif
 #endif
 
 #ifdef CONFIG_MB93090_MB00
@@ -113,15 +98,16 @@ unsigned long __nongprelbss rom_length;
 unsigned long __nongprelbss memory_start;
 unsigned long __nongprelbss memory_end;
 
-unsigned long __nongprelbss dma_consistent_mem_start;
-unsigned long __nongprelbss dma_consistent_mem_end;
+unsigned long __nongprelbss dma_coherent_mem_start;
+unsigned long __nongprelbss dma_coherent_mem_end;
 
 unsigned long __initdata __sdram_old_base;
+unsigned long __initdata num_mappedpages;
 
 struct cpuinfo_frv __nongprelbss boot_cpu_data;
 
-char command_line[512];
-char saved_command_line[512] = "console=ttyS0,115200 root=/dev/mtdblock3 ro";
+char __initdata command_line[COMMAND_LINE_SIZE];
+char __initdata redboot_command_line[COMMAND_LINE_SIZE];
 
 #ifdef CONFIG_PM
 #define __pminit
@@ -201,22 +187,22 @@ static struct clock_cmode __pminitdata clock_cmodes_fr555[16] = {
 static const struct clock_cmode __pminitdata *clock_cmodes;
 static int __pminitdata clock_doubled;
 
-static struct serial_struct __frv_uart0 = {
-	.baud_base		= 0,
-	.io_type		= SERIAL_IO_MEMHI,
-	.iomem_base		= (u8 *) UART0_BASE,
-	.iomem_reg_shift	= 3,
+static struct uart_port __pminitdata __frv_uart0 = {
+	.uartclk		= 0,
+	.membase		= (char *) UART0_BASE,
 	.irq			= IRQ_CPU_UART0,
-	.flags			= STD_COM_FLAGS,
+	.regshift		= 3,
+	.iotype			= UPIO_MEM,
+	.flags			= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 };
 
-static struct serial_struct __frv_uart1 = {
-	.baud_base		= 0,
-	.io_type		= SERIAL_IO_MEMHI,
-	.iomem_base		= (u8 *) UART1_BASE,
-	.iomem_reg_shift	= 3,
+static struct uart_port __pminitdata __frv_uart1 = {
+	.uartclk		= 0,
+	.membase		= (char *) UART1_BASE,
 	.irq			= IRQ_CPU_UART1,
-	.flags			= STD_COM_FLAGS,
+	.regshift		= 3,
+	.iotype			= UPIO_MEM,
+	.flags			= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST,
 };
 
 #if 0
@@ -224,7 +210,7 @@ static void __init printk_xampr(unsigned long ampr, unsigned long amlr, char i_d
 {
 	unsigned long phys, virt, cxn, size;
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	virt = amlr & 0xffffc000;
 	cxn = amlr & 0x3fff;
 #else
@@ -542,11 +528,9 @@ void __pminit determine_clocks(int verbose)
 	clkc = __get_CLKC();
 	psr = __get_PSR();
 
-#ifdef CONFIG_PM
 	clock_p0_current = !!(clkc & CLKC_P0);
 	clock_cm_current = clkc & CLKC_CM;
 	clock_cmode_current = (clkc & CLKC_CMODE) >> CLKC_CMODE_s;
-#endif
 
 	if (verbose)
 		printk("psr=%08lx hsr0=%08lx clkc=%08lx\n", psr, __get_HSR(0), clkc);
@@ -650,12 +634,11 @@ void __pminit determine_clocks(int verbose)
 		quot <<= 1;
 
 	__serial_clock_speed_HZ /= quot;
-	__frv_uart0.baud_base = __serial_clock_speed_HZ / 16;
-	__frv_uart1.baud_base = __serial_clock_speed_HZ / 16;
+	__frv_uart0.uartclk = __serial_clock_speed_HZ;
+	__frv_uart1.uartclk = __serial_clock_speed_HZ;
 
 	if (verbose)
-		printk("      uart=%luMHz\n",
-		       __serial_clock_speed_HZ / 1000000 * quot);
+		printk("      uart=%luMHz\n", __serial_clock_speed_HZ / 1000000 * quot);
 
 	while (!(__get_UART0_LSR() & UART_LSR_TEMT))
 		continue;
@@ -671,8 +654,8 @@ void __pminit determine_clocks(int verbose)
 /*
  * reserve some DMA consistent memory
  */
-#ifdef CONFIG_RESERVE_DMA_CONSISTENT
-static void __init reserve_dma_consistent(void)
+#ifdef CONFIG_RESERVE_DMA_COHERENT
+static void __init reserve_dma_coherent(void)
 {
 	unsigned long ampr;
 
@@ -708,23 +691,23 @@ static void __init reserve_dma_consistent(void)
 	return;
 
  found:
-	dma_consistent_mem_start = ampr & xAMPRx_PPFN;
+	dma_coherent_mem_start = ampr & xAMPRx_PPFN;
 	ampr &= xAMPRx_SS;
 	ampr >>= 4;
 	ampr = 1 << (ampr - 3 + 20);
-	dma_consistent_mem_end = dma_consistent_mem_start + ampr;
+	dma_coherent_mem_end = dma_coherent_mem_start + ampr;
 
 	printk("DMA consistent memory reserved %lx-%lx\n",
-	       dma_consistent_mem_start, dma_consistent_mem_end);
+	       dma_coherent_mem_start, dma_coherent_mem_end);
 
-} /* end reserve_dma_consistent() */
+} /* end reserve_dma_coherent() */
 #endif
 
 /*****************************************************************************/
 /*
  * calibrate the delay loop
  */
-void __init calibrate_delay(void)
+void __cpuinit calibrate_delay(void)
 {
 	loops_per_jiffy = __delay_loops_MHz * (1000000 / HZ);
 
@@ -769,11 +752,13 @@ static void __init parse_cmdline_early(char *cmdline)
  */
 void __init setup_arch(char **cmdline_p)
 {
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	printk("Linux FR-V port done by Red Hat Inc <dhowells@redhat.com>\n");
 #else
 	printk("uClinux FR-V port done by Red Hat Inc <dhowells@redhat.com>\n");
 #endif
+
+	memcpy(boot_command_line, redboot_command_line, COMMAND_LINE_SIZE);
 
 	determine_cpu();
 	determine_clocks(1);
@@ -784,8 +769,8 @@ void __init setup_arch(char **cmdline_p)
 	gdbstub_set_baud(115200);
 #endif
 
-#ifdef CONFIG_RESERVE_DMA_CONSISTENT
-	reserve_dma_consistent();
+#ifdef CONFIG_RESERVE_DMA_COHERENT
+	reserve_dma_coherent();
 #endif
 	dump_memory_map();
 
@@ -793,25 +778,21 @@ void __init setup_arch(char **cmdline_p)
 	if (mb93090_mb00_detected)
 		mb93090_display();
 #endif
+
 	/* register those serial ports that are available */
+#ifdef CONFIG_FRV_ONCPU_SERIAL
 #ifndef CONFIG_GDBSTUB_UART0
 	__reg(UART0_BASE + UART_IER * 8) = 0;
-	register_serial(&__frv_uart0);
+	early_serial_setup(&__frv_uart0);
 #endif
 #ifndef CONFIG_GDBSTUB_UART1
 	__reg(UART1_BASE + UART_IER * 8) = 0;
-	register_serial(&__frv_uart1);
+	early_serial_setup(&__frv_uart1);
 #endif
-
-#if defined(CONFIG_CHR_DEV_FLASH) || defined(CONFIG_BLK_DEV_FLASH)
-	/* we need to initialize the Flashrom device here since we might
-	 * do things with flash early on in the boot
-	 */
-	flash_probe();
 #endif
 
 	/* deal with the command line - RedBoot may have passed one to the kernel */
-	memcpy(command_line, saved_command_line, sizeof(command_line));
+	memcpy(command_line, boot_command_line, sizeof(command_line));
 	*cmdline_p = &command_line[0];
 	parse_cmdline_early(command_line);
 
@@ -819,7 +800,7 @@ void __init setup_arch(char **cmdline_p)
 	 * - by now the stack is part of the init task */
 	printk("Memory %08lx-%08lx\n", memory_start, memory_end);
 
-	if (memory_start == memory_end) BUG();
+	BUG_ON(memory_start == memory_end);
 
 	init_mm.start_code = (unsigned long) &_stext;
 	init_mm.end_code = (unsigned long) &_etext;
@@ -845,12 +826,7 @@ void __init setup_arch(char **cmdline_p)
 #endif
 #endif
 
-#ifdef CONFIG_BLK_DEV_BLKMEM
-	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
-#endif
-	/*rom_length = (unsigned long)&_flashend - (unsigned long)&_romvec;*/
-
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	setup_linux_memory();
 #else
 	setup_uclinux_memory();
@@ -865,13 +841,38 @@ void __init setup_arch(char **cmdline_p)
 	printk("Done setup_arch\n");
 #endif
 
+	/* start the decrement timer running */
+//	asm volatile("movgs %0,timerd" :: "r"(10000000));
+//	__set_HSR(0, __get_HSR(0) | HSR0_ETMD);
+
 } /* end setup_arch() */
+
+#if 0
+/*****************************************************************************/
+/*
+ *
+ */
+static int __devinit setup_arch_serial(void)
+{
+	/* register those serial ports that are available */
+#ifndef CONFIG_GDBSTUB_UART0
+	early_serial_setup(&__frv_uart0);
+#endif
+#ifndef CONFIG_GDBSTUB_UART1
+	early_serial_setup(&__frv_uart1);
+#endif
+
+	return 0;
+} /* end setup_arch_serial() */
+
+late_initcall(setup_arch_serial);
+#endif
 
 /*****************************************************************************/
 /*
  * set up the memory map for normal MMU linux
  */
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 static void __init setup_linux_memory(void)
 {
 	unsigned long bootmap_size, low_top_pfn, kstart, kend, high_mem;
@@ -907,6 +908,10 @@ static void __init setup_linux_memory(void)
 		low_top_pfn = num_physpages;
 	}
 
+	min_low_pfn = memory_start >> PAGE_SHIFT;
+	max_low_pfn = low_top_pfn;
+	max_pfn = memory_end >> PAGE_SHIFT;
+
 	num_mappedpages = low_top_pfn;
 
 	printk(KERN_NOTICE "%ldMB LOWMEM available.\n", low_top_pfn >> (20 - PAGE_SHIFT));
@@ -919,14 +924,16 @@ static void __init setup_linux_memory(void)
 #endif
 
 	/* take back the memory occupied by the kernel image and the bootmem alloc map */
-	reserve_bootmem(kstart, kend - kstart + bootmap_size);
+	reserve_bootmem(kstart, kend - kstart + bootmap_size,
+			BOOTMEM_DEFAULT);
 
 	/* reserve the memory occupied by the initial ramdisk */
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (LOADER_TYPE && INITRD_START) {
 		if (INITRD_START + INITRD_SIZE <= (low_top_pfn << PAGE_SHIFT)) {
-			reserve_bootmem(INITRD_START, INITRD_SIZE);
-			initrd_start = INITRD_START ? INITRD_START + PAGE_OFFSET : 0;
+			reserve_bootmem(INITRD_START, INITRD_SIZE,
+					BOOTMEM_DEFAULT);
+			initrd_start = INITRD_START + PAGE_OFFSET;
 			initrd_end = initrd_start + INITRD_SIZE;
 		}
 		else {
@@ -947,37 +954,43 @@ static void __init setup_linux_memory(void)
 /*
  * set up the memory map for uClinux
  */
-#ifdef CONFIG_UCLINUX
+#ifndef CONFIG_MMU
 static void __init setup_uclinux_memory(void)
 {
 #ifdef CONFIG_PROTECT_KERNEL
 	unsigned long dampr;
 #endif
+	unsigned long kend;
 	int bootmap_size;
+
+	kend = (unsigned long) &__kernel_image_end;
+	kend = (kend + PAGE_SIZE - 1) & PAGE_MASK;
 
 	/* give all the memory to the bootmap allocator,  tell it to put the
 	 * boot mem_map immediately following the kernel image
 	 */
-	bootmap_size =
-		init_bootmem_node(NODE_DATA(0),
-				  (unsigned long) &__kernel_image_end >> PAGE_SHIFT, /* map addr */
-				  memory_start >> PAGE_SHIFT,	/* start of RAM */
-				  memory_end >> PAGE_SHIFT	/* end of RAM */
-				  );
+	bootmap_size = init_bootmem_node(NODE_DATA(0),
+					 kend >> PAGE_SHIFT,		/* map addr */
+					 memory_start >> PAGE_SHIFT,	/* start of RAM */
+					 memory_end >> PAGE_SHIFT	/* end of RAM */
+					 );
 
-	/* free the usable memory,  we have to make sure we do not free
-	 * the bootmem bitmap so we then reserve it after freeing it :-)
-	 */
+	/* free all the usable memory */
 	free_bootmem(memory_start, memory_end - memory_start);
 
 	high_memory = (void *) (memory_end & PAGE_MASK);
-	max_mapnr = num_physpages = num_mappedpages = MAP_NR(high_memory);
+	max_mapnr = num_physpages = ((unsigned long) high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
 
+	min_low_pfn = memory_start >> PAGE_SHIFT;
+	max_low_pfn = memory_end >> PAGE_SHIFT;
+	max_pfn = max_low_pfn;
+
+	/* now take back the bits the core kernel is occupying */
 #ifndef CONFIG_PROTECT_KERNEL
-	reserve_bootmem((unsigned long) &__kernel_image_end, bootmap_size);
+	reserve_bootmem(kend, bootmap_size, BOOTMEM_DEFAULT);
 	reserve_bootmem((unsigned long) &__kernel_image_start,
-			(unsigned long) &__kernel_image_end -
-			(unsigned long) &__kernel_image_start);
+			kend - (unsigned long) &__kernel_image_start,
+			BOOTMEM_DEFAULT);
 
 #else
 	dampr = __get_DAMPR(0);
@@ -985,13 +998,15 @@ static void __init setup_uclinux_memory(void)
 	dampr = (dampr >> 4) + 17;
 	dampr = 1 << dampr;
 
-	reserve_bootmem(__get_DAMPR(0) & xAMPRx_PPFN, dampr);
+	reserve_bootmem(__get_DAMPR(0) & xAMPRx_PPFN, dampr, BOOTMEM_DEFAULT);
 #endif
 
-#ifdef CONFIG_RESERVE_DMA_CONSISTENT
-	if (dma_consistent_mem_start)
-		reserve_bootmem(dma_consistent_mem_start,
-				dma_consistent_mem_end - dma_consistent_mem_start);
+	/* reserve some memory to do uncached DMA through if requested */
+#ifdef CONFIG_RESERVE_DMA_COHERENT
+	if (dma_coherent_mem_start)
+		reserve_bootmem(dma_coherent_mem_start,
+				dma_coherent_mem_end - dma_coherent_mem_start,
+				BOOTMEM_DEFAULT);
 #endif
 
 } /* end setup_uclinux_memory() */
@@ -1003,7 +1018,10 @@ static void __init setup_uclinux_memory(void)
  */
 static int show_cpuinfo(struct seq_file *m, void *v)
 {
-	const char *gr, *fr, *fm, *fp, *cm, *nem, *ble, *sep;
+	const char *gr, *fr, *fm, *fp, *cm, *nem, *ble;
+#ifdef CONFIG_PM
+	const char *sep;
+#endif
 
 	gr  = cpu_hsr0_all & HSR0_GRHE	? "gr0-63"	: "gr0-31";
 	fr  = cpu_hsr0_all & HSR0_FRHE	? "fr0-63"	: "fr0-31";
@@ -1094,7 +1112,7 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
+const struct seq_operations cpuinfo_op = {
 	.start	= c_start,
 	.next	= c_next,
 	.stop	= c_stop,

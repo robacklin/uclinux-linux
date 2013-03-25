@@ -16,7 +16,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *  
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -24,6 +24,11 @@
 
 #ifndef KERNEL_IRDA_H
 #define KERNEL_IRDA_H
+
+#include <linux/types.h>
+#include <linux/socket.h>
+
+/* Note that this file is shared with user space. */
 
 /* Hint bit positions for first hint byte */
 #define HINT_PNP         0x01
@@ -70,6 +75,8 @@ typedef enum {
 	IRDA_MCP2120_DONGLE      = 9,
 	IRDA_ACT200L_DONGLE      = 10,
 	IRDA_MA600_DONGLE        = 11,
+	IRDA_TOIM3232_DONGLE     = 12,
+	IRDA_EP7211_DONGLE       = 13,
 } IRDA_DONGLE;
 
 /* Protocol types to be used for SOCK_DGRAM */
@@ -115,7 +122,7 @@ enum {
 #define LSAP_ANY              0xff
 
 struct sockaddr_irda {
-	sa_family_t sir_family;   /* AF_IRDA */
+	__kernel_sa_family_t sir_family; /* AF_IRDA */
 	__u8        sir_lsap_sel; /* LSAP selector */
 	__u32       sir_addr;     /* Device address */
 	char        sir_name[25]; /* Usually <service>:IrDA:TinyTP */
@@ -208,6 +215,34 @@ struct if_irda_req {
 #define ifr_mode      ifr_ifru.ifru_mode
 #define ifr_dtr       ifr_ifru.ifru_line.dtr
 #define ifr_rts       ifr_ifru.ifru_line.rts
+
+
+/* IrDA netlink definitions */
+#define IRDA_NL_NAME "irda"
+#define IRDA_NL_VERSION 1
+
+enum irda_nl_commands {
+	IRDA_NL_CMD_UNSPEC,
+	IRDA_NL_CMD_SET_MODE,
+	IRDA_NL_CMD_GET_MODE,
+
+	__IRDA_NL_CMD_AFTER_LAST
+};
+#define IRDA_NL_CMD_MAX (__IRDA_NL_CMD_AFTER_LAST - 1)
+
+enum nl80211_attrs {
+	IRDA_NL_ATTR_UNSPEC,
+	IRDA_NL_ATTR_IFNAME,
+	IRDA_NL_ATTR_MODE,
+
+	__IRDA_NL_ATTR_AFTER_LAST
+};
+#define IRDA_NL_ATTR_MAX (__IRDA_NL_ATTR_AFTER_LAST - 1)
+
+/* IrDA modes */
+#define IRDA_MODE_PRIMARY   0x1
+#define IRDA_MODE_SECONDARY 0x2
+#define IRDA_MODE_MONITOR   0x4
 
 #endif /* KERNEL_IRDA_H */
 

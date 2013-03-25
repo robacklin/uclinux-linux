@@ -10,6 +10,11 @@
 
 #include <linux/netfilter.h>
 
+/* only for userspace compatibility */
+#ifndef __KERNEL__
+
+#include <limits.h> /* for INT_MIN, INT_MAX */
+
 /* IP Cache bits. */
 /* Src IP address. */
 #define NFC_IP6_SRC              0x0001
@@ -39,7 +44,6 @@
 /* Something else about the proto */
 #define NFC_IP6_PROTO_UNKNOWN    0x2000
 
-
 /* IP6 Hooks */
 /* After promisc drops, checksum checks. */
 #define NF_IP6_PRE_ROUTING	0
@@ -52,16 +56,38 @@
 /* Packets about to hit the wire. */
 #define NF_IP6_POST_ROUTING	4
 #define NF_IP6_NUMHOOKS		5
+#endif /* ! __KERNEL__ */
 
 
 enum nf_ip6_hook_priorities {
 	NF_IP6_PRI_FIRST = INT_MIN,
+	NF_IP6_PRI_CONNTRACK_DEFRAG = -400,
+	NF_IP6_PRI_RAW = -300,
+	NF_IP6_PRI_SELINUX_FIRST = -225,
 	NF_IP6_PRI_CONNTRACK = -200,
 	NF_IP6_PRI_MANGLE = -150,
 	NF_IP6_PRI_NAT_DST = -100,
 	NF_IP6_PRI_FILTER = 0,
+	NF_IP6_PRI_SECURITY = 50,
 	NF_IP6_PRI_NAT_SRC = 100,
+	NF_IP6_PRI_SELINUX_LAST = 225,
 	NF_IP6_PRI_LAST = INT_MAX,
 };
+
+#ifdef  __KERNEL__
+
+#ifdef CONFIG_NETFILTER
+extern int ip6_route_me_harder(struct sk_buff *skb);
+extern __sum16 nf_ip6_checksum(struct sk_buff *skb, unsigned int hook,
+				    unsigned int dataoff, u_int8_t protocol);
+
+extern int ipv6_netfilter_init(void);
+extern void ipv6_netfilter_fini(void);
+#else /* CONFIG_NETFILTER */
+static inline int ipv6_netfilter_init(void) { return 0; }
+static inline void ipv6_netfilter_fini(void) { return; }
+#endif /* CONFIG_NETFILTER */
+
+#endif /* __KERNEL__ */
 
 #endif /*__LINUX_IP6_NETFILTER_H*/

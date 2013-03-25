@@ -13,6 +13,7 @@
 #include "matroxfb_base.h"
 #include "matroxfb_maven.h"
 #include <linux/i2c.h>
+#include <linux/slab.h>
 #include <linux/i2c-algo-bit.h>
 
 /* MGA-TVO I2C for G200, G400 */
@@ -41,7 +42,7 @@ static int matroxfb_read_gpio(struct matrox_fb_info* minfo) {
 	int v;
 
 	matroxfb_DAC_lock_irqsave(flags);
-	v = matroxfb_DAC_in(PMINFO DAC_XGENIODATA);
+	v = matroxfb_DAC_in(minfo, DAC_XGENIODATA);
 	matroxfb_DAC_unlock_irqrestore(flags);
 	return v;
 }
@@ -51,10 +52,10 @@ static void matroxfb_set_gpio(struct matrox_fb_info* minfo, int mask, int val) {
 	int v;
 
 	matroxfb_DAC_lock_irqsave(flags);
-	v = (matroxfb_DAC_in(PMINFO DAC_XGENIOCTRL) & mask) | val;
-	matroxfb_DAC_out(PMINFO DAC_XGENIOCTRL, v);
+	v = (matroxfb_DAC_in(minfo, DAC_XGENIOCTRL) & mask) | val;
+	matroxfb_DAC_out(minfo, DAC_XGENIOCTRL, v);
 	/* We must reset GENIODATA very often... XFree plays with this register */
-	matroxfb_DAC_out(PMINFO DAC_XGENIODATA, 0x00);
+	matroxfb_DAC_out(minfo, DAC_XGENIODATA, 0x00);
 	matroxfb_DAC_unlock_irqrestore(flags);
 }
 
@@ -87,43 +88,32 @@ static int matroxfb_gpio_getscl(void* data) {
 	return (matroxfb_read_gpio(b->minfo) & b->mask.clock) ? 1 : 0;
 }
 
-static void matroxfb_dh_inc_use(struct i2c_adapter* dummy) {
-	MOD_INC_USE_COUNT;
-}
-
-static void matroxfb_dh_dec_use(struct i2c_adapter* dummy) {
-	MOD_DEC_USE_COUNT;
-}
-
-static struct i2c_adapter matrox_i2c_adapter_template =
-{
-	.id =		I2C_HW_B_G400,
-	.inc_use =	matroxfb_dh_inc_use,
-	.dec_use =	matroxfb_dh_dec_use,
-};
-
-static struct i2c_algo_bit_data matrox_i2c_algo_template =
+static const struct i2c_algo_bit_data matrox_i2c_algo_template =
 {
 	.setsda		= matroxfb_gpio_setsda,
 	.setscl		= matroxfb_gpio_setscl,
 	.getsda		= matroxfb_gpio_getsda,
 	.getscl		= matroxfb_gpio_getscl,
 	.udelay		= 10,
-	.mdelay		= 10,
 	.timeout	= 100,
 };
 
 static int i2c_bus_reg(struct i2c_bit_adapter* b, struct matrox_fb_info* minfo, 
-		unsigned int data, unsigned int clock, const char* name) {
+		unsigned int data, unsigned int clock, const char *name,
+		int class)
+{
 	int err;
 
 	b->minfo = minfo;
 	b->mask.data = data;
 	b->mask.clock = clock;
-	b->adapter = matrox_i2c_adapter_template;
-	sprintf(b->adapter.name, name, GET_FB_IDX(minfo->fbcon.node));
-	b->adapter.data = b;
+	b->adapter.owner = THIS_MODULE;
+	snprintf(b->adapter.name, sizeof(b->adapter.name), name,
+		minfo->fbcon.node);
+	i2c_set_adapdata(&b->adapter, b);
+	b->adapter.class = class;
 	b->adapter.algo_data = &b->bac;
+	b->adapter.dev.parent = &minfo->pcidev->dev;
 	b->bac = matrox_i2c_algo_template;
 	b->bac.data = b;
 	err = i2c_bit_add_bus(&b->adapter);
@@ -133,7 +123,7 @@ static int i2c_bus_reg(struct i2c_bit_adapter* b, struct matrox_fb_info* minfo,
 
 static void i2c_bit_bus_del(struct i2c_bit_adapter* b) {
 	if (b->initialized) {
-		i2c_bit_del_bus(&b->adapter);
+		i2c_del_adapter(&b->adapter);
 		b->initialized = 0;
 	}
 }
@@ -155,38 +145,54 @@ static void* i2c_matroxfb_probe(struct matrox_fb_info* minfo) {
 	unsigned long flags;
 	struct matroxfb_dh_maven_info* m2info;
 
-	m2info = (struct matroxfb_dh_maven_info*)kmalloc(sizeof(*m2info), GFP_KERNEL);
+	m2info = kzalloc(sizeof(*m2info), GFP_KERNEL);
 	if (!m2info)
 		return NULL;
 
 	matroxfb_DAC_lock_irqsave(flags);
-	matroxfb_DAC_out(PMINFO DAC_XGENIODATA, 0xFF);
-	matroxfb_DAC_out(PMINFO DAC_XGENIOCTRL, 0x00);
+	matroxfb_DAC_out(minfo, DAC_XGENIODATA, 0xFF);
+	matroxfb_DAC_out(minfo, DAC_XGENIOCTRL, 0x00);
 	matroxfb_DAC_unlock_irqrestore(flags);
 
-	memset(m2info, 0, sizeof(*m2info));
-
-	switch (ACCESS_FBINFO(chip)) {
+	switch (minfo->chip) {
 		case MGA_2064:
 		case MGA_2164:
-			err = i2c_bus_reg(&m2info->ddc1, minfo, DDC1B_DATA, DDC1B_CLK, "DDC:fb%u #0 on i2c-matroxfb");
+			err = i2c_bus_reg(&m2info->ddc1, minfo,
+					  DDC1B_DATA, DDC1B_CLK,
+					  "DDC:fb%u #0", I2C_CLASS_DDC);
 			break;
 		default:
-			err = i2c_bus_reg(&m2info->ddc1, minfo, DDC1_DATA, DDC1_CLK, "DDC:fb%u #0 on i2c-matroxfb");
+			err = i2c_bus_reg(&m2info->ddc1, minfo,
+					  DDC1_DATA, DDC1_CLK,
+					  "DDC:fb%u #0", I2C_CLASS_DDC);
 			break;
 	}
 	if (err)
 		goto fail_ddc1;
-	if (ACCESS_FBINFO(devflags.dualhead)) {
-		err = i2c_bus_reg(&m2info->ddc2, minfo, DDC2_DATA, DDC2_CLK, "DDC:fb%u #1 on i2c-matroxfb");
+	if (minfo->devflags.dualhead) {
+		err = i2c_bus_reg(&m2info->ddc2, minfo,
+				  DDC2_DATA, DDC2_CLK,
+				  "DDC:fb%u #1", I2C_CLASS_DDC);
 		if (err == -ENODEV) {
 			printk(KERN_INFO "i2c-matroxfb: VGA->TV plug detected, DDC unavailable.\n");
 		} else if (err)
 			printk(KERN_INFO "i2c-matroxfb: Could not register secondary output i2c bus. Continuing anyway.\n");
 		/* Register maven bus even on G450/G550 */
-		err = i2c_bus_reg(&m2info->maven, minfo, MAT_DATA, MAT_CLK, "MAVEN:fb%u on i2c-matroxfb");
+		err = i2c_bus_reg(&m2info->maven, minfo,
+				  MAT_DATA, MAT_CLK, "MAVEN:fb%u", 0);
 		if (err)
 			printk(KERN_INFO "i2c-matroxfb: Could not register Maven i2c bus. Continuing anyway.\n");
+		else {
+			struct i2c_board_info maven_info = {
+				I2C_BOARD_INFO("maven", 0x1b),
+			};
+			unsigned short const addr_list[2] = {
+				0x1b, I2C_CLIENT_END
+			};
+
+			i2c_new_probed_device(&m2info->maven.adapter,
+					      &maven_info, addr_list, NULL);
+		}
 	}
 	return m2info;
 fail_ddc1:;

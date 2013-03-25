@@ -1,4 +1,4 @@
-/* 2001/10/02
+/* drivers/isdn/hisax/amd7930_fn.h
  *
  * gerdes_amd7930.h     Header-file included by
  *                      gerdes_amd7930.c
@@ -32,5 +32,6 @@
 
 #define DBUSY_TIMER_VALUE 80
 
-extern void Amd7930_interrupt(struct IsdnCardState *cs, unsigned char irflags);
-extern void Amd7930_init(struct IsdnCardState *cs);
+extern void Amd7930_interrupt(struct IsdnCardState *, unsigned char);
+extern void Amd7930_init(struct IsdnCardState *);
+extern void setup_Amd7930(struct IsdnCardState *);

@@ -5,85 +5,109 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br.c,v 1.46.2.1 2001/12/24 00:56:13 davem Exp $
- *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
  *	as published by the Free Software Foundation; either version
  *	2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/miscdevice.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
-#include <linux/if_bridge.h>
-#include <linux/brlock.h>
-#include <linux/rtnetlink.h>
-#include <asm/uaccess.h>
+#include <linux/llc.h>
+#include <net/llc.h>
+#include <net/stp.h>
+
 #include "br_private.h"
 
-#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
-#include "../atm/lec.h"
-#endif
+static const struct stp_proto br_stp_proto = {
+	.rcv	= br_stp_rcv,
+};
 
-int (*br_should_route_hook) (struct sk_buff **pskb) = NULL;
-
-void br_dec_use_count()
-{
-	MOD_DEC_USE_COUNT;
-}
-
-void br_inc_use_count()
-{
-	MOD_INC_USE_COUNT;
-}
+static struct pernet_operations br_net_ops = {
+	.exit	= br_net_exit,
+};
 
 static int __init br_init(void)
 {
-	printk(KERN_INFO "NET4: Ethernet Bridge 008 for NET4.0\n");
+	int err;
 
-#ifdef CONFIG_NETFILTER
-	if (br_netfilter_init())
-		return 1;
+	err = stp_proto_register(&br_stp_proto);
+	if (err < 0) {
+		pr_err("bridge: can't register sap for STP\n");
+		return err;
+	}
+
+	err = br_fdb_init();
+	if (err)
+		goto err_out;
+
+	err = register_pernet_subsys(&br_net_ops);
+	if (err)
+		goto err_out1;
+
+	err = br_netfilter_init();
+	if (err)
+		goto err_out2;
+
+	err = register_netdevice_notifier(&br_device_notifier);
+	if (err)
+		goto err_out3;
+
+	err = br_netlink_init();
+	if (err)
+		goto err_out4;
+
+	brioctl_set(br_ioctl_deviceless_stub);
+
+#if defined(CONFIG_NETFILTER_XT_MATCH_PHYSDEV) || defined(CONFIG_NETFILTER_XT_MATCH_PHYSDEV_MODULE)
+	br_fdb_get_port_hook = br_fdb_get_port;
 #endif
-	br_handle_frame_hook = br_handle_frame;
-	br_ioctl_hook = br_ioctl_deviceless_stub;
-#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
-	br_fdb_get_hook = br_fdb_get;
-	br_fdb_put_hook = br_fdb_put;
+#if IS_ENABLED(CONFIG_ATM_LANE)
+	br_fdb_test_addr_hook = br_fdb_test_addr;
 #endif
-	register_netdevice_notifier(&br_device_notifier);
 
 	return 0;
+err_out4:
+	unregister_netdevice_notifier(&br_device_notifier);
+err_out3:
+	br_netfilter_fini();
+err_out2:
+	unregister_pernet_subsys(&br_net_ops);
+err_out1:
+	br_fdb_fini();
+err_out:
+	stp_proto_unregister(&br_stp_proto);
+	return err;
 }
 
 static void __exit br_deinit(void)
 {
-#ifdef CONFIG_NETFILTER
-	br_netfilter_fini();
-#endif
+	stp_proto_unregister(&br_stp_proto);
+
+	br_netlink_fini();
 	unregister_netdevice_notifier(&br_device_notifier);
+	brioctl_set(NULL);
 
-	rtnl_lock();
-	br_ioctl_hook = NULL;
-	rtnl_unlock();
+	unregister_pernet_subsys(&br_net_ops);
 
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_handle_frame_hook = NULL;
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	rcu_barrier(); /* Wait for completion of call_rcu()'s */
 
-#if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
-	br_fdb_get_hook = NULL;
-	br_fdb_put_hook = NULL;
+	br_netfilter_fini();
+#if defined(CONFIG_NETFILTER_XT_MATCH_PHYSDEV) || defined(CONFIG_NETFILTER_XT_MATCH_PHYSDEV_MODULE)
+	br_fdb_get_port_hook = NULL;
 #endif
-}
+#if IS_ENABLED(CONFIG_ATM_LANE)
+	br_fdb_test_addr_hook = NULL;
+#endif
 
-EXPORT_SYMBOL(br_should_route_hook);
+	br_fdb_fini();
+}
 
 module_init(br_init)
 module_exit(br_deinit)
 MODULE_LICENSE("GPL");
+MODULE_VERSION(BR_VERSION);
+MODULE_ALIAS_RTNL_LINK("bridge");

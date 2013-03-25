@@ -59,6 +59,7 @@
 #include <linux/delay.h>
 #include <linux/mc6821.h>
 #include <linux/zorro.h>
+#include <linux/interrupt.h>
 #include <asm/setup.h>
 #include <asm/amigahw.h>
 #include <asm/irq.h>
@@ -210,7 +211,7 @@ static void mfc3_change_mode( struct parport *p, int m)
 
 static int use_cnt = 0;
 
-static void mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mfc3_interrupt(int irq, void *dev_id)
 {
 	int i;
 
@@ -218,8 +219,9 @@ static void mfc3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if (this_port[i] != NULL)
 			if (pia(this_port[i])->crb & 128) { /* Board caused interrupt */
 				dummy = pia(this_port[i])->pprb; /* clear irq bit */
-				parport_generic_irq(irq, this_port[i], regs);
+				parport_generic_irq(this_port[i]);
 			}
+	return IRQ_HANDLED;
 }
 
 static void mfc3_enable_irq(struct parport *p)
@@ -280,56 +282,45 @@ static void mfc3_restore_state(struct parport *p, struct parport_state *s)
 	pia(p)->cra |= PIA_DDR;
 }
 
-static void mfc3_inc_use_count(void)
-{
-	MOD_INC_USE_COUNT;
-}
-
-static void mfc3_dec_use_count(void)
-{
-	MOD_DEC_USE_COUNT;
-}
-
 static struct parport_operations pp_mfc3_ops = {
-	mfc3_write_data,
-	mfc3_read_data,
+	.write_data	= mfc3_write_data,
+	.read_data	= mfc3_read_data,
 
-	mfc3_write_control,
-	mfc3_read_control,
-	mfc3_frob_control,
+	.write_control	= mfc3_write_control,
+	.read_control	= mfc3_read_control,
+	.frob_control	= mfc3_frob_control,
 
-	mfc3_read_status,
+	.read_status	= mfc3_read_status,
 
-	mfc3_enable_irq,
-	mfc3_disable_irq,
+	.enable_irq	= mfc3_enable_irq,
+	.disable_irq	= mfc3_disable_irq,
 
-	mfc3_data_forward, 
-	mfc3_data_reverse, 
+	.data_forward	= mfc3_data_forward, 
+	.data_reverse	= mfc3_data_reverse, 
 
-	mfc3_init_state,
-	mfc3_save_state,
-	mfc3_restore_state,
+	.init_state	= mfc3_init_state,
+	.save_state	= mfc3_save_state,
+	.restore_state	= mfc3_restore_state,
 
-	mfc3_inc_use_count,
-	mfc3_dec_use_count,
+	.epp_write_data	= parport_ieee1284_epp_write_data,
+	.epp_read_data	= parport_ieee1284_epp_read_data,
+	.epp_write_addr	= parport_ieee1284_epp_write_addr,
+	.epp_read_addr	= parport_ieee1284_epp_read_addr,
 
-	parport_ieee1284_epp_write_data,
-	parport_ieee1284_epp_read_data,
-	parport_ieee1284_epp_write_addr,
-	parport_ieee1284_epp_read_addr,
+	.ecp_write_data	= parport_ieee1284_ecp_write_data,
+	.ecp_read_data	= parport_ieee1284_ecp_read_data,
+	.ecp_write_addr	= parport_ieee1284_ecp_write_addr,
 
-	parport_ieee1284_ecp_write_data,
-	parport_ieee1284_ecp_read_data,
-	parport_ieee1284_ecp_write_addr,
+	.compat_write_data	= parport_ieee1284_write_compat,
+	.nibble_read_data	= parport_ieee1284_read_nibble,
+	.byte_read_data		= parport_ieee1284_read_byte,
 
-	parport_ieee1284_write_compat,
-	parport_ieee1284_read_nibble,
-	parport_ieee1284_read_byte,
+	.owner		= THIS_MODULE,
 };
 
 /* ----------- Initialisation code --------------------------------- */
 
-int __init parport_mfc3_init(void)
+static int __init parport_mfc3_init(void)
 {
 	struct parport *p;
 	int pias = 0;
@@ -362,14 +353,14 @@ int __init parport_mfc3_init(void)
 
 		if (p->irq != PARPORT_IRQ_NONE) {
 			if (use_cnt++ == 0)
-				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, SA_SHIRQ, p->name, &pp_mfc3_ops))
+				if (request_irq(IRQ_AMIGA_PORTS, mfc3_interrupt, IRQF_SHARED, p->name, &pp_mfc3_ops))
 					goto out_irq;
 		}
+		p->dev = &z->dev;
 
 		this_port[pias++] = p;
 		printk(KERN_INFO "%s: Multiface III port using irq\n", p->name);
 		/* XXX: set operating mode */
-		parport_proc_register(p);
 
 		p->private_data = (void *)piabase;
 		parport_announce_port (p);
@@ -379,7 +370,7 @@ int __init parport_mfc3_init(void)
 		continue;
 
 	out_irq:
-		parport_unregister_port(p);
+		parport_put_port(p);
 	out_port:
 		release_mem_region(piabase, sizeof(struct pia));
 	}
@@ -387,29 +378,28 @@ int __init parport_mfc3_init(void)
 	return pias ? 0 : -ENODEV;
 }
 
-void __exit parport_mfc3_exit(void)
+static void __exit parport_mfc3_exit(void)
 {
 	int i;
 
 	for (i = 0; i < MAX_MFC; i++) {
 		if (!this_port[i])
 			continue;
-		if (!this_port[i]->irq != PARPORT_IRQ_NONE) {
+		parport_remove_port(this_port[i]);
+		if (this_port[i]->irq != PARPORT_IRQ_NONE) {
 			if (--use_cnt == 0) 
 				free_irq(IRQ_AMIGA_PORTS, &pp_mfc3_ops);
 		}
-		parport_proc_unregister(this_port[i]);
-		parport_unregister_port(this_port[i]);
 		release_mem_region(ZTWO_PADDR(this_port[i]->private_data), sizeof(struct pia));
+		parport_put_port(this_port[i]);
 	}
 }
 
 
 MODULE_AUTHOR("Joerg Dorchain <joerg@dorchain.net>");
-MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Paralllel Port");
+MODULE_DESCRIPTION("Parport Driver for Multiface 3 expansion cards Parallel Port");
 MODULE_SUPPORTED_DEVICE("Multiface 3 Parallel Port");
 MODULE_LICENSE("GPL");
 
 module_init(parport_mfc3_init)
 module_exit(parport_mfc3_exit)
-

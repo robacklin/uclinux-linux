@@ -1,249 +1,252 @@
 /*
- * arch/arm/mach-ixdp2400/pci.c
+ * arch/arm/mach-ixp2000/pci.c
  *
- * Generic PCI support functionality that should eventually move to
- * arch/arm/kernel/bios32.c.  Derived from support in ppc and alpha.
+ * PCI routines for IXDP2400/IXDP2800 boards
  *
- * Matt Porter <mporter@mvista.com>
+ * Original Author: Naeem Afzal <naeem.m.afzal@intel.com>
+ * Maintained by: Deepak Saxena <dsaxena@plexity.net>
  *
- * Copyright (C) 2001 MontaVista Software, Inc.
+ * Copyright 2002 Intel Corp.
+ * Copyright (C) 2003-2004 MontaVista Software, Inc.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 as
- * published by the Free Software Foundation.
+ *  This program is free software; you can redistribute  it and/or modify it
+ *  under  the terms of  the GNU General  Public License as published by the
+ *  Free Software Foundation;  either version 2 of the  License, or (at your
+ *  option) any later version.
  */
+
+#include <linux/sched.h>
 #include <linux/kernel.h>
-#include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/interrupt.h>
+#include <linux/mm.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
+#include <linux/delay.h>
+#include <linux/io.h>
 
-#include <asm/io.h>
-#include <asm/system.h>
+#include <asm/irq.h>
+#include <mach/hardware.h>
+
 #include <asm/mach/pci.h>
-#include <asm/arch/hardware.h>
-#include <asm/arch/pci-bridge.h>
 
-#define DEBUG 1 
+static volatile int pci_master_aborts = 0;
 
-#ifdef DEBUG
-#define  DBG(x...) printk(x)
-#else
-#define  DBG(x...)
-#endif
+static int clear_master_aborts(void);
 
-struct pci_controller* hose_head;
-struct pci_controller** hose_tail = &hose_head;
-
-/*
- * The following code swizzles for exactly one bridge.  The routine
- * common_swizzle below handles multiple bridges.  But there are a
- * some boards that don't follow the PCI spec's suggestion so we
- * break this piece out separately.
- */
-static inline u8
-bridge_swizzle(u8 pin, u8 slot)
+u32 *
+ixp2000_pci_config_addr(unsigned int bus_nr, unsigned int devfn, int where)
 {
-	return (((pin-1) + slot) % 4) + 1;
-}
+	u32 *paddress;
 
-u8 __init
-common_swizzle(struct pci_dev *dev, u8 *pinp)
-{
-	struct pci_controller *hose;
-	
-	hose = pci_bus_to_hose(dev->bus->number);
+	if (PCI_SLOT(devfn) > 7)
+		return 0;
 
-	if (dev->bus->number != hose->first_busno) {
-		u8 pin = *pinp;
-		do {
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
-			/* Move up the chain of bridges. */
-			dev = dev->bus->self;
-		} while (dev->bus->self);
-		*pinp = pin;
+	/* Must be dword aligned */
+	where &= ~3;
 
-		/* The slot is the slot of the last bridge. */
+	/*
+	 * For top bus, generate type 0, else type 1
+	 */
+	if (!bus_nr) {
+		/* only bits[23:16] are used for IDSEL */
+		paddress = (u32 *) (IXP2000_PCI_CFG0_VIRT_BASE
+				    | (1 << (PCI_SLOT(devfn) + 16))
+				    | (PCI_FUNC(devfn) << 8) | where);
+	} else {
+		paddress = (u32 *) (IXP2000_PCI_CFG1_VIRT_BASE 
+				    | (bus_nr << 16)
+				    | (PCI_SLOT(devfn) << 11)
+				    | (PCI_FUNC(devfn) << 8) | where);
 	}
 
-	return PCI_SLOT(dev->devfn);
+	return paddress;
 }
 
 /*
- * Null PCI config access functions, for the case when we can't
- * find a hose.
+ * Mask table, bits to mask for quantity of size 1, 2 or 4 bytes.
+ * 0 and 3 are not valid indexes...
  */
-#define NULL_PCI_OP(rw, size, type)					\
-static int								\
-null_##rw##_config_##size(struct pci_dev *dev, int offset, type val)	\
-{									\
-	return PCIBIOS_DEVICE_NOT_FOUND;    				\
-}
-
-	NULL_PCI_OP(read, byte, u8 *)
-	NULL_PCI_OP(read, word, u16 *)
-	NULL_PCI_OP(read, dword, u32 *)
-	NULL_PCI_OP(write, byte, u8)
-	NULL_PCI_OP(write, word, u16)
-NULL_PCI_OP(write, dword, u32)
-
-static struct pci_ops null_pci_ops =
-{
-	null_read_config_byte,
-	null_read_config_word,
-	null_read_config_dword,
-	null_write_config_byte,
-	null_write_config_word,
-	null_write_config_dword
+static u32 bytemask[] = {
+	/*0*/	0,
+	/*1*/	0xff,
+	/*2*/	0xffff,
+	/*3*/	0,
+	/*4*/	0xffffffff,
 };
 
+
+int ixp2000_pci_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+				int size, u32 *value)
+{
+	u32 n;
+	u32 *addr;
+
+	n = where % 4;
+
+	addr = ixp2000_pci_config_addr(bus->number, devfn, where);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+
+	pci_master_aborts = 0;
+	*value = (*addr >> (8*n)) & bytemask[size];
+	if (pci_master_aborts) {
+		pci_master_aborts = 0;
+		*value = 0xffffffff;
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	}
+
+	return PCIBIOS_SUCCESSFUL;
+}
+
 /*
- * These functions are used early on before PCI scanning is done
- * and all of the pci_dev and pci_bus structures have been created.
+ * We don't do error checks by calling clear_master_aborts() b/c the
+ * assumption is that the caller did a read first to make sure a device
+ * exists.
  */
-struct pci_dev *
-fake_pci_dev(struct pci_controller *hose, int busnr, int devfn)
+int ixp2000_pci_write_config(struct pci_bus *bus, unsigned int devfn, int where,
+				int size, u32 value)
 {
-	static struct pci_dev dev;
-	static struct pci_bus bus;
+	u32 mask;
+	u32 *addr;
+	u32 temp;
 
-	if (hose == 0) {
-		hose = pci_bus_to_hose(busnr);
-		if (hose == 0)
-			printk(KERN_ERR "Can't find hose for PCI bus %d!\n", busnr);
+	mask = ~(bytemask[size] << ((where % 0x4) * 8));
+	addr = ixp2000_pci_config_addr(bus->number, devfn, where);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	temp = (u32) (value) << ((where % 0x4) * 8);
+	*addr = (*addr & mask) | temp;
+
+	clear_master_aborts();
+
+	return PCIBIOS_SUCCESSFUL;
+}
+
+
+static struct pci_ops ixp2000_pci_ops = {
+	.read	= ixp2000_pci_read_config,
+	.write	= ixp2000_pci_write_config
+};
+
+struct pci_bus *ixp2000_pci_scan_bus(int nr, struct pci_sys_data *sysdata)
+{
+	return pci_scan_root_bus(NULL, sysdata->busnr, &ixp2000_pci_ops,
+				 sysdata, &sysdata->resources);
+}
+
+
+int ixp2000_pci_abort_handler(unsigned long addr, unsigned int fsr, struct pt_regs *regs)
+{
+
+	volatile u32 temp;
+	unsigned long flags;
+
+	pci_master_aborts = 1;
+
+	local_irq_save(flags);
+	temp = *(IXP2000_PCI_CONTROL);
+	if (temp & ((1 << 8) | (1 << 5))) {
+		ixp2000_reg_wrb(IXP2000_PCI_CONTROL, temp);
 	}
-	dev.bus = &bus;
-	dev.sysdata = hose;
-	dev.devfn = devfn;
-	bus.number = busnr;
-	bus.ops = hose? hose->ops: &null_pci_ops;
-	return &dev;
+
+	temp = *(IXP2000_PCI_CMDSTAT);
+	if (temp & (1 << 29)) {
+		while (temp & (1 << 29)) {	
+			ixp2000_reg_write(IXP2000_PCI_CMDSTAT, temp);
+			temp = *(IXP2000_PCI_CMDSTAT);
+		}
+	}
+	local_irq_restore(flags);
+
+	/*
+	 * If it was an imprecise abort, then we need to correct the
+	 * return address to be _after_ the instruction.
+	 */
+	if (fsr & (1 << 10))
+		regs->ARM_pc += 4;
+
+	return 0;
 }
 
-static int next_controller_index;
-
-struct pci_controller * __init
-pcibios_alloc_controller(void)
+int
+clear_master_aborts(void)
 {
-	struct pci_controller *hose;
+	volatile u32 temp;
+	unsigned long flags;
 
-	hose = (struct pci_controller *)kmalloc(sizeof(*hose), GFP_KERNEL);
-	memset(hose, 0, sizeof(struct pci_controller));
-	
-	*hose_tail = hose;
-	hose_tail = &hose->next;
+	local_irq_save(flags);
+	temp = *(IXP2000_PCI_CONTROL);
+	if (temp & ((1 << 8) | (1 << 5))) {
+		ixp2000_reg_wrb(IXP2000_PCI_CONTROL, temp);
+	}
 
-	hose->index = next_controller_index++;
+	temp = *(IXP2000_PCI_CMDSTAT);
+	if (temp & (1 << 29)) {
+		while (temp & (1 << 29)) {
+			ixp2000_reg_write(IXP2000_PCI_CMDSTAT, temp);
+			temp = *(IXP2000_PCI_CMDSTAT);
+		}
+	}
+	local_irq_restore(flags);
 
-	return hose;
-}
-	
-struct pci_controller *
-pci_bus_to_hose(int bus)
-{
-	struct pci_controller *hose = hose_head;
-
-	for (; hose; hose = hose->next)
-		if (bus >= hose->first_busno && bus <= hose->last_busno)
-			return hose;
-	return NULL;
+	return 0;
 }
 
 void __init
-pci_exclude_device(unsigned char bus, unsigned char devfn)
+ixp2000_pci_preinit(void)
 {
-	struct pci_dev *dev, *pdev = NULL;
+	pci_set_flags(0);
 
-	/* Walk the pci device list */
-	pci_for_each_dev(dev)
-	{
-		if ((dev->bus->number == bus) && (dev->devfn == devfn))
-		{
-			/*
-			 * Remove the device from the global and
-			 * bus lists.
-			 */
-			list_del(&(dev->global_list));
-			list_del(&(dev->bus_list));
+	pcibios_min_io = 0;
+	pcibios_min_mem = 0;
 
-			/* Free the pci_dev structure */
-			kfree(dev);
+#ifndef CONFIG_IXP2000_SUPPORT_BROKEN_PCI_IO
+	/*
+	 * Configure the PCI unit to properly byteswap I/O transactions,
+	 * and verify that it worked.
+	 */
+	ixp2000_reg_write(IXP2000_PCI_CONTROL,
+			  (*IXP2000_PCI_CONTROL | PCI_CONTROL_IEE));
 
-			break;
-		}
-		pdev = dev;
-	}
+	if ((*IXP2000_PCI_CONTROL & PCI_CONTROL_IEE) == 0)
+		panic("IXP2000: PCI I/O is broken on this ixp model, and "
+			"the needed workaround has not been configured in");
+#endif
+
+	hook_fault_code(16+6, ixp2000_pci_abort_handler, SIGBUS, 0,
+				"PCI config cycle to non-existent device");
 }
 
-static inline void __init alloc_resource(struct pci_dev *dev, int idx)
+
+/*
+ * IXP2000 systems often have large resource requirements, so we just
+ * use our own resource space.
+ */
+static struct resource ixp2000_pci_mem_space = {
+	.start	= 0xe0000000,
+	.end	= 0xffffffff,
+	.flags	= IORESOURCE_MEM,
+	.name	= "PCI Mem Space"
+};
+
+static struct resource ixp2000_pci_io_space = {
+	.start	= 0x00010000,
+	.end	= 0x0001ffff,
+	.flags	= IORESOURCE_IO,
+	.name	= "PCI I/O Space"
+};
+
+int ixp2000_pci_setup(int nr, struct pci_sys_data *sys)
 {
-	struct resource *pr, *r = &dev->resource[idx];
+	if (nr >= 1)
+		return 0;
 
-	pr = pci_find_parent_resource(dev, r);
-	if(!pr || request_resource(pr, r) < 0)
-	{
-		printk(KERN_ERR "PCI: Can not allocate resource region %d" \
-				" of device %s\n", idx, dev->slot_name);
-		r->end -= r->start;
-		r->start = 0;
-	}
-}
+	pci_add_resource_offset(&sys->resources,
+				&ixp2000_pci_io_space, sys->io_offset);
+	pci_add_resource_offset(&sys->resources,
+				&ixp2000_pci_mem_space, sys->mem_offset);
 
-void __init
-pcibios_allocate_bus_resources(struct list_head *bus_list)
-{
-	struct list_head *ln;
-	struct pci_bus *bus;
-	int i;
-	struct resource *res, *pr;
-
-	if(!bus_list) return; 
-
-	/* Depth-First Search on bus tree */
-	for (ln = bus_list->next; ln != bus_list; ln=ln->next) {
-		bus = pci_bus_b(ln);
-		pci_read_bridge_bases(bus);
-		for (i = 0; i < 4; ++i) {
-			if ((res = bus->resource[i]) == NULL || !res->flags)
-				continue;
-			if (bus->parent == NULL)
-				pr = (res->flags & IORESOURCE_IO)?
-					&ioport_resource: &iomem_resource;
-			else
-				pr = pci_find_parent_resource(bus->self, res);
-
-			if (pr && request_resource(pr, res) == 0)
-				continue;
-			printk(KERN_ERR "PCI: Can not allocate resource region "
-			       "%d of PCI bridge %d\n", i, bus->number);
-			DBG("PCI: resource is %lx..%lx (%lx)\n",
-					res->start, res->end, res->flags);
-		}
-		pcibios_allocate_bus_resources(&bus->children);
-	}
-}
-
-void __init pcibios_allocate_resources(void)
-{
-	struct pci_dev *dev;
-	int idx, disabled;
-	u16 command;
-	struct resource *r;
-
-	pci_for_each_dev(dev)
-	{
-		pci_read_config_word(dev, PCI_COMMAND, &command);
-		for(idx = 0; idx < 6; idx++)
-		{
-			r = &dev->resource[idx];
-
-			if(r->parent)
-				continue;
-			if(!r->start)
-				continue;
-
-			alloc_resource(dev, idx);
-		}
-	}
+	return 1;
 }
 

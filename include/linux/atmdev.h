@@ -7,7 +7,6 @@
 #define LINUX_ATMDEV_H
 
 
-#include <linux/config.h>
 #include <linux/atmapi.h>
 #include <linux/atm.h>
 #include <linux/atmioc.h>
@@ -29,8 +28,6 @@
 			   max cell rate:  1412830.188 cells/sec */
 #define ATM_DS3_PCR	(8000*12)
 			/* DS3: 12 cells in a 125 usec time slot */
-
-#define ATM_SD(s)	((s)->sk->protinfo.af_atm)
 
 
 #define __AAL_STAT_ITEMS \
@@ -78,6 +75,13 @@ struct atm_dev_stats {
 					/* set interface ESI */
 #define ATM_SETESIF	_IOW('a',ATMIOC_ITF+13,struct atmif_sioc)
 					/* force interface ESI */
+#define ATM_ADDLECSADDR	_IOW('a', ATMIOC_ITF+14, struct atmif_sioc)
+					/* register a LECS address */
+#define ATM_DELLECSADDR	_IOW('a', ATMIOC_ITF+15, struct atmif_sioc)
+					/* unregister a LECS address */
+#define ATM_GETLECSADDR	_IOW('a', ATMIOC_ITF+16, struct atmif_sioc)
+					/* retrieve LECS address(es) */
+
 #define ATM_GETSTAT	_IOW('a',ATMIOC_SARCOM+0,struct atmif_sioc)
 					/* get AAL layer statistics */
 #define ATM_GETSTATZ	_IOW('a',ATMIOC_SARCOM+1,struct atmif_sioc)
@@ -94,6 +98,14 @@ struct atm_dev_stats {
 					/* set backend handler */
 #define ATM_NEWBACKENDIF _IOW('a',ATMIOC_SPECIAL+3,atm_backend_t)
 					/* use backend to make new if */
+#define ATM_ADDPARTY  	_IOW('a', ATMIOC_SPECIAL+4,struct atm_iobuf)
+ 					/* add party to p2mp call */
+#ifdef CONFIG_COMPAT
+/* It actually takes struct sockaddr_atmsvc, not struct atm_iobuf */
+#define COMPAT_ATM_ADDPARTY  	_IOW('a', ATMIOC_SPECIAL+4,struct compat_atm_iobuf)
+#endif
+#define ATM_DROPPARTY 	_IOW('a', ATMIOC_SPECIAL+5,int)
+					/* drop party from p2mp call */
 
 /*
  * These are backend handkers that can be set via the ATM_SETBACKEND call
@@ -146,7 +158,7 @@ struct atm_dev_stats {
 
 struct atm_iobuf {
 	int length;
-	void *buffer;
+	void __user *buffer;
 };
 
 /* for ATM_GETCIRANGE / ATM_SETCIRANGE */
@@ -154,8 +166,8 @@ struct atm_iobuf {
 #define ATM_CI_MAX      -1              /* use maximum range of VPI/VCI */
  
 struct atm_cirange {
-	char	vpi_bits;		/* 1..8, ATM_CI_MAX (-1) for maximum */
-	char	vci_bits;		/* 1..16, ATM_CI_MAX (-1) for maximum */
+	signed char	vpi_bits;	/* 1..8, ATM_CI_MAX (-1) for maximum */
+	signed char	vci_bits;	/* 1..16, ATM_CI_MAX (-1) for maximum */
 };
 
 /* for ATM_SETSC; actually taken from the ATM_VF number space */
@@ -201,18 +213,28 @@ struct atm_cirange {
 
 #ifdef __KERNEL__
 
-#include <linux/sched.h> /* wait_queue_head_t */
+#include <linux/wait.h> /* wait_queue_head_t */
 #include <linux/time.h> /* struct timeval */
 #include <linux/net.h>
+#include <linux/bug.h>
 #include <linux/skbuff.h> /* struct sk_buff */
 #include <linux/uio.h>
 #include <net/sock.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
+
+extern struct proc_dir_entry *atm_proc_root;
 #endif
 
+#ifdef CONFIG_COMPAT
+#include <linux/compat.h>
+struct compat_atm_iobuf {
+	int length;
+	compat_uptr_t buffer;
+};
+#endif
 
 struct k_atm_aal_stats {
 #define __HANDLE_ITEM(i) atomic_t i
@@ -227,6 +249,7 @@ struct k_atm_dev_stats {
 	struct k_atm_aal_stats aal5;
 };
 
+struct device;
 
 enum {
 	ATM_VF_ADDR,		/* Address is in use. Set by anybody, cleared
@@ -249,6 +272,8 @@ enum {
 	ATM_VF_SESSION,		/* VCC is p2mp session control descriptor */
 	ATM_VF_HASSAP,		/* SAP has been set */
 	ATM_VF_CLOSE,		/* asynchronous close - treat like VF_RELEASED*/
+	ATM_VF_WAITING,		/* waiting for reply from sigd */
+	ATM_VF_IS_CLIP,		/* in use by CLIP protocol */
 };
 
 
@@ -261,7 +286,7 @@ enum {
 
 
 enum {
-	ATM_DF_CLOSE,		/* close device when last VCC is closed */
+	ATM_DF_REMOVED,		/* device was removed from atm_devs list */
 };
 
 
@@ -271,12 +296,10 @@ enum {
 
 #define ATM_ATMOPT_CLP	1	/* set CLP bit */
 
-
-typedef struct { unsigned long bits; } atm_vcc_flags_t;
-
-
 struct atm_vcc {
-	atm_vcc_flags_t flags;		/* VCC flags (ATM_VF_*) */
+	/* struct sock has to be the first member of atm_vcc */
+	struct sock	sk;
+	unsigned long	flags;		/* VCC flags (ATM_VF_*) */
 	short		vpi;		/* VPI and VCI (types must be equal */
 					/* with sockaddr) */
 	int 		vci;
@@ -292,14 +315,10 @@ struct atm_vcc {
 	void		*dev_data;	/* per-device data */
 	void		*proto_data;	/* per-protocol data */
 	struct k_atm_aal_stats *stats;	/* pointer to AAL stats group */
-	wait_queue_head_t sleep;	/* if socket is busy */
-	struct sock	*sk;		/* socket backpointer */
 	/* SVC part --- may move later ------------------------------------- */
 	short		itf;		/* interface number */
 	struct sockaddr_atmsvc local;
 	struct sockaddr_atmsvc remote;
-	void (*callback)(struct atm_vcc *vcc);
-	int		reply;		/* also used by ATMTCP */
 	/* Multipoint part ------------------------------------------------- */
 	struct atm_vcc	*session;	/* session VCC descriptor */
 	/* Other stuff ----------------------------------------------------- */
@@ -308,15 +327,27 @@ struct atm_vcc {
 					/* by CLIP and sch_atm. */
 };
 
+static inline struct atm_vcc *atm_sk(struct sock *sk)
+{
+	return (struct atm_vcc *)sk;
+}
+
+static inline struct atm_vcc *ATM_SD(struct socket *sock)
+{
+	return atm_sk(sock->sk);
+}
+
+static inline struct sock *sk_atm(struct atm_vcc *vcc)
+{
+	return (struct sock *)vcc;
+}
 
 struct atm_dev_addr {
 	struct sockaddr_atmsvc addr;	/* ATM address */
-	struct atm_dev_addr *next;	/* next address */
+	struct list_head entry;		/* next address */
 };
 
-
-typedef struct { unsigned int bits; } atm_dev_flags_t;
-
+enum atm_addr_type_t { ATM_ADDR_LOCAL, ATM_ADDR_LECS };
 
 struct atm_dev {
 	const struct atmdev_ops *ops;	/* device operations; NULL if unused */
@@ -326,8 +357,9 @@ struct atm_dev {
 	int		number;		/* device index */
 	void		*dev_data;	/* per-device data */
 	void		*phy_data;	/* private PHY date */
-	atm_dev_flags_t flags;		/* device flags (ATM_DF_*) */
-	struct atm_dev_addr *local;	/* local ATM addresses */
+	unsigned long	flags;		/* device flags (ATM_DF_*) */
+	struct list_head local;		/* local ATM addresses */
+	struct list_head lecs;		/* LECS ATM addresses learned via ILMI */
 	unsigned char	esi[ESI_LEN];	/* ESI ("MAC" addr) */
 	struct atm_cirange ci_range;	/* VPI/VCI range */
 	struct k_atm_dev_stats stats;	/* statistics */
@@ -339,50 +371,47 @@ struct atm_dev {
 	struct proc_dir_entry *proc_entry; /* proc entry */
 	char *proc_name;		/* proc entry name */
 #endif
+	struct device class_dev;	/* sysfs device */
 	struct list_head dev_list;	/* linkage */
 };
 
-
-/*
- * ioctl, getsockopt, setsockopt, and sg_send are optional and can be set to
- * NULL. */
-
+ 
 /* OF: send_Oam Flags */
 
-#define ATM_OF_IMMED	1	/* Attempt immediate delivery */
-#define ATM_OF_INRATE	2	/* Attempt in-rate delivery */
+#define ATM_OF_IMMED  1		/* Attempt immediate delivery */
+#define ATM_OF_INRATE 2		/* Attempt in-rate delivery */
+
+
+/*
+ * ioctl, getsockopt, and setsockopt are optional and can be set to NULL.
+ */
 
 struct atmdev_ops { /* only send is required */
 	void (*dev_close)(struct atm_dev *dev);
-	int (*open)(struct atm_vcc *vcc,short vpi,int vci);
+	int (*open)(struct atm_vcc *vcc);
 	void (*close)(struct atm_vcc *vcc);
-	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void *arg);
-	int (*getsockopt)(struct atm_vcc *vcc,int level,int optname,
-	    void *optval,int optlen);
-	int (*setsockopt)(struct atm_vcc *vcc,int level,int optname,
-	    void *optval,int optlen);
-	int (*send)(struct atm_vcc *vcc,struct sk_buff *skb);
-	int (*sg_send)(struct atm_vcc *vcc,unsigned long start,
-	    unsigned long size);
-#if 0 /* keep the current hack for now */
-	int (*send_iovec)(struct atm_vcc *vcc,struct iovec *iov,int size,
-	    void (*discard)(struct atm_vcc *vcc,void *user),void *user);
+	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void __user *arg);
+#ifdef CONFIG_COMPAT
+	int (*compat_ioctl)(struct atm_dev *dev,unsigned int cmd,
+			    void __user *arg);
 #endif
+	int (*getsockopt)(struct atm_vcc *vcc,int level,int optname,
+	    void __user *optval,int optlen);
+	int (*setsockopt)(struct atm_vcc *vcc,int level,int optname,
+	    void __user *optval,unsigned int optlen);
+	int (*send)(struct atm_vcc *vcc,struct sk_buff *skb);
 	int (*send_oam)(struct atm_vcc *vcc,void *cell,int flags);
 	void (*phy_put)(struct atm_dev *dev,unsigned char value,
 	    unsigned long addr);
 	unsigned char (*phy_get)(struct atm_dev *dev,unsigned long addr);
-	void (*feedback)(struct atm_vcc *vcc,struct sk_buff *skb,
-	    unsigned long start,unsigned long dest,int len);
 	int (*change_qos)(struct atm_vcc *vcc,struct atm_qos *qos,int flags);
 	int (*proc_read)(struct atm_dev *dev,loff_t *pos,char *page);
 	struct module *owner;
 };
 
-
 struct atmphy_ops {
 	int (*start)(struct atm_dev *dev);
-	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void *arg);
+	int (*ioctl)(struct atm_dev *dev,unsigned int cmd,void __user *arg);
 	void (*interrupt)(struct atm_dev *dev);
 	int (*stop)(struct atm_dev *dev);
 };
@@ -392,46 +421,48 @@ struct atm_skb_data {
 	unsigned long	atm_options;	/* ATM layer options */
 };
 
-extern struct sock *vcc_sklist;
+#define VCC_HTABLE_SIZE 32
+
+extern struct hlist_head vcc_hash[VCC_HTABLE_SIZE];
 extern rwlock_t vcc_sklist_lock;
 
 #define ATM_SKB(skb) (((struct atm_skb_data *) (skb)->cb))
 
-struct atm_dev *atm_dev_register(const char *type,const struct atmdev_ops *ops,
-    int number,atm_dev_flags_t *flags); /* number == -1: pick first available */
+struct atm_dev *atm_dev_register(const char *type, struct device *parent,
+				 const struct atmdev_ops *ops,
+				 int number, /* -1 == pick first available */
+				 unsigned long *flags);
 struct atm_dev *atm_dev_lookup(int number);
 void atm_dev_deregister(struct atm_dev *dev);
-void shutdown_atm_dev(struct atm_dev *dev);
-void vcc_insert_socket(struct sock *sk);
-void vcc_remove_socket(struct sock *sk);
 
-
-/*
- * This is approximately the algorithm used by alloc_skb.
+/* atm_dev_signal_change
  *
+ * Propagate lower layer signal change in atm_dev->signal to netdevice.
+ * The event will be sent via a notifier call chain.
  */
+void atm_dev_signal_change(struct atm_dev *dev, char signal);
 
-static inline int atm_guess_pdu2truesize(int size)
-{
-	return (SKB_DATA_ALIGN(size) + sizeof(struct skb_shared_info));
-}
+void vcc_insert_socket(struct sock *sk);
+
+void atm_dev_release_vccs(struct atm_dev *dev);
 
 
 static inline void atm_force_charge(struct atm_vcc *vcc,int truesize)
 {
-	atomic_add(truesize, &vcc->sk->rmem_alloc);
+	atomic_add(truesize, &sk_atm(vcc)->sk_rmem_alloc);
 }
 
 
 static inline void atm_return(struct atm_vcc *vcc,int truesize)
 {
-	atomic_sub(truesize, &vcc->sk->rmem_alloc);
+	atomic_sub(truesize, &sk_atm(vcc)->sk_rmem_alloc);
 }
 
 
 static inline int atm_may_send(struct atm_vcc *vcc,unsigned int size)
 {
-	return (size + atomic_read(&vcc->sk->wmem_alloc)) < vcc->sk->sndbuf;
+	return (size + atomic_read(&sk_atm(vcc)->sk_wmem_alloc)) <
+	       sk_atm(vcc)->sk_sndbuf;
 }
 
 
@@ -443,21 +474,52 @@ static inline void atm_dev_hold(struct atm_dev *dev)
 
 static inline void atm_dev_put(struct atm_dev *dev)
 {
-	atomic_dec(&dev->refcnt);
-
-	if ((atomic_read(&dev->refcnt) == 1) &&
-	    test_bit(ATM_DF_CLOSE,&dev->flags))
-		shutdown_atm_dev(dev);
+	if (atomic_dec_and_test(&dev->refcnt)) {
+		BUG_ON(!test_bit(ATM_DF_REMOVED, &dev->flags));
+		if (dev->ops->dev_close)
+			dev->ops->dev_close(dev);
+		put_device(&dev->class_dev);
+	}
 }
 
 
 int atm_charge(struct atm_vcc *vcc,int truesize);
 struct sk_buff *atm_alloc_charge(struct atm_vcc *vcc,int pdu_size,
-    int gfp_flags);
-int atm_find_ci(struct atm_vcc *vcc,short *vpi,int *vci);
-int atm_pcr_goal(struct atm_trafprm *tp);
+    gfp_t gfp_flags);
+int atm_pcr_goal(const struct atm_trafprm *tp);
 
 void vcc_release_async(struct atm_vcc *vcc, int reply);
+
+struct atm_ioctl {
+	struct module *owner;
+	/* A module reference is kept if appropriate over this call.
+	 * Return -ENOIOCTLCMD if you don't handle it. */
+	int (*ioctl)(struct socket *, unsigned int cmd, unsigned long arg);
+	struct list_head list;
+};
+
+/**
+ * register_atm_ioctl - register handler for ioctl operations
+ *
+ * Special (non-device) handlers of ioctl's should
+ * register here. If you're a normal device, you should
+ * set .ioctl in your atmdev_ops instead.
+ */
+void register_atm_ioctl(struct atm_ioctl *);
+
+/**
+ * deregister_atm_ioctl - remove the ioctl handler
+ */
+void deregister_atm_ioctl(struct atm_ioctl *);
+
+
+/* register_atmdevice_notifier - register atm_dev notify events
+ *
+ * Clients like br2684 will register notify events
+ * Currently we notify of signal found/lost
+ */
+int register_atmdevice_notifier(struct notifier_block *nb);
+void unregister_atmdevice_notifier(struct notifier_block *nb);
 
 #endif /* __KERNEL__ */
 

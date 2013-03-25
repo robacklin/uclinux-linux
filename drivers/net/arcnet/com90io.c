@@ -27,12 +27,13 @@
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/ioport.h>
-#include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/bootmem.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <asm/io.h>
 #include <linux/arcdevice.h>
 
@@ -47,7 +48,6 @@ static void com90io_command(struct net_device *dev, int command);
 static int com90io_status(struct net_device *dev);
 static void com90io_setmask(struct net_device *dev, int mask);
 static int com90io_reset(struct net_device *dev, int really_reset);
-static void com90io_openclose(struct net_device *dev, bool open);
 static void com90io_copy_to_card(struct net_device *dev, int bufnum, int offset,
 				 void *buf, int count);
 static void com90io_copy_from_card(struct net_device *dev, int bufnum, int offset,
@@ -151,10 +151,6 @@ static int __init com90io_probe(struct net_device *dev)
 	int ioaddr = dev->base_addr, status;
 	unsigned long airqmask;
 
-#ifndef MODULE
-	arcnet_init();
-#endif
-
 	BUGLVL(D_NORMAL) printk(VERSION);
 	BUGLVL(D_NORMAL) printk("E-mail me if you actually test this driver, please!\n");
 
@@ -163,14 +159,14 @@ static int __init com90io_probe(struct net_device *dev)
 		       "must specify the base address!\n");
 		return -ENODEV;
 	}
-	if (check_region(ioaddr, ARCNET_TOTAL_SIZE)) {
-		BUGMSG(D_INIT_REASONS, "IO check_region %x-%x failed.\n",
+	if (!request_region(ioaddr, ARCNET_TOTAL_SIZE, "com90io probe")) {
+		BUGMSG(D_INIT_REASONS, "IO request_region %x-%x failed.\n",
 		       ioaddr, ioaddr + ARCNET_TOTAL_SIZE - 1);
 		return -ENXIO;
 	}
 	if (ASTATUS() == 0xFF) {
 		BUGMSG(D_INIT_REASONS, "IO address %x empty\n", ioaddr);
-		return -ENODEV;
+		goto err_out;
 	}
 	inb(_RESET);
 	mdelay(RESETtime);
@@ -179,7 +175,7 @@ static int __init com90io_probe(struct net_device *dev)
 
 	if ((status & 0x9D) != (NORXflag | RECONflag | TXFREEflag | RESETflag)) {
 		BUGMSG(D_INIT_REASONS, "Status invalid (%Xh).\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	BUGMSG(D_INIT_REASONS, "Status after reset: %X\n", status);
 
@@ -191,7 +187,7 @@ static int __init com90io_probe(struct net_device *dev)
 
 	if (status & RESETflag) {
 		BUGMSG(D_INIT_REASONS, "Eternal reset (status=%Xh)\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	outb((0x16 | IOMAPflag) & ~ENABLE16flag, _CONFIG);
 
@@ -203,7 +199,7 @@ static int __init com90io_probe(struct net_device *dev)
 	if ((status = inb(_MEMDATA)) != 0xd1) {
 		BUGMSG(D_INIT_REASONS, "Signature byte not found"
 		       " (%Xh instead).\n", status);
-		return -ENODEV;
+		goto err_out;
 	}
 	if (!dev->irq) {
 		/*
@@ -218,12 +214,17 @@ static int __init com90io_probe(struct net_device *dev)
 		outb(0, _INTMASK);
 		dev->irq = probe_irq_off(airqmask);
 
-		if (dev->irq <= 0) {
+		if ((int)dev->irq <= 0) {
 			BUGMSG(D_INIT_REASONS, "Autoprobe IRQ failed\n");
-			return -ENODEV;
+			goto err_out;
 		}
 	}
+	release_region(ioaddr, ARCNET_TOTAL_SIZE); /* end of probing */
 	return com90io_found(dev);
+
+err_out:
+	release_region(ioaddr, ARCNET_TOTAL_SIZE);
+	return -ENODEV;
 }
 
 
@@ -234,42 +235,28 @@ static int __init com90io_found(struct net_device *dev)
 {
 	struct arcnet_local *lp;
 	int ioaddr = dev->base_addr;
+	int err;
 
 	/* Reserve the irq */
-	if (request_irq(dev->irq, &arcnet_interrupt, 0, "arcnet (COM90xx-IO)", dev)) {
+	if (request_irq(dev->irq, arcnet_interrupt, 0, "arcnet (COM90xx-IO)", dev)) {
 		BUGMSG(D_NORMAL, "Can't get IRQ %d!\n", dev->irq);
 		return -ENODEV;
 	}
-	/* Reserve the I/O region - guaranteed to work by check_region */
+	/* Reserve the I/O region */
 	if (!request_region(dev->base_addr, ARCNET_TOTAL_SIZE, "arcnet (COM90xx-IO)")) {
 		free_irq(dev->irq, dev);
 		return -EBUSY;
 	}
 
-	/* Initialize the rest of the device structure. */
-	dev->priv = kmalloc(sizeof(struct arcnet_local), GFP_KERNEL);
-	if (!dev->priv) {
-		free_irq(dev->irq, dev);
-		release_region(dev->base_addr, ARCNET_TOTAL_SIZE);
-		return -ENOMEM;
-	}
-	memset(dev->priv, 0, sizeof(struct arcnet_local));
-
-	lp = (struct arcnet_local *) (dev->priv);
+	lp = netdev_priv(dev);
 	lp->card_name = "COM90xx I/O";
 	lp->hw.command = com90io_command;
 	lp->hw.status = com90io_status;
 	lp->hw.intmask = com90io_setmask;
 	lp->hw.reset = com90io_reset;
-	lp->hw.open_close = com90io_openclose;
+	lp->hw.owner = THIS_MODULE;
 	lp->hw.copy_to_card = com90io_copy_to_card;
 	lp->hw.copy_from_card = com90io_copy_from_card;
-
-	/*
-	 * Fill in the fields of the device structure with generic
-	 * values.
-	 */
-	arcdev_setup(dev);
 
 	lp->config = (0x16 | IOMAPflag) & ~ENABLE16flag;
 	SETCONF();
@@ -277,6 +264,14 @@ static int __init com90io_found(struct net_device *dev)
 	/* get and check the station ID from offset 1 in shmem */
 
 	dev->dev_addr[0] = get_buffer_byte(dev, 1);
+
+	err = register_netdev(dev);
+	if (err) {
+		outb((inb(_CONFIG) & ~IOMAPflag), _CONFIG);
+		free_irq(dev->irq, dev);
+		release_region(dev->base_addr, ARCNET_TOTAL_SIZE);
+		return err;
+	}
 
 	BUGMSG(D_NORMAL, "COM90IO: station %02Xh found at %03lXh, IRQ %d.\n",
 	       dev->dev_addr[0], dev->base_addr, dev->irq);
@@ -295,7 +290,7 @@ static int __init com90io_found(struct net_device *dev)
  */
 static int com90io_reset(struct net_device *dev, int really_reset)
 {
-	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
+	struct arcnet_local *lp = netdev_priv(dev);
 	short ioaddr = dev->base_addr;
 
 	BUGMSG(D_INIT, "Resetting %s (status=%02Xh)\n", dev->name, ASTATUS());
@@ -348,14 +343,6 @@ static void com90io_setmask(struct net_device *dev, int mask)
 	AINTMASK(mask);
 }
 
-static void com90io_openclose(struct net_device *dev, int open)
-{
-	if (open)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-}
-
 static void com90io_copy_to_card(struct net_device *dev, int bufnum, int offset,
 				 void *buf, int count)
 {
@@ -369,44 +356,65 @@ static void com90io_copy_from_card(struct net_device *dev, int bufnum, int offse
 	TIME("get_whole_buffer", count, get_whole_buffer(dev, bufnum * 512 + offset, count, buf));
 }
 
+static int io;			/* use the insmod io= irq= shmem= options */
+static int irq;
+static char device[9];		/* use eg. device=arc1 to change name */
 
-#ifdef MODULE
+module_param(io, int, 0);
+module_param(irq, int, 0);
+module_param_string(device, device, sizeof(device), 0);
+MODULE_LICENSE("GPL");
+
+#ifndef MODULE
+static int __init com90io_setup(char *s)
+{
+	int ints[4];
+	s = get_options(s, 4, ints);
+	if (!ints[0])
+		return 0;
+	switch (ints[0]) {
+	default:		/* ERROR */
+		printk("com90io: Too many arguments.\n");
+	case 2:		/* IRQ */
+		irq = ints[2];
+	case 1:		/* IO address */
+		io = ints[1];
+	}
+	if (*s)
+		snprintf(device, sizeof(device), "%s", s);
+	return 1;
+}
+__setup("com90io=", com90io_setup);
+#endif
 
 static struct net_device *my_dev;
 
-/* Module parameters */
-
-static int io;			/* use the insmod io= irq= shmem= options */
-static int irq;
-static char *device;		/* use eg. device=arc1 to change name */
-
-MODULE_PARM(io, "i");
-MODULE_PARM(irq, "i");
-MODULE_PARM(device, "s");
-MODULE_LICENSE("GPL");
-
-int init_module(void)
+static int __init com90io_init(void)
 {
 	struct net_device *dev;
 	int err;
 
-	dev = dev_alloc(device ? : "arc%d", &err);
+	dev = alloc_arcdev(device);
 	if (!dev)
-		return err;
+		return -ENOMEM;
 
 	dev->base_addr = io;
 	dev->irq = irq;
 	if (dev->irq == 2)
 		dev->irq = 9;
 
-	if (com90io_probe(dev))
-		return -EIO;
+	err = com90io_probe(dev);
+
+	if (err) {
+		free_netdev(dev);
+		return err;
+	}
 
 	my_dev = dev;
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit com90io_exit(void)
 {
 	struct net_device *dev = my_dev;
 	int ioaddr = dev->base_addr;
@@ -418,42 +426,8 @@ void cleanup_module(void)
 
 	free_irq(dev->irq, dev);
 	release_region(dev->base_addr, ARCNET_TOTAL_SIZE);
-	kfree(dev->priv);
-	kfree(dev);
+	free_netdev(dev);
 }
 
-#else
-
-static int __init com90io_setup(char *s)
-{
-	struct net_device *dev;
-	int ints[4];
-
-	s = get_options(s, 4, ints);
-	if (!ints[0])
-		return 0;
-	dev = alloc_bootmem(sizeof(struct net_device));
-	memset(dev, 0, sizeof(struct net_device));
-	dev->init = com90io_probe;
-
-	switch (ints[0]) {
-	default:		/* ERROR */
-		printk("com90io: Too many arguments.\n");
-	case 2:		/* IRQ */
-		dev->irq = ints[2];
-	case 1:		/* IO address */
-		dev->base_addr = ints[1];
-	}
-	if (*s)
-		strncpy(dev->name, s, 9);
-	else
-		strcpy(dev->name, "arc%d");
-	if (register_netdev(dev))
-		printk(KERN_ERR "com90io: Cannot register arcnet device\n");
-
-	return 1;
-}
-
-__setup("com90io=", com90io_setup);
-
-#endif				/* MODULE */
+module_init(com90io_init)
+module_exit(com90io_exit)

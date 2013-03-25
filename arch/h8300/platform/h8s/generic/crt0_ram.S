@@ -3,14 +3,13 @@
  *
  *  Yoshinori Sato <ysato@users.sourceforge.jp>
  *
- *  Platform depend startup for uClinux-2.4.x
+ *  Platform depend startup
  *  Target Archtecture:	generic
  *  Memory Layout     :	RAM
  */
 
 #define ASSEMBLY
 
-#include <linux/config.h>
 #include <asm/linkage.h>
 #include <asm/regs267x.h>
 			
@@ -38,12 +37,13 @@
 SYMBOL_NAME_LABEL(_start)
 	mov.l	#RAMEND,sp
 	ldc	#0x80,ccr
+	ldc	#0x00,exr
 
 	/* Peripheral Setup */
 	bclr	#4,@INTCR:8	/* interrupt mode 2 */
 	bset	#5,@INTCR:8
 
-#if defined(CONFIG_BLK_DEV_BLKMEM)
+#if defined(CONFIG_MTD_UCLINUX)
 	/* move romfs image */
 	jsr	@__move_romfs	
 #endif
@@ -69,8 +69,7 @@ SYMBOL_NAME_LABEL(_start)
 
 	/* uClinux kernel start */
 	ldc	#0x90,ccr	/* running kernel */
-	mov.l	#SYMBOL_NAME(init_task_union),sp
-	mov.l	sp,@SYMBOL_NAME(_current_task)
+	mov.l	#SYMBOL_NAME(init_thread_union),sp
 	add.l	#0x2000,sp
 	jsr	@_start_kernel
 _exit:

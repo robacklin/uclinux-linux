@@ -17,13 +17,13 @@
 #include <linux/reboot.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -32,7 +32,7 @@
 
 
 static void 
-miata_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
+miata_srm_device_interrupt(unsigned long vector)
 {
 	int irq;
 
@@ -55,7 +55,7 @@ miata_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	if (irq >= 16)
 		irq = irq + 8;
 
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
@@ -150,7 +150,7 @@ miata_init_irq(void)
  */
 
 static int __init
-miata_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+miata_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
         static char irq_tab[18][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
@@ -182,11 +182,15 @@ miata_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 
 	if((slot == 7) && (PCI_FUNC(dev->devfn) == 3)) {
 		u8 irq=0;
-
-		if(pci_read_config_byte(pci_find_slot(dev->bus->number, dev->devfn & ~(7)), 0x40,&irq)!=PCIBIOS_SUCCESSFUL)
+		struct pci_dev *pdev = pci_get_slot(dev->bus, dev->devfn & ~7);
+		if(pdev == NULL || pci_read_config_byte(pdev, 0x40,&irq) != PCIBIOS_SUCCESSFUL) {
+			pci_dev_put(pdev);
 			return -1;
-		else	
+		}
+		else	{
+			pci_dev_put(pdev);
 			return irq;
+		}
 	}
 
 	return COMMON_TABLE_LOOKUP;
@@ -214,7 +218,7 @@ miata_swizzle(struct pci_dev *dev, u8 *pinp)
 				slot = PCI_SLOT(dev->devfn) + 9;
 				break;
 			}
-			pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+			pin = pci_swizzle_interrupt_pin(dev, pin);
 
 			/* Move up the chain of bridges.  */
 			dev = dev->bus->self;
@@ -230,15 +234,7 @@ static void __init
 miata_init_pci(void)
 {
 	cia_init_pci();
-	/* The PYXIS has data corruption problem with scatter/gather
-	   burst DMA reads crossing 8K boundary. It had been fixed
-	   with off-chip logic on all PYXIS systems except first
-	   MIATAs, so disable SG DMA on such machines. */
-	if (!SMC669_Init(0)) {	/* MIATA GL has SMC37c669 Super I/O */
-		alpha_mv.mv_pci_tbi = NULL; 
-		printk(KERN_INFO "pci: pyxis 8K boundary dma bug - "
-				 "sg dma disabled\n");
-	}
+	SMC669_Init(0); /* it might be a GL (fails harmlessly if not) */
 	es1888_init();
 }
 
@@ -272,26 +268,25 @@ miata_kill_arch(int mode)
  */
 
 struct alpha_machine_vector miata_mv __initmv = {
-	vector_name:		"Miata",
+	.vector_name		= "Miata",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
-	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		PYXIS_DAC_OFFSET,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= PYXIS_DAC_OFFSET,
 
-	nr_irqs:		48,
-	device_interrupt:	pyxis_device_interrupt,
+	.nr_irqs		= 48,
+	.device_interrupt	= pyxis_device_interrupt,
 
-	init_arch:		pyxis_init_arch,
-	init_irq:		miata_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		miata_init_pci,
-	kill_arch:		miata_kill_arch,
-	pci_map_irq:		miata_map_irq,
-	pci_swizzle:		miata_swizzle,
+	.init_arch		= pyxis_init_arch,
+	.init_irq		= miata_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= miata_init_pci,
+	.kill_arch		= miata_kill_arch,
+	.pci_map_irq		= miata_map_irq,
+	.pci_swizzle		= miata_swizzle,
 };
 ALIAS_MV(miata)

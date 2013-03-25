@@ -1,4 +1,4 @@
-/* $Id: netjet.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: netjet.h,v 2.8.2.2 2004/01/12 22:52:28 keil Exp $
  *
  * NETjet common header file
  *
@@ -6,15 +6,13 @@
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
  *              by Matt Henderson,
  *                 Traverse Technologies P/L www.traverse.com.au
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-extern const char *CardType[];
-
-#define byteout(addr,val) outb(val,addr)
+#define byteout(addr, val) outb(val, addr)
 #define bytein(addr) inb(addr)
 
 #define NETJET_CTRL	0x00
@@ -66,7 +64,6 @@ void read_tiger(struct IsdnCardState *cs);
 void write_tiger(struct IsdnCardState *cs);
 
 void netjet_fill_dma(struct BCState *bcs);
-void netjet_interrupt(int intno, void *dev_id, struct pt_regs *regs);
+void netjet_interrupt(int intno, void *dev_id);
 void inittiger(struct IsdnCardState *cs);
 void release_io_netjet(struct IsdnCardState *cs);
-

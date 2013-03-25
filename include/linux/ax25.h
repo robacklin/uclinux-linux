@@ -6,6 +6,8 @@
 #ifndef	AX25_KERNEL_H
 #define	AX25_KERNEL_H
 
+#include <linux/socket.h>
+
 #define AX25_MTU	256
 #define AX25_MAX_DIGIS  8
 
@@ -45,7 +47,7 @@ typedef struct {
 } ax25_address;
 
 struct sockaddr_ax25 {
-	sa_family_t	sax25_family;
+	__kernel_sa_family_t sax25_family;
 	ax25_address	sax25_call;
 	int		sax25_ndigis;
 	/* Digipeater ax25_address sets follow */
@@ -83,7 +85,7 @@ struct ax25_ctl_struct {
 };
 
 /* this will go away. Please do not export to user land */
-struct ax25_info_struct_depreciated {
+struct ax25_info_struct_deprecated {
 	unsigned int	n2, n2count;
 	unsigned int	t1, t1timer;
 	unsigned int	t2, t2timer;

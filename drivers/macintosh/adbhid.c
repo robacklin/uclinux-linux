@@ -1,10 +1,11 @@
 /*
- * drivers/input/adbhid.c
+ * drivers/macintosh/adbhid.c
  *
  * ADB HID driver for Power Macintosh computers.
  *
- * Adapted from drivers/macintosh/mac_keyb.c by Franz Sirl
- * (see that file for its authors and contributors).
+ * Adapted from drivers/macintosh/mac_keyb.c by Franz Sirl.
+ * drivers/macintosh/mac_keyb.c was Copyright (C) 1996 Paul Mackerras
+ * with considerable contributions from Ben Herrenschmidt and others.
  *
  * Copyright (C) 2000 Franz Sirl.
  *
@@ -29,30 +30,32 @@
  * To do:
  *
  * Improve Kensington support.
+ * Split mouse/kbd
+ * Move to syfs
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/notifier.h>
 #include <linux/input.h>
-#include <linux/kbd_ll.h>
 
 #include <linux/adb.h>
 #include <linux/cuda.h>
 #include <linux/pmu.h>
 
 #include <asm/machdep.h>
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
+#include <asm/backlight.h>
 #include <asm/pmac_feature.h>
 #endif
 
-#ifdef CONFIG_PMAC_BACKLIGHT
-#include <asm/backlight.h>
-#endif
-
 MODULE_AUTHOR("Franz Sirl <Franz.Sirl-kernel@lauterbach.com>");
+
+static int restore_capslock_events;
+module_param(restore_capslock_events, int, 0644);
+MODULE_PARM_DESC(restore_capslock_events,
+	"Produce keypress events for capslock on both keyup and keydown.");
 
 #define KEYB_KEYREG	0	/* register # for key up/down data */
 #define KEYB_LEDREG	2	/* register # for leds on ADB keyboard */
@@ -60,37 +63,175 @@ MODULE_AUTHOR("Franz Sirl <Franz.Sirl-kernel@lauterbach.com>");
 
 static int adb_message_handler(struct notifier_block *, unsigned long, void *);
 static struct notifier_block adbhid_adb_notifier = {
-	notifier_call:	adb_message_handler,
+	.notifier_call	= adb_message_handler,
 };
 
-unsigned char adb_to_linux_keycodes[128] = {
-	 30, 31, 32, 33, 35, 34, 44, 45, 46, 47, 86, 48, 16, 17, 18, 19,
-	 21, 20,  2,  3,  4,  5,  7,  6, 13, 10,  8, 12,  9, 11, 27, 24,
-	 22, 26, 23, 25, 28, 38, 36, 40, 37, 39, 43, 51, 53, 49, 50, 52,
-	 15, 57, 41, 14, 96,  1, 29,125, 42, 58, 56,105,106,108,103,  0,
-	  0, 83,  0, 55,  0, 78,  0, 69,  0,  0,  0, 98, 96,  0, 74,  0,
-	  0,117, 82, 79, 80, 81, 75, 76, 77, 71,  0, 72, 73,183,181,124,
-	 63, 64, 65, 61, 66, 67,191, 87,190, 99,  0, 70,  0, 68,101, 88,
-	  0,119,110,102,104,111, 62,107, 60,109, 59, 54,100, 97,126,116
+/* Some special keys */
+#define ADB_KEY_DEL		0x33
+#define ADB_KEY_CMD		0x37
+#define ADB_KEY_CAPSLOCK	0x39
+#define ADB_KEY_FN		0x3f
+#define ADB_KEY_FWDEL		0x75
+#define ADB_KEY_POWER_OLD	0x7e
+#define ADB_KEY_POWER		0x7f
+
+static const u16 adb_to_linux_keycodes[128] = {
+	/* 0x00 */ KEY_A, 		/*  30 */
+	/* 0x01 */ KEY_S, 		/*  31 */
+	/* 0x02 */ KEY_D,		/*  32 */
+	/* 0x03 */ KEY_F,		/*  33 */
+	/* 0x04 */ KEY_H,		/*  35 */
+	/* 0x05 */ KEY_G,		/*  34 */
+	/* 0x06 */ KEY_Z,		/*  44 */
+	/* 0x07 */ KEY_X,		/*  45 */
+	/* 0x08 */ KEY_C,		/*  46 */
+	/* 0x09 */ KEY_V,		/*  47 */
+	/* 0x0a */ KEY_102ND,		/*  86 */
+	/* 0x0b */ KEY_B,		/*  48 */
+	/* 0x0c */ KEY_Q,		/*  16 */
+	/* 0x0d */ KEY_W,		/*  17 */
+	/* 0x0e */ KEY_E,		/*  18 */
+	/* 0x0f */ KEY_R,		/*  19 */
+	/* 0x10 */ KEY_Y,		/*  21 */
+	/* 0x11 */ KEY_T,		/*  20 */
+	/* 0x12 */ KEY_1,		/*   2 */
+	/* 0x13 */ KEY_2,		/*   3 */
+	/* 0x14 */ KEY_3,		/*   4 */
+	/* 0x15 */ KEY_4,		/*   5 */
+	/* 0x16 */ KEY_6,		/*   7 */
+	/* 0x17 */ KEY_5,		/*   6 */
+	/* 0x18 */ KEY_EQUAL,		/*  13 */
+	/* 0x19 */ KEY_9,		/*  10 */
+	/* 0x1a */ KEY_7,		/*   8 */
+	/* 0x1b */ KEY_MINUS,		/*  12 */
+	/* 0x1c */ KEY_8,		/*   9 */
+	/* 0x1d */ KEY_0,		/*  11 */
+	/* 0x1e */ KEY_RIGHTBRACE,	/*  27 */
+	/* 0x1f */ KEY_O,		/*  24 */
+	/* 0x20 */ KEY_U,		/*  22 */
+	/* 0x21 */ KEY_LEFTBRACE,	/*  26 */
+	/* 0x22 */ KEY_I,		/*  23 */
+	/* 0x23 */ KEY_P,		/*  25 */
+	/* 0x24 */ KEY_ENTER,		/*  28 */
+	/* 0x25 */ KEY_L,		/*  38 */
+	/* 0x26 */ KEY_J,		/*  36 */
+	/* 0x27 */ KEY_APOSTROPHE,	/*  40 */
+	/* 0x28 */ KEY_K,		/*  37 */
+	/* 0x29 */ KEY_SEMICOLON,	/*  39 */
+	/* 0x2a */ KEY_BACKSLASH,	/*  43 */
+	/* 0x2b */ KEY_COMMA,		/*  51 */
+	/* 0x2c */ KEY_SLASH,		/*  53 */
+	/* 0x2d */ KEY_N,		/*  49 */
+	/* 0x2e */ KEY_M,		/*  50 */
+	/* 0x2f */ KEY_DOT,		/*  52 */
+	/* 0x30 */ KEY_TAB,		/*  15 */
+	/* 0x31 */ KEY_SPACE,		/*  57 */
+	/* 0x32 */ KEY_GRAVE,		/*  41 */
+	/* 0x33 */ KEY_BACKSPACE,	/*  14 */
+	/* 0x34 */ KEY_KPENTER,		/*  96 */
+	/* 0x35 */ KEY_ESC,		/*   1 */
+	/* 0x36 */ KEY_LEFTCTRL,	/*  29 */
+	/* 0x37 */ KEY_LEFTMETA,	/* 125 */
+	/* 0x38 */ KEY_LEFTSHIFT,	/*  42 */
+	/* 0x39 */ KEY_CAPSLOCK,	/*  58 */
+	/* 0x3a */ KEY_LEFTALT,		/*  56 */
+	/* 0x3b */ KEY_LEFT,		/* 105 */
+	/* 0x3c */ KEY_RIGHT,		/* 106 */
+	/* 0x3d */ KEY_DOWN,		/* 108 */
+	/* 0x3e */ KEY_UP,		/* 103 */
+	/* 0x3f */ KEY_FN,		/* 0x1d0 */
+	/* 0x40 */ 0,
+	/* 0x41 */ KEY_KPDOT,		/*  83 */
+	/* 0x42 */ 0,
+	/* 0x43 */ KEY_KPASTERISK,	/*  55 */
+	/* 0x44 */ 0,
+	/* 0x45 */ KEY_KPPLUS,		/*  78 */
+	/* 0x46 */ 0,
+	/* 0x47 */ KEY_NUMLOCK,		/*  69 */
+	/* 0x48 */ 0,
+	/* 0x49 */ 0,
+	/* 0x4a */ 0,
+	/* 0x4b */ KEY_KPSLASH,		/*  98 */
+	/* 0x4c */ KEY_KPENTER,		/*  96 */
+	/* 0x4d */ 0,
+	/* 0x4e */ KEY_KPMINUS,		/*  74 */
+	/* 0x4f */ 0,
+	/* 0x50 */ 0,
+	/* 0x51 */ KEY_KPEQUAL,		/* 117 */
+	/* 0x52 */ KEY_KP0,		/*  82 */
+	/* 0x53 */ KEY_KP1,		/*  79 */
+	/* 0x54 */ KEY_KP2,		/*  80 */
+	/* 0x55 */ KEY_KP3,		/*  81 */
+	/* 0x56 */ KEY_KP4,		/*  75 */
+	/* 0x57 */ KEY_KP5,		/*  76 */
+	/* 0x58 */ KEY_KP6,		/*  77 */
+	/* 0x59 */ KEY_KP7,		/*  71 */
+	/* 0x5a */ 0,
+	/* 0x5b */ KEY_KP8,		/*  72 */
+	/* 0x5c */ KEY_KP9,		/*  73 */
+	/* 0x5d */ KEY_YEN,		/* 124 */
+	/* 0x5e */ KEY_RO,		/*  89 */
+	/* 0x5f */ KEY_KPCOMMA,		/* 121 */
+	/* 0x60 */ KEY_F5,		/*  63 */
+	/* 0x61 */ KEY_F6,		/*  64 */
+	/* 0x62 */ KEY_F7,		/*  65 */
+	/* 0x63 */ KEY_F3,		/*  61 */
+	/* 0x64 */ KEY_F8,		/*  66 */
+	/* 0x65 */ KEY_F9,		/*  67 */
+	/* 0x66 */ KEY_HANJA,		/* 123 */
+	/* 0x67 */ KEY_F11,		/*  87 */
+	/* 0x68 */ KEY_HANGEUL,		/* 122 */
+	/* 0x69 */ KEY_SYSRQ,		/*  99 */
+	/* 0x6a */ 0,
+	/* 0x6b */ KEY_SCROLLLOCK,	/*  70 */
+	/* 0x6c */ 0,
+	/* 0x6d */ KEY_F10,		/*  68 */
+	/* 0x6e */ KEY_COMPOSE,		/* 127 */
+	/* 0x6f */ KEY_F12,		/*  88 */
+	/* 0x70 */ 0,
+	/* 0x71 */ KEY_PAUSE,		/* 119 */
+	/* 0x72 */ KEY_INSERT,		/* 110 */
+	/* 0x73 */ KEY_HOME,		/* 102 */
+	/* 0x74 */ KEY_PAGEUP,		/* 104 */
+	/* 0x75 */ KEY_DELETE,		/* 111 */
+	/* 0x76 */ KEY_F4,		/*  62 */
+	/* 0x77 */ KEY_END,		/* 107 */
+	/* 0x78 */ KEY_F2,		/*  60 */
+	/* 0x79 */ KEY_PAGEDOWN,	/* 109 */
+	/* 0x7a */ KEY_F1,		/*  59 */
+	/* 0x7b */ KEY_RIGHTSHIFT,	/*  54 */
+	/* 0x7c */ KEY_RIGHTALT,	/* 100 */
+	/* 0x7d */ KEY_RIGHTCTRL,	/*  97 */
+	/* 0x7e */ KEY_RIGHTMETA,	/* 126 */
+	/* 0x7f */ KEY_POWER,		/* 116 */
 };
 
 struct adbhid {
-	struct input_dev input;
+	struct input_dev *input;
 	int id;
 	int default_id;
 	int original_handler_id;
 	int current_handler_id;
 	int mouse_kind;
-	unsigned char *keycode;
+	u16 *keycode;
 	char name[64];
+	char phys[32];
+	int flags;
 };
 
-static struct adbhid *adbhid[16] = { 0 };
+#define FLAG_FN_KEY_PRESSED		0x00000001
+#define FLAG_POWER_FROM_FN		0x00000002
+#define FLAG_EMU_FWDEL_DOWN		0x00000004
+#define FLAG_CAPSLOCK_TRANSLATE		0x00000008
+#define FLAG_CAPSLOCK_DOWN		0x00000010
+#define FLAG_CAPSLOCK_IGNORE_NEXT	0x00000020
+#define FLAG_POWER_KEY_PRESSED		0x00000040
+
+static struct adbhid *adbhid[16];
 
 static void adbhid_probe(void);
 
 static void adbhid_input_keycode(int, int, int);
-static void leds_done(struct adb_request *);
 
 static void init_trackpad(int id);
 static void init_trackball(int id);
@@ -101,11 +242,6 @@ static void init_ms_a3(int id);
 static struct adb_ids keyboard_ids;
 static struct adb_ids mouse_ids;
 static struct adb_ids buttons_ids;
-
-#ifdef CONFIG_PMAC_BACKLIGHT
-/* Exported to via-pmu.c */
-int disable_kernel_backlight = 0;
-#endif /* CONFIG_PMAC_BACKLIGHT */
 
 /* Kind of keyboard, see Apple technote 1152  */
 #define ADB_KEYBOARD_UNKNOWN	0
@@ -126,7 +262,7 @@ int disable_kernel_backlight = 0;
 #define ADBMOUSE_MACALLY2	9	/* MacAlly 2-button mouse */
 
 static void
-adbhid_keyboard_input(unsigned char *data, int nb, struct pt_regs *regs, int apoll)
+adbhid_keyboard_input(unsigned char *data, int nb, int apoll)
 {
 	int id = (data[0] >> 4) & 0x0f;
 
@@ -139,50 +275,134 @@ adbhid_keyboard_input(unsigned char *data, int nb, struct pt_regs *regs, int apo
 	/* first check this is from register 0 */
 	if (nb != 3 || (data[0] & 3) != KEYB_KEYREG)
 		return;		/* ignore it */
-	kbd_pt_regs = regs;
 	adbhid_input_keycode(id, data[1], 0);
 	if (!(data[2] == 0xff || (data[2] == 0x7f && data[1] == 0x7f)))
 		adbhid_input_keycode(id, data[2], 0);
 }
 
 static void
-adbhid_input_keycode(int id, int keycode, int repeat)
+adbhid_input_keycode(int id, int scancode, int repeat)
 {
-	int up_flag;
+	struct adbhid *ahid = adbhid[id];
+	int keycode, up_flag, key;
 
-	up_flag = (keycode & 0x80);
-	keycode &= 0x7f;
+	keycode = scancode & 0x7f;
+	up_flag = scancode & 0x80;
+
+	if (restore_capslock_events) {
+		if (keycode == ADB_KEY_CAPSLOCK && !up_flag) {
+			/* Key pressed, turning on the CapsLock LED.
+			 * The next 0xff will be interpreted as a release. */
+			if (ahid->flags & FLAG_CAPSLOCK_IGNORE_NEXT) {
+				/* Throw away this key event if it happens
+				 * just after resume. */
+				ahid->flags &= ~FLAG_CAPSLOCK_IGNORE_NEXT;
+				return;
+			} else {
+				ahid->flags |= FLAG_CAPSLOCK_TRANSLATE
+					| FLAG_CAPSLOCK_DOWN;
+			}
+		} else if (scancode == 0xff &&
+			   !(ahid->flags & FLAG_POWER_KEY_PRESSED)) {
+			/* Scancode 0xff usually signifies that the capslock
+			 * key was either pressed or released, or that the
+			 * power button was released. */
+			if (ahid->flags & FLAG_CAPSLOCK_TRANSLATE) {
+				keycode = ADB_KEY_CAPSLOCK;
+				if (ahid->flags & FLAG_CAPSLOCK_DOWN) {
+					/* Key released */
+					up_flag = 1;
+					ahid->flags &= ~FLAG_CAPSLOCK_DOWN;
+				} else {
+					/* Key pressed */
+					up_flag = 0;
+					ahid->flags &= ~FLAG_CAPSLOCK_TRANSLATE;
+				}
+			} else {
+				printk(KERN_INFO "Spurious caps lock event "
+						 "(scancode 0xff).\n");
+			}
+		}
+	}
 
 	switch (keycode) {
-	case 0x39: /* Generate down/up events for CapsLock everytime. */
-		input_report_key(&adbhid[id]->input, KEY_CAPSLOCK, 1);
-		input_report_key(&adbhid[id]->input, KEY_CAPSLOCK, 0);
-		return;
-	case 0x3f: /* ignore Powerbook Fn key */
-		return;
-#ifdef CONFIG_ALL_PPC
-	case 0x7e: /* Power key on PBook 3400 needs remapping */
+	case ADB_KEY_CAPSLOCK:
+		if (!restore_capslock_events) {
+			/* Generate down/up events for CapsLock every time. */
+			input_report_key(ahid->input, KEY_CAPSLOCK, 1);
+			input_sync(ahid->input);
+			input_report_key(ahid->input, KEY_CAPSLOCK, 0);
+			input_sync(ahid->input);
+			return;
+		}
+		break;
+#ifdef CONFIG_PPC_PMAC
+	case ADB_KEY_POWER_OLD: /* Power key on PBook 3400 needs remapping */
 		switch(pmac_call_feature(PMAC_FTR_GET_MB_INFO,
 			NULL, PMAC_MB_INFO_MODEL, 0)) {
 		case PMAC_TYPE_COMET:
 		case PMAC_TYPE_HOOPER:
 		case PMAC_TYPE_KANGA:
-			keycode = 0x7f;
+			keycode = ADB_KEY_POWER;
 		}
 		break;
-#endif /* CONFIG_ALL_PPC */
+	case ADB_KEY_POWER:
+		/* Keep track of the power key state */
+		if (up_flag)
+			ahid->flags &= ~FLAG_POWER_KEY_PRESSED;
+		else
+			ahid->flags |= FLAG_POWER_KEY_PRESSED;
+
+		/* Fn + Command will produce a bogus "power" keycode */
+		if (ahid->flags & FLAG_FN_KEY_PRESSED) {
+			keycode = ADB_KEY_CMD;
+			if (up_flag)
+				ahid->flags &= ~FLAG_POWER_FROM_FN;
+			else
+				ahid->flags |= FLAG_POWER_FROM_FN;
+		} else if (ahid->flags & FLAG_POWER_FROM_FN) {
+			keycode = ADB_KEY_CMD;
+			ahid->flags &= ~FLAG_POWER_FROM_FN;
+		}
+		break;
+	case ADB_KEY_FN:
+		/* Keep track of the Fn key state */
+		if (up_flag) {
+			ahid->flags &= ~FLAG_FN_KEY_PRESSED;
+			/* Emulate Fn+delete = forward delete */
+			if (ahid->flags & FLAG_EMU_FWDEL_DOWN) {
+				ahid->flags &= ~FLAG_EMU_FWDEL_DOWN;
+				keycode = ADB_KEY_FWDEL;
+				break;
+			}
+		} else
+			ahid->flags |= FLAG_FN_KEY_PRESSED;
+		break;
+	case ADB_KEY_DEL:
+		/* Emulate Fn+delete = forward delete */
+		if (ahid->flags & FLAG_FN_KEY_PRESSED) {
+			keycode = ADB_KEY_FWDEL;
+			if (up_flag)
+				ahid->flags &= ~FLAG_EMU_FWDEL_DOWN;
+			else
+				ahid->flags |= FLAG_EMU_FWDEL_DOWN;
+		}
+		break;
+#endif /* CONFIG_PPC_PMAC */
 	}
 
-	if (adbhid[id]->keycode[keycode])
-		input_report_key(&adbhid[id]->input,
-				 adbhid[id]->keycode[keycode], !up_flag);
-	else
+	key = adbhid[id]->keycode[keycode];
+	if (key) {
+		input_report_key(adbhid[id]->input, key, !up_flag);
+		input_sync(adbhid[id]->input);
+	} else
 		printk(KERN_INFO "Unhandled ADB key (scancode %#02x) %s.\n", keycode,
 		       up_flag ? "released" : "pressed");
+
 }
 
 static void
-adbhid_mouse_input(unsigned char *data, int nb, struct pt_regs *regs, int autopoll)
+adbhid_mouse_input(unsigned char *data, int nb, int autopoll)
 {
 	int id = (data[0] >> 4) & 0x0f;
 
@@ -265,20 +485,22 @@ adbhid_mouse_input(unsigned char *data, int nb, struct pt_regs *regs, int autopo
                 break;
 	}
 
-	input_report_key(&adbhid[id]->input, BTN_LEFT,   !((data[1] >> 7) & 1));
-	input_report_key(&adbhid[id]->input, BTN_MIDDLE, !((data[2] >> 7) & 1));
+	input_report_key(adbhid[id]->input, BTN_LEFT,   !((data[1] >> 7) & 1));
+	input_report_key(adbhid[id]->input, BTN_MIDDLE, !((data[2] >> 7) & 1));
 
-	if (nb >= 4)
-		input_report_key(&adbhid[id]->input, BTN_RIGHT,  !((data[3] >> 7) & 1));
+	if (nb >= 4 && adbhid[id]->mouse_kind != ADBMOUSE_TRACKPAD)
+		input_report_key(adbhid[id]->input, BTN_RIGHT,  !((data[3] >> 7) & 1));
 
-	input_report_rel(&adbhid[id]->input, REL_X,
+	input_report_rel(adbhid[id]->input, REL_X,
 			 ((data[2]&0x7f) < 64 ? (data[2]&0x7f) : (data[2]&0x7f)-128 ));
-	input_report_rel(&adbhid[id]->input, REL_Y,
+	input_report_rel(adbhid[id]->input, REL_Y,
 			 ((data[1]&0x7f) < 64 ? (data[1]&0x7f) : (data[1]&0x7f)-128 ));
+
+	input_sync(adbhid[id]->input);
 }
 
 static void
-adbhid_buttons_input(unsigned char *data, int nb, struct pt_regs *regs, int autopoll)
+adbhid_buttons_input(unsigned char *data, int nb, int autopoll)
 {
 	int id = (data[0] >> 4) & 0x0f;
 
@@ -290,15 +512,38 @@ adbhid_buttons_input(unsigned char *data, int nb, struct pt_regs *regs, int auto
 	switch (adbhid[id]->original_handler_id) {
 	default:
 	case 0x02: /* Adjustable keyboard button device */
-		printk(KERN_INFO "Unhandled ADB_MISC event %02x, %02x, %02x, %02x\n",
-		       data[0], data[1], data[2], data[3]);
-		break;
+	  {
+		int down = (data[1] == (data[1] & 0xf));
+
+		switch (data[1] & 0x0f) {
+		case 0x0:	/* microphone */
+			input_report_key(adbhid[id]->input, KEY_SOUND, down);
+			break;
+
+		case 0x1:	/* mute */
+			input_report_key(adbhid[id]->input, KEY_MUTE, down);
+			break;
+
+		case 0x2:	/* volume decrease */
+			input_report_key(adbhid[id]->input, KEY_VOLUMEDOWN, down);
+			break;
+
+		case 0x3:	/* volume increase */
+			input_report_key(adbhid[id]->input, KEY_VOLUMEUP, down);
+			break;
+
+		default:
+			printk(KERN_INFO "Unhandled ADB_MISC event %02x, %02x, %02x, %02x\n",
+			       data[0], data[1], data[2], data[3]);
+			break;
+		}
+	  }
+	  break;
+
 	case 0x1f: /* Powerbook button device */
 	  {
-	  	int down = (data[1] == (data[1] & 0xf));
-#ifdef CONFIG_PMAC_BACKLIGHT
-		int backlight = get_backlight_level();
-#endif
+		int down = (data[1] == (data[1] & 0xf));
+
 		/*
 		 * XXX: Where is the contrast control for the passive?
 		 *  -- Cort
@@ -306,72 +551,130 @@ adbhid_buttons_input(unsigned char *data, int nb, struct pt_regs *regs, int auto
 
 		switch (data[1] & 0x0f) {
 		case 0x8:	/* mute */
-			input_report_key(&adbhid[id]->input, KEY_MUTE, down);
+			input_report_key(adbhid[id]->input, KEY_MUTE, down);
 			break;
 
 		case 0x7:	/* volume decrease */
-			input_report_key(&adbhid[id]->input, KEY_VOLUMEDOWN, down);
+			input_report_key(adbhid[id]->input, KEY_VOLUMEDOWN, down);
 			break;
 
 		case 0x6:	/* volume increase */
-			input_report_key(&adbhid[id]->input, KEY_VOLUMEUP, down);
- 			break;
+			input_report_key(adbhid[id]->input, KEY_VOLUMEUP, down);
+			break;
 
 		case 0xb:	/* eject */
-			input_report_key(&adbhid[id]->input, KEY_EJECTCD, down);
+			input_report_key(adbhid[id]->input, KEY_EJECTCD, down);
 			break;
+
 		case 0xa:	/* brightness decrease */
 #ifdef CONFIG_PMAC_BACKLIGHT
-			if (!disable_kernel_backlight) {
-				if (down && backlight >= 0) {
-					if (backlight > BACKLIGHT_OFF)
-						set_backlight_level(backlight-1);
-					else
-						set_backlight_level(BACKLIGHT_OFF);
-				}
-			}
-#endif /* CONFIG_PMAC_BACKLIGHT */
-			input_report_key(&adbhid[id]->input, KEY_BRIGHTNESSDOWN, down);
+			if (down)
+				pmac_backlight_key_down();
+#endif
+			input_report_key(adbhid[id]->input, KEY_BRIGHTNESSDOWN, down);
 			break;
+
 		case 0x9:	/* brightness increase */
 #ifdef CONFIG_PMAC_BACKLIGHT
-			if (!disable_kernel_backlight) {
-				if (down && backlight >= 0) {
-					if (backlight < BACKLIGHT_MAX)
-						set_backlight_level(backlight+1);
-					else 
-						set_backlight_level(BACKLIGHT_MAX);
-				}
+			if (down)
+				pmac_backlight_key_up();
+#endif
+			input_report_key(adbhid[id]->input, KEY_BRIGHTNESSUP, down);
+			break;
+
+		case 0xc:	/* videomode switch */
+			input_report_key(adbhid[id]->input, KEY_SWITCHVIDEOMODE, down);
+			break;
+
+		case 0xd:	/* keyboard illumination toggle */
+			input_report_key(adbhid[id]->input, KEY_KBDILLUMTOGGLE, down);
+			break;
+
+		case 0xe:	/* keyboard illumination decrease */
+			input_report_key(adbhid[id]->input, KEY_KBDILLUMDOWN, down);
+			break;
+
+		case 0xf:
+			switch (data[1]) {
+			case 0x8f:
+			case 0x0f:
+				/* keyboard illumination increase */
+				input_report_key(adbhid[id]->input, KEY_KBDILLUMUP, down);
+				break;
+
+			case 0x7f:
+			case 0xff:
+				/* keypad overlay toogle */
+				break;
+
+			default:
+				printk(KERN_INFO "Unhandled ADB_MISC event %02x, %02x, %02x, %02x\n",
+				       data[0], data[1], data[2], data[3]);
+				break;
 			}
-#endif /* CONFIG_PMAC_BACKLIGHT */
-			input_report_key(&adbhid[id]->input, KEY_BRIGHTNESSUP, down);
+			break;
+		default:
+			printk(KERN_INFO "Unhandled ADB_MISC event %02x, %02x, %02x, %02x\n",
+			       data[0], data[1], data[2], data[3]);
 			break;
 		}
 	  }
 	  break;
 	}
+
+	input_sync(adbhid[id]->input);
 }
 
 static struct adb_request led_request;
 static int leds_pending[16];
+static int leds_req_pending;
 static int pending_devs[16];
-static int pending_led_start=0;
-static int pending_led_end=0;
+static int pending_led_start;
+static int pending_led_end;
+static DEFINE_SPINLOCK(leds_lock);
+
+static void leds_done(struct adb_request *req)
+{
+	int leds = 0, device = 0, pending = 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&leds_lock, flags);
+
+	if (pending_led_start != pending_led_end) {
+		device = pending_devs[pending_led_start];
+		leds = leds_pending[device] & 0xff;
+		leds_pending[device] = 0;
+		pending_led_start++;
+		pending_led_start = (pending_led_start < 16) ? pending_led_start : 0;
+		pending = leds_req_pending;
+	} else
+		leds_req_pending = 0;
+	spin_unlock_irqrestore(&leds_lock, flags);
+	if (pending)
+		adb_request(&led_request, leds_done, 0, 3,
+			    ADB_WRITEREG(device, KEYB_LEDREG), 0xff, ~leds);
+}
 
 static void real_leds(unsigned char leds, int device)
 {
-    if (led_request.complete) {
-	adb_request(&led_request, leds_done, 0, 3,
-		    ADB_WRITEREG(device, KEYB_LEDREG), 0xff,
-		    ~leds);
-    } else {
-	if (!(leds_pending[device] & 0x100)) {
-	    pending_devs[pending_led_end] = device;
-	    pending_led_end++;
-	    pending_led_end = (pending_led_end < 16) ? pending_led_end : 0;
+	unsigned long flags;
+
+	spin_lock_irqsave(&leds_lock, flags);
+	if (!leds_req_pending) {
+		leds_req_pending = 1;
+		spin_unlock_irqrestore(&leds_lock, flags);	       
+		adb_request(&led_request, leds_done, 0, 3,
+			    ADB_WRITEREG(device, KEYB_LEDREG), 0xff, ~leds);
+		return;
+	} else {
+		if (!(leds_pending[device] & 0x100)) {
+			pending_devs[pending_led_end] = device;
+			pending_led_end++;
+			pending_led_end = (pending_led_end < 16) ? pending_led_end : 0;
+		}
+		leds_pending[device] = leds | 0x100;
 	}
-	leds_pending[device] = leds | 0x100;
-    }
+	spin_unlock_irqrestore(&leds_lock, flags);	       
 }
 
 /*
@@ -380,59 +683,63 @@ static void real_leds(unsigned char leds, int device)
  */
 static int adbhid_kbd_event(struct input_dev *dev, unsigned int type, unsigned int code, int value)
 {
-	struct adbhid *adbhid = dev->private;
+	struct adbhid *adbhid = input_get_drvdata(dev);
 	unsigned char leds;
 
 	switch (type) {
 	case EV_LED:
-	  leds = (test_bit(LED_SCROLLL, dev->led) ? 4 : 0)
-	       | (test_bit(LED_NUML,    dev->led) ? 1 : 0)
-	       | (test_bit(LED_CAPSL,   dev->led) ? 2 : 0);
-	  real_leds(leds, adbhid->id);
-	  return 0;
+		leds =  (test_bit(LED_SCROLLL, dev->led) ? 4 : 0) |
+			(test_bit(LED_NUML,    dev->led) ? 1 : 0) |
+			(test_bit(LED_CAPSL,   dev->led) ? 2 : 0);
+		real_leds(leds, adbhid->id);
+		return 0;
 	}
 
 	return -1;
 }
 
-static void leds_done(struct adb_request *req)
+static void
+adbhid_kbd_capslock_remember(void)
 {
-    int leds,device;
+	struct adbhid *ahid;
+	int i;
 
-    if (pending_led_start != pending_led_end) {
-	device = pending_devs[pending_led_start];
-	leds = leds_pending[device] & 0xff;
-	leds_pending[device] = 0;
-	pending_led_start++;
-	pending_led_start = (pending_led_start < 16) ? pending_led_start : 0;
-	real_leds(leds,device);
-    }
+	for (i = 1; i < 16; i++) {
+		ahid = adbhid[i];
 
+		if (ahid && ahid->id == ADB_KEYBOARD)
+			if (ahid->flags & FLAG_CAPSLOCK_TRANSLATE)
+				ahid->flags |= FLAG_CAPSLOCK_IGNORE_NEXT;
+	}
 }
 
 static int
 adb_message_handler(struct notifier_block *this, unsigned long code, void *x)
 {
-	unsigned long flags;
-
 	switch (code) {
 	case ADB_MSG_PRE_RESET:
 	case ADB_MSG_POWERDOWN:
-	    	/* Stop the repeat timer. Autopoll is already off at this point */
-		save_flags(flags);
-		cli();
+		/* Stop the repeat timer. Autopoll is already off at this point */
 		{
 			int i;
 			for (i = 1; i < 16; i++) {
 				if (adbhid[i])
-					del_timer(&adbhid[i]->input.timer);
+					del_timer_sync(&adbhid[i]->input->timer);
 			}
 		}
-		restore_flags(flags);
 
 		/* Stop pending led requests */
-		while(!led_request.complete)
+		while (leds_req_pending)
 			adb_poll();
+
+		/* After resume, and if the capslock LED is on, the PMU will
+		 * send a "capslock down" key event. This confuses the
+		 * restore_capslock_events logic. Remember if the capslock
+		 * LED was on before suspend so the unwanted key event can
+		 * be ignored after resume. */
+		if (restore_capslock_events)
+			adbhid_kbd_capslock_remember();
+
 		break;
 
 	case ADB_MSG_POST_RESET:
@@ -442,147 +749,176 @@ adb_message_handler(struct notifier_block *this, unsigned long code, void *x)
 	return NOTIFY_DONE;
 }
 
-static void
+static int
 adbhid_input_register(int id, int default_id, int original_handler_id,
 		      int current_handler_id, int mouse_kind)
 {
+	struct adbhid *hid;
+	struct input_dev *input_dev;
+	int err;
 	int i;
 
 	if (adbhid[id]) {
 		printk(KERN_ERR "Trying to reregister ADB HID on ID %d\n", id);
-		return;
+		return -EEXIST;
 	}
 
-	if (!(adbhid[id] = kmalloc(sizeof(struct adbhid), GFP_KERNEL)))
-		return;
+	adbhid[id] = hid = kzalloc(sizeof(struct adbhid), GFP_KERNEL);
+	input_dev = input_allocate_device();
+	if (!hid || !input_dev) {
+		err = -ENOMEM;
+		goto fail;
+	}
 
-	memset(adbhid[id], 0, sizeof(struct adbhid));
+	sprintf(hid->phys, "adb%d:%d.%02x/input", id, default_id, original_handler_id);
 
-	adbhid[id]->id = default_id;
-	adbhid[id]->original_handler_id = original_handler_id;
-	adbhid[id]->current_handler_id = current_handler_id;
-	adbhid[id]->mouse_kind = mouse_kind;
-	adbhid[id]->input.private = adbhid[id];
-	adbhid[id]->input.name = adbhid[id]->name;
-	adbhid[id]->input.idbus = BUS_ADB;
-	adbhid[id]->input.idvendor = 0x0001;
-	adbhid[id]->input.idproduct = (id << 12) | (default_id << 8) | original_handler_id;
-	adbhid[id]->input.idversion = 0x0100;
+	hid->input = input_dev;
+	hid->id = default_id;
+	hid->original_handler_id = original_handler_id;
+	hid->current_handler_id = current_handler_id;
+	hid->mouse_kind = mouse_kind;
+	hid->flags = 0;
+	input_set_drvdata(input_dev, hid);
+	input_dev->name = hid->name;
+	input_dev->phys = hid->phys;
+	input_dev->id.bustype = BUS_ADB;
+	input_dev->id.vendor = 0x0001;
+	input_dev->id.product = (id << 12) | (default_id << 8) | original_handler_id;
+	input_dev->id.version = 0x0100;
 
 	switch (default_id) {
 	case ADB_KEYBOARD:
-		if (!(adbhid[id]->keycode = kmalloc(sizeof(adb_to_linux_keycodes), GFP_KERNEL))) {
-			kfree(adbhid[id]);
-			return;
+		hid->keycode = kmalloc(sizeof(adb_to_linux_keycodes), GFP_KERNEL);
+		if (!hid->keycode) {
+			err = -ENOMEM;
+			goto fail;
 		}
 
-		sprintf(adbhid[id]->name, "ADB keyboard on ID %d:%d.%02x",
-			id, default_id, original_handler_id);
+		sprintf(hid->name, "ADB keyboard");
 
-		memcpy(adbhid[id]->keycode, adb_to_linux_keycodes, sizeof(adb_to_linux_keycodes));
+		memcpy(hid->keycode, adb_to_linux_keycodes, sizeof(adb_to_linux_keycodes));
 
 		printk(KERN_INFO "Detected ADB keyboard, type ");
 		switch (original_handler_id) {
 		default:
 			printk("<unknown>.\n");
-			adbhid[id]->input.idversion = ADB_KEYBOARD_UNKNOWN;
+			input_dev->id.version = ADB_KEYBOARD_UNKNOWN;
 			break;
 
 		case 0x01: case 0x02: case 0x03: case 0x06: case 0x08:
 		case 0x0C: case 0x10: case 0x18: case 0x1B: case 0x1C:
 		case 0xC0: case 0xC3: case 0xC6:
 			printk("ANSI.\n");
-			adbhid[id]->input.idversion = ADB_KEYBOARD_ANSI;
+			input_dev->id.version = ADB_KEYBOARD_ANSI;
 			break;
 
 		case 0x04: case 0x05: case 0x07: case 0x09: case 0x0D:
 		case 0x11: case 0x14: case 0x19: case 0x1D: case 0xC1:
 		case 0xC4: case 0xC7:
 			printk("ISO, swapping keys.\n");
-			adbhid[id]->input.idversion = ADB_KEYBOARD_ISO;
-			i = adbhid[id]->keycode[10];
-			adbhid[id]->keycode[10] = adbhid[id]->keycode[50];
-			adbhid[id]->keycode[50] = i;
+			input_dev->id.version = ADB_KEYBOARD_ISO;
+			i = hid->keycode[10];
+			hid->keycode[10] = hid->keycode[50];
+			hid->keycode[50] = i;
 			break;
 
 		case 0x12: case 0x15: case 0x16: case 0x17: case 0x1A:
 		case 0x1E: case 0xC2: case 0xC5: case 0xC8: case 0xC9:
 			printk("JIS.\n");
-			adbhid[id]->input.idversion = ADB_KEYBOARD_JIS;
+			input_dev->id.version = ADB_KEYBOARD_JIS;
 			break;
 		}
 
 		for (i = 0; i < 128; i++)
-			if (adbhid[id]->keycode[i])
-				set_bit(adbhid[id]->keycode[i], adbhid[id]->input.keybit);
+			if (hid->keycode[i])
+				set_bit(hid->keycode[i], input_dev->keybit);
 
-		adbhid[id]->input.evbit[0] = BIT(EV_KEY) | BIT(EV_LED) | BIT(EV_REP);
-		adbhid[id]->input.ledbit[0] = BIT(LED_SCROLLL) | BIT(LED_CAPSL) | BIT(LED_NUML);
-		adbhid[id]->input.event = adbhid_kbd_event;
-		adbhid[id]->input.keycodemax = 127;
-		adbhid[id]->input.keycodesize = 1;
+		input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_LED) |
+			BIT_MASK(EV_REP);
+		input_dev->ledbit[0] = BIT_MASK(LED_SCROLLL) |
+			BIT_MASK(LED_CAPSL) | BIT_MASK(LED_NUML);
+		input_dev->event = adbhid_kbd_event;
+		input_dev->keycodemax = KEY_FN;
+		input_dev->keycodesize = sizeof(hid->keycode[0]);
 		break;
 
 	case ADB_MOUSE:
-		sprintf(adbhid[id]->name, "ADB mouse on ID %d:%d.%02x",
-			id, default_id, original_handler_id);
+		sprintf(hid->name, "ADB mouse");
 
-		adbhid[id]->input.evbit[0] = BIT(EV_KEY) | BIT(EV_REL);
-		adbhid[id]->input.keybit[LONG(BTN_MOUSE)] = BIT(BTN_LEFT) | BIT(BTN_MIDDLE) | BIT(BTN_RIGHT);
-		adbhid[id]->input.relbit[0] = BIT(REL_X) | BIT(REL_Y);
+		input_dev->evbit[0] = BIT_MASK(EV_KEY) | BIT_MASK(EV_REL);
+		input_dev->keybit[BIT_WORD(BTN_MOUSE)] = BIT_MASK(BTN_LEFT) |
+			BIT_MASK(BTN_MIDDLE) | BIT_MASK(BTN_RIGHT);
+		input_dev->relbit[0] = BIT_MASK(REL_X) | BIT_MASK(REL_Y);
 		break;
 
 	case ADB_MISC:
 		switch (original_handler_id) {
 		case 0x02: /* Adjustable keyboard button device */
-			sprintf(adbhid[id]->name, "ADB adjustable keyboard buttons on ID %d:%d.%02x",
-				id, default_id, original_handler_id);
+			sprintf(hid->name, "ADB adjustable keyboard buttons");
+			input_dev->evbit[0] = BIT_MASK(EV_KEY) |
+				BIT_MASK(EV_REP);
+			set_bit(KEY_SOUND, input_dev->keybit);
+			set_bit(KEY_MUTE, input_dev->keybit);
+			set_bit(KEY_VOLUMEUP, input_dev->keybit);
+			set_bit(KEY_VOLUMEDOWN, input_dev->keybit);
 			break;
 		case 0x1f: /* Powerbook button device */
-			sprintf(adbhid[id]->name, "ADB Powerbook buttons on ID %d:%d.%02x",
-				id, default_id, original_handler_id);
-			adbhid[id]->input.evbit[0] = BIT(EV_KEY) | BIT(EV_REP);
-			set_bit(KEY_MUTE, adbhid[id]->input.keybit);
-			set_bit(KEY_VOLUMEUP, adbhid[id]->input.keybit);
-			set_bit(KEY_VOLUMEDOWN, adbhid[id]->input.keybit);
-			set_bit(KEY_BRIGHTNESSUP, adbhid[id]->input.keybit);
-			set_bit(KEY_BRIGHTNESSDOWN, adbhid[id]->input.keybit);
-			set_bit(KEY_EJECTCD, adbhid[id]->input.keybit);
+			sprintf(hid->name, "ADB Powerbook buttons");
+			input_dev->evbit[0] = BIT_MASK(EV_KEY) |
+				BIT_MASK(EV_REP);
+			set_bit(KEY_MUTE, input_dev->keybit);
+			set_bit(KEY_VOLUMEUP, input_dev->keybit);
+			set_bit(KEY_VOLUMEDOWN, input_dev->keybit);
+			set_bit(KEY_BRIGHTNESSUP, input_dev->keybit);
+			set_bit(KEY_BRIGHTNESSDOWN, input_dev->keybit);
+			set_bit(KEY_EJECTCD, input_dev->keybit);
+			set_bit(KEY_SWITCHVIDEOMODE, input_dev->keybit);
+			set_bit(KEY_KBDILLUMTOGGLE, input_dev->keybit);
+			set_bit(KEY_KBDILLUMDOWN, input_dev->keybit);
+			set_bit(KEY_KBDILLUMUP, input_dev->keybit);
 			break;
 		}
-		if (adbhid[id]->name[0])
+		if (hid->name[0])
 			break;
 		/* else fall through */
 
 	default:
 		printk(KERN_INFO "Trying to register unknown ADB device to input layer.\n");
-		kfree(adbhid[id]);
-		return;
+		err = -ENODEV;
+		goto fail;
 	}
 
-	adbhid[id]->input.keycode = adbhid[id]->keycode;
+	input_dev->keycode = hid->keycode;
 
-	input_register_device(&adbhid[id]->input);
-
-	printk(KERN_INFO "input%d: ADB HID on ID %d:%d.%02x\n",
-	       adbhid[id]->input.number, id, default_id, original_handler_id);
+	err = input_register_device(input_dev);
+	if (err)
+		goto fail;
 
 	if (default_id == ADB_KEYBOARD) {
 		/* HACK WARNING!! This should go away as soon there is an utility
 		 * to control that for event devices.
 		 */
-		adbhid[id]->input.rep[REP_DELAY] = HZ/2;   /* input layer default: HZ/4 */
-		adbhid[id]->input.rep[REP_PERIOD] = HZ/15; /* input layer default: HZ/33 */
+		input_dev->rep[REP_DELAY] = 500;   /* input layer default: 250 */
+		input_dev->rep[REP_PERIOD] = 66; /* input layer default: 33 */
 	}
+
+	return 0;
+
+ fail:	input_free_device(input_dev);
+	if (hid) {
+		kfree(hid->keycode);
+		kfree(hid);
+	}
+	adbhid[id] = NULL;
+	return err;
 }
 
 static void adbhid_input_unregister(int id)
 {
-	input_unregister_device(&adbhid[id]->input);
-	if (adbhid[id]->keycode)
-		kfree(adbhid[id]->keycode);
+	input_unregister_device(adbhid[id]->input);
+	kfree(adbhid[id]->keycode);
 	kfree(adbhid[id]);
-	adbhid[id] = 0;
+	adbhid[id] = NULL;
 }
 
 
@@ -591,15 +927,15 @@ adbhid_input_reregister(int id, int default_id, int org_handler_id,
 			int cur_handler_id, int mk)
 {
 	if (adbhid[id]) {
-		if (adbhid[id]->input.idproduct !=
+		if (adbhid[id]->input->id.product !=
 		    ((id << 12)|(default_id << 8)|org_handler_id)) {
 			adbhid_input_unregister(id);
 			adbhid_input_register(id, default_id, org_handler_id,
-				cur_handler_id, mk);
+					      cur_handler_id, mk);
 		}
 	} else
 		adbhid_input_register(id, default_id, org_handler_id,
-			cur_handler_id, mk);
+				      cur_handler_id, mk);
 	return 1<<id;
 }
 
@@ -608,10 +944,10 @@ adbhid_input_devcleanup(u16 exist)
 {
 	int i;
 	for(i=1; i<16; i++)
-	    if (adbhid[i] && !(exist&(1<<i)))
-		adbhid_input_unregister(i);
+		if (adbhid[i] && !(exist&(1<<i)))
+			adbhid_input_unregister(i);
 }
- 
+
 static void
 adbhid_probe(void)
 {
@@ -646,14 +982,16 @@ adbhid_probe(void)
 			printk("ADB keyboard at %d, handler 1\n", id);
 
 		adb_get_infos(id, &default_id, &cur_handler_id);
-		reg |= adbhid_input_reregister(id, default_id, org_handler_id, cur_handler_id, 0);
+		reg |= adbhid_input_reregister(id, default_id, org_handler_id,
+					       cur_handler_id, 0);
 	}
 
 	for (i = 0; i < buttons_ids.nids; i++) {
 		int id = buttons_ids.id[i];
 
 		adb_get_infos(id, &default_id, &org_handler_id);
-		reg |= adbhid_input_reregister(id, default_id, org_handler_id, org_handler_id, 0);
+		reg |= adbhid_input_reregister(id, default_id, org_handler_id,
+					       org_handler_id, 0);
 	}
 
 	/* Try to switch all mice to handler 4, or 2 for three-button
@@ -743,8 +1081,8 @@ adbhid_probe(void)
 
 		adb_get_infos(id, &default_id, &cur_handler_id);
 		reg |= adbhid_input_reregister(id, default_id, org_handler_id,
-				      cur_handler_id, mouse_kind);
-        }
+					       cur_handler_id, mouse_kind);
+	}
 	adbhid_input_devcleanup(reg);
 }
 
@@ -757,7 +1095,7 @@ init_trackpad(int id)
 	printk(" (trackpad)");
 
 	adb_request(&req, NULL, ADBREQ_SYNC | ADBREQ_REPLY, 1,
-		ADB_READREG(id,1));
+		    ADB_READREG(id,1));
 	if (req.reply_len < 8)
 	    printk("bad length for reg. 1\n");
 	else
@@ -797,7 +1135,7 @@ init_trackpad(int id)
 	            0x03, /*r1_buffer[6],*/
 	            r1_buffer[7]);
 
-	    /* Without this flush, the trackpad may be locked up */	    
+	    /* Without this flush, the trackpad may be locked up */
 	    adb_request(&req, NULL, ADBREQ_SYNC, 1, ADB_FLUSH(id));
         }
 }
@@ -927,15 +1265,16 @@ init_ms_a3(int id)
 static int __init adbhid_init(void)
 {
 #ifndef CONFIG_MAC
-	if ( (_machine != _MACH_chrp) && (_machine != _MACH_Pmac) )
-	    return 0;
+	if (!machine_is(chrp) && !machine_is(powermac))
+		return 0;
 #endif
 
 	led_request.complete = 1;
 
 	adbhid_probe();
 
-	notifier_chain_register(&adb_client_list, &adbhid_adb_notifier);
+	blocking_notifier_chain_register(&adb_client_list,
+			&adbhid_adb_notifier);
 
 	return 0;
 }

@@ -1,5 +1,5 @@
 /*
- * befs_fs.h
+ * befs.h
  *
  * Copyright (C) 2001-2002 Will Dyson <will_dyson@pobox.com>
  * Copyright (C) 1999 Makoto Kato (m_kato@ga2.so-net.ne.jp)
@@ -13,9 +13,8 @@
 /* used in debug.c */
 #define BEFS_VERSION "0.9.3"
 
-typedef u64 befs_blocknr_t;
-typedef u32 vfs_blocknr_t;
 
+typedef u64 befs_blocknr_t;
 /*
  * BeFS in memory structures
  */
@@ -71,6 +70,8 @@ typedef struct befs_inode_info {
 		char symlink[BEFS_SYMLINK_LEN];
 	} i_data;
 
+	struct inode vfs_inode;
+
 } befs_inode_info;
 
 enum befs_err {
@@ -84,6 +85,7 @@ enum befs_err {
 	BEFS_BT_NOT_FOUND
 };
 
+
 /****************************/
 /* debug.c */
 void befs_error(const struct super_block *sb, const char *fmt, ...);
@@ -92,10 +94,10 @@ void befs_debug(const struct super_block *sb, const char *fmt, ...);
 
 void befs_dump_super_block(const struct super_block *sb, befs_super_block *);
 void befs_dump_inode(const struct super_block *sb, befs_inode *);
-void befs_dump_index_entry(const struct super_block *sb, befs_btree_super *);
+void befs_dump_index_entry(const struct super_block *sb, befs_disk_btree_super *);
 void befs_dump_index_node(const struct super_block *sb, befs_btree_nodehead *);
-void befs_dump_inode_addr(const struct super_block *sb, befs_inode_addr);
 /****************************/
+
 
 /* Gets a pointer to the private portion of the super_block
  * structure from the public part
@@ -103,13 +105,13 @@ void befs_dump_inode_addr(const struct super_block *sb, befs_inode_addr);
 static inline befs_sb_info *
 BEFS_SB(const struct super_block *super)
 {
-	return (befs_sb_info *) super->u.generic_sbp;
+	return (befs_sb_info *) super->s_fs_info;
 }
 
 static inline befs_inode_info *
 BEFS_I(const struct inode *inode)
 {
-	return (befs_inode_info *) inode->u.generic_ip;
+	return list_entry(inode, struct befs_inode_info, vfs_inode);
 }
 
 static inline befs_blocknr_t
@@ -134,7 +136,7 @@ blockno2iaddr(struct super_block *sb, befs_blocknr_t blockno)
 static inline unsigned int
 befs_iaddrs_per_block(struct super_block *sb)
 {
-	return BEFS_SB(sb)->block_size / sizeof (befs_inode_addr);
+	return BEFS_SB(sb)->block_size / sizeof (befs_disk_inode_addr);
 }
 
 static inline int
@@ -148,5 +150,7 @@ befs_brun_size(struct super_block *sb, befs_block_run run)
 {
 	return BEFS_SB(sb)->block_size * run.len;
 }
+
+#include "endian.h"
 
 #endif				/* _LINUX_BEFS_H */

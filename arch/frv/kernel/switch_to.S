@@ -11,8 +11,9 @@
 # 2 of the License, or (at your option) any later version.
 #
 ###############################################################################
-#include <linux/config.h>
+
 #include <linux/linkage.h>
+#include <asm/thread_info.h>
 #include <asm/processor.h>
 #include <asm/registers.h>
 #include <asm/spr-regs.h>
@@ -30,12 +31,12 @@
 	# address of frame 0 (userspace) on current kernel stack
 	.globl		__kernel_frame0_ptr
 __kernel_frame0_ptr:
-	.long		init_task_union + 8192 - USER_CONTEXT_SIZE
+	.long		init_thread_union + THREAD_SIZE - FRV_FRAME0_SIZE
 
 	# address of current task
 	.globl		__kernel_current_task
 __kernel_current_task:
-	.long		init_task_union
+	.long		init_task
 
 	.section	.text
 	.balign		4
@@ -69,7 +70,7 @@ __switch_to:
 	ldi.p		@(gr8,#__THREAD_USER),gr8
 	call		save_user_regs
 	or		gr22,gr22,gr8
-
+	
 	# retrieve the new context
 	sethi.p		%hi(__kernel_frame0_ptr),gr6
 	setlo		%lo(__kernel_frame0_ptr),gr6
@@ -78,8 +79,11 @@ __switch_to:
 	lddi.p		@(gr9,#__THREAD_FRAME),gr10
 	or		gr10,gr10,gr27		; save prev for the return value
 
+	ldi		@(gr11,#4),gr19		; get new_current->thread_info
+
 	lddi		@(gr9,#__THREAD_SP),gr12
-	lddi		@(gr9,#__THREAD_LR),gr14
+	ldi		@(gr9,#__THREAD_LR),gr14
+	ldi		@(gr9,#__THREAD_PC),gr18
 	ldi.p		@(gr9,#__THREAD_FRAME0),gr7
 
 	# actually switch kernel contexts with ordinary exceptions disabled
@@ -90,6 +94,7 @@ __switch_to:
 	or		gr11,gr0,gr29		; set __current
 	or.p		gr12,gr0,sp
 	or		gr13,gr0,fp
+	or		gr19,gr0,gr15		; set __current_thread_info
 
 	sti		gr7,@(gr6,#0)		; set __kernel_frame0_ptr
 	sti		gr29,@(gr6,#4)		; set __kernel_current_task
@@ -100,14 +105,14 @@ __switch_to:
 	# jump to __switch_back or ret_from_fork as appropriate
 	# - move prev to GR8
 	movgs		gr4,psr
-	jmpl.p		@(gr15,gr0)
+	jmpl.p		@(gr18,gr0)
 	or		gr27,gr27,gr8
 
 ###############################################################################
 #
 # restore incoming process's context
 # - on entry:
-#   - SP, FP, LR, GR28 and GR29 will have been set up appropriately
+#   - SP, FP, LR, GR15, GR28 and GR29 will have been set up appropriately
 #   - GR8 will point to the outgoing task_struct
 #   - GR9 will point to the incoming thread_struct
 #

@@ -1,5 +1,5 @@
 Documentation/networking/vortex.txt
-Andrew Morton <andrewm@uow.edu.au>
+Andrew Morton
 30 April 2000
 
 
@@ -11,7 +11,7 @@ The driver was written by Donald Becker <becker@scyld.com>
 Don is no longer the prime maintainer of this version of the driver. 
 Please report problems to one or more of:
 
-  Andrew Morton <andrewm@uow.edu.au>
+  Andrew Morton
   Netdev mailing list <netdev@vger.kernel.org>
   Linux kernel mailing list <linux-kernel@vger.kernel.org>
 
@@ -24,43 +24,51 @@ Since kernel 2.3.99-pre6, this driver incorporates the support for the
 
 This driver supports the following hardware:
 
-   3c590 Vortex 10Mbps
-   3c592 EISA 10mbps Demon/Vortex
-   3c597 EISA Fast Demon/Vortex
-   3c595 Vortex 100baseTx
-   3c595 Vortex 100baseT4
-   3c595 Vortex 100base-MII
-   3Com Vortex
-   3c900 Boomerang 10baseT
-   3c900 Boomerang 10Mbps Combo
-   3c900 Cyclone 10Mbps TPO
-   3c900B Cyclone 10Mbps T
-   3c900 Cyclone 10Mbps Combo
-   3c900 Cyclone 10Mbps TPC
-   3c900B-FL Cyclone 10base-FL
-   3c905 Boomerang 100baseTx
-   3c905 Boomerang 100baseT4
-   3c905B Cyclone 100baseTx
-   3c905B Cyclone 10/100/BNC
-   3c905B-FX Cyclone 100baseFx
-   3c905C Tornado
-   3c980 Cyclone
-   3cSOHO100-TX Hurricane
-   3c555 Laptop Hurricane
-   3c575 Boomerang CardBus
-   3CCFE575 Cyclone CardBus
-   3CCFE575CT Cyclone CardBus
-   3CCFE656 Cyclone CardBus
-   3CCFEM656 Cyclone CardBus
-   3c450 Cyclone/unknown
-
+	3c590 Vortex 10Mbps
+	3c592 EISA 10Mbps Demon/Vortex
+	3c597 EISA Fast Demon/Vortex
+	3c595 Vortex 100baseTx
+	3c595 Vortex 100baseT4
+	3c595 Vortex 100base-MII
+	3c900 Boomerang 10baseT
+	3c900 Boomerang 10Mbps Combo
+	3c900 Cyclone 10Mbps TPO
+	3c900 Cyclone 10Mbps Combo
+	3c900 Cyclone 10Mbps TPC
+	3c900B-FL Cyclone 10base-FL
+	3c905 Boomerang 100baseTx
+	3c905 Boomerang 100baseT4
+	3c905B Cyclone 100baseTx
+	3c905B Cyclone 10/100/BNC
+	3c905B-FX Cyclone 100baseFx
+	3c905C Tornado
+	3c920B-EMB-WNM (ATI Radeon 9100 IGP)
+	3c980 Cyclone
+	3c980C Python-T
+	3cSOHO100-TX Hurricane
+	3c555 Laptop Hurricane
+	3c556 Laptop Tornado
+	3c556B Laptop Hurricane
+	3c575 [Megahertz] 10/100 LAN  CardBus
+	3c575 Boomerang CardBus
+	3CCFE575BT Cyclone CardBus
+	3CCFE575CT Tornado CardBus
+	3CCFE656 Cyclone CardBus
+	3CCFEM656B Cyclone+Winmodem CardBus
+	3CXFEM656C Tornado+Winmodem CardBus
+	3c450 HomePNA Tornado
+	3c920 Tornado
+	3c982 Hydra Dual Port A
+	3c982 Hydra Dual Port B
+	3c905B-T4
+	3c920B-EMB-WNM Tornado
 
 Module parameters
 =================
 
 There are several parameters which may be provided to the driver when
-its module is loaded.  These are usually placed in /etc/modules.conf
-(used to be conf.modules).  Example:
+its module is loaded.  These are usually placed in /etc/modprobe.d/*.conf
+configuretion files.  Example:
 
 options 3c59x debug=3 rx_copybreak=300
 
@@ -274,48 +282,38 @@ Details of the device driver implementation are at the top of the source file.
 
 Additional documentation is available at Don Becker's Linux Drivers site:
 
-  http://www.scyld.com/network/vortex.html
+     http://www.scyld.com/vortex.html
 
 Donald Becker's driver development site:
 
-     http://www.scyld.com/network
+     http://www.scyld.com/network.html
 
 Donald's vortex-diag program is useful for inspecting the NIC's state:
 
-     http://www.scyld.com/diag/#pci-diags
+     http://www.scyld.com/ethercard_diag.html
 
 Donald's mii-diag program may be used for inspecting and manipulating
 the NIC's Media Independent Interface subsystem:
 
-     http://www.scyld.com/diag/#mii-diag
+     http://www.scyld.com/ethercard_diag.html#mii-diag
 
 Donald's wake-on-LAN page:
 
-     http://www.scyld.com/expert/wake-on-lan.html
-
-3Com's documentation for many NICs, including the ones supported by
-this driver is available at 
-
-     http://support.3com.com/partners/developer/developer_form.html
+     http://www.scyld.com/wakeonlan.html
 
 3Com's DOS-based application for setting up the NICs EEPROMs:
 
 	ftp://ftp.3com.com/pub/nic/3c90x/3c90xx2.exe
-
-Driver updates and a detailed changelog for the modifications which
-were made for the 2.3/2,4 series kernel is available at
-
-     http://www.uow.edu.au/~andrewm/linux/#3c59x-2.3
 
 
 Autonegotiation notes
 ---------------------
 
   The driver uses a one-minute heartbeat for adapting to changes in
-  the external LAN environment.  This means that when, for example, a
-  machine is unplugged from a hubbed 10baseT LAN plugged into a
-  switched 100baseT LAN, the throughput will be quite dreadful for up
-  to sixty seconds.  Be patient.
+  the external LAN environment if link is up and 5 seconds if link is down.
+  This means that when, for example, a machine is unplugged from a hubbed
+  10baseT LAN plugged into a  switched 100baseT LAN, the throughput
+  will be quite dreadful for up to sixty seconds.  Be patient.
 
   Cisco interoperability note from Walter Wong <wcw+@CMU.EDU>:
 
@@ -356,13 +354,13 @@ steps you should take:
 
    Eliminate some variables: try different cards, different
    computers, different cables, different ports on the switch/hub,
-   different versions of the kernel or ofthe driver, etc.
+   different versions of the kernel or of the driver, etc.
 
 - OK, it's a driver problem.
 
    You need to generate a report.  Typically this is an email to the
    maintainer and/or linux-net@vger.kernel.org.  The maintainer's
-   email address will be inthe driver source or in the MAINTAINERS file.
+   email address will be in the driver source or in the MAINTAINERS file.
 
 - The contents of your report will vary a lot depending upon the
   problem.  If it's a kernel crash then you should refer to the
@@ -426,16 +424,16 @@ steps you should take:
 
       1) Increase the debug level.  Usually this is done via:
 
-         a) modprobe driver.o debug=7
-         b) In /etc/conf.modules (or modules.conf):
-            options driver_name debug=7
+         a) modprobe driver debug=7
+         b) In /etc/modprobe.d/driver.conf:
+            options driver debug=7
 
       2) Recreate the problem with the higher debug level,
          send all logs to the maintainer.
 
       3) Download you card's diagnostic tool from Donald
-         Backer's website http://www.scyld.com/diag.  Download
-         mii-diag.c as well.  Build these.
+         Becker's website <http://www.scyld.com/ethercard_diag.html>.
+         Download mii-diag.c as well.  Build these.
 
          a) Run 'vortex-diag -aaee' and 'mii-diag -v' when the card is
             working correctly.  Save the output.
@@ -443,8 +441,8 @@ steps you should take:
          b) Run the above commands when the card is malfunctioning.  Send
             both sets of output.
 
-Finally, please be patient and be prepared to do some work.  You may end up working on
-this problem for a week or more as the maintainer asks more questions, asks for more
-tests, asks for patches to be applied, etc.  At the end of it all, the problem may even
-remain unresolved.
-
+Finally, please be patient and be prepared to do some work.  You may
+end up working on this problem for a week or more as the maintainer
+asks more questions, asks for more tests, asks for patches to be
+applied, etc.  At the end of it all, the problem may even remain
+unresolved.

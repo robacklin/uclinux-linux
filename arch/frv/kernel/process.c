@@ -1,24 +1,21 @@
-/*
- *  linux/arch/m68k/kernel/process.c
+/* process.c: FRV specific parts of process handling
  *
- *  Copyright (C) 1995  Hamish Macdonald
+ * Copyright (C) 2003-5 Red Hat, Inc. All Rights Reserved.
+ * Written by David Howells (dhowells@redhat.com)
+ * - Derived from arch/m68k/kernel/process.c
  *
- *  68060 fixes by Jesper Skov
- *
- *  uClinux changes Copyright (C) 2000-2002, David McCullough <davidm@snapgear.com>
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version
+ * 2 of the License, or (at your option) any later version.
  */
 
-/*
- * This file handles the architecture-dependent parts of process handling..
- */
-
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
@@ -26,107 +23,56 @@
 #include <linux/user.h>
 #include <linux/elf.h>
 #include <linux/reboot.h>
+#include <linux/interrupt.h>
+#include <linux/pagemap.h>
 
+#include <asm/asm-offsets.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/setup.h>
 #include <asm/pgtable.h>
+#include <asm/tlb.h>
 #include <asm/gdb-stub.h>
 #include <asm/mb-regs.h>
 
 #include "local.h"
 
-/*
- * Initial task structure. Make this a per-architecture thing,
- * because different architectures tend to have different
- * alignment requirements and potentially different initial
- * setup.
- */
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-struct mm_struct init_mm = INIT_MM(init_mm);
-
-union task_union init_task_union
-__attribute__((section(".data.init_task"), aligned(THREAD_SIZE))) = {
-	.task	= INIT_TASK(init_task_union.task),
-};
-
 asmlinkage void ret_from_fork(void);
-
-/*
- * The idle loop
- */
-static void __attribute__((unused)) default_idle(void)
-{
-	while (1) {
-		schedule();
-#ifndef NO_MM
-		check_pgt_cache();
-#endif
-	}
-}
 
 #include <asm/pgalloc.h>
 
-struct task_struct *alloc_task_struct(void)
+void (*pm_power_off)(void);
+EXPORT_SYMBOL(pm_power_off);
+
+struct task_struct *alloc_task_struct_node(int node)
 {
-	struct task_struct *p = kmalloc(THREAD_SIZE, GFP_KERNEL);
+	struct task_struct *p = kmalloc_node(THREAD_SIZE, GFP_KERNEL, node);
+
 	if (p)
-		atomic_set((atomic_t *) (p + 1), 1);
+		atomic_set((atomic_t *)(p+1), 1);
 	return p;
 }
 
 void free_task_struct(struct task_struct *p)
 {
-	if (atomic_dec_and_test((atomic_t *) (p + 1)))
+	if (atomic_dec_and_test((atomic_t *)(p+1)))
 		kfree(p);
-}
-
-void get_task_struct(struct task_struct *p)
-{
-	atomic_inc((atomic_t *) (p + 1));
 }
 
 static void core_sleep_idle(void)
 {
-	while (1) {
-	  	if (frv_dma_inprogress) {
-		  	/* If we put the core to sleep, DMA will be suspended */
-		  	schedule();
-#ifndef NO_MM
-			check_pgt_cache();
-#endif
-		} else {
-		  	cli();
-			if (need_resched()) {
-			  	sti();
-			} else {
 #ifdef LED_DEBUG_SLEEP
-				/* Show that we're sleeping... */
-				__set_LEDS(0x55aa);
+	/* Show that we're sleeping... */
+	__set_LEDS(0x55aa);
 #endif
-				frv_cpu_core_sleep();
+	frv_cpu_core_sleep();
 #ifdef LED_DEBUG_SLEEP
-				/* ... and that we woke up */
-				__set_LEDS(0);
+	/* ... and that we woke up */
+	__set_LEDS(0);
 #endif
-				mb();
-			}
-
-			schedule();
-
-#ifndef NO_MM
-			check_pgt_cache();
-#endif
-		}
-	}
+	mb();
 }
 
-
-
 void (*idle)(void) = core_sleep_idle;
-//void (*idle)(void) = default_idle;
 
 /*
  * The idle thread. There's no useful work to be
@@ -137,7 +83,16 @@ void (*idle)(void) = core_sleep_idle;
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	idle();
+	while (1) {
+		while (!need_resched()) {
+			check_pgt_cache();
+
+			if (!frv_dma_inprogress && idle)
+				idle();
+		}
+
+		schedule_preempt_disabled();
+	}
 }
 
 void machine_restart(char * __unused)
@@ -151,7 +106,7 @@ void machine_restart(char * __unused)
 		reset_addr = 0xfefff500;
 	else
 		reset_addr = 0xfeff0500;
-	
+
 	/* Software reset. */
 	asm volatile("      dcef @(gr0,gr0),1 ! membar !"
 		     "      sti     %1,@(%0,0) !"
@@ -185,10 +140,7 @@ void machine_power_off(void)
 
 void flush_thread(void)
 {
-#if 0 //ndef NO_FPU
-	unsigned long zero = 0;
-#endif
-	set_fs(USER_DS);
+	/* nothing */
 }
 
 inline unsigned long user_stack(const struct pt_regs *regs)
@@ -200,53 +152,57 @@ inline unsigned long user_stack(const struct pt_regs *regs)
 
 asmlinkage int sys_fork(void)
 {
-#ifdef NO_MM
+#ifndef CONFIG_MMU
 	/* fork almost works, enough to trick you into looking elsewhere:-( */
 	return -EINVAL;
 #else
-	return do_fork(SIGCHLD, user_stack(__frame), __frame, 0);
+	return do_fork(SIGCHLD, user_stack(__frame), __frame, 0, NULL, NULL);
 #endif
 }
 
 asmlinkage int sys_vfork(void)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, user_stack(__frame), __frame, 0);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, user_stack(__frame), __frame, 0,
+		       NULL, NULL);
 }
 
 /*****************************************************************************/
 /*
  * clone a process
- * - child_tls (in GR12) is accessed directly by copy_thread()
+ * - tlsptr is retrieved by copy_thread()
  */
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp,
-			 int __user *parent_tidp, int __user *child_tidp,
-			 void __user *child_tls)
+			 int __user *parent_tidptr, int __user *child_tidptr,
+			 int __user *tlsptr)
 {
-#if 0 //def CONFIG_UCLINUX
-	/* uClinux can't or doesn't support all of the CLONE_* options */
-	if (clone_flags & (CLONE_SYSVSEM | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID |
-			   CLONE_DETACHED | CLONE_UNTRACED | CLONE_CHILD_SETTID | CLONE_STOPPED))
-		return -EINVAL;
-#endif
-
 	if (!newsp)
 		newsp = user_stack(__frame);
+	return do_fork(clone_flags, newsp, __frame, 0, parent_tidptr, child_tidptr);
+} /* end sys_clone() */
 
-	return do_fork(clone_flags, newsp, __frame, 0);
-}
+/*****************************************************************************/
+/*
+ * This gets called before we allocate a new thread and copy
+ * the current task into it.
+ */
+void prepare_to_copy(struct task_struct *tsk)
+{
+	//unlazy_fpu(tsk);
+} /* end prepare_to_copy() */
 
 /*****************************************************************************/
 /*
  * set up the kernel stack and exception frames for a new process
  */
-int copy_thread(int nr, unsigned long clone_flags,
+int copy_thread(unsigned long clone_flags,
 		unsigned long usp, unsigned long topstk,
 		struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs0, *childregs, *regs0;
 
 	regs0 = __kernel_frame0_ptr;
-	childregs0 = (struct pt_regs *) ((unsigned long) p + THREAD_SIZE - USER_CONTEXT_SIZE);
+	childregs0 = (struct pt_regs *)
+		(task_stack_page(p) + THREAD_SIZE - FRV_FRAME0_SIZE);
 	childregs = childregs0;
 
 	/* set up the userspace frame (the only place that the USP is stored) */
@@ -256,20 +212,17 @@ int copy_thread(int nr, unsigned long clone_flags,
 	childregs0->sp		= usp;
 	childregs0->next_frame	= NULL;
 
-#if 0
-	if (clone_flags & CLONE_SETTLS)
-		/* access sys_clone()'s child_tls argument directly */
-		childregs0->gr29 = regs->gr12;
-#endif
-
 	/* set up the return kernel frame if called from kernel_thread() */
 	if (regs != regs0) {
 		childregs--;
 		*childregs = *regs;
 		childregs->sp = (unsigned long) childregs0;
 		childregs->next_frame = childregs0;
+		childregs->gr15 = (unsigned long) task_thread_info(p);
 		childregs->gr29 = (unsigned long) p;
 	}
+
+	p->set_child_tid = p->clear_child_tid = NULL;
 
 	p->thread.frame	 = childregs;
 	p->thread.curr	 = p;
@@ -279,58 +232,33 @@ int copy_thread(int nr, unsigned long clone_flags,
 	p->thread.pc	 = (unsigned long) ret_from_fork;
 	p->thread.frame0 = childregs0;
 
+	/* the new TLS pointer is passed in as arg #5 to sys_clone() */
+	if (clone_flags & CLONE_SETTLS)
+		childregs->gr29 = childregs->gr12;
+
 	save_user_regs(p->thread.user);
 
 	return 0;
 } /* end copy_thread() */
 
 /*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs *regs, struct user *dump)
-{
-	/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = user_stack(regs) & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk + (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-
-	if (dump->start_stack < TASK_SIZE)
-		dump->u_ssize = ((unsigned long) (TASK_SIZE - dump->start_stack)) >> PAGE_SHIFT;
-
-	dump->regs = *(struct user_context *) regs;
-}
-
-/*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(char *name, char **argv, char **envp)
+asmlinkage int sys_execve(const char __user *name,
+			  const char __user *const __user *argv,
+			  const char __user *const __user *envp)
 {
 	int error;
 	char * filename;
 
-	lock_kernel();
 	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
-		goto out;
+		return error;
 	error = do_execve(filename, argv, envp, __frame);
 	putname(filename);
- out:
-	unlock_kernel();
 	return error;
 }
-
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -352,13 +280,22 @@ unsigned long get_wchan(struct task_struct *p)
 		pc = ((unsigned long *) fp)[2];
 
 		/* FIXME: This depends on the order of these functions. */
-		if (pc < first_sched || pc >= last_sched)
+		if (!in_sched_functions(pc))
 			return pc;
 
 		fp = *(unsigned long *) fp;
 	} while (count++ < 16);
 
 	return 0;
+}
+
+unsigned long thread_saved_pc(struct task_struct *tsk)
+{
+	/* Check whether the thread is blocked in resume() */
+	if (in_sched_functions(tsk->thread.pc))
+		return ((unsigned long *)tsk->thread.fp)[2];
+	else
+		return tsk->thread.pc;
 }
 
 int elf_check_arch(const struct elf32_hdr *hdr)
@@ -412,11 +349,6 @@ int elf_check_arch(const struct elf32_hdr *hdr)
 		    PSR_IMPLE(psr) != PSR_IMPLE_FR551)
 			return 0;
 		break;
-	case EF_FRV_CPU_FR405:
-		if (PSR_IMPLE(psr) != PSR_IMPLE_FR405 &&
-		    PSR_IMPLE(psr) != PSR_IMPLE_FR451)
-			return 0;
-		break;
 	case EF_FRV_CPU_FR450:
 		if (PSR_IMPLE(psr) != PSR_IMPLE_FR451)
 			return 0;
@@ -431,5 +363,13 @@ int elf_check_arch(const struct elf32_hdr *hdr)
 		break;
 	}
 
+	return 1;
+}
+
+int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs)
+{
+	memcpy(fpregs,
+	       &current->thread.user->f,
+	       sizeof(current->thread.user->f));
 	return 1;
 }

@@ -6,9 +6,10 @@
  * Portions derived from work (c) 1995,1996 Christian Vogelgsang.
  */
 
-#include <linux/efs_fs.h>
+#include <linux/buffer_head.h>
+#include "efs.h"
 
-int efs_get_block(struct inode *inode, long iblock,
+int efs_get_block(struct inode *inode, sector_t iblock,
 		  struct buffer_head *bh_result, int create)
 {
 	int error = -EROFS;
@@ -29,11 +30,8 @@ int efs_get_block(struct inode *inode, long iblock,
 		return 0;
 	}
 	phys = efs_map_block(inode, iblock);
-	if (phys) {
-		bh_result->b_dev = inode->i_dev;
-		bh_result->b_blocknr = phys;
-		bh_result->b_state |= (1UL << BH_Mapped);
-	}
+	if (phys)
+		map_bh(bh_result, inode->i_sb, phys);
 	return 0;
 }
 

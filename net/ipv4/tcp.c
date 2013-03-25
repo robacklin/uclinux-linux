@@ -5,9 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp.c,v 1.215 2001/10/31 08:17:58 davem Exp $
- *
- * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * Authors:	Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Mark Evans, <evansmp@uhura.aston.ac.uk>
  *		Corey Minyard <wf-rch!minyard@relay.EU.net>
@@ -172,7 +170,7 @@
  *					ack if state is TCP_CLOSED.
  *		Alan Cox	:	Look up device on a retransmit - routes may
  *					change. Doesn't yet cope with MSS shrink right
- *					but its a start!
+ *					but it's a start!
  *		Marc Tamsky	:	Closing in closing fixes.
  *		Mike Shaver	:	RFC1122 verifications.
  *		Alan Cox	:	rcv_saddr errors.
@@ -204,7 +202,9 @@
  *		Andi Kleen 	:	Make poll agree with SIGIO
  *	Salvatore Sanfilippo	:	Support SO_LINGER with linger == 1 and
  *					lingertime == 0 (RFC 793 ABORT Call)
- *					
+ *	Hirokazu Takahashi	:	Use copy_from_user() instead of
+ *					csum_and_copy_from_user() if possible.
+ *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
  *		as published by the Free Software Foundation; either version
@@ -245,129 +245,122 @@
  *	TCP_CLOSE		socket is finished
  */
 
-#include <linux/config.h>
+#define pr_fmt(fmt) "TCP: " fmt
+
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/smp_lock.h>
 #include <linux/fs.h>
+#include <linux/skbuff.h>
+#include <linux/scatterlist.h>
+#include <linux/splice.h>
+#include <linux/net.h>
+#include <linux/socket.h>
 #include <linux/random.h>
+#include <linux/bootmem.h>
+#include <linux/highmem.h>
+#include <linux/swap.h>
+#include <linux/cache.h>
+#include <linux/err.h>
+#include <linux/crypto.h>
+#include <linux/time.h>
+#include <linux/slab.h>
 
 #include <net/icmp.h>
 #include <net/tcp.h>
+#include <net/xfrm.h>
+#include <net/ip.h>
+#include <net/netdma.h>
+#include <net/sock.h>
 
 #include <asm/uaccess.h>
 #include <asm/ioctls.h>
 
-int sysctl_tcp_fin_timeout = TCP_FIN_TIMEOUT;
+int sysctl_tcp_fin_timeout __read_mostly = TCP_FIN_TIMEOUT;
 
-struct tcp_mib	tcp_statistics[NR_CPUS*2];
+struct percpu_counter tcp_orphan_count;
+EXPORT_SYMBOL_GPL(tcp_orphan_count);
 
-kmem_cache_t *tcp_openreq_cachep;
-kmem_cache_t *tcp_bucket_cachep;
-kmem_cache_t *tcp_timewait_cachep;
+int sysctl_tcp_wmem[3] __read_mostly;
+int sysctl_tcp_rmem[3] __read_mostly;
 
-atomic_t tcp_orphan_count = ATOMIC_INIT(0);
+EXPORT_SYMBOL(sysctl_tcp_rmem);
+EXPORT_SYMBOL(sysctl_tcp_wmem);
 
-int sysctl_tcp_default_win_scale = 0;
-
-int sysctl_tcp_mem[3];
-int sysctl_tcp_wmem[3] = { 4*1024, 16*1024, 128*1024 };
-int sysctl_tcp_rmem[3] = { 4*1024, 87380, 87380*2 };
-
-atomic_t tcp_memory_allocated;	/* Current allocated memory. */
-atomic_t tcp_sockets_allocated;	/* Current number of TCP sockets. */
-
-/* Pressure flag: try to collapse.
- * Technical note: it is used by multiple contexts non atomically.
- * All the tcp_mem_schedule() is of this nature: accounting
- * is strict, actions are advisory and have some latency. */
-int tcp_memory_pressure;
-
-#define TCP_PAGES(amt) (((amt)+TCP_MEM_QUANTUM-1)/TCP_MEM_QUANTUM)
-
-int tcp_mem_schedule(struct sock *sk, int size, int kind)
-{
-	int amt = TCP_PAGES(size);
-
-	sk->forward_alloc += amt*TCP_MEM_QUANTUM;
-	atomic_add(amt, &tcp_memory_allocated);
-
-	/* Under limit. */
-	if (atomic_read(&tcp_memory_allocated) < sysctl_tcp_mem[0]) {
-		if (tcp_memory_pressure)
-			tcp_memory_pressure = 0;
-		return 1;
-	}
-
-	/* Over hard limit. */
-	if (atomic_read(&tcp_memory_allocated) > sysctl_tcp_mem[2]) {
-		tcp_enter_memory_pressure();
-		goto suppress_allocation;
-	}
-
-	/* Under pressure. */
-	if (atomic_read(&tcp_memory_allocated) > sysctl_tcp_mem[1])
-		tcp_enter_memory_pressure();
-
-	if (kind) {
-		if (atomic_read(&sk->rmem_alloc) < sysctl_tcp_rmem[0])
-			return 1;
-	} else {
-		if (sk->wmem_queued < sysctl_tcp_wmem[0])
-			return 1;
-	}
-
-	if (!tcp_memory_pressure ||
-	    sysctl_tcp_mem[2] > atomic_read(&tcp_sockets_allocated)
-	    * TCP_PAGES(sk->wmem_queued+atomic_read(&sk->rmem_alloc)+
-			sk->forward_alloc))
-		return 1;
-
-suppress_allocation:
-
-	if (kind == 0) {
-		tcp_moderate_sndbuf(sk);
-
-		/* Fail only if socket is _under_ its sndbuf.
-		 * In this case we cannot block, so that we have to fail.
-		 */
-		if (sk->wmem_queued+size >= sk->sndbuf)
-			return 1;
-	}
-
-	/* Alas. Undo changes. */
-	sk->forward_alloc -= amt*TCP_MEM_QUANTUM;
-	atomic_sub(amt, &tcp_memory_allocated);
-	return 0;
-}
-
-void __tcp_mem_reclaim(struct sock *sk)
-{
-	if (sk->forward_alloc >= TCP_MEM_QUANTUM) {
-		atomic_sub(sk->forward_alloc/TCP_MEM_QUANTUM, &tcp_memory_allocated);
-		sk->forward_alloc &= (TCP_MEM_QUANTUM-1);
-		if (tcp_memory_pressure &&
-		    atomic_read(&tcp_memory_allocated) < sysctl_tcp_mem[0])
-			tcp_memory_pressure = 0;
-	}
-}
-
-void tcp_rfree(struct sk_buff *skb)
-{
-	struct sock *sk = skb->sk;
-
-	atomic_sub(skb->truesize, &sk->rmem_alloc);
-	sk->forward_alloc += skb->truesize;
-}
+atomic_long_t tcp_memory_allocated;	/* Current allocated memory. */
+EXPORT_SYMBOL(tcp_memory_allocated);
 
 /*
- * LISTEN is a special case for poll..
+ * Current number of TCP sockets.
  */
-static __inline__ unsigned int tcp_listen_poll(struct sock *sk, poll_table *wait)
+struct percpu_counter tcp_sockets_allocated;
+EXPORT_SYMBOL(tcp_sockets_allocated);
+
+/*
+ * TCP splice context
+ */
+struct tcp_splice_state {
+	struct pipe_inode_info *pipe;
+	size_t len;
+	unsigned int flags;
+};
+
+/*
+ * Pressure flag: try to collapse.
+ * Technical note: it is used by multiple contexts non atomically.
+ * All the __sk_mem_schedule() is of this nature: accounting
+ * is strict, actions are advisory and have some latency.
+ */
+int tcp_memory_pressure __read_mostly;
+EXPORT_SYMBOL(tcp_memory_pressure);
+
+void tcp_enter_memory_pressure(struct sock *sk)
 {
-	return sk->tp_pinfo.af_tcp.accept_queue ? (POLLIN | POLLRDNORM) : 0;
+	if (!tcp_memory_pressure) {
+		NET_INC_STATS(sock_net(sk), LINUX_MIB_TCPMEMORYPRESSURES);
+		tcp_memory_pressure = 1;
+	}
+}
+EXPORT_SYMBOL(tcp_enter_memory_pressure);
+
+/* Convert seconds to retransmits based on initial and max timeout */
+static u8 secs_to_retrans(int seconds, int timeout, int rto_max)
+{
+	u8 res = 0;
+
+	if (seconds > 0) {
+		int period = timeout;
+
+		res = 1;
+		while (seconds > period && res < 255) {
+			res++;
+			timeout <<= 1;
+			if (timeout > rto_max)
+				timeout = rto_max;
+			period += timeout;
+		}
+	}
+	return res;
+}
+
+/* Convert retransmits to seconds based on initial and max timeout */
+static int retrans_to_secs(u8 retrans, int timeout, int rto_max)
+{
+	int period = 0;
+
+	if (retrans > 0) {
+		period = timeout;
+		while (--retrans) {
+			timeout <<= 1;
+			if (timeout > rto_max)
+				timeout = rto_max;
+			period += timeout;
+		}
+	}
+	return period;
 }
 
 /*
@@ -377,24 +370,22 @@ static __inline__ unsigned int tcp_listen_poll(struct sock *sk, poll_table *wait
  *	take care of normal races (between the test and the event) and we don't
  *	go look at any of the socket buffers directly.
  */
-unsigned int tcp_poll(struct file * file, struct socket *sock, poll_table *wait)
+unsigned int tcp_poll(struct file *file, struct socket *sock, poll_table *wait)
 {
 	unsigned int mask;
 	struct sock *sk = sock->sk;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	const struct tcp_sock *tp = tcp_sk(sk);
 
-	poll_wait(file, sk->sleep, wait);
-	if (sk->state == TCP_LISTEN)
-		return tcp_listen_poll(sk, wait);
+	sock_poll_wait(file, sk_sleep(sk), wait);
+	if (sk->sk_state == TCP_LISTEN)
+		return inet_csk_listen_poll(sk);
 
 	/* Socket is not locked. We are protected from async events
-	   by poll logic and correct handling of state changes
-	   made by another threads is impossible in any case.
+	 * by poll logic and correct handling of state changes
+	 * made by other threads is impossible in any case.
 	 */
 
 	mask = 0;
-	if (sk->err)
-		mask = POLLERR;
 
 	/*
 	 * POLLHUP is certainly not done right. But poll() doesn't
@@ -415,628 +406,536 @@ unsigned int tcp_poll(struct file * file, struct socket *sock, poll_table *wait)
 	 * in state CLOSE_WAIT. One solution is evident --- to set POLLHUP
 	 * if and only if shutdown has been made in both directions.
 	 * Actually, it is interesting to look how Solaris and DUX
-	 * solve this dilemma. I would prefer, if PULLHUP were maskable,
+	 * solve this dilemma. I would prefer, if POLLHUP were maskable,
 	 * then we could set it on SND_SHUTDOWN. BTW examples given
 	 * in Stevens' books assume exactly this behaviour, it explains
-	 * why PULLHUP is incompatible with POLLOUT.	--ANK
+	 * why POLLHUP is incompatible with POLLOUT.	--ANK
 	 *
 	 * NOTE. Check for TCP_CLOSE is added. The goal is to prevent
 	 * blocking on fresh not-connected or disconnected socket. --ANK
 	 */
-	if (sk->shutdown == SHUTDOWN_MASK || sk->state == TCP_CLOSE)
+	if (sk->sk_shutdown == SHUTDOWN_MASK || sk->sk_state == TCP_CLOSE)
 		mask |= POLLHUP;
-	if (sk->shutdown & RCV_SHUTDOWN)
-		mask |= POLLIN | POLLRDNORM;
+	if (sk->sk_shutdown & RCV_SHUTDOWN)
+		mask |= POLLIN | POLLRDNORM | POLLRDHUP;
 
 	/* Connected? */
-	if ((1 << sk->state) & ~(TCPF_SYN_SENT|TCPF_SYN_RECV)) {
+	if ((1 << sk->sk_state) & ~(TCPF_SYN_SENT | TCPF_SYN_RECV)) {
+		int target = sock_rcvlowat(sk, 0, INT_MAX);
+
+		if (tp->urg_seq == tp->copied_seq &&
+		    !sock_flag(sk, SOCK_URGINLINE) &&
+		    tp->urg_data)
+			target++;
+
 		/* Potential race condition. If read of tp below will
-		 * escape above sk->state, we can be illegally awaken
+		 * escape above sk->sk_state, we can be illegally awaken
 		 * in SYN_* states. */
-		if ((tp->rcv_nxt != tp->copied_seq) &&
-		    (tp->urg_seq != tp->copied_seq ||
-		     tp->rcv_nxt != tp->copied_seq+1 ||
-		     sk->urginline || !tp->urg_data))
+		if (tp->rcv_nxt - tp->copied_seq >= target)
 			mask |= POLLIN | POLLRDNORM;
 
-		if (!(sk->shutdown & SEND_SHUTDOWN)) {
-			if (tcp_wspace(sk) >= tcp_min_write_space(sk)) {
+		if (!(sk->sk_shutdown & SEND_SHUTDOWN)) {
+			if (sk_stream_wspace(sk) >= sk_stream_min_wspace(sk)) {
 				mask |= POLLOUT | POLLWRNORM;
 			} else {  /* send SIGIO later */
-				set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
-				set_bit(SOCK_NOSPACE, &sk->socket->flags);
+				set_bit(SOCK_ASYNC_NOSPACE,
+					&sk->sk_socket->flags);
+				set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 
 				/* Race breaker. If space is freed after
 				 * wspace test but before the flags are set,
 				 * IO signal will be lost.
 				 */
-				if (tcp_wspace(sk) >= tcp_min_write_space(sk))
+				if (sk_stream_wspace(sk) >= sk_stream_min_wspace(sk))
 					mask |= POLLOUT | POLLWRNORM;
 			}
-		}
+		} else
+			mask |= POLLOUT | POLLWRNORM;
 
 		if (tp->urg_data & TCP_URG_VALID)
 			mask |= POLLPRI;
 	}
+	/* This barrier is coupled with smp_wmb() in tcp_reset() */
+	smp_rmb();
+	if (sk->sk_err)
+		mask |= POLLERR;
+
 	return mask;
 }
-
-/*
- *	TCP socket write_space callback.
- */
-void tcp_write_space(struct sock *sk)
-{
-	struct socket *sock = sk->socket;
-
-	if (tcp_wspace(sk) >= tcp_min_write_space(sk) && sock) {
-		clear_bit(SOCK_NOSPACE, &sock->flags);
-
-		if (sk->sleep && waitqueue_active(sk->sleep))
-			wake_up_interruptible(sk->sleep);
-
-		if (sock->fasync_list && !(sk->shutdown&SEND_SHUTDOWN))
-			sock_wake_async(sock, 2, POLL_OUT);
-	}
-}
+EXPORT_SYMBOL(tcp_poll);
 
 int tcp_ioctl(struct sock *sk, int cmd, unsigned long arg)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int answ;
 
-	switch(cmd) {
+	switch (cmd) {
 	case SIOCINQ:
-		if (sk->state == TCP_LISTEN)
-			return(-EINVAL);
+		if (sk->sk_state == TCP_LISTEN)
+			return -EINVAL;
 
 		lock_sock(sk);
-		if ((1<<sk->state) & (TCPF_SYN_SENT|TCPF_SYN_RECV))
+		if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))
 			answ = 0;
-		else if (sk->urginline || !tp->urg_data ||
-			 before(tp->urg_seq,tp->copied_seq) ||
-			 !before(tp->urg_seq,tp->rcv_nxt)) {
+		else if (sock_flag(sk, SOCK_URGINLINE) ||
+			 !tp->urg_data ||
+			 before(tp->urg_seq, tp->copied_seq) ||
+			 !before(tp->urg_seq, tp->rcv_nxt)) {
+			struct sk_buff *skb;
+
 			answ = tp->rcv_nxt - tp->copied_seq;
 
 			/* Subtract 1, if FIN is in queue. */
-			if (answ && !skb_queue_empty(&sk->receive_queue))
-				answ -= ((struct sk_buff*)sk->receive_queue.prev)->h.th->fin;
+			skb = skb_peek_tail(&sk->sk_receive_queue);
+			if (answ && skb)
+				answ -= tcp_hdr(skb)->fin;
 		} else
 			answ = tp->urg_seq - tp->copied_seq;
 		release_sock(sk);
 		break;
 	case SIOCATMARK:
-		{
-			answ = tp->urg_data && tp->urg_seq == tp->copied_seq;
-			break;
-		}
+		answ = tp->urg_data && tp->urg_seq == tp->copied_seq;
+		break;
 	case SIOCOUTQ:
-		if (sk->state == TCP_LISTEN)
-			return(-EINVAL);
+		if (sk->sk_state == TCP_LISTEN)
+			return -EINVAL;
 
-		if ((1<<sk->state) & (TCPF_SYN_SENT|TCPF_SYN_RECV))
+		if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))
 			answ = 0;
 		else
 			answ = tp->write_seq - tp->snd_una;
 		break;
+	case SIOCOUTQNSD:
+		if (sk->sk_state == TCP_LISTEN)
+			return -EINVAL;
+
+		if ((1 << sk->sk_state) & (TCPF_SYN_SENT | TCPF_SYN_RECV))
+			answ = 0;
+		else
+			answ = tp->write_seq - tp->snd_nxt;
+		break;
 	default:
-		return(-ENOIOCTLCMD);
-	};
-
-	return put_user(answ, (int *)arg);
-}
-
-
-int tcp_listen_start(struct sock *sk)
-{
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
-	struct tcp_listen_opt *lopt;
-
-	sk->max_ack_backlog = 0;
-	sk->ack_backlog = 0;
-	tp->accept_queue = tp->accept_queue_tail = NULL;
-	tp->syn_wait_lock = RW_LOCK_UNLOCKED;
-	tcp_delack_init(tp);
-
-	lopt = kmalloc(sizeof(struct tcp_listen_opt), GFP_KERNEL);
-	if (!lopt)
-		return -ENOMEM;
-
-	memset(lopt, 0, sizeof(struct tcp_listen_opt));
-	for (lopt->max_qlen_log = 6; ; lopt->max_qlen_log++)
-		if ((1<<lopt->max_qlen_log) >= sysctl_max_syn_backlog)
-			break;
-	get_random_bytes(&lopt->hash_rnd, 4);
-
-	write_lock_bh(&tp->syn_wait_lock);
-	tp->listen_opt = lopt;
-	write_unlock_bh(&tp->syn_wait_lock);
-
-	/* There is race window here: we announce ourselves listening,
-	 * but this transition is still not validated by get_port().
-	 * It is OK, because this socket enters to hash table only
-	 * after validation is complete.
-	 */
-	sk->state = TCP_LISTEN;
-	if (sk->prot->get_port(sk, sk->num) == 0) {
-		sk->sport = htons(sk->num);
-
-		sk_dst_reset(sk);
-		sk->prot->hash(sk);
-
-		return 0;
+		return -ENOIOCTLCMD;
 	}
 
-	sk->state = TCP_CLOSE;
-	write_lock_bh(&tp->syn_wait_lock);
-	tp->listen_opt = NULL;
-	write_unlock_bh(&tp->syn_wait_lock);
-	kfree(lopt);
-	return -EADDRINUSE;
+	return put_user(answ, (int __user *)arg);
 }
+EXPORT_SYMBOL(tcp_ioctl);
 
-/*
- *	This routine closes sockets which have been at least partially
- *	opened, but not yet accepted.
- */
-
-static void tcp_listen_stop (struct sock *sk)
+static inline void tcp_mark_push(struct tcp_sock *tp, struct sk_buff *skb)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
-	struct tcp_listen_opt *lopt = tp->listen_opt;
-	struct open_request *acc_req = tp->accept_queue;
-	struct open_request *req;
-	int i;
-
-	tcp_delete_keepalive_timer(sk);
-
-	/* make all the listen_opt local to us */
-	write_lock_bh(&tp->syn_wait_lock);
-	tp->listen_opt =NULL;
-	write_unlock_bh(&tp->syn_wait_lock);
-	tp->accept_queue = tp->accept_queue_tail = NULL;
-
-	if (lopt->qlen) {
-		for (i=0; i<TCP_SYNQ_HSIZE; i++) {
-			while ((req = lopt->syn_table[i]) != NULL) {
-				lopt->syn_table[i] = req->dl_next;
-				lopt->qlen--;
-				tcp_openreq_free(req);
-
-		/* Following specs, it would be better either to send FIN
-		 * (and enter FIN-WAIT-1, it is normal close)
-		 * or to send active reset (abort). 
-		 * Certainly, it is pretty dangerous while synflood, but it is
-		 * bad justification for our negligence 8)
-		 * To be honest, we are not able to make either
-		 * of the variants now.			--ANK
-		 */
-			}
-		}
-	}
-	BUG_TRAP(lopt->qlen == 0);
-
-	kfree(lopt);
-
-	while ((req=acc_req) != NULL) {
-		struct sock *child = req->sk;
-
-		acc_req = req->dl_next;
-
-		local_bh_disable();
-		bh_lock_sock(child);
-		BUG_TRAP(child->lock.users==0);
-		sock_hold(child);
-
-		tcp_disconnect(child, O_NONBLOCK);
-
-		sock_orphan(child);
-
-		atomic_inc(&tcp_orphan_count);
-
-		tcp_destroy_sock(child);
-
-		bh_unlock_sock(child);
-		local_bh_enable();
-		sock_put(child);
-
-		tcp_acceptq_removed(sk);
-		tcp_openreq_fastfree(req);
-	}
-	BUG_TRAP(sk->ack_backlog == 0);
-}
-
-/*
- *	Wait for a socket to get into the connected state
- *
- *	Note: Must be called with the socket locked.
- */
-static int wait_for_tcp_connect(struct sock * sk, int flags, long *timeo_p)
-{
-	struct task_struct *tsk = current;
-	DECLARE_WAITQUEUE(wait, tsk);
-
-	while((1 << sk->state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT)) {
-		if(sk->err)
-			return sock_error(sk);
-		if((1 << sk->state) &
-		   ~(TCPF_SYN_SENT | TCPF_SYN_RECV))
-			return -EPIPE;
-		if(!*timeo_p)
-			return -EAGAIN;
-		if(signal_pending(tsk))
-			return sock_intr_errno(*timeo_p);
-
-		__set_task_state(tsk, TASK_INTERRUPTIBLE);
-		add_wait_queue(sk->sleep, &wait);
-		sk->tp_pinfo.af_tcp.write_pending++;
-
-		release_sock(sk);
-		*timeo_p = schedule_timeout(*timeo_p);
-		lock_sock(sk);
-
-		__set_task_state(tsk, TASK_RUNNING);
-		remove_wait_queue(sk->sleep, &wait);
-		sk->tp_pinfo.af_tcp.write_pending--;
-	}
-	return 0;
-}
-
-static inline int tcp_memory_free(struct sock *sk)
-{
-	return sk->wmem_queued < sk->sndbuf;
-}
-
-/*
- *	Wait for more memory for a socket
- */
-static int wait_for_tcp_memory(struct sock * sk, long *timeo)
-{
-	int err = 0;
-	long vm_wait = 0;
-	long current_timeo = *timeo;
-	DECLARE_WAITQUEUE(wait, current);
-
-	if (tcp_memory_free(sk))
-		current_timeo = vm_wait = (net_random()%(HZ/5))+2;
-
-	add_wait_queue(sk->sleep, &wait);
-	for (;;) {
-		set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
-
-		set_current_state(TASK_INTERRUPTIBLE);
-
-		if (sk->err || (sk->shutdown & SEND_SHUTDOWN))
-			goto do_error;
-		if (!*timeo)
-			goto do_nonblock;
-		if (signal_pending(current))
-			goto do_interrupted;
-		clear_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
-		if (tcp_memory_free(sk) && !vm_wait)
-			break;
-
-		set_bit(SOCK_NOSPACE, &sk->socket->flags);
-		sk->tp_pinfo.af_tcp.write_pending++;
-		release_sock(sk);
-		if (!tcp_memory_free(sk) || vm_wait)
-			current_timeo = schedule_timeout(current_timeo);
-		lock_sock(sk);
-		sk->tp_pinfo.af_tcp.write_pending--;
-
-		if (vm_wait) {
-			vm_wait -= current_timeo;
-			current_timeo = *timeo;
-			if (current_timeo != MAX_SCHEDULE_TIMEOUT &&
-			    (current_timeo -= vm_wait) < 0)
-				current_timeo = 0;
-			vm_wait = 0;
-		}
-		*timeo = current_timeo;
-	}
-out:
-	current->state = TASK_RUNNING;
-	remove_wait_queue(sk->sleep, &wait);
-	return err;
-
-do_error:
-	err = -EPIPE;
-	goto out;
-do_nonblock:
-	err = -EAGAIN;
-	goto out;
-do_interrupted:
-	err = sock_intr_errno(*timeo);
-	goto out;
-}
-
-ssize_t do_tcp_sendpages(struct sock *sk, struct page **pages, int poffset, size_t psize, int flags);
-
-static inline int
-can_coalesce(struct sk_buff *skb, int i, struct page *page, int off)
-{
-	if (i) {
-		skb_frag_t *frag = &skb_shinfo(skb)->frags[i-1];
-		return page == frag->page &&
-			off == frag->page_offset+frag->size;
-	}
-	return 0;
-}
-
-static inline void
-fill_page_desc(struct sk_buff *skb, int i, struct page *page, int off, int size)
-{
-	skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
-	frag->page = page;
-	frag->page_offset = off;
-	frag->size = size;
-	skb_shinfo(skb)->nr_frags = i+1;
-}
-
-static inline void tcp_mark_push(struct tcp_opt *tp, struct sk_buff *skb)
-{
-	TCP_SKB_CB(skb)->flags |= TCPCB_FLAG_PSH;
+	TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_PSH;
 	tp->pushed_seq = tp->write_seq;
 }
 
-static inline int forced_push(struct tcp_opt *tp)
+static inline int forced_push(const struct tcp_sock *tp)
 {
-	return after(tp->write_seq, tp->pushed_seq + (tp->max_window>>1));
+	return after(tp->write_seq, tp->pushed_seq + (tp->max_window >> 1));
 }
 
-static inline void
-skb_entail(struct sock *sk, struct tcp_opt *tp, struct sk_buff *skb)
+static inline void skb_entail(struct sock *sk, struct sk_buff *skb)
 {
-	skb->csum = 0;
-	TCP_SKB_CB(skb)->seq = tp->write_seq;
-	TCP_SKB_CB(skb)->end_seq = tp->write_seq;
-	TCP_SKB_CB(skb)->flags = TCPCB_FLAG_ACK;
-	TCP_SKB_CB(skb)->sacked = 0;
-	__skb_queue_tail(&sk->write_queue, skb);
-	tcp_charge_skb(sk, skb);
-	if (tp->send_head == NULL)
-		tp->send_head = skb;
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+
+	skb->csum    = 0;
+	tcb->seq     = tcb->end_seq = tp->write_seq;
+	tcb->tcp_flags = TCPHDR_ACK;
+	tcb->sacked  = 0;
+	skb_header_release(skb);
+	tcp_add_write_queue_tail(sk, skb);
+	sk->sk_wmem_queued += skb->truesize;
+	sk_mem_charge(sk, skb->truesize);
+	if (tp->nonagle & TCP_NAGLE_PUSH)
+		tp->nonagle &= ~TCP_NAGLE_PUSH;
 }
 
-static inline void
-tcp_mark_urg(struct tcp_opt *tp, int flags, struct sk_buff *skb)
+static inline void tcp_mark_urg(struct tcp_sock *tp, int flags)
 {
-	if (flags & MSG_OOB) {
-		tp->urg_mode = 1;
+	if (flags & MSG_OOB)
 		tp->snd_up = tp->write_seq;
-		TCP_SKB_CB(skb)->sacked |= TCPCB_URG;
+}
+
+static inline void tcp_push(struct sock *sk, int flags, int mss_now,
+			    int nonagle)
+{
+	if (tcp_send_head(sk)) {
+		struct tcp_sock *tp = tcp_sk(sk);
+
+		if (!(flags & MSG_MORE) || forced_push(tp))
+			tcp_mark_push(tp, tcp_write_queue_tail(sk));
+
+		tcp_mark_urg(tp, flags);
+		__tcp_push_pending_frames(sk, mss_now,
+					  (flags & MSG_MORE) ? TCP_NAGLE_CORK : nonagle);
 	}
 }
 
-static inline void
-tcp_push(struct sock *sk, struct tcp_opt *tp, int flags, int mss_now, int nonagle)
+static int tcp_splice_data_recv(read_descriptor_t *rd_desc, struct sk_buff *skb,
+				unsigned int offset, size_t len)
 {
-	if (tp->send_head) {
-		struct sk_buff *skb = sk->write_queue.prev;
-		if (!(flags&MSG_MORE) || forced_push(tp))
-			tcp_mark_push(tp, skb);
-		tcp_mark_urg(tp, flags, skb);
-		__tcp_push_pending_frames(sk, tp, mss_now, (flags&MSG_MORE) ? 2 : nonagle);
+	struct tcp_splice_state *tss = rd_desc->arg.data;
+	int ret;
+
+	ret = skb_splice_bits(skb, offset, tss->pipe, min(rd_desc->count, len),
+			      tss->flags);
+	if (ret > 0)
+		rd_desc->count -= ret;
+	return ret;
+}
+
+static int __tcp_splice_read(struct sock *sk, struct tcp_splice_state *tss)
+{
+	/* Store TCP splice context information in read_descriptor_t. */
+	read_descriptor_t rd_desc = {
+		.arg.data = tss,
+		.count	  = tss->len,
+	};
+
+	return tcp_read_sock(sk, &rd_desc, tcp_splice_data_recv);
+}
+
+/**
+ *  tcp_splice_read - splice data from TCP socket to a pipe
+ * @sock:	socket to splice from
+ * @ppos:	position (not valid)
+ * @pipe:	pipe to splice to
+ * @len:	number of bytes to splice
+ * @flags:	splice modifier flags
+ *
+ * Description:
+ *    Will read pages from given socket and fill them into a pipe.
+ *
+ **/
+ssize_t tcp_splice_read(struct socket *sock, loff_t *ppos,
+			struct pipe_inode_info *pipe, size_t len,
+			unsigned int flags)
+{
+	struct sock *sk = sock->sk;
+	struct tcp_splice_state tss = {
+		.pipe = pipe,
+		.len = len,
+		.flags = flags,
+	};
+	long timeo;
+	ssize_t spliced;
+	int ret;
+
+	sock_rps_record_flow(sk);
+	/*
+	 * We can't seek on a socket input
+	 */
+	if (unlikely(*ppos))
+		return -ESPIPE;
+
+	ret = spliced = 0;
+
+	lock_sock(sk);
+
+	timeo = sock_rcvtimeo(sk, sock->file->f_flags & O_NONBLOCK);
+	while (tss.len) {
+		ret = __tcp_splice_read(sk, &tss);
+		if (ret < 0)
+			break;
+		else if (!ret) {
+			if (spliced)
+				break;
+			if (sock_flag(sk, SOCK_DONE))
+				break;
+			if (sk->sk_err) {
+				ret = sock_error(sk);
+				break;
+			}
+			if (sk->sk_shutdown & RCV_SHUTDOWN)
+				break;
+			if (sk->sk_state == TCP_CLOSE) {
+				/*
+				 * This occurs when user tries to read
+				 * from never connected socket.
+				 */
+				if (!sock_flag(sk, SOCK_DONE))
+					ret = -ENOTCONN;
+				break;
+			}
+			if (!timeo) {
+				ret = -EAGAIN;
+				break;
+			}
+			sk_wait_data(sk, &timeo);
+			if (signal_pending(current)) {
+				ret = sock_intr_errno(timeo);
+				break;
+			}
+			continue;
+		}
+		tss.len -= ret;
+		spliced += ret;
+
+		if (!timeo)
+			break;
+		release_sock(sk);
+		lock_sock(sk);
+
+		if (sk->sk_err || sk->sk_state == TCP_CLOSE ||
+		    (sk->sk_shutdown & RCV_SHUTDOWN) ||
+		    signal_pending(current))
+			break;
 	}
+
+	release_sock(sk);
+
+	if (spliced)
+		return spliced;
+
+	return ret;
+}
+EXPORT_SYMBOL(tcp_splice_read);
+
+struct sk_buff *sk_stream_alloc_skb(struct sock *sk, int size, gfp_t gfp)
+{
+	struct sk_buff *skb;
+
+	/* The TCP header must be at least 32-bit aligned.  */
+	size = ALIGN(size, 4);
+
+	skb = alloc_skb_fclone(size + sk->sk_prot->max_header, gfp);
+	if (skb) {
+		if (sk_wmem_schedule(sk, skb->truesize)) {
+			skb_reserve(skb, sk->sk_prot->max_header);
+			/*
+			 * Make sure that we have exactly size bytes
+			 * available to the caller, no more, no less.
+			 */
+			skb->avail_size = size;
+			return skb;
+		}
+		__kfree_skb(skb);
+	} else {
+		sk->sk_prot->enter_memory_pressure(sk);
+		sk_stream_moderate_sndbuf(sk);
+	}
+	return NULL;
 }
 
-static int tcp_error(struct sock *sk, int flags, int err)
+static unsigned int tcp_xmit_size_goal(struct sock *sk, u32 mss_now,
+				       int large_allowed)
 {
-	if (err == -EPIPE)
-		err = sock_error(sk) ? : -EPIPE;
-	if (err == -EPIPE && !(flags&MSG_NOSIGNAL))
-		send_sig(SIGPIPE, current, 0);
-	return err;
+	struct tcp_sock *tp = tcp_sk(sk);
+	u32 xmit_size_goal, old_size_goal;
+
+	xmit_size_goal = mss_now;
+
+	if (large_allowed && sk_can_gso(sk)) {
+		xmit_size_goal = ((sk->sk_gso_max_size - 1) -
+				  inet_csk(sk)->icsk_af_ops->net_header_len -
+				  inet_csk(sk)->icsk_ext_hdr_len -
+				  tp->tcp_header_len);
+
+		xmit_size_goal = tcp_bound_to_half_wnd(tp, xmit_size_goal);
+
+		/* We try hard to avoid divides here */
+		old_size_goal = tp->xmit_size_goal_segs * mss_now;
+
+		if (likely(old_size_goal <= xmit_size_goal &&
+			   old_size_goal + mss_now > xmit_size_goal)) {
+			xmit_size_goal = old_size_goal;
+		} else {
+			tp->xmit_size_goal_segs = xmit_size_goal / mss_now;
+			xmit_size_goal = tp->xmit_size_goal_segs * mss_now;
+		}
+	}
+
+	return max(xmit_size_goal, mss_now);
 }
 
-ssize_t do_tcp_sendpages(struct sock *sk, struct page **pages, int poffset, size_t psize, int flags)
+static int tcp_send_mss(struct sock *sk, int *size_goal, int flags)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
 	int mss_now;
-	int err;
-	ssize_t copied;
-	long timeo = sock_sndtimeo(sk, flags&MSG_DONTWAIT);
-
-	/* Wait for a connection to finish. */
-	if ((1 << sk->state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
-		if((err = wait_for_tcp_connect(sk, 0, &timeo)) != 0)
-			goto out_err;
-
-	clear_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
 
 	mss_now = tcp_current_mss(sk);
+	*size_goal = tcp_xmit_size_goal(sk, mss_now, !(flags & MSG_OOB));
+
+	return mss_now;
+}
+
+static ssize_t do_tcp_sendpages(struct sock *sk, struct page **pages, int poffset,
+			 size_t psize, int flags)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	int mss_now, size_goal;
+	int err;
+	ssize_t copied;
+	long timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
+
+	/* Wait for a connection to finish. */
+	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
+		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
+			goto out_err;
+
+	clear_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
+
+	mss_now = tcp_send_mss(sk, &size_goal, flags);
 	copied = 0;
 
 	err = -EPIPE;
-	if (sk->err || (sk->shutdown & SEND_SHUTDOWN))
-		goto do_error;
+	if (sk->sk_err || (sk->sk_shutdown & SEND_SHUTDOWN))
+		goto out_err;
 
 	while (psize > 0) {
-		struct sk_buff *skb = sk->write_queue.prev;
-		int offset, size, copy, i;
-		struct page *page;
+		struct sk_buff *skb = tcp_write_queue_tail(sk);
+		struct page *page = pages[poffset / PAGE_SIZE];
+		int copy, i, can_coalesce;
+		int offset = poffset % PAGE_SIZE;
+		int size = min_t(size_t, psize, PAGE_SIZE - offset);
 
-		page = pages[poffset/PAGE_SIZE];
-		offset = poffset % PAGE_SIZE;
-		size = min_t(size_t, psize, PAGE_SIZE-offset);
-
-		if (tp->send_head==NULL || (copy = mss_now - skb->len) <= 0) {
+		if (!tcp_send_head(sk) || (copy = size_goal - skb->len) <= 0) {
 new_segment:
-			if (!tcp_memory_free(sk))
+			if (!sk_stream_memory_free(sk))
 				goto wait_for_sndbuf;
 
-			skb = tcp_alloc_pskb(sk, 0, tp->mss_cache, sk->allocation);
-			if (skb == NULL)
+			skb = sk_stream_alloc_skb(sk, 0, sk->sk_allocation);
+			if (!skb)
 				goto wait_for_memory;
 
-			skb_entail(sk, tp, skb);
-			copy = mss_now;
+			skb_entail(sk, skb);
+			copy = size_goal;
 		}
 
 		if (copy > size)
 			copy = size;
 
 		i = skb_shinfo(skb)->nr_frags;
-		if (can_coalesce(skb, i, page, offset)) {
-			skb_shinfo(skb)->frags[i-1].size += copy;
-		} else if (i < MAX_SKB_FRAGS) {
-			get_page(page);
-			fill_page_desc(skb, i, page, offset, copy);
-		} else {
+		can_coalesce = skb_can_coalesce(skb, i, page, offset);
+		if (!can_coalesce && i >= MAX_SKB_FRAGS) {
 			tcp_mark_push(tp, skb);
 			goto new_segment;
+		}
+		if (!sk_wmem_schedule(sk, copy))
+			goto wait_for_memory;
+
+		if (can_coalesce) {
+			skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
+		} else {
+			get_page(page);
+			skb_fill_page_desc(skb, i, page, offset, copy);
 		}
 
 		skb->len += copy;
 		skb->data_len += copy;
-		skb->ip_summed = CHECKSUM_HW;
+		skb->truesize += copy;
+		sk->sk_wmem_queued += copy;
+		sk_mem_charge(sk, copy);
+		skb->ip_summed = CHECKSUM_PARTIAL;
 		tp->write_seq += copy;
 		TCP_SKB_CB(skb)->end_seq += copy;
+		skb_shinfo(skb)->gso_segs = 0;
 
 		if (!copied)
-			TCP_SKB_CB(skb)->flags &= ~TCPCB_FLAG_PSH;
+			TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
 
 		copied += copy;
 		poffset += copy;
 		if (!(psize -= copy))
 			goto out;
 
-		if (skb->len != mss_now || (flags&MSG_OOB))
+		if (skb->len < size_goal || (flags & MSG_OOB))
 			continue;
 
 		if (forced_push(tp)) {
 			tcp_mark_push(tp, skb);
-			__tcp_push_pending_frames(sk, tp, mss_now, 1);
-		} else if (skb == tp->send_head)
+			__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
+		} else if (skb == tcp_send_head(sk))
 			tcp_push_one(sk, mss_now);
 		continue;
 
 wait_for_sndbuf:
-		set_bit(SOCK_NOSPACE, &sk->socket->flags);
+		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
-		if (copied)
-			tcp_push(sk, tp, flags&~MSG_MORE, mss_now, 1);
+		tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
 
-		if ((err = wait_for_tcp_memory(sk, &timeo)) != 0)
+		if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
 			goto do_error;
 
-		mss_now = tcp_current_mss(sk);
+		mss_now = tcp_send_mss(sk, &size_goal, flags);
 	}
 
 out:
-	if (copied)
-		tcp_push(sk, tp, flags, mss_now, tp->nonagle);
+	if (copied && !(flags & MSG_SENDPAGE_NOTLAST))
+		tcp_push(sk, flags, mss_now, tp->nonagle);
 	return copied;
 
 do_error:
 	if (copied)
 		goto out;
 out_err:
-	return tcp_error(sk, flags, err);
+	return sk_stream_error(sk, flags, err);
 }
 
-ssize_t tcp_sendpage(struct socket *sock, struct page *page, int offset, size_t size, int flags)
+int tcp_sendpage(struct sock *sk, struct page *page, int offset,
+		 size_t size, int flags)
 {
 	ssize_t res;
-	struct sock *sk = sock->sk;
 
-#define TCP_ZC_CSUM_FLAGS (NETIF_F_IP_CSUM|NETIF_F_NO_CSUM|NETIF_F_HW_CSUM)
-
-	if (!(sk->route_caps & NETIF_F_SG) || 
-	    !(sk->route_caps & TCP_ZC_CSUM_FLAGS))
-		return sock_no_sendpage(sock, page, offset, size, flags);
-
-#undef TCP_ZC_CSUM_FLAGS
+	if (!(sk->sk_route_caps & NETIF_F_SG) ||
+	    !(sk->sk_route_caps & NETIF_F_ALL_CSUM))
+		return sock_no_sendpage(sk->sk_socket, page, offset, size,
+					flags);
 
 	lock_sock(sk);
-	TCP_CHECK_TIMER(sk);
 	res = do_tcp_sendpages(sk, &page, offset, size, flags);
-	TCP_CHECK_TIMER(sk);
 	release_sock(sk);
 	return res;
 }
+EXPORT_SYMBOL(tcp_sendpage);
 
-#define TCP_PAGE(sk)	(sk->tp_pinfo.af_tcp.sndmsg_page)
-#define TCP_OFF(sk)	(sk->tp_pinfo.af_tcp.sndmsg_off)
-
-static inline int
-tcp_copy_to_page(struct sock *sk, char *from, struct sk_buff *skb,
-		 struct page *page, int off, int copy)
+static inline int select_size(const struct sock *sk, bool sg)
 {
-	int err = 0;
-	unsigned int csum;
-
-	csum = csum_and_copy_from_user(from, page_address(page)+off,
-				       copy, 0, &err);
-	if (!err) {
-		if (skb->ip_summed == CHECKSUM_NONE)
-			skb->csum = csum_block_add(skb->csum, csum, skb->len);
-		skb->len += copy;
-		skb->data_len += copy;
-		skb->truesize += copy;
-		sk->wmem_queued += copy;
-		sk->forward_alloc -= copy;
-	}
-	return err;
-}
-
-static inline int
-skb_add_data(struct sk_buff *skb, char *from, int copy)
-{
-	int err = 0;
-	unsigned int csum;
-	int off = skb->len;
-
-	csum = csum_and_copy_from_user(from, skb_put(skb, copy),
-				       copy, 0, &err);
-	if (!err) {
-		skb->csum = csum_block_add(skb->csum, csum, off);
-		return 0;
-	}
-
-	__skb_trim(skb, off);
-	return -EFAULT;
-}
-
-static inline int select_size(struct sock *sk, struct tcp_opt *tp)
-{
+	const struct tcp_sock *tp = tcp_sk(sk);
 	int tmp = tp->mss_cache;
 
-	if (sk->route_caps&NETIF_F_SG) {
-		int pgbreak = SKB_MAX_HEAD(MAX_TCP_HEADER);
+	if (sg) {
+		if (sk_can_gso(sk)) {
+			/* Small frames wont use a full page:
+			 * Payload will immediately follow tcp header.
+			 */
+			tmp = SKB_WITH_OVERHEAD(2048 - MAX_TCP_HEADER);
+		} else {
+			int pgbreak = SKB_MAX_HEAD(MAX_TCP_HEADER);
 
-		if (tmp >= pgbreak && tmp <= pgbreak + (MAX_SKB_FRAGS-1)*PAGE_SIZE)
-			tmp = pgbreak;
+			if (tmp >= pgbreak &&
+			    tmp <= pgbreak + (MAX_SKB_FRAGS - 1) * PAGE_SIZE)
+				tmp = pgbreak;
+		}
 	}
+
 	return tmp;
 }
 
-int tcp_sendmsg(struct sock *sk, struct msghdr *msg, int size)
+int tcp_sendmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+		size_t size)
 {
 	struct iovec *iov;
-	struct tcp_opt *tp;
+	struct tcp_sock *tp = tcp_sk(sk);
 	struct sk_buff *skb;
-	int iovlen, flags;
-	int mss_now;
-	int err, copied;
+	int iovlen, flags, err, copied;
+	int mss_now, size_goal;
+	bool sg;
 	long timeo;
 
-	tp = &(sk->tp_pinfo.af_tcp);
-
 	lock_sock(sk);
-	TCP_CHECK_TIMER(sk);
 
 	flags = msg->msg_flags;
-	timeo = sock_sndtimeo(sk, flags&MSG_DONTWAIT);
+	timeo = sock_sndtimeo(sk, flags & MSG_DONTWAIT);
 
 	/* Wait for a connection to finish. */
-	if ((1 << sk->state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
-		if((err = wait_for_tcp_connect(sk, flags, &timeo)) != 0)
+	if ((1 << sk->sk_state) & ~(TCPF_ESTABLISHED | TCPF_CLOSE_WAIT))
+		if ((err = sk_stream_wait_connect(sk, &timeo)) != 0)
 			goto out_err;
 
 	/* This should be in poll */
-	clear_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
+	clear_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
 
-	mss_now = tcp_current_mss(sk);
+	mss_now = tcp_send_mss(sk, &size_goal, flags);
 
 	/* Ok commence sending. */
 	iovlen = msg->msg_iovlen;
@@ -1044,36 +943,51 @@ int tcp_sendmsg(struct sock *sk, struct msghdr *msg, int size)
 	copied = 0;
 
 	err = -EPIPE;
-	if (sk->err || (sk->shutdown&SEND_SHUTDOWN))
-		goto do_error;
+	if (sk->sk_err || (sk->sk_shutdown & SEND_SHUTDOWN))
+		goto out_err;
+
+	sg = !!(sk->sk_route_caps & NETIF_F_SG);
 
 	while (--iovlen >= 0) {
-		int seglen=iov->iov_len;
-		unsigned char * from=iov->iov_base;
+		size_t seglen = iov->iov_len;
+		unsigned char __user *from = iov->iov_base;
 
 		iov++;
 
 		while (seglen > 0) {
-			int copy;
-			
-			skb = sk->write_queue.prev;
+			int copy = 0;
+			int max = size_goal;
 
-			if (tp->send_head == NULL ||
-			    (copy = mss_now - skb->len) <= 0) {
+			skb = tcp_write_queue_tail(sk);
+			if (tcp_send_head(sk)) {
+				if (skb->ip_summed == CHECKSUM_NONE)
+					max = mss_now;
+				copy = max - skb->len;
+			}
 
+			if (copy <= 0) {
 new_segment:
 				/* Allocate new segment. If the interface is SG,
 				 * allocate skb fitting to single page.
 				 */
-				if (!tcp_memory_free(sk))
+				if (!sk_stream_memory_free(sk))
 					goto wait_for_sndbuf;
 
-				skb = tcp_alloc_pskb(sk, select_size(sk, tp), 0, sk->allocation);
-				if (skb == NULL)
+				skb = sk_stream_alloc_skb(sk,
+							  select_size(sk, sg),
+							  sk->sk_allocation);
+				if (!skb)
 					goto wait_for_memory;
 
-				skb_entail(sk, tp, skb);
-				copy = mss_now;
+				/*
+				 * Check whether we can use HW checksum.
+				 */
+				if (sk->sk_route_caps & NETIF_F_ALL_CSUM)
+					skb->ip_summed = CHECKSUM_PARTIAL;
+
+				skb_entail(sk, skb);
+				copy = size_goal;
+				max = size_goal;
 			}
 
 			/* Try to append data to the end of skb. */
@@ -1081,177 +995,186 @@ new_segment:
 				copy = seglen;
 
 			/* Where to copy to? */
-			if (skb_tailroom(skb) > 0) {
+			if (skb_availroom(skb) > 0) {
 				/* We have some space in skb head. Superb! */
-				if (copy > skb_tailroom(skb))
-					copy = skb_tailroom(skb);
-				if ((err = skb_add_data(skb, from, copy)) != 0)
+				copy = min_t(int, copy, skb_availroom(skb));
+				err = skb_add_data_nocache(sk, skb, from, copy);
+				if (err)
 					goto do_fault;
 			} else {
 				int merge = 0;
 				int i = skb_shinfo(skb)->nr_frags;
-				struct page *page = TCP_PAGE(sk);
-				int off = TCP_OFF(sk);
+				struct page *page = sk->sk_sndmsg_page;
+				int off;
 
-				if (can_coalesce(skb, i, page, off) && off != PAGE_SIZE) {
-					/* We can extend the last page fragment. */
+				if (page && page_count(page) == 1)
+					sk->sk_sndmsg_off = 0;
+
+				off = sk->sk_sndmsg_off;
+
+				if (skb_can_coalesce(skb, i, page, off) &&
+				    off != PAGE_SIZE) {
+					/* We can extend the last page
+					 * fragment. */
 					merge = 1;
-				} else if (i == MAX_SKB_FRAGS ||
-					   (i == 0 && !(sk->route_caps&NETIF_F_SG))) {
+				} else if (i == MAX_SKB_FRAGS || !sg) {
 					/* Need to add new fragment and cannot
 					 * do this because interface is non-SG,
-					 * or because all the page slots are busy.
-					 */
+					 * or because all the page slots are
+					 * busy. */
 					tcp_mark_push(tp, skb);
 					goto new_segment;
 				} else if (page) {
-					/* If page is cached, align
-					 * offset to L1 cache boundary
-					 */
-					off = (off+L1_CACHE_BYTES-1)&~(L1_CACHE_BYTES-1);
 					if (off == PAGE_SIZE) {
 						put_page(page);
-						TCP_PAGE(sk) = page = NULL;
+						sk->sk_sndmsg_page = page = NULL;
+						off = 0;
 					}
-				}
+				} else
+					off = 0;
+
+				if (copy > PAGE_SIZE - off)
+					copy = PAGE_SIZE - off;
+
+				if (!sk_wmem_schedule(sk, copy))
+					goto wait_for_memory;
 
 				if (!page) {
 					/* Allocate new cache page. */
-					if (!(page=tcp_alloc_page(sk)))
+					if (!(page = sk_stream_alloc_page(sk)))
 						goto wait_for_memory;
-					off = 0;
 				}
 
-				if (copy > PAGE_SIZE-off)
-					copy = PAGE_SIZE-off;
-
-				/* Time to copy data. We are close to the end! */
-				err = tcp_copy_to_page(sk, from, skb, page, off, copy);
+				/* Time to copy data. We are close to
+				 * the end! */
+				err = skb_copy_to_page_nocache(sk, from, skb,
+							       page, off, copy);
 				if (err) {
 					/* If this page was new, give it to the
 					 * socket so it does not get leaked.
 					 */
-					if (TCP_PAGE(sk) == NULL) {
-						TCP_PAGE(sk) = page;
-						TCP_OFF(sk) = 0;
+					if (!sk->sk_sndmsg_page) {
+						sk->sk_sndmsg_page = page;
+						sk->sk_sndmsg_off = 0;
 					}
 					goto do_error;
 				}
 
 				/* Update the skb. */
 				if (merge) {
-					skb_shinfo(skb)->frags[i-1].size += copy;
+					skb_frag_size_add(&skb_shinfo(skb)->frags[i - 1], copy);
 				} else {
-					fill_page_desc(skb, i, page, off, copy);
-					if (TCP_PAGE(sk)) {
+					skb_fill_page_desc(skb, i, page, off, copy);
+					if (sk->sk_sndmsg_page) {
 						get_page(page);
 					} else if (off + copy < PAGE_SIZE) {
 						get_page(page);
-						TCP_PAGE(sk) = page;
+						sk->sk_sndmsg_page = page;
 					}
 				}
 
-				TCP_OFF(sk) = off+copy;
+				sk->sk_sndmsg_off = off + copy;
 			}
 
 			if (!copied)
-				TCP_SKB_CB(skb)->flags &= ~TCPCB_FLAG_PSH;
+				TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_PSH;
 
 			tp->write_seq += copy;
 			TCP_SKB_CB(skb)->end_seq += copy;
+			skb_shinfo(skb)->gso_segs = 0;
 
 			from += copy;
 			copied += copy;
 			if ((seglen -= copy) == 0 && iovlen == 0)
 				goto out;
 
-			if (skb->len != mss_now || (flags&MSG_OOB))
+			if (skb->len < max || (flags & MSG_OOB))
 				continue;
 
 			if (forced_push(tp)) {
 				tcp_mark_push(tp, skb);
-				__tcp_push_pending_frames(sk, tp, mss_now, 1);
-			} else if (skb == tp->send_head)
+				__tcp_push_pending_frames(sk, mss_now, TCP_NAGLE_PUSH);
+			} else if (skb == tcp_send_head(sk))
 				tcp_push_one(sk, mss_now);
 			continue;
 
 wait_for_sndbuf:
-			set_bit(SOCK_NOSPACE, &sk->socket->flags);
+			set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 wait_for_memory:
 			if (copied)
-				tcp_push(sk, tp, flags&~MSG_MORE, mss_now, 1);
+				tcp_push(sk, flags & ~MSG_MORE, mss_now, TCP_NAGLE_PUSH);
 
-			if ((err = wait_for_tcp_memory(sk, &timeo)) != 0)
+			if ((err = sk_stream_wait_memory(sk, &timeo)) != 0)
 				goto do_error;
 
-			mss_now = tcp_current_mss(sk);
+			mss_now = tcp_send_mss(sk, &size_goal, flags);
 		}
 	}
 
 out:
 	if (copied)
-		tcp_push(sk, tp, flags, mss_now, tp->nonagle);
-	TCP_CHECK_TIMER(sk);
+		tcp_push(sk, flags, mss_now, tp->nonagle);
 	release_sock(sk);
 	return copied;
 
 do_fault:
-	if (skb->len == 0) {
-		if (tp->send_head == skb)
-			tp->send_head = NULL;
-		__skb_unlink(skb, skb->list);
-		tcp_free_skb(sk, skb);
+	if (!skb->len) {
+		tcp_unlink_write_queue(skb, sk);
+		/* It is the one place in all of TCP, except connection
+		 * reset, where we can be unlinking the send_head.
+		 */
+		tcp_check_send_head(sk, skb);
+		sk_wmem_free_skb(sk, skb);
 	}
 
 do_error:
 	if (copied)
 		goto out;
 out_err:
-	err = tcp_error(sk, flags, err);
-	TCP_CHECK_TIMER(sk);
+	err = sk_stream_error(sk, flags, err);
 	release_sock(sk);
 	return err;
 }
+EXPORT_SYMBOL(tcp_sendmsg);
 
 /*
  *	Handle reading urgent data. BSD has very simple semantics for
  *	this, no blocking and very strange errors 8)
  */
 
-static int tcp_recv_urg(struct sock * sk, long timeo,
-			struct msghdr *msg, int len, int flags, 
-			int *addr_len)
+static int tcp_recv_urg(struct sock *sk, struct msghdr *msg, int len, int flags)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 
 	/* No URG data to read. */
-	if (sk->urginline || !tp->urg_data || tp->urg_data == TCP_URG_READ)
+	if (sock_flag(sk, SOCK_URGINLINE) || !tp->urg_data ||
+	    tp->urg_data == TCP_URG_READ)
 		return -EINVAL;	/* Yes this is right ! */
 
-	if (sk->state==TCP_CLOSE && !sk->done)
+	if (sk->sk_state == TCP_CLOSE && !sock_flag(sk, SOCK_DONE))
 		return -ENOTCONN;
 
 	if (tp->urg_data & TCP_URG_VALID) {
-		int err = 0; 
+		int err = 0;
 		char c = tp->urg_data;
 
 		if (!(flags & MSG_PEEK))
 			tp->urg_data = TCP_URG_READ;
 
 		/* Read urgent data. */
-		msg->msg_flags|=MSG_OOB;
+		msg->msg_flags |= MSG_OOB;
 
-		if(len>0) {
+		if (len > 0) {
 			if (!(flags & MSG_TRUNC))
 				err = memcpy_toiovec(msg->msg_iov, &c, 1);
 			len = 1;
 		} else
-			msg->msg_flags|=MSG_TRUNC;
+			msg->msg_flags |= MSG_TRUNC;
 
 		return err ? -EFAULT : len;
 	}
 
-	if (sk->state == TCP_CLOSE || (sk->shutdown & RCV_SHUTDOWN))
+	if (sk->sk_state == TCP_CLOSE || (sk->sk_shutdown & RCV_SHUTDOWN))
 		return 0;
 
 	/* Fixed the recv(..., MSG_OOB) behaviour.  BSD docs and
@@ -1263,61 +1186,51 @@ static int tcp_recv_urg(struct sock * sk, long timeo,
 	return -EAGAIN;
 }
 
-/*
- *	Release a skb if it is no longer needed. This routine
- *	must be called with interrupts disabled or with the
- *	socket locked so that the sk_buff queue operation is ok.
- */
-
-static inline void tcp_eat_skb(struct sock *sk, struct sk_buff * skb)
-{
-	__skb_unlink(skb, &sk->receive_queue);
-	__kfree_skb(skb);
-}
-
 /* Clean up the receive buffer for full frames taken by the user,
  * then send an ACK if necessary.  COPIED is the number of bytes
  * tcp_recvmsg has given to the user so far, it speeds up the
  * calculation of whether or not we must ACK for the sake of
  * a window update.
  */
-static void cleanup_rbuf(struct sock *sk, int copied)
+void tcp_cleanup_rbuf(struct sock *sk, int copied)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int time_to_ack = 0;
 
-#if TCP_DEBUG
-	struct sk_buff *skb = skb_peek(&sk->receive_queue);
+	struct sk_buff *skb = skb_peek(&sk->sk_receive_queue);
 
-	BUG_TRAP(skb==NULL || before(tp->copied_seq, TCP_SKB_CB(skb)->end_seq));
-#endif
+	WARN(skb && !before(tp->copied_seq, TCP_SKB_CB(skb)->end_seq),
+	     "cleanup rbuf bug: copied %X seq %X rcvnxt %X\n",
+	     tp->copied_seq, TCP_SKB_CB(skb)->end_seq, tp->rcv_nxt);
 
-	if (tcp_ack_scheduled(tp)) {
-		   /* Delayed ACKs frequently hit locked sockets during bulk receive. */
-		if (tp->ack.blocked
+	if (inet_csk_ack_scheduled(sk)) {
+		const struct inet_connection_sock *icsk = inet_csk(sk);
+		   /* Delayed ACKs frequently hit locked sockets during bulk
+		    * receive. */
+		if (icsk->icsk_ack.blocked ||
 		    /* Once-per-two-segments ACK was not sent by tcp_input.c */
-		    || tp->rcv_nxt - tp->rcv_wup > tp->ack.rcv_mss
+		    tp->rcv_nxt - tp->rcv_wup > icsk->icsk_ack.rcv_mss ||
 		    /*
 		     * If this read emptied read buffer, we send ACK, if
 		     * connection is not bidirectional, user drained
 		     * receive buffer and there was a small segment
 		     * in queue.
 		     */
-		    || (copied > 0 &&
-			(tp->ack.pending&TCP_ACK_PUSHED) &&
-			!tp->ack.pingpong &&
-			atomic_read(&sk->rmem_alloc) == 0)) {
+		    (copied > 0 &&
+		     ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED2) ||
+		      ((icsk->icsk_ack.pending & ICSK_ACK_PUSHED) &&
+		       !icsk->icsk_ack.pingpong)) &&
+		      !atomic_read(&sk->sk_rmem_alloc)))
 			time_to_ack = 1;
-		}
 	}
 
-  	/* We send an ACK if we can now advertise a non-zero window
+	/* We send an ACK if we can now advertise a non-zero window
 	 * which has been raised "significantly".
 	 *
 	 * Even if window raised up to infinity, do not send window open ACK
 	 * in states, where we will not receive more. It is useless.
-  	 */
-	if(copied > 0 && !time_to_ack && !(sk->shutdown&RCV_SHUTDOWN)) {
+	 */
+	if (copied > 0 && !time_to_ack && !(sk->sk_shutdown & RCV_SHUTDOWN)) {
 		__u32 rcv_window_now = tcp_receive_window(tp);
 
 		/* Optimize, __tcp_select_window() is not cheap. */
@@ -1329,7 +1242,7 @@ static void cleanup_rbuf(struct sock *sk, int copied)
 			 * We can advertise it now, if it is not less than current one.
 			 * "Lots" means "at least twice" here.
 			 */
-			if(new_window && new_window >= 2*rcv_window_now)
+			if (new_window && new_window >= 2 * rcv_window_now)
 				time_to_ack = 1;
 		}
 	}
@@ -1337,62 +1250,67 @@ static void cleanup_rbuf(struct sock *sk, int copied)
 		tcp_send_ack(sk);
 }
 
-/* Now socket state including sk->err is changed only under lock,
- * hence we may omit checks after joining wait queue.
- * We check receive queue before schedule() only as optimization;
- * it is very likely that release_sock() added new data.
- */
-
-static long tcp_data_wait(struct sock *sk, long timeo)
-{
-	DECLARE_WAITQUEUE(wait, current);
-
-	add_wait_queue(sk->sleep, &wait);
-
-	__set_current_state(TASK_INTERRUPTIBLE);
-
-	set_bit(SOCK_ASYNC_WAITDATA, &sk->socket->flags);
-	release_sock(sk);
-
-	if (skb_queue_empty(&sk->receive_queue))
-		timeo = schedule_timeout(timeo);
-
-	lock_sock(sk);
-	clear_bit(SOCK_ASYNC_WAITDATA, &sk->socket->flags);
-
-	remove_wait_queue(sk->sleep, &wait);
-	__set_current_state(TASK_RUNNING);
-	return timeo;
-}
-
 static void tcp_prequeue_process(struct sock *sk)
 {
 	struct sk_buff *skb;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 
-	net_statistics[smp_processor_id()*2+1].TCPPrequeued += skb_queue_len(&tp->ucopy.prequeue);
+	NET_INC_STATS_USER(sock_net(sk), LINUX_MIB_TCPPREQUEUED);
 
-	/* RX process wants to run with disabled BHs, though it is not necessary */
+	/* RX process wants to run with disabled BHs, though it is not
+	 * necessary */
 	local_bh_disable();
 	while ((skb = __skb_dequeue(&tp->ucopy.prequeue)) != NULL)
-		sk->backlog_rcv(sk, skb);
+		sk_backlog_rcv(sk, skb);
 	local_bh_enable();
 
 	/* Clear memory counter. */
 	tp->ucopy.memory = 0;
 }
 
-static inline
-struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
+#ifdef CONFIG_NET_DMA
+static void tcp_service_net_dma(struct sock *sk, bool wait)
+{
+	dma_cookie_t done, used;
+	dma_cookie_t last_issued;
+	struct tcp_sock *tp = tcp_sk(sk);
+
+	if (!tp->ucopy.dma_chan)
+		return;
+
+	last_issued = tp->ucopy.dma_cookie;
+	dma_async_memcpy_issue_pending(tp->ucopy.dma_chan);
+
+	do {
+		if (dma_async_memcpy_complete(tp->ucopy.dma_chan,
+					      last_issued, &done,
+					      &used) == DMA_SUCCESS) {
+			/* Safe to free early-copied skbs now */
+			__skb_queue_purge(&sk->sk_async_wait_queue);
+			break;
+		} else {
+			struct sk_buff *skb;
+			while ((skb = skb_peek(&sk->sk_async_wait_queue)) &&
+			       (dma_async_is_complete(skb->dma_cookie, done,
+						      used) == DMA_SUCCESS)) {
+				__skb_dequeue(&sk->sk_async_wait_queue);
+				kfree_skb(skb);
+			}
+		}
+	} while (wait);
+}
+#endif
+
+static inline struct sk_buff *tcp_recv_skb(struct sock *sk, u32 seq, u32 *off)
 {
 	struct sk_buff *skb;
 	u32 offset;
 
-	skb_queue_walk(&sk->receive_queue, skb) {
+	skb_queue_walk(&sk->sk_receive_queue, skb) {
 		offset = seq - TCP_SKB_CB(skb)->seq;
-		if (skb->h.th->syn)
+		if (tcp_hdr(skb)->syn)
 			offset--;
-		if (offset < skb->len || skb->h.th->fin) {
+		if (offset < skb->len || tcp_hdr(skb)->fin) {
 			*off = offset;
 			return skb;
 		}
@@ -1415,16 +1333,17 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 		  sk_read_actor_t recv_actor)
 {
 	struct sk_buff *skb;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 	u32 seq = tp->copied_seq;
 	u32 offset;
 	int copied = 0;
 
-	if (sk->state == TCP_LISTEN)
+	if (sk->sk_state == TCP_LISTEN)
 		return -ENOTCONN;
 	while ((skb = tcp_recv_skb(sk, seq, &offset)) != NULL) {
 		if (offset < skb->len) {
-			size_t used, len;
+			int used;
+			size_t len;
 
 			len = skb->len - offset;
 			/* Stop reading if we hit a patch of urgent data */
@@ -1436,45 +1355,58 @@ int tcp_read_sock(struct sock *sk, read_descriptor_t *desc,
 					break;
 			}
 			used = recv_actor(desc, skb, offset, len);
-			if (used <= len) {
+			if (used < 0) {
+				if (!copied)
+					copied = used;
+				break;
+			} else if (used <= len) {
 				seq += used;
 				copied += used;
 				offset += used;
 			}
-			if (offset != skb->len)
+			/*
+			 * If recv_actor drops the lock (e.g. TCP splice
+			 * receive) the skb pointer might be invalid when
+			 * getting here: tcp_collapse might have deleted it
+			 * while aggregating skbs from the socket queue.
+			 */
+			skb = tcp_recv_skb(sk, seq-1, &offset);
+			if (!skb || (offset+1 != skb->len))
 				break;
 		}
-		if (skb->h.th->fin) {
-			tcp_eat_skb(sk, skb);
+		if (tcp_hdr(skb)->fin) {
+			sk_eat_skb(sk, skb, 0);
 			++seq;
 			break;
 		}
-		tcp_eat_skb(sk, skb);
+		sk_eat_skb(sk, skb, 0);
 		if (!desc->count)
 			break;
+		tp->copied_seq = seq;
 	}
 	tp->copied_seq = seq;
 
 	tcp_rcv_space_adjust(sk);
 
 	/* Clean up data we have read: This will do ACK frames. */
-	if (copied)
-		cleanup_rbuf(sk, copied);
+	if (copied > 0)
+		tcp_cleanup_rbuf(sk, copied);
 	return copied;
 }
+EXPORT_SYMBOL(tcp_read_sock);
 
 /*
- *	This routine copies from a sock struct into the user buffer. 
+ *	This routine copies from a sock struct into the user buffer.
  *
  *	Technical note: in 2.3 we work on _locked_ socket, so that
  *	tricks with *seq access order and skb->users are not required.
  *	Probably, code can be easily improved even more.
  */
- 
-int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
-		int len, int nonblock, int flags, int *addr_len)
+
+int tcp_recvmsg(struct kiocb *iocb, struct sock *sk, struct msghdr *msg,
+		size_t len, int nonblock, int flags, int *addr_len)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int copied = 0;
 	u32 peek_seq;
 	u32 *seq;
@@ -1483,13 +1415,14 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 	int target;		/* Read at least this many bytes */
 	long timeo;
 	struct task_struct *user_recv = NULL;
+	int copied_early = 0;
+	struct sk_buff *skb;
+	u32 urg_hole = 0;
 
 	lock_sock(sk);
 
-	TCP_CHECK_TIMER(sk);
-
 	err = -ENOTCONN;
-	if (sk->state == TCP_LISTEN)
+	if (sk->sk_state == TCP_LISTEN)
 		goto out;
 
 	timeo = sock_rcvtimeo(sk, nonblock);
@@ -1506,8 +1439,29 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 
 	target = sock_rcvlowat(sk, flags & MSG_WAITALL, len);
 
+#ifdef CONFIG_NET_DMA
+	tp->ucopy.dma_chan = NULL;
+	preempt_disable();
+	skb = skb_peek_tail(&sk->sk_receive_queue);
+	{
+		int available = 0;
+
+		if (skb)
+			available = TCP_SKB_CB(skb)->seq + skb->len - (*seq);
+		if ((available < target) &&
+		    (len > sysctl_tcp_dma_copybreak) && !(flags & MSG_PEEK) &&
+		    !sysctl_tcp_low_latency &&
+		    net_dma_find_channel()) {
+			preempt_enable_no_resched();
+			tp->ucopy.pinned_list =
+					dma_pin_iovec_pages(msg->msg_iov, len);
+		} else {
+			preempt_enable_no_resched();
+		}
+	}
+#endif
+
 	do {
-		struct sk_buff * skb;
 		u32 offset;
 
 		/* Are we at urgent data? Stop if we have read anything or have SIGURG pending. */
@@ -1522,57 +1476,54 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 
 		/* Next get a buffer. */
 
-		skb = skb_peek(&sk->receive_queue);
-		do {
-			if (!skb)
-				break;
-
-			/* Now that we have two receive queues this 
+		skb_queue_walk(&sk->sk_receive_queue, skb) {
+			/* Now that we have two receive queues this
 			 * shouldn't happen.
 			 */
-			if (before(*seq, TCP_SKB_CB(skb)->seq)) {
-				printk(KERN_INFO "recvmsg bug: copied %X seq %X\n",
-				       *seq, TCP_SKB_CB(skb)->seq);
+			if (WARN(before(*seq, TCP_SKB_CB(skb)->seq),
+				 "recvmsg bug: copied %X seq %X rcvnxt %X fl %X\n",
+				 *seq, TCP_SKB_CB(skb)->seq, tp->rcv_nxt,
+				 flags))
 				break;
-			}
+
 			offset = *seq - TCP_SKB_CB(skb)->seq;
-			if (skb->h.th->syn)
+			if (tcp_hdr(skb)->syn)
 				offset--;
 			if (offset < skb->len)
 				goto found_ok_skb;
-			if (skb->h.th->fin)
+			if (tcp_hdr(skb)->fin)
 				goto found_fin_ok;
-			BUG_TRAP(flags&MSG_PEEK);
-			skb = skb->next;
-		} while (skb != (struct sk_buff *)&sk->receive_queue);
+			WARN(!(flags & MSG_PEEK),
+			     "recvmsg bug 2: copied %X seq %X rcvnxt %X fl %X\n",
+			     *seq, TCP_SKB_CB(skb)->seq, tp->rcv_nxt, flags);
+		}
 
 		/* Well, if we have backlog, try to process it now yet. */
 
-		if (copied >= target && sk->backlog.tail == NULL)
+		if (copied >= target && !sk->sk_backlog.tail)
 			break;
 
 		if (copied) {
-			if (sk->err ||
-			    sk->state == TCP_CLOSE ||
-			    (sk->shutdown & RCV_SHUTDOWN) ||
+			if (sk->sk_err ||
+			    sk->sk_state == TCP_CLOSE ||
+			    (sk->sk_shutdown & RCV_SHUTDOWN) ||
 			    !timeo ||
-			    signal_pending(current) ||
-			    (flags & MSG_PEEK))
+			    signal_pending(current))
 				break;
 		} else {
-			if (sk->done)
+			if (sock_flag(sk, SOCK_DONE))
 				break;
 
-			if (sk->err) {
+			if (sk->sk_err) {
 				copied = sock_error(sk);
 				break;
 			}
 
-			if (sk->shutdown & RCV_SHUTDOWN)
+			if (sk->sk_shutdown & RCV_SHUTDOWN)
 				break;
 
-			if (sk->state == TCP_CLOSE) {
-				if (!sk->done) {
+			if (sk->sk_state == TCP_CLOSE) {
+				if (!sock_flag(sk, SOCK_DONE)) {
 					/* This occurs when user tries to read
 					 * from never connected socket.
 					 */
@@ -1593,11 +1544,11 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 			}
 		}
 
-		cleanup_rbuf(sk, copied);
+		tcp_cleanup_rbuf(sk, copied);
 
-		if (tp->ucopy.task == user_recv) {
+		if (!sysctl_tcp_low_latency && tp->ucopy.task == user_recv) {
 			/* Install new reader */
-			if (user_recv == NULL && !(flags&(MSG_TRUNC|MSG_PEEK))) {
+			if (!user_recv && !(flags & (MSG_TRUNC | MSG_PEEK))) {
 				user_recv = current;
 				tp->ucopy.task = user_recv;
 				tp->ucopy.iov = msg->msg_iov;
@@ -1605,7 +1556,8 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 
 			tp->ucopy.len = len;
 
-			BUG_TRAP(tp->copied_seq == tp->rcv_nxt || (flags&(MSG_PEEK|MSG_TRUNC)));
+			WARN_ON(tp->copied_seq != tp->rcv_nxt &&
+				!(flags & (MSG_PEEK | MSG_TRUNC)));
 
 			/* Ugly... If prequeue is not empty, we have to
 			 * process it before releasing socket, otherwise
@@ -1621,7 +1573,7 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 			 *
 			 * Each queue can be processed only if the next ones
 			 * are empty. At this point we have empty receive_queue.
-			 * But prequeue _can_ be not empty after second iteration,
+			 * But prequeue _can_ be not empty after 2nd iteration,
 			 * when we jumped to start of loop because backlog
 			 * processing added something to receive_queue.
 			 * We cannot release_sock(), because backlog contains
@@ -1633,19 +1585,27 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 			 * is not empty. It is more elegant, but eats cycles,
 			 * unfortunately.
 			 */
-			if (skb_queue_len(&tp->ucopy.prequeue))
+			if (!skb_queue_empty(&tp->ucopy.prequeue))
 				goto do_prequeue;
 
 			/* __ Set realtime policy in scheduler __ */
 		}
 
+#ifdef CONFIG_NET_DMA
+		if (tp->ucopy.dma_chan)
+			dma_async_memcpy_issue_pending(tp->ucopy.dma_chan);
+#endif
 		if (copied >= target) {
 			/* Do not sleep, just process backlog. */
 			release_sock(sk);
 			lock_sock(sk);
-		} else {
-			timeo = tcp_data_wait(sk, timeo);
-		}
+		} else
+			sk_wait_data(sk, &timeo);
+
+#ifdef CONFIG_NET_DMA
+		tcp_service_net_dma(sk, false);  /* Don't block */
+		tp->ucopy.wakeup = 0;
+#endif
 
 		if (user_recv) {
 			int chunk;
@@ -1653,27 +1613,28 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg,
 			/* __ Restore normal policy in scheduler __ */
 
 			if ((chunk = len - tp->ucopy.len) != 0) {
-				net_statistics[smp_processor_id()*2+1].TCPDirectCopyFromBacklog += chunk;
+				NET_ADD_STATS_USER(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMBACKLOG, chunk);
 				len -= chunk;
 				copied += chunk;
 			}
 
 			if (tp->rcv_nxt == tp->copied_seq &&
-			    skb_queue_len(&tp->ucopy.prequeue)) {
+			    !skb_queue_empty(&tp->ucopy.prequeue)) {
 do_prequeue:
 				tcp_prequeue_process(sk);
 
 				if ((chunk = len - tp->ucopy.len) != 0) {
-					net_statistics[smp_processor_id()*2+1].TCPDirectCopyFromPrequeue += chunk;
+					NET_ADD_STATS_USER(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
 					len -= chunk;
 					copied += chunk;
 				}
 			}
 		}
-		if ((flags & MSG_PEEK) && peek_seq != tp->copied_seq) {
+		if ((flags & MSG_PEEK) &&
+		    (peek_seq - copied - urg_hole != tp->copied_seq)) {
 			if (net_ratelimit())
 				printk(KERN_DEBUG "TCP(%s:%d): Application bug, race in MSG_PEEK.\n",
-				       current->comm, current->pid);
+				       current->comm, task_pid_nr(current));
 			peek_seq = tp->copied_seq;
 		}
 		continue;
@@ -1689,8 +1650,9 @@ do_prequeue:
 			u32 urg_offset = tp->urg_seq - *seq;
 			if (urg_offset < used) {
 				if (!urg_offset) {
-					if (!sk->urginline) {
+					if (!sock_flag(sk, SOCK_URGINLINE)) {
 						++*seq;
+						urg_hole++;
 						offset++;
 						used--;
 						if (!used)
@@ -1701,13 +1663,44 @@ do_prequeue:
 			}
 		}
 
-		if (!(flags&MSG_TRUNC)) {
-			err = skb_copy_datagram_iovec(skb, offset, msg->msg_iov, used);
-			if (err) {
-				/* Exception. Bailout! */
-				if (!copied)
-					copied = -EFAULT;
-				break;
+		if (!(flags & MSG_TRUNC)) {
+#ifdef CONFIG_NET_DMA
+			if (!tp->ucopy.dma_chan && tp->ucopy.pinned_list)
+				tp->ucopy.dma_chan = net_dma_find_channel();
+
+			if (tp->ucopy.dma_chan) {
+				tp->ucopy.dma_cookie = dma_skb_copy_datagram_iovec(
+					tp->ucopy.dma_chan, skb, offset,
+					msg->msg_iov, used,
+					tp->ucopy.pinned_list);
+
+				if (tp->ucopy.dma_cookie < 0) {
+
+					pr_alert("%s: dma_cookie < 0\n",
+						 __func__);
+
+					/* Exception. Bailout! */
+					if (!copied)
+						copied = -EFAULT;
+					break;
+				}
+
+				dma_async_memcpy_issue_pending(tp->ucopy.dma_chan);
+
+				if ((offset + used) == skb->len)
+					copied_early = 1;
+
+			} else
+#endif
+			{
+				err = skb_copy_datagram_iovec(skb, offset,
+						msg->msg_iov, used);
+				if (err) {
+					/* Exception. Bailout! */
+					if (!copied)
+						copied = -EFAULT;
+					break;
+				}
 			}
 		}
 
@@ -1718,29 +1711,33 @@ do_prequeue:
 		tcp_rcv_space_adjust(sk);
 
 skip_copy:
-		if (tp->urg_data && after(tp->copied_seq,tp->urg_seq)) {
+		if (tp->urg_data && after(tp->copied_seq, tp->urg_seq)) {
 			tp->urg_data = 0;
-			tcp_fast_path_check(sk, tp);
+			tcp_fast_path_check(sk);
 		}
 		if (used + offset < skb->len)
 			continue;
 
-		if (skb->h.th->fin)
+		if (tcp_hdr(skb)->fin)
 			goto found_fin_ok;
-		if (!(flags & MSG_PEEK))
-			tcp_eat_skb(sk, skb);
+		if (!(flags & MSG_PEEK)) {
+			sk_eat_skb(sk, skb, copied_early);
+			copied_early = 0;
+		}
 		continue;
 
 	found_fin_ok:
 		/* Process the FIN. */
 		++*seq;
-		if (!(flags & MSG_PEEK))
-			tcp_eat_skb(sk, skb);
+		if (!(flags & MSG_PEEK)) {
+			sk_eat_skb(sk, skb, copied_early);
+			copied_early = 0;
+		}
 		break;
 	} while (len > 0);
 
 	if (user_recv) {
-		if (skb_queue_len(&tp->ucopy.prequeue)) {
+		if (!skb_queue_empty(&tp->ucopy.prequeue)) {
 			int chunk;
 
 			tp->ucopy.len = copied > 0 ? len : 0;
@@ -1748,7 +1745,7 @@ skip_copy:
 			tcp_prequeue_process(sk);
 
 			if (copied > 0 && (chunk = len - tp->ucopy.len) != 0) {
-				net_statistics[smp_processor_id()*2+1].TCPDirectCopyFromPrequeue += chunk;
+				NET_ADD_STATS_USER(sock_net(sk), LINUX_MIB_TCPDIRECTCOPYFROMPREQUEUE, chunk);
 				len -= chunk;
 				copied += chunk;
 			}
@@ -1758,26 +1755,70 @@ skip_copy:
 		tp->ucopy.len = 0;
 	}
 
+#ifdef CONFIG_NET_DMA
+	tcp_service_net_dma(sk, true);  /* Wait for queue to drain */
+	tp->ucopy.dma_chan = NULL;
+
+	if (tp->ucopy.pinned_list) {
+		dma_unpin_iovec_pages(tp->ucopy.pinned_list);
+		tp->ucopy.pinned_list = NULL;
+	}
+#endif
+
 	/* According to UNIX98, msg_name/msg_namelen are ignored
 	 * on connected socket. I was just happy when found this 8) --ANK
 	 */
 
 	/* Clean up data we have read: This will do ACK frames. */
-	cleanup_rbuf(sk, copied);
+	tcp_cleanup_rbuf(sk, copied);
 
-	TCP_CHECK_TIMER(sk);
 	release_sock(sk);
 	return copied;
 
 out:
-	TCP_CHECK_TIMER(sk);
 	release_sock(sk);
 	return err;
 
 recv_urg:
-	err = tcp_recv_urg(sk, timeo, msg, len, flags, addr_len);
+	err = tcp_recv_urg(sk, msg, len, flags);
 	goto out;
 }
+EXPORT_SYMBOL(tcp_recvmsg);
+
+void tcp_set_state(struct sock *sk, int state)
+{
+	int oldstate = sk->sk_state;
+
+	switch (state) {
+	case TCP_ESTABLISHED:
+		if (oldstate != TCP_ESTABLISHED)
+			TCP_INC_STATS(sock_net(sk), TCP_MIB_CURRESTAB);
+		break;
+
+	case TCP_CLOSE:
+		if (oldstate == TCP_CLOSE_WAIT || oldstate == TCP_ESTABLISHED)
+			TCP_INC_STATS(sock_net(sk), TCP_MIB_ESTABRESETS);
+
+		sk->sk_prot->unhash(sk);
+		if (inet_csk(sk)->icsk_bind_hash &&
+		    !(sk->sk_userlocks & SOCK_BINDPORT_LOCK))
+			inet_put_port(sk);
+		/* fall through */
+	default:
+		if (oldstate == TCP_ESTABLISHED)
+			TCP_DEC_STATS(sock_net(sk), TCP_MIB_CURRESTAB);
+	}
+
+	/* Change state AFTER socket is unhashed to avoid closed
+	 * socket sitting in hash tables.
+	 */
+	sk->sk_state = state;
+
+#ifdef STATE_TRACE
+	SOCK_DEBUG(sk, "TCP sk=%p, State %s -> %s\n", sk, statename[oldstate], statename[state]);
+#endif
+}
+EXPORT_SYMBOL_GPL(tcp_set_state);
 
 /*
  *	State processing on a close. This implements the state shift for
@@ -1786,7 +1827,7 @@ recv_urg:
  *	closed.
  */
 
-static unsigned char new_state[16] = {
+static const unsigned char new_state[16] = {
   /* current state:        new state:      action:	*/
   /* (Invalid)		*/ TCP_CLOSE,
   /* TCP_ESTABLISHED	*/ TCP_FIN_WAIT1 | TCP_ACTION_FIN,
@@ -1804,17 +1845,17 @@ static unsigned char new_state[16] = {
 
 static int tcp_close_state(struct sock *sk)
 {
-	int next = (int) new_state[sk->state];
-	int ns = (next & TCP_STATE_MASK);
+	int next = (int)new_state[sk->sk_state];
+	int ns = next & TCP_STATE_MASK;
 
 	tcp_set_state(sk, ns);
 
-	return (next & TCP_ACTION_FIN);
+	return next & TCP_ACTION_FIN;
 }
 
 /*
  *	Shutdown the sending side of a connection. Much like close except
- *	that we don't receive shut down or set sk->dead.
+ *	that we don't receive shut down or sock_set_flag(sk, SOCK_DEAD).
  */
 
 void tcp_shutdown(struct sock *sk, int how)
@@ -1827,99 +1868,44 @@ void tcp_shutdown(struct sock *sk, int how)
 		return;
 
 	/* If we've already sent a FIN, or it's a closed state, skip this. */
-	if ((1 << sk->state) &
-	    (TCPF_ESTABLISHED|TCPF_SYN_SENT|TCPF_SYN_RECV|TCPF_CLOSE_WAIT)) {
+	if ((1 << sk->sk_state) &
+	    (TCPF_ESTABLISHED | TCPF_SYN_SENT |
+	     TCPF_SYN_RECV | TCPF_CLOSE_WAIT)) {
 		/* Clear out any half completed packets.  FIN if needed. */
 		if (tcp_close_state(sk))
 			tcp_send_fin(sk);
 	}
 }
+EXPORT_SYMBOL(tcp_shutdown);
 
-
-/*
- *	Return 1 if we still have things to send in our buffers.
- */
-
-static inline int closing(struct sock * sk)
+bool tcp_check_oom(struct sock *sk, int shift)
 {
-	return ((1 << sk->state) & (TCPF_FIN_WAIT1|TCPF_CLOSING|TCPF_LAST_ACK));
-}
+	bool too_many_orphans, out_of_socket_memory;
 
-static __inline__ void tcp_kill_sk_queues(struct sock *sk)
-{
-	/* First the read buffer. */
-	__skb_queue_purge(&sk->receive_queue);
+	too_many_orphans = tcp_too_many_orphans(sk, shift);
+	out_of_socket_memory = tcp_out_of_memory(sk);
 
-	/* Next, the error queue. */
-	__skb_queue_purge(&sk->error_queue);
-
-	/* Next, the write queue. */
-	BUG_TRAP(skb_queue_empty(&sk->write_queue));
-
-	/* Account for returned memory. */
-	tcp_mem_reclaim(sk);
-
-	BUG_TRAP(sk->wmem_queued == 0);
-	BUG_TRAP(sk->forward_alloc == 0);
-
-	/* It is _impossible_ for the backlog to contain anything
-	 * when we get here.  All user references to this socket
-	 * have gone away, only the net layer knows can touch it.
-	 */
-}
-
-/*
- * At this point, there should be no process reference to this
- * socket, and thus no user references at all.  Therefore we
- * can assume the socket waitqueue is inactive and nobody will
- * try to jump onto it.
- */
-void tcp_destroy_sock(struct sock *sk)
-{
-	BUG_TRAP(sk->state==TCP_CLOSE);
-	BUG_TRAP(sk->dead);
-
-	/* It cannot be in hash table! */
-	BUG_TRAP(sk->pprev==NULL);
-
-	/* If it has not 0 sk->num, it must be bound */
-	BUG_TRAP(!sk->num || sk->prev!=NULL);
-
-#ifdef TCP_DEBUG
-	if (sk->zapped) {
-		printk(KERN_DEBUG "TCP: double destroy sk=%p\n", sk);
-		sock_hold(sk);
-	}
-	sk->zapped = 1;
-#endif
-
-	sk->prot->destroy(sk);
-
-	tcp_kill_sk_queues(sk);
-
-#ifdef INET_REFCNT_DEBUG
-	if (atomic_read(&sk->refcnt) != 1) {
-		printk(KERN_DEBUG "Destruction TCP %p delayed, c=%d\n", sk, atomic_read(&sk->refcnt));
-	}
-#endif
-
-	atomic_dec(&tcp_orphan_count);
-	sock_put(sk);
+	if (too_many_orphans && net_ratelimit())
+		pr_info("too many orphaned sockets\n");
+	if (out_of_socket_memory && net_ratelimit())
+		pr_info("out of memory -- consider tuning tcp_mem\n");
+	return too_many_orphans || out_of_socket_memory;
 }
 
 void tcp_close(struct sock *sk, long timeout)
 {
 	struct sk_buff *skb;
 	int data_was_unread = 0;
+	int state;
 
 	lock_sock(sk);
-	sk->shutdown = SHUTDOWN_MASK;
+	sk->sk_shutdown = SHUTDOWN_MASK;
 
-	if(sk->state == TCP_LISTEN) {
+	if (sk->sk_state == TCP_LISTEN) {
 		tcp_set_state(sk, TCP_CLOSE);
 
 		/* Special case. */
-		tcp_listen_stop(sk);
+		inet_csk_listen_stop(sk);
 
 		goto adjudge_to_death;
 	}
@@ -1928,32 +1914,35 @@ void tcp_close(struct sock *sk, long timeout)
 	 *  descriptor close, not protocol-sourced closes, because the
 	 *  reader process may not have drained the data yet!
 	 */
-	while((skb=__skb_dequeue(&sk->receive_queue))!=NULL) {
-		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq - skb->h.th->fin;
+	while ((skb = __skb_dequeue(&sk->sk_receive_queue)) != NULL) {
+		u32 len = TCP_SKB_CB(skb)->end_seq - TCP_SKB_CB(skb)->seq -
+			  tcp_hdr(skb)->fin;
 		data_was_unread += len;
 		__kfree_skb(skb);
 	}
 
-	tcp_mem_reclaim(sk);
+	sk_mem_reclaim(sk);
 
-	/* As outlined in draft-ietf-tcpimpl-prob-03.txt, section
-	 * 3.10, we send a RST here because data was lost.  To
-	 * witness the awful effects of the old behavior of always
-	 * doing a FIN, run an older 2.1.x kernel or 2.0.x, start
-	 * a bulk GET in an FTP client, suspend the process, wait
-	 * for the client to advertise a zero window, then kill -9
-	 * the FTP client, wheee...  Note: timeout is always zero
-	 * in such a case.
+	/* If socket has been already reset (e.g. in tcp_reset()) - kill it. */
+	if (sk->sk_state == TCP_CLOSE)
+		goto adjudge_to_death;
+
+	/* As outlined in RFC 2525, section 2.17, we send a RST here because
+	 * data was lost. To witness the awful effects of the old behavior of
+	 * always doing a FIN, run an older 2.1.x kernel or 2.0.x, start a bulk
+	 * GET in an FTP client, suspend the process, wait for the client to
+	 * advertise a zero window, then kill -9 the FTP client, wheee...
+	 * Note: timeout is always zero in such a case.
 	 */
-	if(data_was_unread != 0) {
+	if (data_was_unread) {
 		/* Unread data was tossed, zap the connection. */
-		NET_INC_STATS_USER(TCPAbortOnClose);
+		NET_INC_STATS_USER(sock_net(sk), LINUX_MIB_TCPABORTONCLOSE);
 		tcp_set_state(sk, TCP_CLOSE);
-		tcp_send_active_reset(sk, GFP_KERNEL);
-	} else if (sk->linger && sk->lingertime==0) {
+		tcp_send_active_reset(sk, sk->sk_allocation);
+	} else if (sock_flag(sk, SOCK_LINGER) && !sk->sk_lingertime) {
 		/* Check zero linger _after_ checking for unread data. */
-		sk->prot->disconnect(sk, 0);
-		NET_INC_STATS_USER(TCPAbortOnData);
+		sk->sk_prot->disconnect(sk, 0);
+		NET_INC_STATS_USER(sock_net(sk), LINUX_MIB_TCPABORTONDATA);
 	} else if (tcp_close_state(sk)) {
 		/* We FIN if the application ate all the data before
 		 * zapping the connection.
@@ -1983,26 +1972,13 @@ void tcp_close(struct sock *sk, long timeout)
 		tcp_send_fin(sk);
 	}
 
-	if (timeout) {
-		struct task_struct *tsk = current;
-		DECLARE_WAITQUEUE(wait, current);
-
-		add_wait_queue(sk->sleep, &wait);
-
-		do {
-			set_current_state(TASK_INTERRUPTIBLE);
-			if (!closing(sk))
-				break;
-			release_sock(sk);
-			timeout = schedule_timeout(timeout);
-			lock_sock(sk);
-		} while (!signal_pending(tsk) && timeout);
-
-		tsk->state = TASK_RUNNING;
-		remove_wait_queue(sk->sleep, &wait);
-	}
+	sk_stream_wait_close(sk, timeout);
 
 adjudge_to_death:
+	state = sk->sk_state;
+	sock_hold(sk);
+	sock_orphan(sk);
+
 	/* It is the last release_sock in its life. It will remove backlog. */
 	release_sock(sk);
 
@@ -2012,10 +1988,13 @@ adjudge_to_death:
 	 */
 	local_bh_disable();
 	bh_lock_sock(sk);
-	BUG_TRAP(sk->lock.users==0);
+	WARN_ON(sock_owned_by_user(sk));
 
-	sock_hold(sk);
-	sock_orphan(sk);
+	percpu_counter_inc(sk->sk_prot->orphan_count);
+
+	/* Have we already been destroyed by a softirq or backlog? */
+	if (state != TCP_CLOSE && sk->sk_state == TCP_CLOSE)
+		goto out;
 
 	/*	This is a (useful) BSD violating of the RFC. There is a
 	 *	problem with TCP as specified in that the other end could
@@ -2031,40 +2010,37 @@ adjudge_to_death:
 	 *	linger2	option.					--ANK
 	 */
 
-	if (sk->state == TCP_FIN_WAIT2) {
-		struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	if (sk->sk_state == TCP_FIN_WAIT2) {
+		struct tcp_sock *tp = tcp_sk(sk);
 		if (tp->linger2 < 0) {
 			tcp_set_state(sk, TCP_CLOSE);
 			tcp_send_active_reset(sk, GFP_ATOMIC);
-			NET_INC_STATS_BH(TCPAbortOnLinger);
+			NET_INC_STATS_BH(sock_net(sk),
+					LINUX_MIB_TCPABORTONLINGER);
 		} else {
-			int tmo = tcp_fin_time(tp);
+			const int tmo = tcp_fin_time(sk);
 
 			if (tmo > TCP_TIMEWAIT_LEN) {
-				tcp_reset_keepalive_timer(sk, tcp_fin_time(tp));
+				inet_csk_reset_keepalive_timer(sk,
+						tmo - TCP_TIMEWAIT_LEN);
 			} else {
-				atomic_inc(&tcp_orphan_count);
 				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
 				goto out;
 			}
 		}
 	}
-	if (sk->state != TCP_CLOSE) {
-		tcp_mem_reclaim(sk);
-		if (atomic_read(&tcp_orphan_count) > sysctl_tcp_max_orphans ||
-		    (sk->wmem_queued > SOCK_MIN_SNDBUF &&
-		     atomic_read(&tcp_memory_allocated) > sysctl_tcp_mem[2])) {
-			if (net_ratelimit())
-				printk(KERN_INFO "TCP: too many of orphaned sockets\n");
+	if (sk->sk_state != TCP_CLOSE) {
+		sk_mem_reclaim(sk);
+		if (tcp_check_oom(sk, 0)) {
 			tcp_set_state(sk, TCP_CLOSE);
 			tcp_send_active_reset(sk, GFP_ATOMIC);
-			NET_INC_STATS_BH(TCPAbortOnMemory);
+			NET_INC_STATS_BH(sock_net(sk),
+					LINUX_MIB_TCPABORTONMEMORY);
 		}
 	}
-	atomic_inc(&tcp_orphan_count);
 
-	if (sk->state == TCP_CLOSE)
-		tcp_destroy_sock(sk);
+	if (sk->sk_state == TCP_CLOSE)
+		inet_csk_destroy_sock(sk);
 	/* Otherwise, socket is reprieved until protocol close. */
 
 out:
@@ -2072,227 +2048,252 @@ out:
 	local_bh_enable();
 	sock_put(sk);
 }
+EXPORT_SYMBOL(tcp_close);
 
 /* These states need RST on ABORT according to RFC793 */
 
 static inline int tcp_need_reset(int state)
 {
-	return ((1 << state) &
-	       	(TCPF_ESTABLISHED|TCPF_CLOSE_WAIT|TCPF_FIN_WAIT1|
-		 TCPF_FIN_WAIT2|TCPF_SYN_RECV));
+	return (1 << state) &
+	       (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT | TCPF_FIN_WAIT1 |
+		TCPF_FIN_WAIT2 | TCPF_SYN_RECV);
 }
 
 int tcp_disconnect(struct sock *sk, int flags)
 {
-	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-	int old_state;
+	struct inet_sock *inet = inet_sk(sk);
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int err = 0;
+	int old_state = sk->sk_state;
 
-	old_state = sk->state;
 	if (old_state != TCP_CLOSE)
 		tcp_set_state(sk, TCP_CLOSE);
 
 	/* ABORT function of RFC793 */
 	if (old_state == TCP_LISTEN) {
-		tcp_listen_stop(sk);
+		inet_csk_listen_stop(sk);
 	} else if (tcp_need_reset(old_state) ||
 		   (tp->snd_nxt != tp->write_seq &&
-		    (1<<old_state)&(TCPF_CLOSING|TCPF_LAST_ACK))) {
-		/* The last check adjusts for discrepance of Linux wrt. RFC
+		    (1 << old_state) & (TCPF_CLOSING | TCPF_LAST_ACK))) {
+		/* The last check adjusts for discrepancy of Linux wrt. RFC
 		 * states
 		 */
 		tcp_send_active_reset(sk, gfp_any());
-		sk->err = ECONNRESET;
+		sk->sk_err = ECONNRESET;
 	} else if (old_state == TCP_SYN_SENT)
-		sk->err = ECONNRESET;
+		sk->sk_err = ECONNRESET;
 
 	tcp_clear_xmit_timers(sk);
-	__skb_queue_purge(&sk->receive_queue);
-  	tcp_writequeue_purge(sk);
-  	__skb_queue_purge(&tp->out_of_order_queue);
-
-	sk->dport = 0;
-
-	if (!(sk->userlocks&SOCK_BINDADDR_LOCK)) {
-		sk->rcv_saddr = 0;
-		sk->saddr = 0;
-#if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-		memset(&sk->net_pinfo.af_inet6.saddr, 0, 16);
-		memset(&sk->net_pinfo.af_inet6.rcv_saddr, 0, 16);
+	__skb_queue_purge(&sk->sk_receive_queue);
+	tcp_write_queue_purge(sk);
+	__skb_queue_purge(&tp->out_of_order_queue);
+#ifdef CONFIG_NET_DMA
+	__skb_queue_purge(&sk->sk_async_wait_queue);
 #endif
-	}
 
-	sk->shutdown = 0;
-	sk->done = 0;
+	inet->inet_dport = 0;
+
+	if (!(sk->sk_userlocks & SOCK_BINDADDR_LOCK))
+		inet_reset_saddr(sk);
+
+	sk->sk_shutdown = 0;
+	sock_reset_flag(sk, SOCK_DONE);
 	tp->srtt = 0;
-	if ((tp->write_seq += tp->max_window+2) == 0)
+	if ((tp->write_seq += tp->max_window + 2) == 0)
 		tp->write_seq = 1;
-	tp->backoff = 0;
+	icsk->icsk_backoff = 0;
 	tp->snd_cwnd = 2;
-	tp->probes_out = 0;
+	icsk->icsk_probes_out = 0;
 	tp->packets_out = 0;
-	tp->snd_ssthresh = 0x7fffffff;
+	tp->snd_ssthresh = TCP_INFINITE_SSTHRESH;
 	tp->snd_cwnd_cnt = 0;
-	tcp_set_ca_state(tp, TCP_CA_Open);
+	tp->bytes_acked = 0;
+	tp->window_clamp = 0;
+	tcp_set_ca_state(sk, TCP_CA_Open);
 	tcp_clear_retrans(tp);
-	tcp_delack_init(tp);
-	tp->send_head = NULL;
-	tp->saw_tstamp = 0;
-	tcp_sack_reset(tp);
+	inet_csk_delack_init(sk);
+	tcp_init_send_head(sk);
+	memset(&tp->rx_opt, 0, sizeof(tp->rx_opt));
 	__sk_dst_reset(sk);
 
-	BUG_TRAP(!sk->num || sk->prev);
+	WARN_ON(inet->inet_num && !icsk->icsk_bind_hash);
 
-	sk->error_report(sk);
+	sk->sk_error_report(sk);
 	return err;
 }
+EXPORT_SYMBOL(tcp_disconnect);
 
 /*
- *	Wait for an incoming connection, avoid race
- *	conditions. This must be called with the socket locked.
+ *	Socket option code for TCP.
  */
-static int wait_for_connect(struct sock * sk, long timeo)
+static int do_tcp_setsockopt(struct sock *sk, int level,
+		int optname, char __user *optval, unsigned int optlen)
 {
-	DECLARE_WAITQUEUE(wait, current);
-	int err;
-
-	/*
-	 * True wake-one mechanism for incoming connections: only
-	 * one process gets woken up, not the 'whole herd'.
-	 * Since we do not 'race & poll' for established sockets
-	 * anymore, the common case will execute the loop only once.
-	 *
-	 * Subtle issue: "add_wait_queue_exclusive()" will be added
-	 * after any current non-exclusive waiters, and we know that
-	 * it will always _stay_ after any new non-exclusive waiters
-	 * because all non-exclusive waiters are added at the
-	 * beginning of the wait-queue. As such, it's ok to "drop"
-	 * our exclusiveness temporarily when we get woken up without
-	 * having to remove and re-insert us on the wait queue.
-	 */
-	add_wait_queue_exclusive(sk->sleep, &wait);
-	for (;;) {
-		current->state = TASK_INTERRUPTIBLE;
-		release_sock(sk);
-		if (sk->tp_pinfo.af_tcp.accept_queue == NULL)
-			timeo = schedule_timeout(timeo);
-		lock_sock(sk);
-		err = 0;
-		if (sk->tp_pinfo.af_tcp.accept_queue)
-			break;
-		err = -EINVAL;
-		if (sk->state != TCP_LISTEN)
-			break;
-		err = sock_intr_errno(timeo);
-		if (signal_pending(current))
-			break;
-		err = -EAGAIN;
-		if (!timeo)
-			break;
-	}
-	current->state = TASK_RUNNING;
-	remove_wait_queue(sk->sleep, &wait);
-	return err;
-}
-
-/*
- *	This will accept the next outstanding connection.
- */
-
-struct sock *tcp_accept(struct sock *sk, int flags, int *err)
-{
-	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-	struct open_request *req;
-	struct sock *newsk;
-	int error;
-
-	lock_sock(sk); 
-
-	/* We need to make sure that this socket is listening,
-	 * and that it has something pending.
-	 */
-	error = -EINVAL;
-	if (sk->state != TCP_LISTEN)
-		goto out;
-
-	/* Find already established connection */
-	if (!tp->accept_queue) {
-		long timeo = sock_rcvtimeo(sk, flags & O_NONBLOCK);
-
-		/* If this is a non blocking socket don't sleep */
-		error = -EAGAIN;
-		if (!timeo)
-			goto out;
-
-		error = wait_for_connect(sk, timeo);
-		if (error)
-			goto out;
-	}
-
-	req = tp->accept_queue;
-	if ((tp->accept_queue = req->dl_next) == NULL)
-		tp->accept_queue_tail = NULL;
-
- 	newsk = req->sk;
-	tcp_acceptq_removed(sk);
-	tcp_openreq_fastfree(req);
-	BUG_TRAP(newsk->state != TCP_SYN_RECV);
-	release_sock(sk);
-	return newsk;
-
-out:
-	release_sock(sk);
-	*err = error; 
-	return NULL;
-}
-
-/*
- *	Socket option code for TCP. 
- */
-  
-int tcp_setsockopt(struct sock *sk, int level, int optname, char *optval, 
-		   int optlen)
-{
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct inet_connection_sock *icsk = inet_csk(sk);
 	int val;
 	int err = 0;
 
-	if (level != SOL_TCP)
-		return tp->af_specific->setsockopt(sk, level, optname, 
-						   optval, optlen);
+	/* These are data/string values, all the others are ints */
+	switch (optname) {
+	case TCP_CONGESTION: {
+		char name[TCP_CA_NAME_MAX];
 
-	if(optlen<sizeof(int))
+		if (optlen < 1)
+			return -EINVAL;
+
+		val = strncpy_from_user(name, optval,
+					min_t(long, TCP_CA_NAME_MAX-1, optlen));
+		if (val < 0)
+			return -EFAULT;
+		name[val] = 0;
+
+		lock_sock(sk);
+		err = tcp_set_congestion_control(sk, name);
+		release_sock(sk);
+		return err;
+	}
+	case TCP_COOKIE_TRANSACTIONS: {
+		struct tcp_cookie_transactions ctd;
+		struct tcp_cookie_values *cvp = NULL;
+
+		if (sizeof(ctd) > optlen)
+			return -EINVAL;
+		if (copy_from_user(&ctd, optval, sizeof(ctd)))
+			return -EFAULT;
+
+		if (ctd.tcpct_used > sizeof(ctd.tcpct_value) ||
+		    ctd.tcpct_s_data_desired > TCP_MSS_DESIRED)
+			return -EINVAL;
+
+		if (ctd.tcpct_cookie_desired == 0) {
+			/* default to global value */
+		} else if ((0x1 & ctd.tcpct_cookie_desired) ||
+			   ctd.tcpct_cookie_desired > TCP_COOKIE_MAX ||
+			   ctd.tcpct_cookie_desired < TCP_COOKIE_MIN) {
+			return -EINVAL;
+		}
+
+		if (TCP_COOKIE_OUT_NEVER & ctd.tcpct_flags) {
+			/* Supercedes all other values */
+			lock_sock(sk);
+			if (tp->cookie_values != NULL) {
+				kref_put(&tp->cookie_values->kref,
+					 tcp_cookie_values_release);
+				tp->cookie_values = NULL;
+			}
+			tp->rx_opt.cookie_in_always = 0; /* false */
+			tp->rx_opt.cookie_out_never = 1; /* true */
+			release_sock(sk);
+			return err;
+		}
+
+		/* Allocate ancillary memory before locking.
+		 */
+		if (ctd.tcpct_used > 0 ||
+		    (tp->cookie_values == NULL &&
+		     (sysctl_tcp_cookie_size > 0 ||
+		      ctd.tcpct_cookie_desired > 0 ||
+		      ctd.tcpct_s_data_desired > 0))) {
+			cvp = kzalloc(sizeof(*cvp) + ctd.tcpct_used,
+				      GFP_KERNEL);
+			if (cvp == NULL)
+				return -ENOMEM;
+
+			kref_init(&cvp->kref);
+		}
+		lock_sock(sk);
+		tp->rx_opt.cookie_in_always =
+			(TCP_COOKIE_IN_ALWAYS & ctd.tcpct_flags);
+		tp->rx_opt.cookie_out_never = 0; /* false */
+
+		if (tp->cookie_values != NULL) {
+			if (cvp != NULL) {
+				/* Changed values are recorded by a changed
+				 * pointer, ensuring the cookie will differ,
+				 * without separately hashing each value later.
+				 */
+				kref_put(&tp->cookie_values->kref,
+					 tcp_cookie_values_release);
+			} else {
+				cvp = tp->cookie_values;
+			}
+		}
+
+		if (cvp != NULL) {
+			cvp->cookie_desired = ctd.tcpct_cookie_desired;
+
+			if (ctd.tcpct_used > 0) {
+				memcpy(cvp->s_data_payload, ctd.tcpct_value,
+				       ctd.tcpct_used);
+				cvp->s_data_desired = ctd.tcpct_used;
+				cvp->s_data_constant = 1; /* true */
+			} else {
+				/* No constant payload data. */
+				cvp->s_data_desired = ctd.tcpct_s_data_desired;
+				cvp->s_data_constant = 0; /* false */
+			}
+
+			tp->cookie_values = cvp;
+		}
+		release_sock(sk);
+		return err;
+	}
+	default:
+		/* fallthru */
+		break;
+	}
+
+	if (optlen < sizeof(int))
 		return -EINVAL;
 
-	if (get_user(val, (int *)optval))
+	if (get_user(val, (int __user *)optval))
 		return -EFAULT;
 
 	lock_sock(sk);
 
-	switch(optname) {
+	switch (optname) {
 	case TCP_MAXSEG:
-		/* values greater than interface MTU won't take effect.  however at
-		 * the point when this call is done we typically don't yet know
-		 * which interface is going to be used
-		 */
-		if(val < 8 || val > MAX_TCP_WINDOW) {
+		/* Values greater than interface MTU won't take effect. However
+		 * at the point when this call is done we typically don't yet
+		 * know which interface is going to be used */
+		if (val < TCP_MIN_MSS || val > MAX_TCP_WINDOW) {
 			err = -EINVAL;
 			break;
 		}
-		tp->user_mss = val;
+		tp->rx_opt.user_mss = val;
 		break;
 
 	case TCP_NODELAY:
-		/* You cannot try to use this and TCP_CORK in
-		 * tandem, so let the user know.
-		 */
-		if (tp->nonagle == 2) {
-			err = -EINVAL;
-			break;
+		if (val) {
+			/* TCP_NODELAY is weaker than TCP_CORK, so that
+			 * this option on corked socket is remembered, but
+			 * it is not activated until cork is cleared.
+			 *
+			 * However, when TCP_NODELAY is set we make
+			 * an explicit push, which overrides even TCP_CORK
+			 * for currently queued segments.
+			 */
+			tp->nonagle |= TCP_NAGLE_OFF|TCP_NAGLE_PUSH;
+			tcp_push_pending_frames(sk);
+		} else {
+			tp->nonagle &= ~TCP_NAGLE_OFF;
 		}
-		tp->nonagle = (val == 0) ? 0 : 1;
-		if (val)
-			tcp_push_pending_frames(sk, tp);
+		break;
+
+	case TCP_THIN_LINEAR_TIMEOUTS:
+		if (val < 0 || val > 1)
+			err = -EINVAL;
+		else
+			tp->thin_lto = val;
+		break;
+
+	case TCP_THIN_DUPACK:
+		if (val < 0 || val > 1)
+			err = -EINVAL;
+		else
+			tp->thin_dupack = val;
 		break;
 
 	case TCP_CORK:
@@ -2304,34 +2305,33 @@ int tcp_setsockopt(struct sock *sk, int level, int optname, char *optval,
 		 * out headers with a write() call first and then use
 		 * sendfile to send out the data parts.
 		 *
-		 * You cannot try to use TCP_NODELAY and this mechanism
-		 * at the same time, so let the user know.
+		 * TCP_CORK can be set together with TCP_NODELAY and it is
+		 * stronger than TCP_NODELAY.
 		 */
-		if (tp->nonagle == 1) {
-			err = -EINVAL;
-			break;
-		}
-		if (val != 0) {
-			tp->nonagle = 2;
+		if (val) {
+			tp->nonagle |= TCP_NAGLE_CORK;
 		} else {
-			tp->nonagle = 0;
-
-			tcp_push_pending_frames(sk, tp);
+			tp->nonagle &= ~TCP_NAGLE_CORK;
+			if (tp->nonagle&TCP_NAGLE_OFF)
+				tp->nonagle |= TCP_NAGLE_PUSH;
+			tcp_push_pending_frames(sk);
 		}
 		break;
-		
+
 	case TCP_KEEPIDLE:
 		if (val < 1 || val > MAX_TCP_KEEPIDLE)
 			err = -EINVAL;
 		else {
 			tp->keepalive_time = val * HZ;
-			if (sk->keepopen && !((1<<sk->state)&(TCPF_CLOSE|TCPF_LISTEN))) {
-				__u32 elapsed = tcp_time_stamp - tp->rcv_tstamp;
+			if (sock_flag(sk, SOCK_KEEPOPEN) &&
+			    !((1 << sk->sk_state) &
+			      (TCPF_CLOSE | TCPF_LISTEN))) {
+				u32 elapsed = keepalive_time_elapsed(tp);
 				if (tp->keepalive_time > elapsed)
 					elapsed = tp->keepalive_time - elapsed;
 				else
 					elapsed = 0;
-				tcp_reset_keepalive_timer(sk, elapsed);
+				inet_csk_reset_keepalive_timer(sk, elapsed);
 			}
 		}
 		break;
@@ -2351,302 +2351,979 @@ int tcp_setsockopt(struct sock *sk, int level, int optname, char *optval,
 		if (val < 1 || val > MAX_TCP_SYNCNT)
 			err = -EINVAL;
 		else
-			tp->syn_retries = val;
+			icsk->icsk_syn_retries = val;
 		break;
 
 	case TCP_LINGER2:
 		if (val < 0)
 			tp->linger2 = -1;
-		else if (val > sysctl_tcp_fin_timeout/HZ)
+		else if (val > sysctl_tcp_fin_timeout / HZ)
 			tp->linger2 = 0;
 		else
-			tp->linger2 = val*HZ;
+			tp->linger2 = val * HZ;
 		break;
 
 	case TCP_DEFER_ACCEPT:
-		tp->defer_accept = 0;
-		if (val > 0) {
-			/* Translate value in seconds to number of retransmits */
-			while (tp->defer_accept < 32 && val > ((TCP_TIMEOUT_INIT/HZ)<<tp->defer_accept))
-				tp->defer_accept++;
-			tp->defer_accept++;
-		}
+		/* Translate value in seconds to number of retransmits */
+		icsk->icsk_accept_queue.rskq_defer_accept =
+			secs_to_retrans(val, TCP_TIMEOUT_INIT / HZ,
+					TCP_RTO_MAX / HZ);
 		break;
 
 	case TCP_WINDOW_CLAMP:
-		if (val==0) {
-			if (sk->state != TCP_CLOSE) {
+		if (!val) {
+			if (sk->sk_state != TCP_CLOSE) {
 				err = -EINVAL;
 				break;
 			}
 			tp->window_clamp = 0;
-		} else {
-			tp->window_clamp = val<SOCK_MIN_RCVBUF/2 ?
-				SOCK_MIN_RCVBUF/2 : val;
-		}
+		} else
+			tp->window_clamp = val < SOCK_MIN_RCVBUF / 2 ?
+						SOCK_MIN_RCVBUF / 2 : val;
 		break;
 
 	case TCP_QUICKACK:
 		if (!val) {
-			tp->ack.pingpong = 1;
+			icsk->icsk_ack.pingpong = 1;
 		} else {
-			tp->ack.pingpong = 0;
-			if ((1<<sk->state)&(TCPF_ESTABLISHED|TCPF_CLOSE_WAIT) &&
-			    tcp_ack_scheduled(tp)) {
-				tp->ack.pending |= TCP_ACK_PUSHED;
-				cleanup_rbuf(sk, 1);
+			icsk->icsk_ack.pingpong = 0;
+			if ((1 << sk->sk_state) &
+			    (TCPF_ESTABLISHED | TCPF_CLOSE_WAIT) &&
+			    inet_csk_ack_scheduled(sk)) {
+				icsk->icsk_ack.pending |= ICSK_ACK_PUSHED;
+				tcp_cleanup_rbuf(sk, 1);
 				if (!(val & 1))
-					tp->ack.pingpong = 1;
+					icsk->icsk_ack.pingpong = 1;
 			}
 		}
 		break;
 
+#ifdef CONFIG_TCP_MD5SIG
+	case TCP_MD5SIG:
+		/* Read the IP->Key mappings from userspace */
+		err = tp->af_specific->md5_parse(sk, optval, optlen);
+		break;
+#endif
+	case TCP_USER_TIMEOUT:
+		/* Cap the max timeout in ms TCP will retry/retrans
+		 * before giving up and aborting (ETIMEDOUT) a connection.
+		 */
+		icsk->icsk_user_timeout = msecs_to_jiffies(val);
+		break;
 	default:
 		err = -ENOPROTOOPT;
 		break;
-	};
+	}
+
 	release_sock(sk);
 	return err;
 }
 
-int tcp_getsockopt(struct sock *sk, int level, int optname, char *optval,
-		   int *optlen)
+int tcp_setsockopt(struct sock *sk, int level, int optname, char __user *optval,
+		   unsigned int optlen)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+
+	if (level != SOL_TCP)
+		return icsk->icsk_af_ops->setsockopt(sk, level, optname,
+						     optval, optlen);
+	return do_tcp_setsockopt(sk, level, optname, optval, optlen);
+}
+EXPORT_SYMBOL(tcp_setsockopt);
+
+#ifdef CONFIG_COMPAT
+int compat_tcp_setsockopt(struct sock *sk, int level, int optname,
+			  char __user *optval, unsigned int optlen)
+{
+	if (level != SOL_TCP)
+		return inet_csk_compat_setsockopt(sk, level, optname,
+						  optval, optlen);
+	return do_tcp_setsockopt(sk, level, optname, optval, optlen);
+}
+EXPORT_SYMBOL(compat_tcp_setsockopt);
+#endif
+
+/* Return information about state of tcp endpoint in API format. */
+void tcp_get_info(const struct sock *sk, struct tcp_info *info)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+	const struct inet_connection_sock *icsk = inet_csk(sk);
+	u32 now = tcp_time_stamp;
+
+	memset(info, 0, sizeof(*info));
+
+	info->tcpi_state = sk->sk_state;
+	info->tcpi_ca_state = icsk->icsk_ca_state;
+	info->tcpi_retransmits = icsk->icsk_retransmits;
+	info->tcpi_probes = icsk->icsk_probes_out;
+	info->tcpi_backoff = icsk->icsk_backoff;
+
+	if (tp->rx_opt.tstamp_ok)
+		info->tcpi_options |= TCPI_OPT_TIMESTAMPS;
+	if (tcp_is_sack(tp))
+		info->tcpi_options |= TCPI_OPT_SACK;
+	if (tp->rx_opt.wscale_ok) {
+		info->tcpi_options |= TCPI_OPT_WSCALE;
+		info->tcpi_snd_wscale = tp->rx_opt.snd_wscale;
+		info->tcpi_rcv_wscale = tp->rx_opt.rcv_wscale;
+	}
+
+	if (tp->ecn_flags & TCP_ECN_OK)
+		info->tcpi_options |= TCPI_OPT_ECN;
+	if (tp->ecn_flags & TCP_ECN_SEEN)
+		info->tcpi_options |= TCPI_OPT_ECN_SEEN;
+
+	info->tcpi_rto = jiffies_to_usecs(icsk->icsk_rto);
+	info->tcpi_ato = jiffies_to_usecs(icsk->icsk_ack.ato);
+	info->tcpi_snd_mss = tp->mss_cache;
+	info->tcpi_rcv_mss = icsk->icsk_ack.rcv_mss;
+
+	if (sk->sk_state == TCP_LISTEN) {
+		info->tcpi_unacked = sk->sk_ack_backlog;
+		info->tcpi_sacked = sk->sk_max_ack_backlog;
+	} else {
+		info->tcpi_unacked = tp->packets_out;
+		info->tcpi_sacked = tp->sacked_out;
+	}
+	info->tcpi_lost = tp->lost_out;
+	info->tcpi_retrans = tp->retrans_out;
+	info->tcpi_fackets = tp->fackets_out;
+
+	info->tcpi_last_data_sent = jiffies_to_msecs(now - tp->lsndtime);
+	info->tcpi_last_data_recv = jiffies_to_msecs(now - icsk->icsk_ack.lrcvtime);
+	info->tcpi_last_ack_recv = jiffies_to_msecs(now - tp->rcv_tstamp);
+
+	info->tcpi_pmtu = icsk->icsk_pmtu_cookie;
+	info->tcpi_rcv_ssthresh = tp->rcv_ssthresh;
+	info->tcpi_rtt = jiffies_to_usecs(tp->srtt)>>3;
+	info->tcpi_rttvar = jiffies_to_usecs(tp->mdev)>>2;
+	info->tcpi_snd_ssthresh = tp->snd_ssthresh;
+	info->tcpi_snd_cwnd = tp->snd_cwnd;
+	info->tcpi_advmss = tp->advmss;
+	info->tcpi_reordering = tp->reordering;
+
+	info->tcpi_rcv_rtt = jiffies_to_usecs(tp->rcv_rtt_est.rtt)>>3;
+	info->tcpi_rcv_space = tp->rcvq_space.space;
+
+	info->tcpi_total_retrans = tp->total_retrans;
+}
+EXPORT_SYMBOL_GPL(tcp_get_info);
+
+static int do_tcp_getsockopt(struct sock *sk, int level,
+		int optname, char __user *optval, int __user *optlen)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
+	struct tcp_sock *tp = tcp_sk(sk);
 	int val, len;
 
-	if(level != SOL_TCP)
-		return tp->af_specific->getsockopt(sk, level, optname,
-						   optval, optlen);
-
-	if(get_user(len,optlen))
+	if (get_user(len, optlen))
 		return -EFAULT;
 
 	len = min_t(unsigned int, len, sizeof(int));
-	
-	if(len < 0)
+
+	if (len < 0)
 		return -EINVAL;
 
-	switch(optname) {
+	switch (optname) {
 	case TCP_MAXSEG:
 		val = tp->mss_cache;
-		if (val == 0 && ((1<<sk->state)&(TCPF_CLOSE|TCPF_LISTEN)))
-			val = tp->user_mss;
+		if (!val && ((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
+			val = tp->rx_opt.user_mss;
 		break;
 	case TCP_NODELAY:
-		val = (tp->nonagle == 1);
+		val = !!(tp->nonagle&TCP_NAGLE_OFF);
 		break;
 	case TCP_CORK:
-		val = (tp->nonagle == 2);
+		val = !!(tp->nonagle&TCP_NAGLE_CORK);
 		break;
 	case TCP_KEEPIDLE:
-		val = (tp->keepalive_time ? : sysctl_tcp_keepalive_time)/HZ;
+		val = keepalive_time_when(tp) / HZ;
 		break;
 	case TCP_KEEPINTVL:
-		val = (tp->keepalive_intvl ? : sysctl_tcp_keepalive_intvl)/HZ;
+		val = keepalive_intvl_when(tp) / HZ;
 		break;
 	case TCP_KEEPCNT:
-		val = tp->keepalive_probes ? : sysctl_tcp_keepalive_probes;
+		val = keepalive_probes(tp);
 		break;
 	case TCP_SYNCNT:
-		val = tp->syn_retries ? : sysctl_tcp_syn_retries;
+		val = icsk->icsk_syn_retries ? : sysctl_tcp_syn_retries;
 		break;
 	case TCP_LINGER2:
 		val = tp->linger2;
 		if (val >= 0)
-			val = (val ? : sysctl_tcp_fin_timeout)/HZ;
+			val = (val ? : sysctl_tcp_fin_timeout) / HZ;
 		break;
 	case TCP_DEFER_ACCEPT:
-		val = tp->defer_accept == 0 ? 0 : ((TCP_TIMEOUT_INIT/HZ)<<(tp->defer_accept-1));
+		val = retrans_to_secs(icsk->icsk_accept_queue.rskq_defer_accept,
+				      TCP_TIMEOUT_INIT / HZ, TCP_RTO_MAX / HZ);
 		break;
 	case TCP_WINDOW_CLAMP:
 		val = tp->window_clamp;
 		break;
-	case TCP_INFO:
-	{
+	case TCP_INFO: {
 		struct tcp_info info;
-		u32 now = tcp_time_stamp;
 
-		if(get_user(len,optlen))
+		if (get_user(len, optlen))
 			return -EFAULT;
-		info.tcpi_state = sk->state;
-		info.tcpi_ca_state = tp->ca_state;
-		info.tcpi_retransmits = tp->retransmits;
-		info.tcpi_probes = tp->probes_out;
-		info.tcpi_backoff = tp->backoff;
-		info.tcpi_options = 0;
-		if (tp->tstamp_ok)
-			info.tcpi_options |= TCPI_OPT_TIMESTAMPS;
-		if (tp->sack_ok)
-			info.tcpi_options |= TCPI_OPT_SACK;
-		if (tp->wscale_ok) {
-			info.tcpi_options |= TCPI_OPT_WSCALE;
-			info.tcpi_snd_wscale = tp->snd_wscale;
-			info.tcpi_rcv_wscale = tp->rcv_wscale;
-		} else {
-			info.tcpi_snd_wscale = 0;
-			info.tcpi_rcv_wscale = 0;
-		}
-		if (tp->ecn_flags&TCP_ECN_OK)
-			info.tcpi_options |= TCPI_OPT_ECN;
 
-		info.tcpi_rto = (1000000*tp->rto)/HZ;
-		info.tcpi_ato = (1000000*tp->ack.ato)/HZ;
-		info.tcpi_snd_mss = tp->mss_cache;
-		info.tcpi_rcv_mss = tp->ack.rcv_mss;
-
-		info.tcpi_unacked = tp->packets_out;
-		info.tcpi_sacked = tp->sacked_out;
-		info.tcpi_lost = tp->lost_out;
-		info.tcpi_retrans = tp->retrans_out;
-		info.tcpi_fackets = tp->fackets_out;
-
-		info.tcpi_last_data_sent = ((now - tp->lsndtime)*1000)/HZ;
-		info.tcpi_last_ack_sent = 0;
-		info.tcpi_last_data_recv = ((now - tp->ack.lrcvtime)*1000)/HZ;
-		info.tcpi_last_ack_recv = ((now - tp->rcv_tstamp)*1000)/HZ;
-
-		info.tcpi_pmtu = tp->pmtu_cookie;
-		info.tcpi_rcv_ssthresh = tp->rcv_ssthresh;
-		info.tcpi_rtt = ((1000000*tp->srtt)/HZ)>>3;
-		info.tcpi_rttvar = ((1000000*tp->mdev)/HZ)>>2;
-		info.tcpi_snd_ssthresh = tp->snd_ssthresh;
-		info.tcpi_snd_cwnd = tp->snd_cwnd;
-		info.tcpi_advmss = tp->advmss;
-		info.tcpi_reordering = tp->reordering;
+		tcp_get_info(sk, &info);
 
 		len = min_t(unsigned int, len, sizeof(info));
-		if(put_user(len, optlen))
+		if (put_user(len, optlen))
 			return -EFAULT;
-		if(copy_to_user(optval, &info,len))
+		if (copy_to_user(optval, &info, len))
 			return -EFAULT;
 		return 0;
 	}
 	case TCP_QUICKACK:
-		val = !tp->ack.pingpong;
+		val = !icsk->icsk_ack.pingpong;
+		break;
+
+	case TCP_CONGESTION:
+		if (get_user(len, optlen))
+			return -EFAULT;
+		len = min_t(unsigned int, len, TCP_CA_NAME_MAX);
+		if (put_user(len, optlen))
+			return -EFAULT;
+		if (copy_to_user(optval, icsk->icsk_ca_ops->name, len))
+			return -EFAULT;
+		return 0;
+
+	case TCP_COOKIE_TRANSACTIONS: {
+		struct tcp_cookie_transactions ctd;
+		struct tcp_cookie_values *cvp = tp->cookie_values;
+
+		if (get_user(len, optlen))
+			return -EFAULT;
+		if (len < sizeof(ctd))
+			return -EINVAL;
+
+		memset(&ctd, 0, sizeof(ctd));
+		ctd.tcpct_flags = (tp->rx_opt.cookie_in_always ?
+				   TCP_COOKIE_IN_ALWAYS : 0)
+				| (tp->rx_opt.cookie_out_never ?
+				   TCP_COOKIE_OUT_NEVER : 0);
+
+		if (cvp != NULL) {
+			ctd.tcpct_flags |= (cvp->s_data_in ?
+					    TCP_S_DATA_IN : 0)
+					 | (cvp->s_data_out ?
+					    TCP_S_DATA_OUT : 0);
+
+			ctd.tcpct_cookie_desired = cvp->cookie_desired;
+			ctd.tcpct_s_data_desired = cvp->s_data_desired;
+
+			memcpy(&ctd.tcpct_value[0], &cvp->cookie_pair[0],
+			       cvp->cookie_pair_size);
+			ctd.tcpct_used = cvp->cookie_pair_size;
+		}
+
+		if (put_user(sizeof(ctd), optlen))
+			return -EFAULT;
+		if (copy_to_user(optval, &ctd, sizeof(ctd)))
+			return -EFAULT;
+		return 0;
+	}
+	case TCP_THIN_LINEAR_TIMEOUTS:
+		val = tp->thin_lto;
+		break;
+	case TCP_THIN_DUPACK:
+		val = tp->thin_dupack;
+		break;
+
+	case TCP_USER_TIMEOUT:
+		val = jiffies_to_msecs(icsk->icsk_user_timeout);
 		break;
 	default:
 		return -ENOPROTOOPT;
-	};
+	}
 
-  	if(put_user(len, optlen))
-  		return -EFAULT;
-	if(copy_to_user(optval, &val,len))
+	if (put_user(len, optlen))
 		return -EFAULT;
-  	return 0;
+	if (copy_to_user(optval, &val, len))
+		return -EFAULT;
+	return 0;
 }
 
+int tcp_getsockopt(struct sock *sk, int level, int optname, char __user *optval,
+		   int __user *optlen)
+{
+	struct inet_connection_sock *icsk = inet_csk(sk);
 
-extern void __skb_cb_too_small_for_tcp(int, int);
-extern void tcpdiag_init(void);
+	if (level != SOL_TCP)
+		return icsk->icsk_af_ops->getsockopt(sk, level, optname,
+						     optval, optlen);
+	return do_tcp_getsockopt(sk, level, optname, optval, optlen);
+}
+EXPORT_SYMBOL(tcp_getsockopt);
+
+#ifdef CONFIG_COMPAT
+int compat_tcp_getsockopt(struct sock *sk, int level, int optname,
+			  char __user *optval, int __user *optlen)
+{
+	if (level != SOL_TCP)
+		return inet_csk_compat_getsockopt(sk, level, optname,
+						  optval, optlen);
+	return do_tcp_getsockopt(sk, level, optname, optval, optlen);
+}
+EXPORT_SYMBOL(compat_tcp_getsockopt);
+#endif
+
+struct sk_buff *tcp_tso_segment(struct sk_buff *skb,
+	netdev_features_t features)
+{
+	struct sk_buff *segs = ERR_PTR(-EINVAL);
+	struct tcphdr *th;
+	unsigned thlen;
+	unsigned int seq;
+	__be32 delta;
+	unsigned int oldlen;
+	unsigned int mss;
+
+	if (!pskb_may_pull(skb, sizeof(*th)))
+		goto out;
+
+	th = tcp_hdr(skb);
+	thlen = th->doff * 4;
+	if (thlen < sizeof(*th))
+		goto out;
+
+	if (!pskb_may_pull(skb, thlen))
+		goto out;
+
+	oldlen = (u16)~skb->len;
+	__skb_pull(skb, thlen);
+
+	mss = skb_shinfo(skb)->gso_size;
+	if (unlikely(skb->len <= mss))
+		goto out;
+
+	if (skb_gso_ok(skb, features | NETIF_F_GSO_ROBUST)) {
+		/* Packet is from an untrusted source, reset gso_segs. */
+		int type = skb_shinfo(skb)->gso_type;
+
+		if (unlikely(type &
+			     ~(SKB_GSO_TCPV4 |
+			       SKB_GSO_DODGY |
+			       SKB_GSO_TCP_ECN |
+			       SKB_GSO_TCPV6 |
+			       0) ||
+			     !(type & (SKB_GSO_TCPV4 | SKB_GSO_TCPV6))))
+			goto out;
+
+		skb_shinfo(skb)->gso_segs = DIV_ROUND_UP(skb->len, mss);
+
+		segs = NULL;
+		goto out;
+	}
+
+	segs = skb_segment(skb, features);
+	if (IS_ERR(segs))
+		goto out;
+
+	delta = htonl(oldlen + (thlen + mss));
+
+	skb = segs;
+	th = tcp_hdr(skb);
+	seq = ntohl(th->seq);
+
+	do {
+		th->fin = th->psh = 0;
+
+		th->check = ~csum_fold((__force __wsum)((__force u32)th->check +
+				       (__force u32)delta));
+		if (skb->ip_summed != CHECKSUM_PARTIAL)
+			th->check =
+			     csum_fold(csum_partial(skb_transport_header(skb),
+						    thlen, skb->csum));
+
+		seq += mss;
+		skb = skb->next;
+		th = tcp_hdr(skb);
+
+		th->seq = htonl(seq);
+		th->cwr = 0;
+	} while (skb->next);
+
+	delta = htonl(oldlen + (skb->tail - skb->transport_header) +
+		      skb->data_len);
+	th->check = ~csum_fold((__force __wsum)((__force u32)th->check +
+				(__force u32)delta));
+	if (skb->ip_summed != CHECKSUM_PARTIAL)
+		th->check = csum_fold(csum_partial(skb_transport_header(skb),
+						   thlen, skb->csum));
+
+out:
+	return segs;
+}
+EXPORT_SYMBOL(tcp_tso_segment);
+
+struct sk_buff **tcp_gro_receive(struct sk_buff **head, struct sk_buff *skb)
+{
+	struct sk_buff **pp = NULL;
+	struct sk_buff *p;
+	struct tcphdr *th;
+	struct tcphdr *th2;
+	unsigned int len;
+	unsigned int thlen;
+	__be32 flags;
+	unsigned int mss = 1;
+	unsigned int hlen;
+	unsigned int off;
+	int flush = 1;
+	int i;
+
+	off = skb_gro_offset(skb);
+	hlen = off + sizeof(*th);
+	th = skb_gro_header_fast(skb, off);
+	if (skb_gro_header_hard(skb, hlen)) {
+		th = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely(!th))
+			goto out;
+	}
+
+	thlen = th->doff * 4;
+	if (thlen < sizeof(*th))
+		goto out;
+
+	hlen = off + thlen;
+	if (skb_gro_header_hard(skb, hlen)) {
+		th = skb_gro_header_slow(skb, hlen, off);
+		if (unlikely(!th))
+			goto out;
+	}
+
+	skb_gro_pull(skb, thlen);
+
+	len = skb_gro_len(skb);
+	flags = tcp_flag_word(th);
+
+	for (; (p = *head); head = &p->next) {
+		if (!NAPI_GRO_CB(p)->same_flow)
+			continue;
+
+		th2 = tcp_hdr(p);
+
+		if (*(u32 *)&th->source ^ *(u32 *)&th2->source) {
+			NAPI_GRO_CB(p)->same_flow = 0;
+			continue;
+		}
+
+		goto found;
+	}
+
+	goto out_check_final;
+
+found:
+	flush = NAPI_GRO_CB(p)->flush;
+	flush |= (__force int)(flags & TCP_FLAG_CWR);
+	flush |= (__force int)((flags ^ tcp_flag_word(th2)) &
+		  ~(TCP_FLAG_CWR | TCP_FLAG_FIN | TCP_FLAG_PSH));
+	flush |= (__force int)(th->ack_seq ^ th2->ack_seq);
+	for (i = sizeof(*th); i < thlen; i += 4)
+		flush |= *(u32 *)((u8 *)th + i) ^
+			 *(u32 *)((u8 *)th2 + i);
+
+	mss = skb_shinfo(p)->gso_size;
+
+	flush |= (len - 1) >= mss;
+	flush |= (ntohl(th2->seq) + skb_gro_len(p)) ^ ntohl(th->seq);
+
+	if (flush || skb_gro_receive(head, skb)) {
+		mss = 1;
+		goto out_check_final;
+	}
+
+	p = *head;
+	th2 = tcp_hdr(p);
+	tcp_flag_word(th2) |= flags & (TCP_FLAG_FIN | TCP_FLAG_PSH);
+
+out_check_final:
+	flush = len < mss;
+	flush |= (__force int)(flags & (TCP_FLAG_URG | TCP_FLAG_PSH |
+					TCP_FLAG_RST | TCP_FLAG_SYN |
+					TCP_FLAG_FIN));
+
+	if (p && (!NAPI_GRO_CB(skb)->same_flow || flush))
+		pp = head;
+
+out:
+	NAPI_GRO_CB(skb)->flush |= flush;
+
+	return pp;
+}
+EXPORT_SYMBOL(tcp_gro_receive);
+
+int tcp_gro_complete(struct sk_buff *skb)
+{
+	struct tcphdr *th = tcp_hdr(skb);
+
+	skb->csum_start = skb_transport_header(skb) - skb->head;
+	skb->csum_offset = offsetof(struct tcphdr, check);
+	skb->ip_summed = CHECKSUM_PARTIAL;
+
+	skb_shinfo(skb)->gso_segs = NAPI_GRO_CB(skb)->count;
+
+	if (th->cwr)
+		skb_shinfo(skb)->gso_type |= SKB_GSO_TCP_ECN;
+
+	return 0;
+}
+EXPORT_SYMBOL(tcp_gro_complete);
+
+#ifdef CONFIG_TCP_MD5SIG
+static unsigned long tcp_md5sig_users;
+static struct tcp_md5sig_pool __percpu *tcp_md5sig_pool;
+static DEFINE_SPINLOCK(tcp_md5sig_pool_lock);
+
+static void __tcp_free_md5sig_pool(struct tcp_md5sig_pool __percpu *pool)
+{
+	int cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct tcp_md5sig_pool *p = per_cpu_ptr(pool, cpu);
+
+		if (p->md5_desc.tfm)
+			crypto_free_hash(p->md5_desc.tfm);
+	}
+	free_percpu(pool);
+}
+
+void tcp_free_md5sig_pool(void)
+{
+	struct tcp_md5sig_pool __percpu *pool = NULL;
+
+	spin_lock_bh(&tcp_md5sig_pool_lock);
+	if (--tcp_md5sig_users == 0) {
+		pool = tcp_md5sig_pool;
+		tcp_md5sig_pool = NULL;
+	}
+	spin_unlock_bh(&tcp_md5sig_pool_lock);
+	if (pool)
+		__tcp_free_md5sig_pool(pool);
+}
+EXPORT_SYMBOL(tcp_free_md5sig_pool);
+
+static struct tcp_md5sig_pool __percpu *
+__tcp_alloc_md5sig_pool(struct sock *sk)
+{
+	int cpu;
+	struct tcp_md5sig_pool __percpu *pool;
+
+	pool = alloc_percpu(struct tcp_md5sig_pool);
+	if (!pool)
+		return NULL;
+
+	for_each_possible_cpu(cpu) {
+		struct crypto_hash *hash;
+
+		hash = crypto_alloc_hash("md5", 0, CRYPTO_ALG_ASYNC);
+		if (!hash || IS_ERR(hash))
+			goto out_free;
+
+		per_cpu_ptr(pool, cpu)->md5_desc.tfm = hash;
+	}
+	return pool;
+out_free:
+	__tcp_free_md5sig_pool(pool);
+	return NULL;
+}
+
+struct tcp_md5sig_pool __percpu *tcp_alloc_md5sig_pool(struct sock *sk)
+{
+	struct tcp_md5sig_pool __percpu *pool;
+	int alloc = 0;
+
+retry:
+	spin_lock_bh(&tcp_md5sig_pool_lock);
+	pool = tcp_md5sig_pool;
+	if (tcp_md5sig_users++ == 0) {
+		alloc = 1;
+		spin_unlock_bh(&tcp_md5sig_pool_lock);
+	} else if (!pool) {
+		tcp_md5sig_users--;
+		spin_unlock_bh(&tcp_md5sig_pool_lock);
+		cpu_relax();
+		goto retry;
+	} else
+		spin_unlock_bh(&tcp_md5sig_pool_lock);
+
+	if (alloc) {
+		/* we cannot hold spinlock here because this may sleep. */
+		struct tcp_md5sig_pool __percpu *p;
+
+		p = __tcp_alloc_md5sig_pool(sk);
+		spin_lock_bh(&tcp_md5sig_pool_lock);
+		if (!p) {
+			tcp_md5sig_users--;
+			spin_unlock_bh(&tcp_md5sig_pool_lock);
+			return NULL;
+		}
+		pool = tcp_md5sig_pool;
+		if (pool) {
+			/* oops, it has already been assigned. */
+			spin_unlock_bh(&tcp_md5sig_pool_lock);
+			__tcp_free_md5sig_pool(p);
+		} else {
+			tcp_md5sig_pool = pool = p;
+			spin_unlock_bh(&tcp_md5sig_pool_lock);
+		}
+	}
+	return pool;
+}
+EXPORT_SYMBOL(tcp_alloc_md5sig_pool);
+
+
+/**
+ *	tcp_get_md5sig_pool - get md5sig_pool for this user
+ *
+ *	We use percpu structure, so if we succeed, we exit with preemption
+ *	and BH disabled, to make sure another thread or softirq handling
+ *	wont try to get same context.
+ */
+struct tcp_md5sig_pool *tcp_get_md5sig_pool(void)
+{
+	struct tcp_md5sig_pool __percpu *p;
+
+	local_bh_disable();
+
+	spin_lock(&tcp_md5sig_pool_lock);
+	p = tcp_md5sig_pool;
+	if (p)
+		tcp_md5sig_users++;
+	spin_unlock(&tcp_md5sig_pool_lock);
+
+	if (p)
+		return this_cpu_ptr(p);
+
+	local_bh_enable();
+	return NULL;
+}
+EXPORT_SYMBOL(tcp_get_md5sig_pool);
+
+void tcp_put_md5sig_pool(void)
+{
+	local_bh_enable();
+	tcp_free_md5sig_pool();
+}
+EXPORT_SYMBOL(tcp_put_md5sig_pool);
+
+int tcp_md5_hash_header(struct tcp_md5sig_pool *hp,
+			const struct tcphdr *th)
+{
+	struct scatterlist sg;
+	struct tcphdr hdr;
+	int err;
+
+	/* We are not allowed to change tcphdr, make a local copy */
+	memcpy(&hdr, th, sizeof(hdr));
+	hdr.check = 0;
+
+	/* options aren't included in the hash */
+	sg_init_one(&sg, &hdr, sizeof(hdr));
+	err = crypto_hash_update(&hp->md5_desc, &sg, sizeof(hdr));
+	return err;
+}
+EXPORT_SYMBOL(tcp_md5_hash_header);
+
+int tcp_md5_hash_skb_data(struct tcp_md5sig_pool *hp,
+			  const struct sk_buff *skb, unsigned int header_len)
+{
+	struct scatterlist sg;
+	const struct tcphdr *tp = tcp_hdr(skb);
+	struct hash_desc *desc = &hp->md5_desc;
+	unsigned i;
+	const unsigned head_data_len = skb_headlen(skb) > header_len ?
+				       skb_headlen(skb) - header_len : 0;
+	const struct skb_shared_info *shi = skb_shinfo(skb);
+	struct sk_buff *frag_iter;
+
+	sg_init_table(&sg, 1);
+
+	sg_set_buf(&sg, ((u8 *) tp) + header_len, head_data_len);
+	if (crypto_hash_update(desc, &sg, head_data_len))
+		return 1;
+
+	for (i = 0; i < shi->nr_frags; ++i) {
+		const struct skb_frag_struct *f = &shi->frags[i];
+		struct page *page = skb_frag_page(f);
+		sg_set_page(&sg, page, skb_frag_size(f), f->page_offset);
+		if (crypto_hash_update(desc, &sg, skb_frag_size(f)))
+			return 1;
+	}
+
+	skb_walk_frags(skb, frag_iter)
+		if (tcp_md5_hash_skb_data(hp, frag_iter, 0))
+			return 1;
+
+	return 0;
+}
+EXPORT_SYMBOL(tcp_md5_hash_skb_data);
+
+int tcp_md5_hash_key(struct tcp_md5sig_pool *hp, const struct tcp_md5sig_key *key)
+{
+	struct scatterlist sg;
+
+	sg_init_one(&sg, key->key, key->keylen);
+	return crypto_hash_update(&hp->md5_desc, &sg, key->keylen);
+}
+EXPORT_SYMBOL(tcp_md5_hash_key);
+
+#endif
+
+/**
+ * Each Responder maintains up to two secret values concurrently for
+ * efficient secret rollover.  Each secret value has 4 states:
+ *
+ * Generating.  (tcp_secret_generating != tcp_secret_primary)
+ *    Generates new Responder-Cookies, but not yet used for primary
+ *    verification.  This is a short-term state, typically lasting only
+ *    one round trip time (RTT).
+ *
+ * Primary.  (tcp_secret_generating == tcp_secret_primary)
+ *    Used both for generation and primary verification.
+ *
+ * Retiring.  (tcp_secret_retiring != tcp_secret_secondary)
+ *    Used for verification, until the first failure that can be
+ *    verified by the newer Generating secret.  At that time, this
+ *    cookie's state is changed to Secondary, and the Generating
+ *    cookie's state is changed to Primary.  This is a short-term state,
+ *    typically lasting only one round trip time (RTT).
+ *
+ * Secondary.  (tcp_secret_retiring == tcp_secret_secondary)
+ *    Used for secondary verification, after primary verification
+ *    failures.  This state lasts no more than twice the Maximum Segment
+ *    Lifetime (2MSL).  Then, the secret is discarded.
+ */
+struct tcp_cookie_secret {
+	/* The secret is divided into two parts.  The digest part is the
+	 * equivalent of previously hashing a secret and saving the state,
+	 * and serves as an initialization vector (IV).  The message part
+	 * serves as the trailing secret.
+	 */
+	u32				secrets[COOKIE_WORKSPACE_WORDS];
+	unsigned long			expires;
+};
+
+#define TCP_SECRET_1MSL (HZ * TCP_PAWS_MSL)
+#define TCP_SECRET_2MSL (HZ * TCP_PAWS_MSL * 2)
+#define TCP_SECRET_LIFE (HZ * 600)
+
+static struct tcp_cookie_secret tcp_secret_one;
+static struct tcp_cookie_secret tcp_secret_two;
+
+/* Essentially a circular list, without dynamic allocation. */
+static struct tcp_cookie_secret *tcp_secret_generating;
+static struct tcp_cookie_secret *tcp_secret_primary;
+static struct tcp_cookie_secret *tcp_secret_retiring;
+static struct tcp_cookie_secret *tcp_secret_secondary;
+
+static DEFINE_SPINLOCK(tcp_secret_locker);
+
+/* Select a pseudo-random word in the cookie workspace.
+ */
+static inline u32 tcp_cookie_work(const u32 *ws, const int n)
+{
+	return ws[COOKIE_DIGEST_WORDS + ((COOKIE_MESSAGE_WORDS-1) & ws[n])];
+}
+
+/* Fill bakery[COOKIE_WORKSPACE_WORDS] with generator, updating as needed.
+ * Called in softirq context.
+ * Returns: 0 for success.
+ */
+int tcp_cookie_generator(u32 *bakery)
+{
+	unsigned long jiffy = jiffies;
+
+	if (unlikely(time_after_eq(jiffy, tcp_secret_generating->expires))) {
+		spin_lock_bh(&tcp_secret_locker);
+		if (!time_after_eq(jiffy, tcp_secret_generating->expires)) {
+			/* refreshed by another */
+			memcpy(bakery,
+			       &tcp_secret_generating->secrets[0],
+			       COOKIE_WORKSPACE_WORDS);
+		} else {
+			/* still needs refreshing */
+			get_random_bytes(bakery, COOKIE_WORKSPACE_WORDS);
+
+			/* The first time, paranoia assumes that the
+			 * randomization function isn't as strong.  But,
+			 * this secret initialization is delayed until
+			 * the last possible moment (packet arrival).
+			 * Although that time is observable, it is
+			 * unpredictably variable.  Mash in the most
+			 * volatile clock bits available, and expire the
+			 * secret extra quickly.
+			 */
+			if (unlikely(tcp_secret_primary->expires ==
+				     tcp_secret_secondary->expires)) {
+				struct timespec tv;
+
+				getnstimeofday(&tv);
+				bakery[COOKIE_DIGEST_WORDS+0] ^=
+					(u32)tv.tv_nsec;
+
+				tcp_secret_secondary->expires = jiffy
+					+ TCP_SECRET_1MSL
+					+ (0x0f & tcp_cookie_work(bakery, 0));
+			} else {
+				tcp_secret_secondary->expires = jiffy
+					+ TCP_SECRET_LIFE
+					+ (0xff & tcp_cookie_work(bakery, 1));
+				tcp_secret_primary->expires = jiffy
+					+ TCP_SECRET_2MSL
+					+ (0x1f & tcp_cookie_work(bakery, 2));
+			}
+			memcpy(&tcp_secret_secondary->secrets[0],
+			       bakery, COOKIE_WORKSPACE_WORDS);
+
+			rcu_assign_pointer(tcp_secret_generating,
+					   tcp_secret_secondary);
+			rcu_assign_pointer(tcp_secret_retiring,
+					   tcp_secret_primary);
+			/*
+			 * Neither call_rcu() nor synchronize_rcu() needed.
+			 * Retiring data is not freed.  It is replaced after
+			 * further (locked) pointer updates, and a quiet time
+			 * (minimum 1MSL, maximum LIFE - 2MSL).
+			 */
+		}
+		spin_unlock_bh(&tcp_secret_locker);
+	} else {
+		rcu_read_lock_bh();
+		memcpy(bakery,
+		       &rcu_dereference(tcp_secret_generating)->secrets[0],
+		       COOKIE_WORKSPACE_WORDS);
+		rcu_read_unlock_bh();
+	}
+	return 0;
+}
+EXPORT_SYMBOL(tcp_cookie_generator);
+
+void tcp_done(struct sock *sk)
+{
+	if (sk->sk_state == TCP_SYN_SENT || sk->sk_state == TCP_SYN_RECV)
+		TCP_INC_STATS_BH(sock_net(sk), TCP_MIB_ATTEMPTFAILS);
+
+	tcp_set_state(sk, TCP_CLOSE);
+	tcp_clear_xmit_timers(sk);
+
+	sk->sk_shutdown = SHUTDOWN_MASK;
+
+	if (!sock_flag(sk, SOCK_DEAD))
+		sk->sk_state_change(sk);
+	else
+		inet_csk_destroy_sock(sk);
+}
+EXPORT_SYMBOL_GPL(tcp_done);
+
+extern struct tcp_congestion_ops tcp_reno;
+
+static __initdata unsigned long thash_entries;
+static int __init set_thash_entries(char *str)
+{
+	if (!str)
+		return 0;
+	thash_entries = simple_strtoul(str, &str, 0);
+	return 1;
+}
+__setup("thash_entries=", set_thash_entries);
+
+void tcp_init_mem(struct net *net)
+{
+	unsigned long limit = nr_free_buffer_pages() / 8;
+	limit = max(limit, 128UL);
+	net->ipv4.sysctl_tcp_mem[0] = limit / 4 * 3;
+	net->ipv4.sysctl_tcp_mem[1] = limit;
+	net->ipv4.sysctl_tcp_mem[2] = net->ipv4.sysctl_tcp_mem[0] * 2;
+}
 
 void __init tcp_init(void)
 {
 	struct sk_buff *skb = NULL;
-	unsigned long goal;
-	int order, i;
+	unsigned long limit;
+	int max_rshare, max_wshare, cnt;
+	unsigned int i;
+	unsigned long jiffy = jiffies;
 
-	if(sizeof(struct tcp_skb_cb) > sizeof(skb->cb))
-		__skb_cb_too_small_for_tcp(sizeof(struct tcp_skb_cb),
-					   sizeof(skb->cb));
+	BUILD_BUG_ON(sizeof(struct tcp_skb_cb) > sizeof(skb->cb));
 
-	tcp_openreq_cachep = kmem_cache_create("tcp_open_request",
-						   sizeof(struct open_request),
-					       0, SLAB_HWCACHE_ALIGN,
-					       NULL, NULL);
-	if(!tcp_openreq_cachep)
-		panic("tcp_init: Cannot alloc open_request cache.");
-
-	tcp_bucket_cachep = kmem_cache_create("tcp_bind_bucket",
-					      sizeof(struct tcp_bind_bucket),
-					      0, SLAB_HWCACHE_ALIGN,
-					      NULL, NULL);
-	if(!tcp_bucket_cachep)
-		panic("tcp_init: Cannot alloc tcp_bind_bucket cache.");
-
-	tcp_timewait_cachep = kmem_cache_create("tcp_tw_bucket",
-						sizeof(struct tcp_tw_bucket),
-						0, SLAB_HWCACHE_ALIGN,
-						NULL, NULL);
-	if(!tcp_timewait_cachep)
-		panic("tcp_init: Cannot alloc tcp_tw_bucket cache.");
+	percpu_counter_init(&tcp_sockets_allocated, 0);
+	percpu_counter_init(&tcp_orphan_count, 0);
+	tcp_hashinfo.bind_bucket_cachep =
+		kmem_cache_create("tcp_bind_bucket",
+				  sizeof(struct inet_bind_bucket), 0,
+				  SLAB_HWCACHE_ALIGN|SLAB_PANIC, NULL);
 
 	/* Size and allocate the main established and bind bucket
 	 * hash tables.
 	 *
 	 * The methodology is similar to that of the buffer cache.
 	 */
-	if (num_physpages >= (128 * 1024))
-		goal = num_physpages >> (21 - PAGE_SHIFT);
-	else
-		goal = num_physpages >> (23 - PAGE_SHIFT);
-
-	for(order = 0; (1UL << order) < goal; order++)
-		;
-	do {
-		tcp_ehash_size = (1UL << order) * PAGE_SIZE /
-			sizeof(struct tcp_ehash_bucket);
-		tcp_ehash_size >>= 1;
-		while (tcp_ehash_size & (tcp_ehash_size-1))
-			tcp_ehash_size--;
-		tcp_ehash = (struct tcp_ehash_bucket *)
-			__get_free_pages(GFP_ATOMIC, order);
-	} while (tcp_ehash == NULL && --order > 0);
-
-	if (!tcp_ehash)
-		panic("Failed to allocate TCP established hash table\n");
-	for (i = 0; i < (tcp_ehash_size<<1); i++) {
-		tcp_ehash[i].lock = RW_LOCK_UNLOCKED;
-		tcp_ehash[i].chain = NULL;
+	tcp_hashinfo.ehash =
+		alloc_large_system_hash("TCP established",
+					sizeof(struct inet_ehash_bucket),
+					thash_entries,
+					(totalram_pages >= 128 * 1024) ?
+					13 : 15,
+					0,
+					NULL,
+					&tcp_hashinfo.ehash_mask,
+					thash_entries ? 0 : 512 * 1024);
+	for (i = 0; i <= tcp_hashinfo.ehash_mask; i++) {
+		INIT_HLIST_NULLS_HEAD(&tcp_hashinfo.ehash[i].chain, i);
+		INIT_HLIST_NULLS_HEAD(&tcp_hashinfo.ehash[i].twchain, i);
+	}
+	if (inet_ehash_locks_alloc(&tcp_hashinfo))
+		panic("TCP: failed to alloc ehash_locks");
+	tcp_hashinfo.bhash =
+		alloc_large_system_hash("TCP bind",
+					sizeof(struct inet_bind_hashbucket),
+					tcp_hashinfo.ehash_mask + 1,
+					(totalram_pages >= 128 * 1024) ?
+					13 : 15,
+					0,
+					&tcp_hashinfo.bhash_size,
+					NULL,
+					64 * 1024);
+	tcp_hashinfo.bhash_size = 1U << tcp_hashinfo.bhash_size;
+	for (i = 0; i < tcp_hashinfo.bhash_size; i++) {
+		spin_lock_init(&tcp_hashinfo.bhash[i].lock);
+		INIT_HLIST_HEAD(&tcp_hashinfo.bhash[i].chain);
 	}
 
-	do {
-		tcp_bhash_size = (1UL << order) * PAGE_SIZE /
-			sizeof(struct tcp_bind_hashbucket);
-		if ((tcp_bhash_size > (64 * 1024)) && order > 0)
-			continue;
-		tcp_bhash = (struct tcp_bind_hashbucket *)
-			__get_free_pages(GFP_ATOMIC, order);
-	} while (tcp_bhash == NULL && --order >= 0);
 
-	if (!tcp_bhash)
-		panic("Failed to allocate TCP bind hash table\n");
-	for (i = 0; i < tcp_bhash_size; i++) {
-		tcp_bhash[i].lock = SPIN_LOCK_UNLOCKED;
-		tcp_bhash[i].chain = NULL;
-	}
+	cnt = tcp_hashinfo.ehash_mask + 1;
 
-	/* Try to be a bit smarter and adjust defaults depending
-	 * on available memory.
-	 */
-	if (order > 4) {
-		sysctl_local_port_range[0] = 32768;
-		sysctl_local_port_range[1] = 61000;
-		sysctl_tcp_max_tw_buckets = 180000;
-		sysctl_tcp_max_orphans = 4096<<(order-4);
-		sysctl_max_syn_backlog = 1024;
-	} else if (order < 3) {
-		sysctl_local_port_range[0] = 1024*(3-order);
-		sysctl_tcp_max_tw_buckets >>= (3-order);
-		sysctl_tcp_max_orphans >>= (3-order);
-		sysctl_max_syn_backlog = 128;
-	}
-	tcp_port_rover = sysctl_local_port_range[0] - 1;
+	tcp_death_row.sysctl_max_tw_buckets = cnt / 2;
+	sysctl_tcp_max_orphans = cnt / 2;
+	sysctl_max_syn_backlog = max(128, cnt / 256);
 
-	sysctl_tcp_mem[0] = 768<<order;
-	sysctl_tcp_mem[1] = 1024<<order;
-	sysctl_tcp_mem[2] = 1536<<order;
+	tcp_init_mem(&init_net);
+	/* Set per-socket limits to no more than 1/128 the pressure threshold */
+	limit = nr_free_buffer_pages() << (PAGE_SHIFT - 7);
+	max_wshare = min(4UL*1024*1024, limit);
+	max_rshare = min(6UL*1024*1024, limit);
 
-	if (order < 3) {
-		sysctl_tcp_wmem[2] = 64*1024;
-		sysctl_tcp_rmem[0] = PAGE_SIZE;
-		sysctl_tcp_rmem[1] = 43689;
-		sysctl_tcp_rmem[2] = 2*43689;
-	}
+	sysctl_tcp_wmem[0] = SK_MEM_QUANTUM;
+	sysctl_tcp_wmem[1] = 16*1024;
+	sysctl_tcp_wmem[2] = max(64*1024, max_wshare);
 
-	printk(KERN_INFO "TCP: Hash tables configured (established %d bind %d)\n",
-	       tcp_ehash_size<<1, tcp_bhash_size);
+	sysctl_tcp_rmem[0] = SK_MEM_QUANTUM;
+	sysctl_tcp_rmem[1] = 87380;
+	sysctl_tcp_rmem[2] = max(87380, max_rshare);
 
-	(void) tcp_mib_init();
-	tcpdiag_init();
+	pr_info("Hash tables configured (established %u bind %u)\n",
+		tcp_hashinfo.ehash_mask + 1, tcp_hashinfo.bhash_size);
+
+	tcp_register_congestion_control(&tcp_reno);
+
+	memset(&tcp_secret_one.secrets[0], 0, sizeof(tcp_secret_one.secrets));
+	memset(&tcp_secret_two.secrets[0], 0, sizeof(tcp_secret_two.secrets));
+	tcp_secret_one.expires = jiffy; /* past due */
+	tcp_secret_two.expires = jiffy; /* past due */
+	tcp_secret_generating = &tcp_secret_one;
+	tcp_secret_primary = &tcp_secret_one;
+	tcp_secret_retiring = &tcp_secret_two;
+	tcp_secret_secondary = &tcp_secret_two;
 }

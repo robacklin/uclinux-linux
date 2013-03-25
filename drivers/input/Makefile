@@ -2,30 +2,26 @@
 # Makefile for the input core drivers.
 #
 
-# The target object and module list name.
-
-O_TARGET	:= inputdrv.o
-
-# Objects that export symbols.
-
-export-objs	:= input.o
-
-# Object file lists.
-
-obj-y	:=
-obj-m	:=
-obj-n	:=
-obj-	:=
-
 # Each configuration option enables a list of files.
 
-obj-$(CONFIG_INPUT)		+= input.o
-obj-$(CONFIG_INPUT_KEYBDEV)	+= keybdev.o
+obj-$(CONFIG_INPUT)		+= input-core.o
+input-core-y := input.o input-compat.o input-mt.o ff-core.o
+
+obj-$(CONFIG_INPUT_FF_MEMLESS)	+= ff-memless.o
+obj-$(CONFIG_INPUT_POLLDEV)	+= input-polldev.o
+obj-$(CONFIG_INPUT_SPARSEKMAP)	+= sparse-keymap.o
+
 obj-$(CONFIG_INPUT_MOUSEDEV)	+= mousedev.o
 obj-$(CONFIG_INPUT_JOYDEV)	+= joydev.o
 obj-$(CONFIG_INPUT_EVDEV)	+= evdev.o
-obj-$(CONFIG_INPUT_UINPUT)	+= uinput.o
+obj-$(CONFIG_INPUT_EVBUG)	+= evbug.o
 
-# The global Rules.make.
+obj-$(CONFIG_INPUT_KEYBOARD)	+= keyboard/
+obj-$(CONFIG_INPUT_MOUSE)	+= mouse/
+obj-$(CONFIG_INPUT_JOYSTICK)	+= joystick/
+obj-$(CONFIG_INPUT_TABLET)	+= tablet/
+obj-$(CONFIG_INPUT_TOUCHSCREEN)	+= touchscreen/
+obj-$(CONFIG_INPUT_MISC)	+= misc/
 
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_INPUT_APMPOWER)	+= apm-power.o
+obj-$(CONFIG_INPUT_OF_MATRIX_KEYMAP) += of_keymap.o

@@ -4,11 +4,6 @@
  * PURPOSE
  *	Symlink handling routines for the OSTA-UDF(tm) filesystem.
  *
- * CONTACTS
- *	E-mail regarding any portion of the Linux UDF file system should be
- *	directed to the development team mailing list (run by majordomo):
- *		linux_udf@hpesjro.fc.hp.com
- *
  * COPYRIGHT
  *	This file is distributed under the terms of the GNU General Public
  *	License (GPL). Copies of the GPL can be obtained from:
@@ -16,7 +11,7 @@
  *	Each contributing author retains all rights to their own work.
  *
  *  (C) 1998-2001 Ben Fennema
- *  (C) 1999 Stelias Computing Inc 
+ *  (C) 1999 Stelias Computing Inc
  *
  * HISTORY
  *
@@ -28,50 +23,53 @@
 #include <asm/uaccess.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
-#include <linux/udf_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
-#include <linux/slab.h>
 #include <linux/pagemap.h>
-#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 #include "udf_i.h"
 
-static void udf_pc_to_char(char *from, int fromlen, char *to)
+static void udf_pc_to_char(struct super_block *sb, unsigned char *from,
+			   int fromlen, unsigned char *to)
 {
 	struct pathComponent *pc;
 	int elen = 0;
-	char *p = to;
+	unsigned char *p = to;
 
-	while (elen < fromlen)
-	{
+	while (elen < fromlen) {
 		pc = (struct pathComponent *)(from + elen);
-		switch (pc->componentType)
-		{
-			case 1:
-				if (pc->lengthComponentIdent == 0)
-				{
-					p = to;
-					*p++ = '/';
-				}
+		switch (pc->componentType) {
+		case 1:
+			/*
+			 * Symlink points to some place which should be agreed
+ 			 * upon between originator and receiver of the media. Ignore.
+			 */
+			if (pc->lengthComponentIdent > 0)
 				break;
-			case 3:
-				memcpy(p, "../", 3);
-				p += 3;
-				break;
-			case 4:
-				memcpy(p, "./", 2);
-				p += 2;
-				/* that would be . - just ignore */
-				break;
-			case 5:
-				memcpy(p, pc->componentIdent, pc->lengthComponentIdent);
-				p += pc->lengthComponentIdent;
-				*p++ = '/';
+			/* Fall through */
+		case 2:
+			p = to;
+			*p++ = '/';
+			break;
+		case 3:
+			memcpy(p, "../", 3);
+			p += 3;
+			break;
+		case 4:
+			memcpy(p, "./", 2);
+			p += 2;
+			/* that would be . - just ignore */
+			break;
+		case 5:
+			p += udf_get_filename(sb, pc->componentIdent, p,
+					      pc->lengthComponentIdent);
+			*p++ = '/';
+			break;
 		}
 		elen += sizeof(struct pathComponent) + pc->lengthComponentIdent;
 	}
-	if (p > to+1)
+	if (p > to + 1)
 		p[-1] = '\0';
 	else
 		p[0] = '\0';
@@ -81,23 +79,20 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 {
 	struct inode *inode = page->mapping->host;
 	struct buffer_head *bh = NULL;
-	char *symlink;
+	unsigned char *symlink;
 	int err = -EIO;
-	char *p = kmap(page);
-	
-	lock_kernel();
-	if (UDF_I_ALLOCTYPE(inode) == ICBTAG_FLAG_AD_IN_ICB)
-	{
-		bh = udf_tread(inode->i_sb, inode->i_ino);
+	unsigned char *p = kmap(page);
+	struct udf_inode_info *iinfo;
+	uint32_t pos;
 
-		if (!bh)
-			goto out;
+	iinfo = UDF_I(inode);
+	pos = udf_block_map(inode, 0);
 
-		symlink = bh->b_data + udf_file_entry_alloc_offset(inode);
-	}
-	else
-	{
-		bh = sb_bread(inode->i_sb, udf_block_map(inode, 0));
+	down_read(&iinfo->i_data_sem);
+	if (iinfo->i_alloc_type == ICBTAG_FLAG_AD_IN_ICB) {
+		symlink = iinfo->i_ext.i_data + iinfo->i_lenEAttr;
+	} else {
+		bh = sb_bread(inode->i_sb, pos);
 
 		if (!bh)
 			goto out;
@@ -105,25 +100,26 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 		symlink = bh->b_data;
 	}
 
-	udf_pc_to_char(symlink, inode->i_size, p);
-	udf_release_data(bh);
+	udf_pc_to_char(inode->i_sb, symlink, inode->i_size, p);
+	brelse(bh);
 
-	unlock_kernel();
+	up_read(&iinfo->i_data_sem);
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
+
 out:
-	unlock_kernel();
+	up_read(&iinfo->i_data_sem);
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return err;
 }
 
 /*
  * symlinks can't do much...
  */
-struct address_space_operations udf_symlink_aops = {
-	readpage:		udf_symlink_filler,
+const struct address_space_operations udf_symlink_aops = {
+	.readpage		= udf_symlink_filler,
 };

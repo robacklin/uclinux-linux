@@ -18,26 +18,34 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/delay.h>
-#include <linux/config.h>	/* CONFIG_ALPHA_LCA etc */
 #include <linux/mc146818rtc.h>
 #include <linux/console.h>
+#include <linux/cpu.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
+#include <linux/platform_device.h>
 #include <linux/bootmem.h>
 #include <linux/pci.h>
 #include <linux/seq_file.h>
-
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
+#include <linux/root_dev.h>
+#include <linux/initrd.h>
+#include <linux/eisa.h>
+#include <linux/pfn.h>
+#ifdef CONFIG_MAGIC_SYSRQ
+#include <linux/sysrq.h>
+#include <linux/reboot.h>
 #endif
-
 #include <linux/notifier.h>
-extern struct notifier_block *panic_notifier_list;
+#include <asm/setup.h>
+#include <asm/io.h>
+#include <linux/log2.h>
+#include <linux/export.h>
+
+extern struct atomic_notifier_head panic_notifier_list;
 static int alpha_panic_event(struct notifier_block *, unsigned long, void *);
 static struct notifier_block alpha_panic_block = {
 	alpha_panic_event,
@@ -47,10 +55,8 @@ static struct notifier_block alpha_panic_block = {
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
 #include <asm/hwrpb.h>
 #include <asm/dma.h>
-#include <asm/io.h>
 #include <asm/mmu_context.h>
 #include <asm/console.h>
 
@@ -59,7 +65,24 @@ static struct notifier_block alpha_panic_block = {
 
 
 struct hwrpb_struct *hwrpb;
+EXPORT_SYMBOL(hwrpb);
 unsigned long srm_hae;
+
+int alpha_l1i_cacheshape;
+int alpha_l1d_cacheshape;
+int alpha_l2_cacheshape;
+int alpha_l3_cacheshape;
+
+#ifdef CONFIG_VERBOSE_MCHECK
+/* 0=minimum, 1=verbose, 2=all */
+/* These can be overridden via the command line, ie "verbose_mcheck=2") */
+unsigned long alpha_verbose_mcheck = CONFIG_VERBOSE_MCHECK_ON;
+#endif
+
+#ifdef CONFIG_NUMA
+struct cpumask node_to_cpumask_map[MAX_NUMNODES] __read_mostly;
+EXPORT_SYMBOL(node_to_cpumask_map);
+#endif
 
 /* Which processor we booted from.  */
 int boot_cpuid;
@@ -72,7 +95,7 @@ int boot_cpuid;
  * "srmcons" specified in the boot command arguments allows us to
  * see kernel messages during the period of time before the true
  * console device is "registered" during console_init(). 
- * As of this version (2.4.20), console_init() will call
+ * As of this version (2.5.59), console_init() will call
  * disable_early_printk() as the last action before initializing
  * the console drivers. That's the last possible time srmcons can be 
  * unregistered without interfering with console behavior.
@@ -93,18 +116,17 @@ unsigned long alpha_agpgart_size = DEFAULT_AGP_APER_SIZE;
 #ifdef CONFIG_ALPHA_GENERIC
 struct alpha_machine_vector alpha_mv;
 int alpha_using_srm;
+EXPORT_SYMBOL(alpha_using_srm);
 #endif
 
-unsigned char aux_device_present = 0xaa;
-
-#define N(a) (sizeof(a)/sizeof(a[0]))
-
-static struct alpha_machine_vector *get_sysvec(long, long, long);
+static struct alpha_machine_vector *get_sysvec(unsigned long, unsigned long,
+					       unsigned long);
 static struct alpha_machine_vector *get_sysvec_byname(const char *);
-static void get_sysnames(long, long, long, char **, char **);
+static void get_sysnames(unsigned long, unsigned long, unsigned long,
+			 char **, char **);
+static void determine_cpu_caches (unsigned int);
 
-static char command_line[COMMAND_LINE_SIZE];
-char saved_command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE];
 
 /*
  * The format of "screen_info" is strange, and due to early
@@ -113,13 +135,15 @@ char saved_command_line[COMMAND_LINE_SIZE];
  */
 
 struct screen_info screen_info = {
-	orig_x: 0,
-	orig_y: 25,
-	orig_video_cols: 80,
-	orig_video_lines: 25,
-	orig_video_isVGA: 1,
-	orig_video_points: 16
+	.orig_x = 0,
+	.orig_y = 25,
+	.orig_video_cols = 80,
+	.orig_video_lines = 25,
+	.orig_video_isVGA = 1,
+	.orig_video_points = 16
 };
+
+EXPORT_SYMBOL(screen_info);
 
 /*
  * The direct map I/O window, if any.  This should be the same
@@ -128,6 +152,8 @@ struct screen_info screen_info = {
 
 unsigned long __direct_map_base;
 unsigned long __direct_map_size;
+EXPORT_SYMBOL(__direct_map_base);
+EXPORT_SYMBOL(__direct_map_size);
 
 /*
  * Declare all of the machine vectors.
@@ -195,18 +221,18 @@ static void __init
 reserve_std_resources(void)
 {
 	static struct resource standard_io_resources[] = {
-		{ "rtc", -1, -1 },
-        	{ "dma1", 0x00, 0x1f },
-        	{ "pic1", 0x20, 0x3f },
-        	{ "timer", 0x40, 0x5f },
-        	{ "keyboard", 0x60, 0x6f },
-        	{ "dma page reg", 0x80, 0x8f },
-        	{ "pic2", 0xa0, 0xbf },
-        	{ "dma2", 0xc0, 0xdf },
+		{ .name = "rtc", .start = -1, .end = -1 },
+        	{ .name = "dma1", .start = 0x00, .end = 0x1f },
+        	{ .name = "pic1", .start = 0x20, .end = 0x3f },
+        	{ .name = "timer", .start = 0x40, .end = 0x5f },
+        	{ .name = "keyboard", .start = 0x60, .end = 0x6f },
+        	{ .name = "dma page reg", .start = 0x80, .end = 0x8f },
+        	{ .name = "pic2", .start = 0xa0, .end = 0xbf },
+        	{ .name = "dma2", .start = 0xc0, .end = 0xdf },
 	};
 
 	struct resource *io = &ioport_resource;
-	long i;
+	size_t i;
 
 	if (hose_head) {
 		struct pci_controller *hose;
@@ -221,17 +247,14 @@ reserve_std_resources(void)
 	standard_io_resources[0].start = RTC_PORT(0);
 	standard_io_resources[0].end = RTC_PORT(0) + 0x10;
 
-	for (i = 0; i < N(standard_io_resources); ++i)
+	for (i = 0; i < ARRAY_SIZE(standard_io_resources); ++i)
 		request_resource(io, standard_io_resources+i);
 }
 
-#define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
 #define PFN_MAX		PFN_DOWN(0x80000000)
-#define for_each_mem_cluster(memdesc, cluster, i)		\
-	for ((cluster) = (memdesc)->cluster, (i) = 0;		\
-	     (i) < (memdesc)->numclusters; (i)++, (cluster)++)
+#define for_each_mem_cluster(memdesc, _cluster, i)		\
+	for ((_cluster) = (memdesc)->cluster, (i) = 0;		\
+	     (i) < (memdesc)->numclusters; (i)++, (_cluster)++)
 
 static unsigned long __init
 get_mem_size_limit(char *s)
@@ -269,7 +292,7 @@ move_initrd(unsigned long mem_limit)
 	memmove(start, (void *)initrd_start, size);
 	initrd_start = (unsigned long)start;
 	initrd_end = initrd_start + size;
-	printk(KERN_INFO "initrd moved to %p\n", start);
+	printk("initrd moved to %p\n", start);
 	return start;
 }
 #endif
@@ -283,14 +306,14 @@ setup_memory(void *kernel_end)
 	unsigned long start_kernel_pfn, end_kernel_pfn;
 	unsigned long bootmap_size, bootmap_pages, bootmap_start;
 	unsigned long start, end;
-	int i;
+	unsigned long i;
 
 	/* Find free clusters, and init and free the bootmem accordingly.  */
 	memdesc = (struct memdesc_struct *)
 	  (hwrpb->mddt_offset + (unsigned long) hwrpb);
 
 	for_each_mem_cluster(memdesc, cluster, i) {
-		printk("memcluster %d, usage %01lx, start %8lu, end %8lu\n",
+		printk("memcluster %lu, usage %01lx, start %8lu, end %8lu\n",
 		       i, cluster->usage, cluster->start_pfn,
 		       cluster->start_pfn + cluster->numpages);
 
@@ -370,7 +393,7 @@ setup_memory(void *kernel_end)
 		}
 	}
 
-	if (bootmap_start == -1) {
+	if (bootmap_start == ~0UL) {
 		max_low_pfn >>= 1;
 		goto try_again;
 	}
@@ -409,7 +432,8 @@ setup_memory(void *kernel_end)
 	}
 
 	/* Reserve the bootmap memory.  */
-	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size);
+	reserve_bootmem(PFN_PHYS(bootmap_start), bootmap_size,
+			BOOTMEM_DEFAULT);
 	printk("reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -427,7 +451,7 @@ setup_memory(void *kernel_end)
 				       phys_to_virt(PFN_PHYS(max_low_pfn)));
 		} else {
 			reserve_bootmem(virt_to_phys((void *)initrd_start),
-					INITRD_SIZE);
+					INITRD_SIZE, BOOTMEM_DEFAULT);
 		}
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
@@ -441,7 +465,7 @@ page_is_ram(unsigned long pfn)
 {
 	struct memclust_struct * cluster;
 	struct memdesc_struct * memdesc;
-	int i;
+	unsigned long i;
 
 	memdesc = (struct memdesc_struct *)
 		(hwrpb->mddt_offset + (unsigned long) hwrpb);
@@ -456,10 +480,21 @@ page_is_ram(unsigned long pfn)
 	return 0;
 }
 
-#undef PFN_UP
-#undef PFN_DOWN
-#undef PFN_PHYS
-#undef PFN_MAX
+static int __init
+register_cpus(void)
+{
+	int i;
+
+	for_each_possible_cpu(i) {
+		struct cpu *p = kzalloc(sizeof(*p), GFP_KERNEL);
+		if (!p)
+			return -ENOMEM;
+		register_cpu(p, i);
+	}
+	return 0;
+}
+
+arch_initcall(register_cpus);
 
 void __init
 setup_arch(char **cmdline_p)
@@ -470,15 +505,32 @@ setup_arch(char **cmdline_p)
 	struct percpu_struct *cpu;
 	char *type_name, *var_name, *p;
 	void *kernel_end = _end; /* end of kernel */
+	char *args = command_line;
 
 	hwrpb = (struct hwrpb_struct*) __va(INIT_HWRPB->phys_addr);
 	boot_cpuid = hard_smp_processor_id();
 
+        /*
+	 * Pre-process the system type to make sure it will be valid.
+	 *
+	 * This may restore real CABRIO and EB66+ family names, ie
+	 * EB64+ and EB66.
+	 *
+	 * Oh, and "white box" AS800 (aka DIGITAL Server 3000 series)
+	 * and AS1200 (DIGITAL Server 5000 series) have the type as
+	 * the negative of the real one.
+	 */
+        if ((long)hwrpb->sys_type < 0) {
+		hwrpb->sys_type = -((long)hwrpb->sys_type);
+		hwrpb_update_checksum(hwrpb);
+	}
+
 	/* Register a call for panic conditions. */
-	notifier_chain_register(&panic_notifier_list, &alpha_panic_block);
+	atomic_notifier_chain_register(&panic_notifier_list,
+			&alpha_panic_block);
 
 #ifdef CONFIG_ALPHA_GENERIC
-	/* Assume that we've booted from SRM if we havn't booted from MILO.
+	/* Assume that we've booted from SRM if we haven't booted from MILO.
 	   Detect the later by looking for "MILO" in the system serial nr.  */
 	alpha_using_srm = strncmp((const char *)hwrpb->ssn, "MILO", 4) != 0;
 #endif
@@ -496,18 +548,18 @@ setup_arch(char **cmdline_p)
 	   boot flags depending on the boot mode, we need some shorthand.
 	   This should do for installation.  */
 	if (strcmp(COMMAND_LINE, "INSTALL") == 0) {
-		strcpy(command_line, "root=/dev/fd0 load_ramdisk=1");
+		strlcpy(command_line, "root=/dev/fd0 load_ramdisk=1", sizeof command_line);
 	} else {
-		strncpy(command_line, COMMAND_LINE, sizeof command_line);
-		command_line[sizeof(command_line)-1] = 0;
+		strlcpy(command_line, COMMAND_LINE, sizeof command_line);
 	}
-	strcpy(saved_command_line, command_line);
+	strcpy(boot_command_line, command_line);
 	*cmdline_p = command_line;
 
 	/* 
 	 * Process command-line arguments.
 	 */
-	for (p = strtok(command_line, " \t"); p ; p = strtok(NULL, " \t")) {
+	while ((p = strsep(&args, " \t")) != NULL) {
+		if (!*p) continue;
 		if (strncmp(p, "alpha_mv=", 9) == 0) {
 			vec = get_sysvec_byname(p+9);
 			continue;
@@ -533,10 +585,16 @@ setup_arch(char **cmdline_p)
 				get_mem_size_limit(p+9) << PAGE_SHIFT;
 			continue;
 		}
+#ifdef CONFIG_VERBOSE_MCHECK
+		if (strncmp(p, "verbose_mcheck=", 15) == 0) {
+			alpha_verbose_mcheck = simple_strtol(p+15, NULL, 0);
+			continue;
+		}
+#endif
 	}
 
-	/* Replace the command line, now that we've killed it with strtok.  */
-	strcpy(command_line, saved_command_line);
+	/* Replace the command line, now that we've killed it with strsep.  */
+	strcpy(command_line, boot_command_line);
 
 	/* If we want SRM console printk echoing early, do it now. */
 	if (alpha_using_srm && srmcons_output) {
@@ -550,8 +608,17 @@ setup_arch(char **cmdline_p)
 			srmcons_output = 0;
 	}
 
+#ifdef CONFIG_MAGIC_SYSRQ
+	/* If we're using SRM, make sysrq-b halt back to the prom,
+	   not auto-reboot.  */
+	if (alpha_using_srm) {
+		struct sysrq_key_op *op = __sysrq_get_key_op('b');
+		op->handler = (void *) machine_halt;
+	}
+#endif
+
 	/*
-	 * Indentify and reconfigure for the current system.
+	 * Identify and reconfigure for the current system.
 	 */
 	cpu = (struct percpu_struct*)((char*)hwrpb + hwrpb->processor_offset);
 
@@ -596,6 +663,9 @@ setup_arch(char **cmdline_p)
 #ifdef CONFIG_ALPHA_LEGACY_START_ADDRESS
 	       "LEGACY_START "
 #endif
+#ifdef CONFIG_VERBOSE_MCHECK
+	       "VERBOSE_MCHECK "
+#endif
 
 #ifdef CONFIG_DISCONTIGMEM
 	       "DISCONTIGMEM "
@@ -627,6 +697,9 @@ setup_arch(char **cmdline_p)
 	/* Find our memory.  */
 	setup_memory(kernel_end);
 
+	/* First guess at cpu cache sizes.  Do this before init_arch.  */
+	determine_cpu_caches(cpu->type);
+
 	/* Initialize the machine.  Usually has to do with setting up
 	   DMA windows and the like.  */
 	if (alpha_mv.init_arch)
@@ -649,7 +722,12 @@ setup_arch(char **cmdline_p)
 #endif
 
 	/* Default root filesystem to sda2.  */
-	ROOT_DEV = to_kdev_t(0x0802);
+	ROOT_DEV = Root_SDA2;
+
+#ifdef CONFIG_EISA
+	/* FIXME:  only set this when we actually have EISA in this box? */
+	EISA_bus = 1;
+#endif
 
  	/*
 	 * Check ASN in HWRPB for validity, report if bad.
@@ -669,15 +747,6 @@ setup_arch(char **cmdline_p)
 	setup_smp();
 #endif
 	paging_init();
-}
-
-void __init
-disable_early_printk(void)
-{
-	if (alpha_using_srm && srmcons_output) {
-		unregister_srm_console();
-		srmcons_output = 0;
-	}
 }
 
 static char sys_unknown[] = "Unknown";
@@ -731,7 +800,7 @@ static char tsunami_names[][16] = {
 static int tsunami_indices[] = {0,1,2,3,4,5,6,7,8,9,10,11,12};
 
 static struct alpha_machine_vector * __init
-get_sysvec(long type, long variation, long cpu)
+get_sysvec(unsigned long type, unsigned long variation, unsigned long cpu)
 {
 	static struct alpha_machine_vector *systype_vecs[] __initdata =
 	{
@@ -846,19 +915,15 @@ get_sysvec(long type, long variation, long cpu)
 
 	struct alpha_machine_vector *vec;
 
-	/* Restore real CABRIO and EB66+ family names, ie EB64+ and EB66 */
-	if (type < 0)
-		type = -type;
-
 	/* Search the system tables first... */
 	vec = NULL;
-	if (type < N(systype_vecs)) {
+	if (type < ARRAY_SIZE(systype_vecs)) {
 		vec = systype_vecs[type];
 	} else if ((type > ST_API_BIAS) &&
-		   (type - ST_API_BIAS) < N(api_vecs)) {
+		   (type - ST_API_BIAS) < ARRAY_SIZE(api_vecs)) {
 		vec = api_vecs[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
-		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_vecs)) {
+		   (type - ST_UNOFFICIAL_BIAS) < ARRAY_SIZE(unofficial_vecs)) {
 		vec = unofficial_vecs[type - ST_UNOFFICIAL_BIAS];
 	}
 
@@ -866,17 +931,17 @@ get_sysvec(long type, long variation, long cpu)
 
 	if (!vec) {
 		/* Member ID is a bit-field. */
-		long member = (variation >> 10) & 0x3f;
+		unsigned long member = (variation >> 10) & 0x3f;
 
 		cpu &= 0xffffffff; /* make it usable */
 
 		switch (type) {
 		case ST_DEC_ALCOR:
-			if (member < N(alcor_indices))
+			if (member < ARRAY_SIZE(alcor_indices))
 				vec = alcor_vecs[alcor_indices[member]];
 			break;
 		case ST_DEC_EB164:
-			if (member < N(eb164_indices))
+			if (member < ARRAY_SIZE(eb164_indices))
 				vec = eb164_vecs[eb164_indices[member]];
 			/* PC164 may show as EB164 variation with EV56 CPU,
 			   but, since no true EB164 had anything but EV5... */
@@ -884,24 +949,24 @@ get_sysvec(long type, long variation, long cpu)
 				vec = &pc164_mv;
 			break;
 		case ST_DEC_EB64P:
-			if (member < N(eb64p_indices))
+			if (member < ARRAY_SIZE(eb64p_indices))
 				vec = eb64p_vecs[eb64p_indices[member]];
 			break;
 		case ST_DEC_EB66:
-			if (member < N(eb66_indices))
+			if (member < ARRAY_SIZE(eb66_indices))
 				vec = eb66_vecs[eb66_indices[member]];
 			break;
 		case ST_DEC_MARVEL:
-			if (member < N(marvel_indices))
+			if (member < ARRAY_SIZE(marvel_indices))
 				vec = marvel_vecs[marvel_indices[member]];
 			break;
 		case ST_DEC_TITAN:
 			vec = titan_vecs[0];	/* default */
-			if (member < N(titan_indices))
+			if (member < ARRAY_SIZE(titan_indices))
 				vec = titan_vecs[titan_indices[member]];
 			break;
 		case ST_DEC_TSUNAMI:
-			if (member < N(tsunami_indices))
+			if (member < ARRAY_SIZE(tsunami_indices))
 				vec = tsunami_vecs[tsunami_indices[member]];
 			break;
 		case ST_DEC_1000:
@@ -971,8 +1036,9 @@ get_sysvec_byname(const char *name)
 		&xlt_mv
 	};
 
-	int i, n = sizeof(all_vecs)/sizeof(*all_vecs);
-	for (i = 0; i < n; ++i) {
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(all_vecs); ++i) {
 		struct alpha_machine_vector *mv = all_vecs[i];
 		if (strcasecmp(mv->vector_name, name) == 0)
 			return mv;
@@ -981,24 +1047,20 @@ get_sysvec_byname(const char *name)
 }
 
 static void
-get_sysnames(long type, long variation, long cpu,
+get_sysnames(unsigned long type, unsigned long variation, unsigned long cpu,
 	     char **type_name, char **variation_name)
 {
-	long member;
-
-	/* Restore real CABRIO and EB66+ family names, ie EB64+ and EB66 */
-	if (type < 0)
-		type = -type;
+	unsigned long member;
 
 	/* If not in the tables, make it UNKNOWN,
 	   else set type name to family */
-	if (type < N(systype_names)) {
+	if (type < ARRAY_SIZE(systype_names)) {
 		*type_name = systype_names[type];
 	} else if ((type > ST_API_BIAS) &&
-		   (type - ST_API_BIAS) < N(api_names)) {
+		   (type - ST_API_BIAS) < ARRAY_SIZE(api_names)) {
 		*type_name = api_names[type - ST_API_BIAS];
 	} else if ((type > ST_UNOFFICIAL_BIAS) &&
-		   (type - ST_UNOFFICIAL_BIAS) < N(unofficial_names)) {
+		   (type - ST_UNOFFICIAL_BIAS) < ARRAY_SIZE(unofficial_names)) {
 		*type_name = unofficial_names[type - ST_UNOFFICIAL_BIAS];
 	} else {
 		*type_name = sys_unknown;
@@ -1006,7 +1068,7 @@ get_sysnames(long type, long variation, long cpu,
 		return;
 	}
 
-	/* Set variation to "0"; if variation is zero, done */
+	/* Set variation to "0"; if variation is zero, done.  */
 	*variation_name = systype_names[0];
 	if (variation == 0) {
 		return;
@@ -1020,7 +1082,7 @@ get_sysnames(long type, long variation, long cpu,
 	default: /* default to variation "0" for now */
 		break;
 	case ST_DEC_EB164:
-		if (member < N(eb164_indices))
+		if (member < ARRAY_SIZE(eb164_indices))
 			*variation_name = eb164_names[eb164_indices[member]];
 		/* PC164 may show as EB164 variation, but with EV56 CPU,
 		   so, since no true EB164 had anything but EV5... */
@@ -1028,32 +1090,32 @@ get_sysnames(long type, long variation, long cpu,
 			*variation_name = eb164_names[1]; /* make it PC164 */
 		break;
 	case ST_DEC_ALCOR:
-		if (member < N(alcor_indices))
+		if (member < ARRAY_SIZE(alcor_indices))
 			*variation_name = alcor_names[alcor_indices[member]];
 		break;
 	case ST_DEC_EB64P:
-		if (member < N(eb64p_indices))
+		if (member < ARRAY_SIZE(eb64p_indices))
 			*variation_name = eb64p_names[eb64p_indices[member]];
 		break;
 	case ST_DEC_EB66:
-		if (member < N(eb66_indices))
+		if (member < ARRAY_SIZE(eb66_indices))
 			*variation_name = eb66_names[eb66_indices[member]];
 		break;
 	case ST_DEC_MARVEL:
-		if (member < N(marvel_indices))
+		if (member < ARRAY_SIZE(marvel_indices))
 			*variation_name = marvel_names[marvel_indices[member]];
 		break;
 	case ST_DEC_RAWHIDE:
-		if (member < N(rawhide_indices))
+		if (member < ARRAY_SIZE(rawhide_indices))
 			*variation_name = rawhide_names[rawhide_indices[member]];
 		break;
 	case ST_DEC_TITAN:
 		*variation_name = titan_names[0];	/* default */
-		if (member < N(titan_indices))
+		if (member < ARRAY_SIZE(titan_indices))
 			*variation_name = titan_names[titan_indices[member]];
 		break;
 	case ST_DEC_TSUNAMI:
-		if (member < N(tsunami_indices))
+		if (member < ARRAY_SIZE(tsunami_indices))
 			*variation_name = tsunami_names[tsunami_indices[member]];
 		break;
 	}
@@ -1101,7 +1163,8 @@ static int
 get_nr_processors(struct percpu_struct *cpubase, unsigned long num)
 {
 	struct percpu_struct *cpu;
-	int i, count = 0;
+	unsigned long i;
+	int count = 0;
 
 	for (i = 0; i < num; i++) {
 		cpu = (struct percpu_struct *)
@@ -1112,6 +1175,18 @@ get_nr_processors(struct percpu_struct *cpubase, unsigned long num)
 	return count;
 }
 
+static void
+show_cache_size (struct seq_file *f, const char *which, int shape)
+{
+	if (shape == -1)
+		seq_printf (f, "%s\t\t: n/a\n", which);
+	else if (shape == 0)
+		seq_printf (f, "%s\t\t: unknown\n", which);
+	else
+		seq_printf (f, "%s\t\t: %dK, %d-way, %db line\n",
+			    which, shape >> 10, shape & 15,
+			    1 << ((shape >> 4) & 15));
+}
 
 static int
 show_cpuinfo(struct seq_file *f, void *slot)
@@ -1135,7 +1210,7 @@ show_cpuinfo(struct seq_file *f, void *slot)
 
 	cpu_index = (unsigned) (cpu->type - 1);
 	cpu_name = "Unknown";
-	if (cpu_index < N(cpu_names))
+	if (cpu_index < ARRAY_SIZE(cpu_names))
 		cpu_name = cpu_names[cpu_index];
 
 	get_sysnames(hwrpb->sys_type, hwrpb->sys_variation,
@@ -1180,12 +1255,205 @@ show_cpuinfo(struct seq_file *f, void *slot)
 		       platform_string(), nr_processors);
 
 #ifdef CONFIG_SMP
-	seq_printf(f, "cpus active\t\t: %d\n"
+	seq_printf(f, "cpus active\t\t: %u\n"
 		      "cpu active mask\t\t: %016lx\n",
-		       smp_num_cpus, cpu_present_mask);
+		       num_online_cpus(), cpumask_bits(cpu_possible_mask)[0]);
 #endif
 
+	show_cache_size (f, "L1 Icache", alpha_l1i_cacheshape);
+	show_cache_size (f, "L1 Dcache", alpha_l1d_cacheshape);
+	show_cache_size (f, "L2 cache", alpha_l2_cacheshape);
+	show_cache_size (f, "L3 cache", alpha_l3_cacheshape);
+
 	return 0;
+}
+
+static int __init
+read_mem_block(int *addr, int stride, int size)
+{
+	long nloads = size / stride, cnt, tmp;
+
+	__asm__ __volatile__(
+	"	rpcc    %0\n"
+	"1:	ldl	%3,0(%2)\n"
+	"	subq	%1,1,%1\n"
+	/* Next two XORs introduce an explicit data dependency between
+	   consecutive loads in the loop, which will give us true load
+	   latency. */
+	"	xor	%3,%2,%2\n"
+	"	xor	%3,%2,%2\n"
+	"	addq	%2,%4,%2\n"
+	"	bne	%1,1b\n"
+	"	rpcc	%3\n"
+	"	subl	%3,%0,%0\n"
+	: "=&r" (cnt), "=&r" (nloads), "=&r" (addr), "=&r" (tmp)
+	: "r" (stride), "1" (nloads), "2" (addr));
+
+	return cnt / (size / stride);
+}
+
+#define CSHAPE(totalsize, linesize, assoc) \
+  ((totalsize & ~0xff) | (linesize << 4) | assoc)
+
+/* ??? EV5 supports up to 64M, but did the systems with more than
+   16M of BCACHE ever exist? */
+#define MAX_BCACHE_SIZE	16*1024*1024
+
+/* Note that the offchip caches are direct mapped on all Alphas. */
+static int __init
+external_cache_probe(int minsize, int width)
+{
+	int cycles, prev_cycles = 1000000;
+	int stride = 1 << width;
+	long size = minsize, maxsize = MAX_BCACHE_SIZE * 2;
+
+	if (maxsize > (max_low_pfn + 1) << PAGE_SHIFT)
+		maxsize = 1 << (ilog2(max_low_pfn + 1) + PAGE_SHIFT);
+
+	/* Get the first block cached. */
+	read_mem_block(__va(0), stride, size);
+
+	while (size < maxsize) {
+		/* Get an average load latency in cycles. */
+		cycles = read_mem_block(__va(0), stride, size);
+		if (cycles > prev_cycles * 2) {
+			/* Fine, we exceed the cache. */
+			printk("%ldK Bcache detected; load hit latency %d "
+			       "cycles, load miss latency %d cycles\n",
+			       size >> 11, prev_cycles, cycles);
+			return CSHAPE(size >> 1, width, 1);
+		}
+		/* Try to get the next block cached. */
+		read_mem_block(__va(size), stride, size);
+		prev_cycles = cycles;
+		size <<= 1;
+	}
+	return -1;	/* No BCACHE found. */
+}
+
+static void __init
+determine_cpu_caches (unsigned int cpu_type)
+{
+	int L1I, L1D, L2, L3;
+
+	switch (cpu_type) {
+	case EV4_CPU:
+	case EV45_CPU:
+	  {
+		if (cpu_type == EV4_CPU)
+			L1I = CSHAPE(8*1024, 5, 1);
+		else
+			L1I = CSHAPE(16*1024, 5, 1);
+		L1D = L1I;
+		L3 = -1;
+	
+		/* BIU_CTL is a write-only Abox register.  PALcode has a
+		   shadow copy, and may be available from some versions
+		   of the CSERVE PALcall.  If we can get it, then
+
+			unsigned long biu_ctl, size;
+			size = 128*1024 * (1 << ((biu_ctl >> 28) & 7));
+			L2 = CSHAPE (size, 5, 1);
+
+		   Unfortunately, we can't rely on that.
+		*/
+		L2 = external_cache_probe(128*1024, 5);
+		break;
+	  }
+
+	case LCA4_CPU:
+	  {
+		unsigned long car, size;
+
+		L1I = L1D = CSHAPE(8*1024, 5, 1);
+		L3 = -1;
+
+		car = *(vuip) phys_to_virt (0x120000078UL);
+		size = 64*1024 * (1 << ((car >> 5) & 7));
+		/* No typo -- 8 byte cacheline size.  Whodathunk.  */
+		L2 = (car & 1 ? CSHAPE (size, 3, 1) : -1);
+		break;
+	  }
+
+	case EV5_CPU:
+	case EV56_CPU:
+	  {
+		unsigned long sc_ctl, width;
+
+		L1I = L1D = CSHAPE(8*1024, 5, 1);
+
+		/* Check the line size of the Scache.  */
+		sc_ctl = *(vulp) phys_to_virt (0xfffff000a8UL);
+		width = sc_ctl & 0x1000 ? 6 : 5;
+		L2 = CSHAPE (96*1024, width, 3);
+
+		/* BC_CONTROL and BC_CONFIG are write-only IPRs.  PALcode
+		   has a shadow copy, and may be available from some versions
+		   of the CSERVE PALcall.  If we can get it, then
+
+			unsigned long bc_control, bc_config, size;
+			size = 1024*1024 * (1 << ((bc_config & 7) - 1));
+			L3 = (bc_control & 1 ? CSHAPE (size, width, 1) : -1);
+
+		   Unfortunately, we can't rely on that.
+		*/
+		L3 = external_cache_probe(1024*1024, width);
+		break;
+	  }
+
+	case PCA56_CPU:
+	case PCA57_CPU:
+	  {
+		if (cpu_type == PCA56_CPU) {
+			L1I = CSHAPE(16*1024, 6, 1);
+			L1D = CSHAPE(8*1024, 5, 1);
+		} else {
+			L1I = CSHAPE(32*1024, 6, 2);
+			L1D = CSHAPE(16*1024, 5, 1);
+		}
+		L3 = -1;
+
+#if 0
+		unsigned long cbox_config, size;
+
+		cbox_config = *(vulp) phys_to_virt (0xfffff00008UL);
+		size = 512*1024 * (1 << ((cbox_config >> 12) & 3));
+
+		L2 = ((cbox_config >> 31) & 1 ? CSHAPE (size, 6, 1) : -1);
+#else
+		L2 = external_cache_probe(512*1024, 6);
+#endif
+		break;
+	  }
+
+	case EV6_CPU:
+	case EV67_CPU:
+	case EV68CB_CPU:
+	case EV68AL_CPU:
+	case EV68CX_CPU:
+	case EV69_CPU:
+		L1I = L1D = CSHAPE(64*1024, 6, 2);
+		L2 = external_cache_probe(1024*1024, 6);
+		L3 = -1;
+		break;
+
+	case EV7_CPU:
+	case EV79_CPU:
+		L1I = L1D = CSHAPE(64*1024, 6, 2);
+		L2 = CSHAPE(7*1024*1024/4, 6, 7);
+		L3 = -1;
+		break;
+
+	default:
+		/* Nothing known about this cpu type.  */
+		L1I = L1D = L2 = L3 = 0;
+		break;
+	}
+
+	alpha_l1i_cacheshape = L1I;
+	alpha_l1d_cacheshape = L1D;
+	alpha_l2_cacheshape = L2;
+	alpha_l3_cacheshape = L3;
 }
 
 /*
@@ -1208,17 +1476,16 @@ c_stop(struct seq_file *f, void *v)
 {
 }
 
-struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
+const struct seq_operations cpuinfo_op = {
+	.start	= c_start,
+	.next	= c_next,
+	.stop	= c_stop,
+	.show	= show_cpuinfo,
 };
 
 
-static int alpha_panic_event(struct notifier_block *this,
-			     unsigned long event,
-			     void *ptr)
+static int
+alpha_panic_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
 #if 1
 	/* FIXME FIXME FIXME */
@@ -1228,3 +1495,20 @@ static int alpha_panic_event(struct notifier_block *this,
 #endif
         return NOTIFY_DONE;
 }
+
+static __init int add_pcspkr(void)
+{
+	struct platform_device *pd;
+	int ret;
+
+	pd = platform_device_alloc("pcspkr", -1);
+	if (!pd)
+		return -ENOMEM;
+
+	ret = platform_device_add(pd);
+	if (ret)
+		platform_device_put(pd);
+
+	return ret;
+}
+device_initcall(add_pcspkr);

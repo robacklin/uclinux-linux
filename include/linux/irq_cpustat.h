@@ -9,7 +9,6 @@
  * Keith Owens <kaos@ocs.com.au> July 2000.
  */
 
-#include <linux/config.h>
 
 /*
  * Simple wrappers reducing source bloat.  Define all irq_stat fields
@@ -17,21 +16,16 @@
  * definitions instead of differing sets for each arch.
  */
 
-extern irq_cpustat_t irq_stat[];			/* defined in asm/hardirq.h */
-
-#ifdef CONFIG_SMP
+#ifndef __ARCH_IRQ_STAT
+extern irq_cpustat_t irq_stat[];		/* defined in asm/hardirq.h */
 #define __IRQ_STAT(cpu, member)	(irq_stat[cpu].member)
-#else
-#define __IRQ_STAT(cpu, member)	(irq_stat[((void)(cpu), 0)].member)
-#endif	
+#endif
 
   /* arch independent irq_stat fields */
-#define softirq_pending(cpu)	__IRQ_STAT((cpu), __softirq_pending)
-#define local_irq_count(cpu)	__IRQ_STAT((cpu), __local_irq_count)
-#define local_bh_count(cpu)	__IRQ_STAT((cpu), __local_bh_count)
-#define syscall_count(cpu)	__IRQ_STAT((cpu), __syscall_count)
-#define ksoftirqd_task(cpu)	__IRQ_STAT((cpu), __ksoftirqd_task)
+#define local_softirq_pending() \
+	__IRQ_STAT(smp_processor_id(), __softirq_pending)
+
   /* arch dependent irq_stat fields */
-#define nmi_count(cpu)		__IRQ_STAT((cpu), __nmi_count)		/* i386, ia64 */
+#define nmi_count(cpu)		__IRQ_STAT((cpu), __nmi_count)	/* i386 */
 
 #endif	/* __irq_cpustat_h */

@@ -1,53 +1,38 @@
 #
-# linux/arch/etrax100/boot/compressed/Makefile
-#
-# create a compressed vmlinux image from the original vmlinux files and romfs
+# arch/cris/boot/compressed/Makefile
 #
 
-ifndef TOPDIR
-TOPDIR = ../../../..
-HPATH = $(TOPDIR)/include
-export HPATH
-endif
+asflags-y += $(LINUXINCLUDE)
+ccflags-y += -O2 $(LINUXINCLUDE)
 
+# asflags-$(CONFIG_ETRAX_ARCH_V32) += -I$(srctree)/include/asm/mach \
+# 				    -I$(srctree)/include/asm/arch
+# ccflags-$(CONFIG_ETRAX_ARCH_V32) += -O2 -I$(srctree)/include/asm/mach
+# 					-I$(srctree)/include/asm/arch
 
-CC = gcc-cris -melf -I $(TOPDIR)/include
-CFLAGS = -O2
-LD = ld-cris
-OBJCOPY = objcopy-cris
+arch-$(CONFIG_ETRAX_ARCH_V10) = v10
+arch-$(CONFIG_ETRAX_ARCH_V32) = v32
 
-OBJECTS = head.o misc.o
+ldflags-y += -T $(srctree)/$(src)/decompress_$(arch-y).lds
 
-# files to compress
-SYSTEM = $(TOPDIR)/vmlinux.bin
+OBJECTS-$(CONFIG_ETRAX_ARCH_V32) = $(obj)/head_v32.o
+OBJECTS-$(CONFIG_ETRAX_ARCH_V10) = $(obj)/head_v10.o
+OBJECTS= $(OBJECTS-y) $(obj)/misc.o
+OBJCOPYFLAGS = -O binary --remove-section=.bss
 
-all: vmlinuz
+quiet_cmd_image = BUILD   $@
+cmd_image = cat $(obj)/decompress.bin $(obj)/piggy.gz > $@
 
-decompress.bin: $(OBJECTS)
-	$(LD) -T decompress.ld -o decompress.o $(OBJECTS)
-	$(OBJCOPY) -O binary --remove-section=.bss decompress.o decompress.bin
-# save it for mkprod in the topdir.
-	cp decompress.bin $(TOPDIR)
+targets := vmlinux piggy.gz decompress.o decompress.bin
 
+$(obj)/decompress.o: $(OBJECTS) FORCE
+	$(call if_changed,ld)
 
-vmlinuz: piggy.img decompress.bin
-	cat decompress.bin piggy.img > vmlinuz
-	rm -f piggy.img
+$(obj)/decompress.bin: $(obj)/decompress.o FORCE
+	$(call if_changed,objcopy)
 
-head.o: head.S
-	$(CC) -D__ASSEMBLY__ -traditional -c head.S -o head.o
+$(obj)/vmlinux: $(obj)/piggy.gz $(obj)/decompress.bin FORCE
+	$(call if_changed,image)
 
-# gzip the kernel image
-
-piggy.img: $(SYSTEM)
-	cat $(SYSTEM) | gzip -f -9 > piggy.img
-
-clean:
-	rm -f piggy.img vmlinuz vmlinuz.o
-
-depend:
-	$(CC) -M *.S *.c > .depend
-
--include .depend
-
-
+$(obj)/piggy.gz: $(obj)/../Image FORCE
+	$(call if_changed,gzip)

@@ -6,7 +6,7 @@
  * 	NEC VRC4173 CARDU driver for Socket Services
  *	(This device doesn't support CardBus. it is supporting only 16bit PC Card.)
  *
- * Copyright 2002,2003 Yoichi Yuasa <yuasa@hh.iij4u.or.jp>
+ * Copyright 2002,2003 Yoichi Yuasa <yuasa@linux-mips.org>
  *
  *  This program is free software; you can redistribute it and/or modify it
  *  under the terms of the GNU General Public License as published by the
@@ -41,7 +41,7 @@
 #include "vrc4173_cardu.h"
 
 MODULE_DESCRIPTION("NEC VRC4173 CARDU driver for Socket Services");
-MODULE_AUTHOR("Yoichi Yuasa <yuasa@hh.iij4u.or.jp>");
+MODULE_AUTHOR("Yoichi Yuasa <yuasa@linux-mips.org>");
 MODULE_LICENSE("GPL");
 
 static int vrc4173_cardu_slots;
@@ -141,11 +141,6 @@ static int cardu_init(unsigned int slot)
 	return 0;
 }
 
-static int cardu_suspend(unsigned int slot)
-{
-	return -EINVAL;
-}
-
 static int cardu_register_callback(unsigned int sock,
                                            void (*handler)(void *, unsigned int),
                                            void * info)
@@ -154,11 +149,6 @@ static int cardu_register_callback(unsigned int sock,
 
 	socket->handler = handler;
 	socket->info = info;
-
-	if (handler)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
 
 	return 0;
 }
@@ -204,48 +194,6 @@ static int cardu_get_status(unsigned int sock, u_int *value)
 		val |= SS_PENDING;
 
 	*value = val;
-
-	return 0;
-}
-
-static inline u_char get_Vcc_value(uint8_t val)
-{
-	switch (val & VCC_MASK) {
-	case VCC_3V:
-		return 33;
-	case VCC_5V:
-		return 50;
-	}
-
-	return 0;
-}
-
-static inline u_char get_Vpp_value(uint8_t val)
-{
-	switch (val & VPP_MASK) {
-	case VPP_12V:
-		return 120;
-	case VPP_VCC:
-		return get_Vcc_value(val);
-	}
-
-	return 0;
-}
-
-static int cardu_get_socket(unsigned int sock, socket_state_t *state)
-{
-	vrc4173_socket_t *socket = &cardu_sockets[sock];
-	uint8_t val;
-
-	val = exca_readb(socket, PWR_CNT);
-	state->Vcc = get_Vcc_value(val);
-	state->Vpp = get_Vpp_value(val);
-	state->flags = 0;
-	if (val & CARD_OUT_EN) state->flags |= SS_OUTPUT_ENA;
-
-	val = exca_readb(socket, INT_GEN_CNT);
-	if (!(val & CARD_REST0)) state->flags |= SS_RESET;
-	if (val & CARD_TYPE_IO) state->flags |= SS_IOCARD;
 
 	return 0;
 }
@@ -305,7 +253,7 @@ static int cardu_get_io_map(unsigned int sock, struct pccard_io_map *io)
 
 	map = io->map;
 	if (map > 1)
-		return -EINVAL; 
+		return -EINVAL;
 
 	io->start = exca_readw(socket, IO_WIN_SA(map));
 	io->stop = exca_readw(socket, IO_WIN_EA(map));
@@ -438,11 +386,9 @@ static void cardu_proc_setup(unsigned int sock, struct proc_dir_entry *base)
 
 static struct pccard_operations cardu_operations = {
 	.init			= cardu_init,
-	.suspend		= cardu_suspend,
 	.register_callback	= cardu_register_callback,
 	.inquire_socket		= cardu_inquire_socket,
 	.get_status		= cardu_get_status,
-	.get_socket		= cardu_get_socket,
 	.set_socket		= cardu_set_socket,
 	.get_io_map		= cardu_get_io_map,
 	.set_io_map		= cardu_set_io_map,
@@ -472,7 +418,7 @@ static uint16_t get_events(vrc4173_socket_t *socket)
 
 	status = exca_readb(socket, IF_STATUS);
 	csc = exca_readb(socket, CARD_SC);
-	if ((csc & CARD_DT_CHG) && 
+	if ((csc & CARD_DT_CHG) &&
 	    ((status & (CARD_DETECT1|CARD_DETECT2)) == (CARD_DETECT1|CARD_DETECT2)))
 		events |= SS_DETECT;
 
@@ -494,20 +440,19 @@ static uint16_t get_events(vrc4173_socket_t *socket)
 	return events;
 }
 
-static void cardu_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void cardu_interrupt(int irq, void *dev_id)
 {
 	vrc4173_socket_t *socket = (vrc4173_socket_t *)dev_id;
 	uint16_t events;
 
-	socket->tq_task.routine = cardu_bh;
-	socket->tq_task.data = socket;
+	INIT_WORK(&socket->tq_work, cardu_bh, socket);
 
 	events = get_events(socket);
 	if (events) {
 		spin_lock(&socket->event_lock);
 		socket->events |= events;
 		spin_unlock(&socket->event_lock);
-		schedule_task(&socket->tq_task);
+		schedule_work(&socket->tq_work);
 	}
 }
 
@@ -516,7 +461,7 @@ static int __devinit vrc4173_cardu_probe(struct pci_dev *dev,
 {
 	vrc4173_socket_t *socket;
 	unsigned long start, len, flags;
-	int slot, err;
+	int slot, err, ret;
 
 	slot = vrc4173_cardu_slots++;
 	socket = &cardu_sockets[slot];
@@ -529,49 +474,69 @@ static int __devinit vrc4173_cardu_probe(struct pci_dev *dev,
 		return err;
 
 	start = pci_resource_start(dev, 0);
-	if (start == 0)
-		return -ENODEV;
+	if (start == 0) {
+		ret = -ENODEV;
+		goto disable;
+	}
 
 	len = pci_resource_len(dev, 0);
-	if (len == 0)
-		return -ENODEV;
+	if (len == 0) {
+		ret = -ENODEV;
+		goto disable;
+	}
 
-	if (((flags = pci_resource_flags(dev, 0)) & IORESOURCE_MEM) == 0)
-		return -EBUSY;
+	flags = pci_resource_flags(dev, 0);
+	if ((flags & IORESOURCE_MEM) == 0) {
+		ret = -EBUSY;
+		goto disable;
+	}
 
-	if ((err = pci_request_regions(dev, socket->name)) < 0)
-		return err;
+	err = pci_request_regions(dev, socket->name);
+	if (err < 0) {
+		ret = err;
+		goto disable;
+	}
 
 	socket->base = ioremap(start, len);
-	if (socket->base == NULL)
-		return -ENODEV;
+	if (socket->base == NULL) {
+		ret = -ENODEV;
+		goto release;
+	}
 
 	socket->dev = dev;
 
 	socket->pcmcia_socket = pcmcia_register_socket(slot, &cardu_operations, 1);
 	if (socket->pcmcia_socket == NULL) {
-		iounmap(socket->base);
-		socket->base = NULL;
-		return -ENOMEM;
+		ret =  -ENOMEM;
+		goto unmap;
 	}
 
-	if (request_irq(dev->irq, cardu_interrupt, SA_SHIRQ, socket->name, socket) < 0) {
-		pcmcia_unregister_socket(socket->pcmcia_socket);
-		socket->pcmcia_socket = NULL;
-		iounmap(socket->base);
-		socket->base = NULL;
-		return -EBUSY;
+	if (request_irq(dev->irq, cardu_interrupt, IRQF_SHARED, socket->name, socket) < 0) {
+		ret = -EBUSY;
+		goto unregister;
 	}
 
 	printk(KERN_INFO "%s at %#08lx, IRQ %d\n", socket->name, start, dev->irq);
 
 	return 0;
+
+unregister:
+	pcmcia_unregister_socket(socket->pcmcia_socket);
+	socket->pcmcia_socket = NULL;
+unmap:
+	iounmap(socket->base);
+	socket->base = NULL;
+release:
+	pci_release_regions(dev);
+disable:
+	pci_disable_device(dev);
+	return ret;
 }
 
 static int __devinit vrc4173_cardu_setup(char *options)
 {
 	if (options == NULL || *options == '\0')
-		return 0;
+		return 1;
 
 	if (strncmp(options, "cardu1:", 7) == 0) {
 		options += 7;
@@ -582,9 +547,9 @@ static int __devinit vrc4173_cardu_setup(char *options)
 			}
 
 			if (*options != ',')
-				return 0;
+				return 1;
 		} else
-			return 0;
+			return 1;
 	}
 
 	if (strncmp(options, "cardu2:", 7) == 0) {
@@ -593,16 +558,13 @@ static int __devinit vrc4173_cardu_setup(char *options)
 			cardu_sockets[CARDU2].noprobe = 1;
 	}
 
-	return 0;
+	return 1;
 }
 
 __setup("vrc4173_cardu=", vrc4173_cardu_setup);
 
-static struct pci_device_id vrc4173_cardu_id_table[] __devinitdata = {
-	{	.vendor		= PCI_VENDOR_ID_NEC,
-		.device		= PCI_DEVICE_ID_NEC_NAPCCARD,
-		.subvendor	= PCI_ANY_ID,
-		.subdevice	= PCI_ANY_ID, },
+static DEFINE_PCI_DEVICE_TABLE(vrc4173_cardu_id_table) = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_NEC, PCI_DEVICE_ID_NEC_NAPCCARD) },
         {0, }
 };
 
@@ -616,7 +578,7 @@ static int __devinit vrc4173_cardu_init(void)
 {
 	vrc4173_cardu_slots = 0;
 
-	return pci_module_init(&vrc4173_cardu_driver);
+	return pci_register_driver(&vrc4173_cardu_driver);
 }
 
 static void __devexit vrc4173_cardu_exit(void)
@@ -626,3 +588,4 @@ static void __devexit vrc4173_cardu_exit(void)
 
 module_init(vrc4173_cardu_init);
 module_exit(vrc4173_cardu_exit);
+MODULE_DEVICE_TABLE(pci, vrc4173_cardu_id_table);

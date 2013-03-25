@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2001 Broadcom Corporation
+ * Copyright (C) 2001,2002,2003 Broadcom Corporation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -15,17 +15,21 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
-
 #include <linux/sched.h>
 #include <asm/mipsregs.h>
 #include <asm/sibyte/sb1250.h>
-
-#ifndef CONFIG_SIBYTE_BUS_WATCHER
-#include <asm/io.h>
 #include <asm/sibyte/sb1250_regs.h>
+
+#if !defined(CONFIG_SIBYTE_BUS_WATCHER) || defined(CONFIG_SIBYTE_BW_TRACE)
+#include <asm/io.h>
 #include <asm/sibyte/sb1250_scd.h>
-#include <asm/sibyte/64bit.h>
 #endif
+
+/*
+ * We'd like to dump the L2_ECC_TAG register on errors, but errata make
+ * that unsafe... So for now we don't.  (BCM1250/BCM112x erratum SOC-48.)
+ */
+#undef DUMP_L2_ECC_TAG_ON_ERROR
 
 /* SB1 definitions */
 
@@ -73,102 +77,121 @@ static uint32_t	extract_dc(unsigned short addr, int data);
 static inline void breakout_errctl(unsigned int val)
 {
 	if (val & CP0_ERRCTL_RECOVERABLE)
-		prom_printf(" recoverable");
+		printk(" recoverable");
 	if (val & CP0_ERRCTL_DCACHE)
-		prom_printf(" dcache");
+		printk(" dcache");
 	if (val & CP0_ERRCTL_ICACHE)
-		prom_printf(" icache");
+		printk(" icache");
 	if (val & CP0_ERRCTL_MULTIBUS)
-		prom_printf(" multiple-buserr");
-	prom_printf("\n");
+		printk(" multiple-buserr");
+	printk("\n");
 }
 
 static inline void breakout_cerri(unsigned int val)
 {
 	if (val & CP0_CERRI_TAG_PARITY)
-		prom_printf(" tag-parity");
+		printk(" tag-parity");
 	if (val & CP0_CERRI_DATA_PARITY)
-		prom_printf(" data-parity");
+		printk(" data-parity");
 	if (val & CP0_CERRI_EXTERNAL)
-		prom_printf(" external");
-	prom_printf("\n");
+		printk(" external");
+	printk("\n");
 }
 
 static inline void breakout_cerrd(unsigned int val)
 {
 	switch (val & CP0_CERRD_CAUSES) {
 	case CP0_CERRD_LOAD:
-		prom_printf(" load,");
+		printk(" load,");
 		break;
 	case CP0_CERRD_STORE:
-		prom_printf(" store,");
+		printk(" store,");
 		break;
 	case CP0_CERRD_FILLWB:
-		prom_printf(" fill/wb,");
+		printk(" fill/wb,");
 		break;
 	case CP0_CERRD_COHERENCY:
-		prom_printf(" coherency,");
+		printk(" coherency,");
 		break;
 	case CP0_CERRD_DUPTAG:
-		prom_printf(" duptags,");
+		printk(" duptags,");
 		break;
 	default:
-		prom_printf(" NO CAUSE,");
+		printk(" NO CAUSE,");
 		break;
 	}
 	if (!(val & CP0_CERRD_TYPES))
-		prom_printf(" NO TYPE");
+		printk(" NO TYPE");
 	else {
 		if (val & CP0_CERRD_MULTIPLE)
-			prom_printf(" multi-err");
+			printk(" multi-err");
 		if (val & CP0_CERRD_TAG_STATE)
-			prom_printf(" tag-state");
+			printk(" tag-state");
 		if (val & CP0_CERRD_TAG_ADDRESS)
-			prom_printf(" tag-address");
+			printk(" tag-address");
 		if (val & CP0_CERRD_DATA_SBE)
-			prom_printf(" data-SBE");
+			printk(" data-SBE");
 		if (val & CP0_CERRD_DATA_DBE)
-			prom_printf(" data-DBE");
+			printk(" data-DBE");
 		if (val & CP0_CERRD_EXTERNAL)
-			prom_printf(" external");
+			printk(" external");
 	}
-	prom_printf("\n");
+	printk("\n");
 }
 
 #ifndef CONFIG_SIBYTE_BUS_WATCHER
 
-static void check_bus_watcher(void)              
-{                               
+static void check_bus_watcher(void)
+{
 	uint32_t status, l2_err, memio_err;
+#ifdef DUMP_L2_ECC_TAG_ON_ERROR
+	uint64_t l2_tag;
+#endif
 
 	/* Destructive read, clears register and interrupt */
-	status = csr_in32(IO_SPACE_BASE | A_SCD_BUS_ERR_STATUS);
+	status = csr_in32(IOADDR(A_SCD_BUS_ERR_STATUS));
 	/* Bit 31 is always on, but there's no #define for that */
-	if (status & ~(1UL << 31)) {  
-		l2_err = csr_in32(IO_SPACE_BASE | A_BUS_L2_ERRORS);
-		memio_err = csr_in32(IO_SPACE_BASE | A_BUS_MEM_IO_ERRORS);
-		prom_printf("Bus watcher error counters: %08x %08x\n", l2_err, memio_err);
-		prom_printf("\nLast recorded signature:\n");
-		prom_printf("Request %02x from %d, answered by %d with Dcode %d\n",
+	if (status & ~(1UL << 31)) {
+		l2_err = csr_in32(IOADDR(A_BUS_L2_ERRORS));
+#ifdef DUMP_L2_ECC_TAG_ON_ERROR
+		l2_tag = in64(IOADDR(A_L2_ECC_TAG));
+#endif
+		memio_err = csr_in32(IOADDR(A_BUS_MEM_IO_ERRORS));
+		printk("Bus watcher error counters: %08x %08x\n", l2_err, memio_err);
+		printk("\nLast recorded signature:\n");
+		printk("Request %02x from %d, answered by %d with Dcode %d\n",
 		       (unsigned int)(G_SCD_BERR_TID(status) & 0x3f),
 		       (int)(G_SCD_BERR_TID(status) >> 6),
 		       (int)G_SCD_BERR_RID(status),
 		       (int)G_SCD_BERR_DCODE(status));
-	} else {		
-		prom_printf("Bus watcher indicates no error\n"); 
-	}			
-}                                       
-#else                                                    
-extern void check_bus_watcher(void);    
-#endif                                          
-                                
+#ifdef DUMP_L2_ECC_TAG_ON_ERROR
+		printk("Last L2 tag w/ bad ECC: %016llx\n", l2_tag);
+#endif
+	} else {
+		printk("Bus watcher indicates no error\n");
+	}
+}
+#else
+extern void check_bus_watcher(void);
+#endif
+
 asmlinkage void sb1_cache_error(void)
 {
-	uint64_t cerr_dpa;
 	uint32_t errctl, cerr_i, cerr_d, dpalo, dpahi, eepc, res;
+	unsigned long long cerr_dpa;
 
-	prom_printf("Cache error exception on CPU %x:\n",
-		    (read_c0_prid() >> 25) & 0x7);
+#ifdef CONFIG_SIBYTE_BW_TRACE
+	/* Freeze the trace buffer now */
+#if defined(CONFIG_SIBYTE_BCM1x55) || defined(CONFIG_SIBYTE_BCM1x80)
+	csr_out32(M_BCM1480_SCD_TRACE_CFG_FREEZE, IOADDR(A_SCD_TRACE_CFG));
+#else
+	csr_out32(M_SCD_TRACE_CFG_FREEZE, IOADDR(A_SCD_TRACE_CFG));
+#endif
+	printk("Trace buffer frozen\n");
+#endif
+
+	printk("Cache error exception on CPU %x:\n",
+	       (read_c0_prid() >> 25) & 0x7);
 
 	__asm__ __volatile__ (
 	"	.set	push\n\t"
@@ -186,43 +209,43 @@ asmlinkage void sb1_cache_error(void)
 	  "=r" (dpahi), "=r" (dpalo), "=r" (eepc));
 
 	cerr_dpa = (((uint64_t)dpahi) << 32) | dpalo;
-	prom_printf(" cp0_errorepc ==   %08x\n", eepc);
-	prom_printf(" cp0_errctl   ==   %08x", errctl);
+	printk(" c0_errorepc ==   %08x\n", eepc);
+	printk(" c0_errctl   ==   %08x", errctl);
 	breakout_errctl(errctl);
 	if (errctl & CP0_ERRCTL_ICACHE) {
-		prom_printf(" cp0_cerr_i   ==   %08x", cerr_i);
+		printk(" c0_cerr_i   ==   %08x", cerr_i);
 		breakout_cerri(cerr_i);
 		if (CP0_CERRI_IDX_VALID(cerr_i)) {
 			/* Check index of EPC, allowing for delay slot */
 			if (((eepc & SB1_CACHE_INDEX_MASK) != (cerr_i & SB1_CACHE_INDEX_MASK)) &&
 			    ((eepc & SB1_CACHE_INDEX_MASK) != ((cerr_i & SB1_CACHE_INDEX_MASK) - 4)))
-				prom_printf(" cerr_i idx doesn't match eepc\n");
+				printk(" cerr_i idx doesn't match eepc\n");
 			else {
 				res = extract_ic(cerr_i & SB1_CACHE_INDEX_MASK,
 						 (cerr_i & CP0_CERRI_DATA) != 0);
 				if (!(res & cerr_i))
-					prom_printf("...didn't see indicated icache problem\n");
+					printk("...didn't see indicated icache problem\n");
 			}
 		}
 	}
 	if (errctl & CP0_ERRCTL_DCACHE) {
-		prom_printf(" cp0_cerr_d   ==   %08x", cerr_d);
+		printk(" c0_cerr_d   ==   %08x", cerr_d);
 		breakout_cerrd(cerr_d);
 		if (CP0_CERRD_DPA_VALID(cerr_d)) {
-			prom_printf(" cp0_cerr_dpa == %010llx\n", cerr_dpa);
+			printk(" c0_cerr_dpa == %010llx\n", cerr_dpa);
 			if (!CP0_CERRD_IDX_VALID(cerr_d)) {
 				res = extract_dc(cerr_dpa & SB1_CACHE_INDEX_MASK,
 						 (cerr_d & CP0_CERRD_DATA) != 0);
 				if (!(res & cerr_d))
-					prom_printf("...didn't see indicated dcache problem\n");
+					printk("...didn't see indicated dcache problem\n");
 			} else {
 				if ((cerr_dpa & SB1_CACHE_INDEX_MASK) != (cerr_d & SB1_CACHE_INDEX_MASK))
-					prom_printf(" cerr_d idx doesn't match cerr_dpa\n");
+					printk(" cerr_d idx doesn't match cerr_dpa\n");
 				else {
 					res = extract_dc(cerr_d & SB1_CACHE_INDEX_MASK,
 							 (cerr_d & CP0_CERRD_DATA) != 0);
 					if (!(res & cerr_d))
-						prom_printf("...didn't see indicated problem\n");
+						printk("...didn't see indicated problem\n");
 				}
 			}
 		}
@@ -230,36 +253,52 @@ asmlinkage void sb1_cache_error(void)
 
 	check_bus_watcher();
 
-	while (1);
 	/*
-	 * This tends to make things get really ugly; let's just stall instead.
-	 *    panic("Can't handle the cache error!");
+	 * Calling panic() when a fatal cache error occurs scrambles the
+	 * state of the system (and the cache), making it difficult to
+	 * investigate after the fact.  However, if you just stall the CPU,
+	 * the other CPU may keep on running, which is typically very
+	 * undesirable.
 	 */
+#ifdef CONFIG_SB1_CERR_STALL
+	while (1)
+		;
+#else
+	panic("unhandled cache error");
+#endif
 }
 
 
 /* Parity lookup table. */
 static const uint8_t parity[256] = {
-	0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
-	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,
-	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,
-	0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
-	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,
-	0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
-	0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0,1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,
-	1,0,0,1,0,1,1,0,0,1,1,0,1,0,0,1,0,1,1,0,1,0,0,1,1,0,0,1,0,1,1,0
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
+	0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0
 };
 
 /* Masks to select bits for Hamming parity, mask_72_64[i] for bit[i] */
 static const uint64_t mask_72_64[8] = {
-	0x0738C808099264FFL,
-	0x38C808099264FF07L,
-	0xC808099264FF0738L,
-	0x08099264FF0738C8L,
-	0x099264FF0738C808L,
-	0x9264FF0738C80809L,
-	0x64FF0738C8080992L,
-	0xFF0738C808099264L
+	0x0738C808099264FFULL,
+	0x38C808099264FF07ULL,
+	0xC808099264FF0738ULL,
+	0x08099264FF0738C8ULL,
+	0x099264FF0738C808ULL,
+	0x9264FF0738C80809ULL,
+	0x64FF0738C8080992ULL,
+	0xFF0738C808099264ULL
 };
 
 /* Calculate the parity on a range of bits */
@@ -298,12 +337,13 @@ static uint32_t extract_ic(unsigned short addr, int data)
 {
 	unsigned short way;
 	int valid;
-	uint64_t taglo, va, tlo_tmp;
 	uint32_t taghi, taglolo, taglohi;
+	unsigned long long taglo, va;
+	uint64_t tlo_tmp;
 	uint8_t lru;
 	int res = 0;
 
-	prom_printf("Icache index 0x%04x  ", addr);
+	printk("Icache index 0x%04x  ", addr);
 	for (way = 0; way < 4; way++) {
 		/* Index-load-tag-I */
 		__asm__ __volatile__ (
@@ -323,7 +363,7 @@ static uint32_t extract_ic(unsigned short addr, int data)
 		taglo = ((unsigned long long)taglohi << 32) | taglolo;
 		if (way == 0) {
 			lru = (taghi >> 14) & 0xff;
-			prom_printf("[Bank %d Set 0x%02x]  LRU > %d %d %d %d > MRU\n",
+			printk("[Bank %d Set 0x%02x]  LRU > %d %d %d %d > MRU\n",
 				    ((addr >> 5) & 0x3), /* bank */
 				    ((addr >> 7) & 0x3f), /* index */
 				    (lru & 0x3),
@@ -331,26 +371,26 @@ static uint32_t extract_ic(unsigned short addr, int data)
 				    ((lru >> 4) & 0x3),
 				    ((lru >> 6) & 0x3));
 		}
-		va = (taglo & 0xC0000FFFFFFFE000) | addr;
+		va = (taglo & 0xC0000FFFFFFFE000ULL) | addr;
 		if ((taglo & (1 << 31)) && (((taglo >> 62) & 0x3) == 3))
-			va |= 0x3FFFF00000000000;
+			va |= 0x3FFFF00000000000ULL;
 		valid = ((taghi >> 29) & 1);
 		if (valid) {
 			tlo_tmp = taglo & 0xfff3ff;
 			if (((taglo >> 10) & 1) ^ range_parity(tlo_tmp, 23, 0)) {
-				prom_printf("   ** bad parity in VTag0/G/ASID\n");
+				printk("   ** bad parity in VTag0/G/ASID\n");
 				res |= CP0_CERRI_TAG_PARITY;
 			}
 			if (((taglo >> 11) & 1) ^ range_parity(taglo, 63, 24)) {
-				prom_printf("   ** bad parity in R/VTag1\n");
+				printk("   ** bad parity in R/VTag1\n");
 				res |= CP0_CERRI_TAG_PARITY;
 			}
 		}
 		if (valid ^ ((taghi >> 27) & 1)) {
-			prom_printf("   ** bad parity for valid bit\n");
+			printk("   ** bad parity for valid bit\n");
 			res |= CP0_CERRI_TAG_PARITY;
 		}
-		prom_printf(" %d  [VA %016llx]  [Vld? %d]  raw tags: %08X-%016llX\n",
+		printk(" %d  [VA %016llx]  [Vld? %d]  raw tags: %08X-%016llX\n",
 			    way, va, valid, taghi, taglo);
 
 		if (data) {
@@ -376,21 +416,21 @@ static uint32_t extract_ic(unsigned short addr, int data)
 				: "r" ((way << 13) | addr | (offset << 3)));
 				predecode = (datahi >> 8) & 0xff;
 				if (((datahi >> 16) & 1) != (uint32_t)range_parity(predecode, 7, 0)) {
-					prom_printf("   ** bad parity in predecode\n");
+					printk("   ** bad parity in predecode\n");
 					res |= CP0_CERRI_DATA_PARITY;
 				}
 				/* XXXKW should/could check predecode bits themselves */
 				if (((datahi >> 4) & 0xf) ^ inst_parity(insta)) {
-					prom_printf("   ** bad parity in instruction a\n");
+					printk("   ** bad parity in instruction a\n");
 					res |= CP0_CERRI_DATA_PARITY;
 				}
 				if ((datahi & 0xf) ^ inst_parity(instb)) {
-					prom_printf("   ** bad parity in instruction b\n");
+					printk("   ** bad parity in instruction b\n");
 					res |= CP0_CERRI_DATA_PARITY;
 				}
-				prom_printf("  %05X-%08X%08X", datahi, insta, instb);
+				printk("  %05X-%08X%08X", datahi, insta, instb);
 			}
-			prom_printf("\n");
+			printk("\n");
 		}
 	}
 	return res;
@@ -435,7 +475,8 @@ static struct dc_state dc_states[] = {
 };
 
 #define DC_TAG_VALID(state) \
-    (((state) == 0xf) || ((state) == 0x13) || ((state) == 0x19) || ((state == 0x16)) || ((state) == 0x1c))
+    (((state) == 0x0) || ((state) == 0xf) || ((state) == 0x13) || \
+     ((state) == 0x19) || ((state) == 0x16) || ((state) == 0x1c))
 
 static char *dc_state_str(unsigned char state)
 {
@@ -452,12 +493,12 @@ static uint32_t extract_dc(unsigned short addr, int data)
 {
 	int valid, way;
 	unsigned char state;
-	uint64_t taglo, pa;
 	uint32_t taghi, taglolo, taglohi;
+	unsigned long long taglo, pa;
 	uint8_t ecc, lru;
 	int res = 0;
 
-	prom_printf("Dcache index 0x%04x  ", addr);
+	printk("Dcache index 0x%04x  ", addr);
 	for (way = 0; way < 4; way++) {
 		__asm__ __volatile__ (
 		"	.set	push\n\t"
@@ -474,10 +515,10 @@ static uint32_t extract_dc(unsigned short addr, int data)
 		: "r" ((way << 13) | addr));
 
 		taglo = ((unsigned long long)taglohi << 32) | taglolo;
-		pa = (taglo & 0xFFFFFFE000) | addr;
+		pa = (taglo & 0xFFFFFFE000ULL) | addr;
 		if (way == 0) {
 			lru = (taghi >> 14) & 0xff;
-			prom_printf("[Bank %d Set 0x%02x]  LRU > %d %d %d %d > MRU\n",
+			printk("[Bank %d Set 0x%02x]  LRU > %d %d %d %d > MRU\n",
 				    ((addr >> 11) & 0x2) | ((addr >> 5) & 1), /* bank */
 				    ((addr >> 6) & 0x3f), /* index */
 				    (lru & 0x3),
@@ -487,15 +528,15 @@ static uint32_t extract_dc(unsigned short addr, int data)
 		}
 		state = (taghi >> 25) & 0x1f;
 		valid = DC_TAG_VALID(state);
-		prom_printf(" %d  [PA %010llx]  [state %s (%02x)]  raw tags: %08X-%016llX\n",
+		printk(" %d  [PA %010llx]  [state %s (%02x)]  raw tags: %08X-%016llX\n",
 			    way, pa, dc_state_str(state), state, taghi, taglo);
 		if (valid) {
 			if (((taglo >> 11) & 1) ^ range_parity(taglo, 39, 26)) {
-				prom_printf("   ** bad parity in PTag1\n");
+				printk("   ** bad parity in PTag1\n");
 				res |= CP0_CERRD_TAG_ADDRESS;
 			}
 			if (((taglo >> 10) & 1) ^ range_parity(taglo, 25, 13)) {
-				prom_printf("   ** bad parity in PTag0\n");
+				printk("   ** bad parity in PTag0\n");
 				res |= CP0_CERRD_TAG_ADDRESS;
 			}
 		} else {
@@ -503,9 +544,10 @@ static uint32_t extract_dc(unsigned short addr, int data)
 		}
 
 		if (data) {
-			uint64_t datalo;
 			uint32_t datalohi, datalolo, datahi;
+			unsigned long long datalo;
 			int offset;
+			char bad_ecc = 0;
 
 			for (offset = 0; offset < 4; offset++) {
 				/* Index-load-data-D */
@@ -525,19 +567,19 @@ static uint32_t extract_dc(unsigned short addr, int data)
 				datalo = ((unsigned long long)datalohi << 32) | datalolo;
 				ecc = dc_ecc(datalo);
 				if (ecc != datahi) {
-					int bits = 0;
-					prom_printf("  ** bad ECC (%02x %02x) ->",
-						    datahi, ecc);
+					int bits;
+					bad_ecc |= 1 << (3-offset);
 					ecc ^= datahi;
-					while (ecc) {
-						if (ecc & 1) bits++;
-						ecc >>= 1;
-					}
+					bits = hweight8(ecc);
 					res |= (bits == 1) ? CP0_CERRD_DATA_SBE : CP0_CERRD_DATA_DBE;
 				}
-				prom_printf("  %02X-%016llX", datahi, datalo);
+				printk("  %02X-%016llX", datahi, datalo);
 			}
-			prom_printf("\n");
+			printk("\n");
+			if (bad_ecc)
+				printk("  dwords w/ bad ECC: %d %d %d %d\n",
+				       !!(bad_ecc & 8), !!(bad_ecc & 4),
+				       !!(bad_ecc & 2), !!(bad_ecc & 1));
 		}
 	}
 	return res;

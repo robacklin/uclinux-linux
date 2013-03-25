@@ -5,25 +5,27 @@
  *
  *  Bits taken from various places.
  */
-#include <linux/config.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/io.h>
 
-#include <asm/page.h> /* for BUG() */
-#include <asm/irq.h>
 #include <asm/mach-types.h>
 #include <asm/mach/pci.h>
 
 static int debug_pci;
-int have_isa_bridge;
 
-void pcibios_report_status(u_int status_mask, int warn)
+/*
+ * We can't use pci_find_device() here since we are
+ * called from interrupt context.
+ */
+static void pcibios_bus_report_status(struct pci_bus *bus, u_int status_mask, int warn)
 {
 	struct pci_dev *dev;
 
-	pci_for_each_dev(dev) {
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 status;
 
 		/*
@@ -34,18 +36,32 @@ void pcibios_report_status(u_int status_mask, int warn)
 			continue;
 
 		pci_read_config_word(dev, PCI_STATUS, &status);
+		if (status == 0xffff)
+			continue;
 
-		status &= status_mask;
-		if (status == 0)
+		if ((status & status_mask) == 0)
 			continue;
 
 		/* clear the status errors */
-		pci_write_config_word(dev, PCI_STATUS, status);
+		pci_write_config_word(dev, PCI_STATUS, status & status_mask);
 
 		if (warn)
-			printk("(%02x:%02x.%d: %04X) ", dev->bus->number,
-				PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn),
-				status);
+			printk("(%s: %04X) ", pci_name(dev), status);
+	}
+
+	list_for_each_entry(dev, &bus->devices, bus_list)
+		if (dev->subordinate)
+			pcibios_bus_report_status(dev->subordinate, status_mask, warn);
+}
+
+void pcibios_report_status(u_int status_mask, int warn)
+{
+	struct list_head *l;
+
+	list_for_each(l, &pci_root_buses) {
+		struct pci_bus *bus = pci_bus_b(l);
+
+		pcibios_bus_report_status(bus, status_mask, warn);
 	}
 }
 
@@ -61,7 +77,7 @@ void pcibios_report_status(u_int status_mask, int warn)
  * Bug 3 is responsible for the sound DMA grinding to a halt.  We now
  * live with bug 2.
  */
-static void __init pci_fixup_83c553(struct pci_dev *dev)
+static void __devinit pci_fixup_83c553(struct pci_dev *dev)
 {
 	/*
 	 * Set memory region to start at address 0, and enable IO
@@ -111,19 +127,21 @@ static void __init pci_fixup_83c553(struct pci_dev *dev)
 	pci_write_config_word(dev, 0x44, 0xb000);
 	outb(0x08, 0x4d1);
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_WINBOND, PCI_DEVICE_ID_WINBOND_83C553, pci_fixup_83c553);
 
-static void __init pci_fixup_unassign(struct pci_dev *dev)
+static void __devinit pci_fixup_unassign(struct pci_dev *dev)
 {
 	dev->resource[0].end -= dev->resource[0].start;
 	dev->resource[0].start = 0;
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_WINBOND2, PCI_DEVICE_ID_WINBOND2_89C940F, pci_fixup_unassign);
 
 /*
  * Prevent the PCI layer from seeing the resources allocated to this device
  * if it is the host bridge by marking it as such.  These resources are of
  * no consequence to the PCI layer (they are handled elsewhere).
  */
-static void __init pci_fixup_dec21285(struct pci_dev *dev)
+static void __devinit pci_fixup_dec21285(struct pci_dev *dev)
 {
 	int i;
 
@@ -137,11 +155,12 @@ static void __init pci_fixup_dec21285(struct pci_dev *dev)
 		}
 	}
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_21285, pci_fixup_dec21285);
 
 /*
  * PCI IDE controllers use non-standard I/O port decoding, respect it.
  */
-static void __init pci_fixup_ide_bases(struct pci_dev *dev)
+static void __devinit pci_fixup_ide_bases(struct pci_dev *dev)
 {
 	struct resource *r;
 	int i;
@@ -157,14 +176,16 @@ static void __init pci_fixup_ide_bases(struct pci_dev *dev)
 		}
 	}
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_ANY_ID, PCI_ANY_ID, pci_fixup_ide_bases);
 
 /*
  * Put the DEC21142 to sleep
  */
-static void __init pci_fixup_dec21142(struct pci_dev *dev)
+static void __devinit pci_fixup_dec21142(struct pci_dev *dev)
 {
 	pci_write_config_dword(dev, 0x40, 0x80000000);
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_21142, pci_fixup_dec21142);
 
 /*
  * The CY82C693 needs some rather major fixups to ensure that it does
@@ -182,7 +203,7 @@ static void __init pci_fixup_dec21142(struct pci_dev *dev)
  * functional.  However, The CY82C693U _does not work_ in bus
  * master mode without locking the PCI bus solid.
  */
-static void __init pci_fixup_cy82c693(struct pci_dev *dev)
+static void __devinit pci_fixup_cy82c693(struct pci_dev *dev)
 {
 	if ((dev->class >> 8) == PCI_CLASS_STORAGE_IDE) {
 		u32 base0, base1;
@@ -230,101 +251,31 @@ static void __init pci_fixup_cy82c693(struct pci_dev *dev)
 		pci_write_config_byte(dev, 0x45, 0x03);
 	}
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CONTAQ, PCI_DEVICE_ID_CONTAQ_82C693, pci_fixup_cy82c693);
 
-
-#ifdef CONFIG_ARCH_IXP1200
-/* Properly setup 32-byte cache line size */
-static void __init pci_fixup_ixp12xx(struct pci_dev *dev)
+static void __init pci_fixup_it8152(struct pci_dev *dev)
 {
-	u8 foo;
-	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &foo);
-
-	printk("PCI: %s has cache line of %#02x\n", dev->name, foo);
-
-	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 8);
-
-}
-#endif
-
-
-struct pci_fixup pcibios_fixups[] = {
-#ifdef CONFIG_ARCH_IXP12xx
-	{
-		PCI_FIXUP_FINAL,
-		PCI_ANY_ID,		PCI_ANY_ID,
-		pci_fixup_ixp12xx
-	},
-#endif
-	{
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_CONTAQ,	PCI_DEVICE_ID_CONTAQ_82C693,
-		pci_fixup_cy82c693
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21142,
-		pci_fixup_dec21142
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21285,
-		pci_fixup_dec21285
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_WINBOND,	PCI_DEVICE_ID_WINBOND_83C553,
-		pci_fixup_83c553
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_WINBOND2,	PCI_DEVICE_ID_WINBOND2_89C940F,
-		pci_fixup_unassign
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_ANY_ID,		PCI_ANY_ID,
-		pci_fixup_ide_bases
-	}, { 0 }
-};
-
-void
-pcibios_update_resource(struct pci_dev *dev, struct resource *root,
-			struct resource *res, int resource)
-{
-	struct pci_sys_data *sys = dev->sysdata;
-	u32 val, check;
-	int reg;
-
-	if (debug_pci)
-		printk("PCI: Assigning %3s %08lx to %s\n",
-			res->flags & IORESOURCE_IO ? "IO" : "MEM",
-			res->start, dev->name);
-
-	if (resource < 6) {
-		reg = PCI_BASE_ADDRESS_0 + 4*resource;
-	} else if (resource == PCI_ROM_RESOURCE) {
-		reg = dev->rom_base_reg;
-	} else {
-		/* Somebody might have asked allocation of a
-		 * non-standard resource.
-		 */
-		return;
-	}
-
-	val = res->start;
-	if (res->flags & IORESOURCE_MEM)
-		val -= sys->mem_offset;
-	val |= res->flags & PCI_REGION_FLAG_MASK;
-
-	pci_write_config_dword(dev, reg, val);
-	pci_read_config_dword(dev, reg, &check);
-	if ((val ^ check) & ((val & PCI_BASE_ADDRESS_SPACE_IO) ?
-	    PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK)) {
-		printk(KERN_ERR "PCI: Error while updating region "
-			"%s/%d (%08x != %08x)\n", dev->slot_name,
-			resource, val, check);
+	int i;
+	/* fixup for ITE 8152 devices */
+	/* FIXME: add defines for class 0x68000 and 0x80103 */
+	if ((dev->class >> 8) == PCI_CLASS_BRIDGE_HOST ||
+	    dev->class == 0x68000 ||
+	    dev->class == 0x80103) {
+		for (i = 0; i < PCI_NUM_RESOURCES; i++) {
+			dev->resource[i].start = 0;
+			dev->resource[i].end   = 0;
+			dev->resource[i].flags = 0;
+		}
 	}
 }
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ITE, PCI_DEVICE_ID_ITE_8152, pci_fixup_it8152);
 
-void __init pcibios_update_irq(struct pci_dev *dev, int irq)
+
+
+void __devinit pcibios_update_irq(struct pci_dev *dev, int irq)
 {
 	if (debug_pci)
-		printk("PCI: Assigning IRQ %02d to %s\n", irq, dev->name);
+		printk("PCI: Assigning IRQ %02d to %s\n", irq, pci_name(dev));
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
 
@@ -334,102 +285,82 @@ void __init pcibios_update_irq(struct pci_dev *dev, int irq)
  */
 static inline int pdev_bad_for_parity(struct pci_dev *dev)
 {
-	return (dev->vendor == PCI_VENDOR_ID_INTERG &&
-		(dev->device == PCI_DEVICE_ID_INTERG_2000 ||
-		 dev->device == PCI_DEVICE_ID_INTERG_2010));
-}
+	return ((dev->vendor == PCI_VENDOR_ID_INTERG &&
+		 (dev->device == PCI_DEVICE_ID_INTERG_2000 ||
+		  dev->device == PCI_DEVICE_ID_INTERG_2010)) ||
+		(dev->vendor == PCI_VENDOR_ID_ITE &&
+		 dev->device == PCI_DEVICE_ID_ITE_8152));
 
-/*
- * Adjust the device resources from bus-centric to Linux-centric.
- */
-static void __init
-pdev_fixup_device_resources(struct pci_sys_data *root, struct pci_dev *dev)
-{
-	int i;
-
-	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
-		if (dev->resource[i].start == 0)
-			continue;
-		if (dev->resource[i].flags & IORESOURCE_MEM) {
-			dev->resource[i].start += root->mem_offset;
-			dev->resource[i].end   += root->mem_offset;
-		}
-	}
-}
-
-static void __init
-pbus_assign_bus_resources(struct pci_bus *bus, struct pci_sys_data *root)
-{
-	struct pci_dev *dev = bus->self;
-	int i;
-
-	if (!dev) {
-		/*
-		 * Assign root bus resources.
-		 */
-		for (i = 0; i < 3; i++)
-			bus->resource[i] = root->resource[i];
-	}
 }
 
 /*
  * pcibios_fixup_bus - Called after each bus is probed,
  * but before its children are examined.
  */
-void __init pcibios_fixup_bus(struct pci_bus *bus)
+void pcibios_fixup_bus(struct pci_bus *bus)
 {
-	struct pci_sys_data *root = bus->sysdata;
-	struct list_head *walk;
-	u16 features = PCI_COMMAND_SERR | PCI_COMMAND_PARITY;
-	u16 all_status = -1;
-
-	pbus_assign_bus_resources(bus, root);
+	struct pci_dev *dev;
+	u16 features = PCI_COMMAND_SERR | PCI_COMMAND_PARITY | PCI_COMMAND_FAST_BACK;
 
 	/*
 	 * Walk the devices on this bus, working out what we can
 	 * and can't support.
 	 */
-	for (walk = bus->devices.next; walk != &bus->devices; walk = walk->next) {
-		struct pci_dev *dev = pci_dev_b(walk);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 status;
 
-		pdev_fixup_device_resources(root, dev);
-
 		pci_read_config_word(dev, PCI_STATUS, &status);
-		all_status &= status;
+
+		/*
+		 * If any device on this bus does not support fast back
+		 * to back transfers, then the bus as a whole is not able
+		 * to support them.  Having fast back to back transfers
+		 * on saves us one PCI cycle per transaction.
+		 */
+		if (!(status & PCI_STATUS_FAST_BACK))
+			features &= ~PCI_COMMAND_FAST_BACK;
 
 		if (pdev_bad_for_parity(dev))
 			features &= ~(PCI_COMMAND_SERR | PCI_COMMAND_PARITY);
 
-		/*
-		 * If this device is an ISA bridge, set the have_isa_bridge
-		 * flag.  We will then go looking for things like keyboard,
-		 * etc
-		 */
-		if (dev->class >> 8 == PCI_CLASS_BRIDGE_ISA ||
-		    dev->class >> 8 == PCI_CLASS_BRIDGE_EISA)
-			have_isa_bridge = !0;
-	}
+		switch (dev->class >> 8) {
+		case PCI_CLASS_BRIDGE_PCI:
+			pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &status);
+			status |= PCI_BRIDGE_CTL_PARITY|PCI_BRIDGE_CTL_MASTER_ABORT;
+			status &= ~(PCI_BRIDGE_CTL_BUS_RESET|PCI_BRIDGE_CTL_FAST_BACK);
+			pci_write_config_word(dev, PCI_BRIDGE_CONTROL, status);
+			break;
 
-	/*
-	 * If any device on this bus does not support fast back to back
-	 * transfers, then the bus as a whole is not able to support them.
-	 * Having fast back to back transfers on saves us one PCI cycle
-	 * per transaction.
-	 */
-	if (all_status & PCI_STATUS_FAST_BACK)
-		features |= PCI_COMMAND_FAST_BACK;
+		case PCI_CLASS_BRIDGE_CARDBUS:
+			pci_read_config_word(dev, PCI_CB_BRIDGE_CONTROL, &status);
+			status |= PCI_CB_BRIDGE_CTL_PARITY|PCI_CB_BRIDGE_CTL_MASTER_ABORT;
+			pci_write_config_word(dev, PCI_CB_BRIDGE_CONTROL, status);
+			break;
+		}
+	}
 
 	/*
 	 * Now walk the devices again, this time setting them up.
 	 */
-	for (walk = bus->devices.next; walk != &bus->devices; walk = walk->next) {
-		struct pci_dev *dev = pci_dev_b(walk);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 cmd;
 
 		pci_read_config_word(dev, PCI_COMMAND, &cmd);
 		cmd |= features;
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
+
+		pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE,
+				      L1_CACHE_BYTES >> 2);
+	}
+
+	/*
+	 * Propagate the flags to the PCI bridge.
+	 */
+	if (bus->self && bus->self->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		if (features & PCI_COMMAND_FAST_BACK)
+			bus->bridge_ctl |= PCI_BRIDGE_CTL_FAST_BACK;
+		if (features & PCI_COMMAND_PARITY)
+			bus->bridge_ctl |= PCI_BRIDGE_CTL_PARITY;
 	}
 
 	/*
@@ -438,225 +369,149 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
 	printk(KERN_INFO "PCI: bus%d: Fast back to back transfers %sabled\n",
 		bus->number, (features & PCI_COMMAND_FAST_BACK) ? "en" : "dis");
 }
+#ifdef CONFIG_HOTPLUG
+EXPORT_SYMBOL(pcibios_fixup_bus);
+#endif
 
 /*
- * Convert from Linux-centric to bus-centric addresses for bridge devices.
+ * Swizzle the device pin each time we cross a bridge.
+ * This might update pin and returns the slot number.
  */
-void __init
-pcibios_fixup_pbus_ranges(struct pci_bus *bus, struct pbus_set_ranges_data *ranges)
+static u8 __devinit pcibios_swizzle(struct pci_dev *dev, u8 *pin)
 {
-	struct pci_sys_data *root = bus->sysdata;
+	struct pci_sys_data *sys = dev->sysdata;
+	int slot = 0, oldpin = *pin;
 
-	ranges->mem_start -= root->mem_offset;
-	ranges->mem_end -= root->mem_offset;
-	ranges->prefetch_start -= root->mem_offset;
-	ranges->prefetch_end -= root->mem_offset;
+	if (sys->swizzle)
+		slot = sys->swizzle(dev, pin);
+
+	if (debug_pci)
+		printk("PCI: %s swizzling pin %d => pin %d slot %d\n",
+			pci_name(dev), oldpin, *pin, slot);
+
+	return slot;
 }
 
-u8 __init no_swizzle(struct pci_dev *dev, u8 *pin)
+/*
+ * Map a slot/pin to an IRQ.
+ */
+static int pcibios_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
-	return 0;
+	struct pci_sys_data *sys = dev->sysdata;
+	int irq = -1;
+
+	if (sys->map_irq)
+		irq = sys->map_irq(dev, slot, pin);
+
+	if (debug_pci)
+		printk("PCI: %s mapping slot %d pin %d => irq %d\n",
+			pci_name(dev), slot, pin, irq);
+
+	return irq;
 }
 
-extern struct hw_pci ebsa285_pci;
-extern struct hw_pci cats_pci;
-extern struct hw_pci netwinder_pci;
-extern struct hw_pci personal_server_pci;
-extern struct hw_pci ftv_pci;
-extern struct hw_pci shark_pci;
-extern struct hw_pci integrator_pci;
-extern struct hw_pci ks8695p_pci;
-extern struct hw_pci ixp1200_pci;
-extern struct hw_pci iq80310_pci;
-extern struct hw_pci iq80321_pci;
-extern struct hw_pci iq31244_pci;
-extern struct hw_pci brh_pci;
-extern struct hw_pci ixdp425_pci;
-extern struct hw_pci coyote_pci;
-extern struct hw_pci sg565_pci;
-extern struct hw_pci ess710_pci;
-extern struct hw_pci sg720_pci;
-extern struct hw_pci sg8100_pci;
-extern struct hw_pci montejade_pci;
-extern struct hw_pci ixdp2400_pci;
-extern struct hw_pci ixdp2800_pci;
-extern struct hw_pci prpmc1100_pci;
-
-void __init pcibios_init(void)
+static void __init pcibios_init_hw(struct hw_pci *hw)
 {
-	struct pci_sys_data *root;
-	struct hw_pci *hw = NULL;
+	struct pci_sys_data *sys = NULL;
+	int ret;
+	int nr, busnr;
 
-	do {
-#ifdef CONFIG_ARCH_EBSA285
-		if (machine_is_ebsa285()) {
-			hw = &ebsa285_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_SHARK
-		if (machine_is_shark()) {
-			hw = &shark_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_CATS
-		if (machine_is_cats()) {
-			hw = &cats_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_NETWINDER
-		if (machine_is_netwinder()) {
-			hw = &netwinder_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_PERSONAL_SERVER
-		if (machine_is_personal_server()) {
-			hw = &personal_server_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_FTVPCI
-		if (machine_is_ftvpci()) {
-			hw = &ftv_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_INTEGRATOR
-		if (machine_is_integrator()) {
-			hw = &integrator_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_KS8695
-		if (machine_is_ks8695()) {
-                        hw = &ks8695p_pci;
-			break;
-                 }
-#endif
-#ifdef CONFIG_ARCH_IXP1200
-		if(machine_is_ixp1200()) {
-			hw = &ixp1200_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_IOP3XX
-		if(machine_is_iq80310()) {
-			hw = &iq80310_pci;
-			break;
-		}
-		if(machine_is_iq80321()) {
-			hw = &iq80321_pci;
-			break;
-		}
-		if(machine_is_iq31244()) {
-			hw = &iq31244_pci;
-			break;
-		}
-#endif
-#ifdef	CONFIG_ARCH_BRH
-		if (machine_is_brh()) {
-			hw = &brh_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_IXP425
-		if (machine_is_ixdp425() || machine_is_ixdp465()) {
-			hw = &ixdp425_pci;
-			break;
-		}
-		if (machine_is_prpmc1100()) {
-			hw = &prpmc1100_pci;
-			break;
-		}
-		if (machine_is_adi_coyote()) {
-			hw = &coyote_pci;
-			break;
-		}
-		if (machine_is_ess710()) {
-			hw = &ess710_pci;
-			break;
-		}
-		if (machine_is_sg720() || machine_is_sg590()) {
-			hw = &sg720_pci;
-			break;
-		}
-		if (machine_is_sg560usb() || machine_is_sg565() || machine_is_shiva1100()) {
-			hw = &sg565_pci;
-			break;
-		}
-		if (machine_is_sg8100()) {
-			hw = &sg8100_pci;
-			break;
-		}
-		if (machine_is_montejade() || machine_is_se5100()) {
-			hw = &montejade_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_IXDP2400
-		if (machine_is_ixdp2400()) {
-			hw = &ixdp2400_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_IXDP2800
-		if (machine_is_ixdp2800()) {
-			hw = &ixdp2800_pci;
-			break;
-		}
-#endif
-	} while (0);
+	for (nr = busnr = 0; nr < hw->nr_controllers; nr++) {
+		sys = kzalloc(sizeof(struct pci_sys_data), GFP_KERNEL);
+		if (!sys)
+			panic("PCI: unable to allocate sys data!");
 
-	if (hw == NULL)
-		return;
+#ifdef CONFIG_PCI_DOMAINS
+		sys->domain  = hw->domain;
+#endif
+		sys->hw      = hw;
+		sys->busnr   = busnr;
+		sys->swizzle = hw->swizzle;
+		sys->map_irq = hw->map_irq;
+		INIT_LIST_HEAD(&sys->resources);
 
-	root = kmalloc(sizeof(*root), GFP_KERNEL);
-	if (!root)
-		panic("PCI: unable to allocate root data!");
+		ret = hw->setup(nr, sys);
 
-	root->hw = hw;
-	root->mem_offset = hw->mem_offset;
+		if (ret > 0) {
+			if (list_empty(&sys->resources)) {
+				pci_add_resource_offset(&sys->resources,
+					 &ioport_resource, sys->io_offset);
+				pci_add_resource_offset(&sys->resources,
+					 &iomem_resource, sys->mem_offset);
+			}
 
-	memset(root->resource, 0, sizeof(root->resource));
+			sys->bus = hw->scan(nr, sys);
 
-	/*
-	 * Setup the resources for this bus.
-	 *   resource[0] - IO ports
-	 *   resource[1] - non-prefetchable memory
-	 *   resource[2] - prefetchable memory
-	 */
-	if (root->hw->setup_resources)
-		root->hw->setup_resources(root->resource);
-	else {
-		root->resource[0] = &ioport_resource;
-		root->resource[1] = &iomem_resource;
-		root->resource[2] = NULL;
+			if (!sys->bus)
+				panic("PCI: unable to scan bus!");
+
+			busnr = sys->bus->subordinate + 1;
+
+			list_add(&sys->node, &hw->buses);
+		} else {
+			kfree(sys);
+			if (ret < 0)
+				break;
+		}
 	}
-
-	/*
-	 * Set up the host bridge, and scan the bus.
-	 */
-	root->hw->init(root);
-
-	/*
-	 * Assign any unassigned resources.
-	 */
-
-	// TODO: Make PCI_AUTO go away
-#ifndef CONFIG_PCI_AUTOCONFIG
-	pci_assign_unassigned_resources();
-#endif
-
-	pci_fixup_irqs(root->hw->swizzle, root->hw->map_irq);
 }
+
+void __init pci_common_init(struct hw_pci *hw)
+{
+	struct pci_sys_data *sys;
+
+	INIT_LIST_HEAD(&hw->buses);
+
+	pci_add_flags(PCI_REASSIGN_ALL_RSRC);
+	if (hw->preinit)
+		hw->preinit();
+	pcibios_init_hw(hw);
+	if (hw->postinit)
+		hw->postinit();
+
+	pci_fixup_irqs(pcibios_swizzle, pcibios_map_irq);
+
+	list_for_each_entry(sys, &hw->buses, node) {
+		struct pci_bus *bus = sys->bus;
+
+		if (!pci_has_flag(PCI_PROBE_ONLY)) {
+			/*
+			 * Size the bridge windows.
+			 */
+			pci_bus_size_bridges(bus);
+
+			/*
+			 * Assign resources.
+			 */
+			pci_bus_assign_resources(bus);
+
+			/*
+			 * Enable bridges
+			 */
+			pci_enable_bridges(bus);
+		}
+
+		/*
+		 * Tell drivers about devices found.
+		 */
+		pci_bus_add_devices(bus);
+	}
+}
+
+#ifndef CONFIG_PCI_HOST_ITE8152
+void pcibios_set_master(struct pci_dev *dev)
+{
+	/* No special bus mastering setup handling */
+}
+#endif
 
 char * __init pcibios_setup(char *str)
 {
 	if (!strcmp(str, "debug")) {
 		debug_pci = 1;
+		return NULL;
+	} else if (!strcmp(str, "firmware")) {
+		pci_add_flags(PCI_PROBE_ONLY);
 		return NULL;
 	}
 	return str;
@@ -677,15 +532,17 @@ char * __init pcibios_setup(char *str)
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might be mirrored at 0x0100-0x03ff..
  */
-void pcibios_align_resource(void *data, struct resource *res,
-			    unsigned long size, unsigned long align)
+resource_size_t pcibios_align_resource(void *data, const struct resource *res,
+				resource_size_t size, resource_size_t align)
 {
-	if (res->flags & IORESOURCE_IO) {
-		unsigned long start = res->start;
+	resource_size_t start = res->start;
 
-		if (start & 0x300)
-			res->start = (start + 0x3ff) & ~0x3ff;
-	}
+	if (res->flags & IORESOURCE_IO && start & 0x300)
+		start = (start + 0x3ff) & ~0x3ff;
+
+	start = (start + align - 1) & ~(align - 1);
+
+	return start;
 }
 
 /**
@@ -708,7 +565,7 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 		r = dev->resource + idx;
 		if (!r->start && r->end) {
 			printk(KERN_ERR "PCI: Device %s not available because"
-			       " of resource collisions\n", dev->slot_name);
+			       " of resource collisions\n", pci_name(dev));
 			return -EINVAL;
 		}
 		if (r->flags & IORESOURCE_IO)
@@ -725,8 +582,33 @@ int pcibios_enable_device(struct pci_dev *dev, int mask)
 
 	if (cmd != old_cmd) {
 		printk("PCI: enabling device %s (%04x -> %04x)\n",
-		       dev->slot_name, old_cmd, cmd);
+		       pci_name(dev), old_cmd, cmd);
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
+	return 0;
+}
+
+int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
+			enum pci_mmap_state mmap_state, int write_combine)
+{
+	struct pci_sys_data *root = dev->sysdata;
+	unsigned long phys;
+
+	if (mmap_state == pci_mmap_io) {
+		return -EINVAL;
+	} else {
+		phys = vma->vm_pgoff + (root->mem_offset >> PAGE_SHIFT);
+	}
+
+	/*
+	 * Mark this as IO
+	 */
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	if (remap_pfn_range(vma, vma->vm_start, phys,
+			     vma->vm_end - vma->vm_start,
+			     vma->vm_page_prot))
+		return -EAGAIN;
+
 	return 0;
 }

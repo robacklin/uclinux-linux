@@ -17,15 +17,15 @@
 # along with this program; see the file COPYING.  If not, write to
 # the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
 #
-# $Source: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/Makefile,v $
+# $Source: /cvs/sw/linux-3.x/drivers/char/can4linux/Makefile,v $
 # $Revision: 1.1 $
-# $Date: 2003/07/18 00:11:46 $
+# $Date: 2009-01-27 04:27:11 $
 
 
 
 # Used release tag for this software version
 VERSION=3
-REL=2
+REL=0
 RELEASE=CAN4LINUX-$(VERSION)_$(REL)
 DVERSION=$(VERSION).$(REL)
 
@@ -35,50 +35,59 @@ DVERSION=$(VERSION).$(REL)
 # The new linux/Documentation/devices.txt defines major=91
 CAN_MAJOR=	91
 
-EXTRA_CFLAGS +=  -DVERSION=\"$(DVERSION)_$(TARGET)\" -DCan_MAJOR=$(CAN_MAJOR) \
-	# -DDEBUG=1 -DDEFAULT_DEBUG
+EXTRA_CFLAGS +=  -DVERSION=\"$(DVERSION)_$(TARGET)\" -DCan_MAJOR=$(CAN_MAJOR)
 
-O_TARGET := Can.o
-
-obj-y   := can_core.o can_open.o can_select.o can_sysctl.o can_write.o \
+can-objs  := can_core.o can_open.o can_select.o can_sysctl.o can_write.o \
 	   can_close.o can_ioctl.o can_read.o can_util.o \
 	   can_debug.o can_error.o
 
 ##########################################################################
 ifeq ($(CONFIG_CAN_ATCANMINI),y)
-obj-y += can_sja1000funcs.o
+can-objs += can_sja1000funcs.o
 EXTRA_CFLAGS += -DATCANMINI_PELICAN -DMAX_CHANNELS=2
 TARGET=ATCANMINI_PELICAN
 endif
 ##########################################################################
 ifeq ($(CONFIG_CAN_CCPC104),y)
-obj-y += can_sja1000funcs.o
+can-objs += can_sja1000funcs.o
 EXTRA_CFLAGS += -DCCPC104 -DMAX_CHANNELS=2
 TARGET=CTRLink_PC104
 endif
 ##########################################################################
-ifeq ($(CONFIG_CAN_MCF5282),y)
-obj-y += can_mcf5282funcs.o
-EXTRA_CFLAGS += -DMCF5282 -DMAX_CHANNELS=1
+ifeq ($(CONFIG_FLEXCAN),y)
+ifeq ($(CONFIG_M528x),y)
+can-objs += can_mcf5282funcs.o
+EXTRA_CFLAGS += -DMCF528x -DMAX_CHANNELS=1
+else
+can-objs += can_mcffuncs.o
+EXTRA_CFLAGS += -DMCF532x -DMAX_CHANNELS=2
+endif
 TARGET=ColdFire_FlexCAN
 endif
 ##########################################################################
-ifeq ($(CONFIG_CAN_MCF5282_MODULE),y)
-obj-y += can_mcf5282funcs.o
-EXTRA_CFLAGS += -DMCF5282 -DMAX_CHANNELS=1
+ifeq ($(CONFIG_FLEXCAN_MODULE),y)
+ifeq ($(CONFIG_M528x),y)
+can-objs += can_mcf5282funcs.o
+EXTRA_CFLAGS += -DMCF528x -DMAX_CHANNELS=1
+else
+can-objs += can_mcffuncs.o
+EXTRA_CFLAGS += -DMCF532x -DMAX_CHANNELS=2
+endif
 TARGET=ColdFire_FlexCAN
 endif
 
-obj-y += can_mcf5282funcs.o
-EXTRA_CFLAGS += -DMCF5282 -DMAX_CHANNELS=1
+ifeq ($(CONFIG_M528x),y)
+can-objs += can_mcf5282funcs.o
+EXTRA_CFLAGS += -DMCF528x -DMAX_CHANNELS=1
+else
+can-objs += can_mcffuncs.o
+EXTRA_CFLAGS += -DMCF532x -DMAX_CHANNELS=2
+endif
 TARGET=ColdFire_FlexCAN
 
 ##########################################################################
            
-obj-m   := $(O_TARGET)
-
-
-
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_FLEXCAN_CAN0)   += can.o
+obj-$(CONFIG_FLEXCAN_CAN1)   += can.o
 
 

@@ -10,6 +10,8 @@
 #ifndef _LINUX_SERIAL_H
 #define _LINUX_SERIAL_H
 
+#include <linux/types.h>
+
 #ifdef __KERNEL__
 #include <asm/page.h>
 
@@ -48,7 +50,7 @@ struct serial_struct {
 	unsigned char	*iomem_base;
 	unsigned short	iomem_reg_shift;
 	unsigned int	port_high;
-	int	reserved[1];
+	unsigned long	iomap_base;	/* cookie passed into ioremap */
 };
 
 /*
@@ -75,16 +77,12 @@ struct serial_struct {
 #define PORT_16654	11
 #define PORT_16850	12
 #define PORT_RSA	13	/* RSA-DV II/S card */
-#define PORT_XSCALE	14
-#define PORT_DSC21	15
-#define PORT_C5471	16
-#define PORT_DM270	17
-#define PORT_MAX	17
+#define PORT_MAX	13
 
 #define SERIAL_IO_PORT	0
 #define SERIAL_IO_HUB6	1
 #define SERIAL_IO_MEM	2
-#define SERIAL_IO_MEMHI	3
+#define	SERIAL_IO_MEM32	3
 
 struct serial_uart_config {
 	char	*name;
@@ -95,58 +93,82 @@ struct serial_uart_config {
 #define UART_CLEAR_FIFO		0x01
 #define UART_USE_FIFO		0x02
 #define UART_STARTECH		0x04
+#define UART_NATSEMI		0x08
 
 /*
  * Definitions for async_struct (and serial_struct) flags field
+ *
+ * Define ASYNCB_* for convenient use with {test,set,clear}_bit.
  */
-#define ASYNC_HUP_NOTIFY 0x0001 /* Notify getty on hangups and closes 
-				   on the callout port */
-#define ASYNC_FOURPORT  0x0002	/* Set OU1, OUT2 per AST Fourport settings */
-#define ASYNC_SAK	0x0004	/* Secure Attention Key (Orange book) */
-#define ASYNC_SPLIT_TERMIOS 0x0008 /* Separate termios for dialin/callout */
+#define ASYNCB_HUP_NOTIFY	 0 /* Notify getty on hangups and closes
+				    * on the callout port */
+#define ASYNCB_FOURPORT		 1 /* Set OU1, OUT2 per AST Fourport settings */
+#define ASYNCB_SAK		 2 /* Secure Attention Key (Orange book) */
+#define ASYNCB_SPLIT_TERMIOS	 3 /* Separate termios for dialin/callout */
+#define ASYNCB_SPD_HI		 4 /* Use 56000 instead of 38400 bps */
+#define ASYNCB_SPD_VHI		 5 /* Use 115200 instead of 38400 bps */
+#define ASYNCB_SKIP_TEST	 6 /* Skip UART test during autoconfiguration */
+#define ASYNCB_AUTO_IRQ		 7 /* Do automatic IRQ during
+				    * autoconfiguration */
+#define ASYNCB_SESSION_LOCKOUT	 8 /* Lock out cua opens based on session */
+#define ASYNCB_PGRP_LOCKOUT	 9 /* Lock out cua opens based on pgrp */
+#define ASYNCB_CALLOUT_NOHUP	10 /* Don't do hangups for cua device */
+#define ASYNCB_HARDPPS_CD	11 /* Call hardpps when CD goes high  */
+#define ASYNCB_SPD_SHI		12 /* Use 230400 instead of 38400 bps */
+#define ASYNCB_LOW_LATENCY	13 /* Request low latency behaviour */
+#define ASYNCB_BUGGY_UART	14 /* This is a buggy UART, skip some safety
+				    * checks.  Note: can be dangerous! */
+#define ASYNCB_AUTOPROBE	15 /* Port was autoprobed by PCI or PNP code */
+#define ASYNCB_LAST_USER	15
 
-#define ASYNC_SPD_MASK	0x1030
-#define ASYNC_SPD_HI	0x0010	/* Use 56000 instead of 38400 bps */
+/* Internal flags used only by kernel */
+#define ASYNCB_INITIALIZED	31 /* Serial port was initialized */
+#define ASYNCB_SUSPENDED	30 /* Serial port is suspended */
+#define ASYNCB_NORMAL_ACTIVE	29 /* Normal device is active */
+#define ASYNCB_BOOT_AUTOCONF	28 /* Autoconfigure port on bootup */
+#define ASYNCB_CLOSING		27 /* Serial port is closing */
+#define ASYNCB_CTS_FLOW		26 /* Do CTS flow control */
+#define ASYNCB_CHECK_CD		25 /* i.e., CLOCAL */
+#define ASYNCB_SHARE_IRQ	24 /* for multifunction cards, no longer used */
+#define ASYNCB_CONS_FLOW	23 /* flow control for console  */
+#define ASYNCB_BOOT_ONLYMCA	22 /* Probe only if MCA bus */
+#define ASYNCB_FIRST_KERNEL	22
 
-#define ASYNC_SPD_VHI	0x0020  /* Use 115200 instead of 38400 bps */
-#define ASYNC_SPD_CUST	0x0030  /* Use user-specified divisor */
+#define ASYNC_HUP_NOTIFY	(1U << ASYNCB_HUP_NOTIFY)
+#define ASYNC_SUSPENDED		(1U << ASYNCB_SUSPENDED)
+#define ASYNC_FOURPORT		(1U << ASYNCB_FOURPORT)
+#define ASYNC_SAK		(1U << ASYNCB_SAK)
+#define ASYNC_SPLIT_TERMIOS	(1U << ASYNCB_SPLIT_TERMIOS)
+#define ASYNC_SPD_HI		(1U << ASYNCB_SPD_HI)
+#define ASYNC_SPD_VHI		(1U << ASYNCB_SPD_VHI)
+#define ASYNC_SKIP_TEST		(1U << ASYNCB_SKIP_TEST)
+#define ASYNC_AUTO_IRQ		(1U << ASYNCB_AUTO_IRQ)
+#define ASYNC_SESSION_LOCKOUT	(1U << ASYNCB_SESSION_LOCKOUT)
+#define ASYNC_PGRP_LOCKOUT	(1U << ASYNCB_PGRP_LOCKOUT)
+#define ASYNC_CALLOUT_NOHUP	(1U << ASYNCB_CALLOUT_NOHUP)
+#define ASYNC_HARDPPS_CD	(1U << ASYNCB_HARDPPS_CD)
+#define ASYNC_SPD_SHI		(1U << ASYNCB_SPD_SHI)
+#define ASYNC_LOW_LATENCY	(1U << ASYNCB_LOW_LATENCY)
+#define ASYNC_BUGGY_UART	(1U << ASYNCB_BUGGY_UART)
+#define ASYNC_AUTOPROBE		(1U << ASYNCB_AUTOPROBE)
 
-#define ASYNC_SKIP_TEST	0x0040 /* Skip UART test during autoconfiguration */
-#define ASYNC_AUTO_IRQ  0x0080 /* Do automatic IRQ during autoconfiguration */
-#define ASYNC_SESSION_LOCKOUT 0x0100 /* Lock out cua opens based on session */
-#define ASYNC_PGRP_LOCKOUT    0x0200 /* Lock out cua opens based on pgrp */
-#define ASYNC_CALLOUT_NOHUP   0x0400 /* Don't do hangups for cua device */
+#define ASYNC_FLAGS		((1U << (ASYNCB_LAST_USER + 1)) - 1)
+#define ASYNC_USR_MASK		(ASYNC_SPD_MASK|ASYNC_CALLOUT_NOHUP| \
+		ASYNC_LOW_LATENCY)
+#define ASYNC_SPD_CUST		(ASYNC_SPD_HI|ASYNC_SPD_VHI)
+#define ASYNC_SPD_WARP		(ASYNC_SPD_HI|ASYNC_SPD_SHI)
+#define ASYNC_SPD_MASK		(ASYNC_SPD_HI|ASYNC_SPD_VHI|ASYNC_SPD_SHI)
 
-#define ASYNC_HARDPPS_CD	0x0800	/* Call hardpps when CD goes high  */
-
-#define ASYNC_SPD_SHI	0x1000	/* Use 230400 instead of 38400 bps */
-#define ASYNC_SPD_WARP	0x1010	/* Use 460800 instead of 38400 bps */
-
-#define ASYNC_LOW_LATENCY 0x2000 /* Request low latency behaviour */
-
-#define ASYNC_BUGGY_UART  0x4000 /* This is a buggy UART, skip some safety
-				  * checks.  Note: can be dangerous! */
-
-#define ASYNC_AUTOPROBE	 0x8000 /* Port was autoprobed by PCI or PNP code */
-
-#define ASYNC_FLAGS	0x7FFF	/* Possible legal async flags */
-#define ASYNC_USR_MASK	0x3430	/* Legal flags that non-privileged
-				 * users can set or reset */
-
-/* Internal flags used only by kernel/chr_drv/serial.c */
-#define ASYNC_INITIALIZED	0x80000000 /* Serial port was initialized */
-#define ASYNC_CALLOUT_ACTIVE	0x40000000 /* Call out device is active */
-#define ASYNC_NORMAL_ACTIVE	0x20000000 /* Normal device is active */
-#define ASYNC_BOOT_AUTOCONF	0x10000000 /* Autoconfigure port on bootup */
-#define ASYNC_CLOSING		0x08000000 /* Serial port is closing */
-#define ASYNC_CTS_FLOW		0x04000000 /* Do CTS flow control */
-#define ASYNC_CHECK_CD		0x02000000 /* i.e., CLOCAL */
-#define ASYNC_SHARE_IRQ		0x01000000 /* for multifunction cards
-					     --- no longer used */
-#define ASYNC_CONS_FLOW		0x00800000 /* flow control for console  */
-
-#define ASYNC_BOOT_ONLYMCA	0x00400000 /* Probe only if MCA bus */
-#define ASYNC_INTERNAL_FLAGS	0xFFC00000 /* Internal flags */
+#define ASYNC_INITIALIZED	(1U << ASYNCB_INITIALIZED)
+#define ASYNC_NORMAL_ACTIVE	(1U << ASYNCB_NORMAL_ACTIVE)
+#define ASYNC_BOOT_AUTOCONF	(1U << ASYNCB_BOOT_AUTOCONF)
+#define ASYNC_CLOSING		(1U << ASYNCB_CLOSING)
+#define ASYNC_CTS_FLOW		(1U << ASYNCB_CTS_FLOW)
+#define ASYNC_CHECK_CD		(1U << ASYNCB_CHECK_CD)
+#define ASYNC_SHARE_IRQ		(1U << ASYNCB_SHARE_IRQ)
+#define ASYNC_CONS_FLOW		(1U << ASYNCB_CONS_FLOW)
+#define ASYNC_BOOT_ONLYMCA	(1U << ASYNCB_BOOT_ONLYMCA)
+#define ASYNC_INTERNAL_FLAGS	(~((1U << ASYNCB_FIRST_KERNEL) - 1))
 
 /*
  * Multiport serial configuration structure --- external structure
@@ -177,17 +199,30 @@ struct serial_icounter_struct {
 	int reserved[9];
 };
 
+/*
+ * Serial interface for controlling RS485 settings on chips with suitable
+ * support. Set with TIOCSRS485 and get with TIOCGRS485 if supported by your
+ * platform. The set function returns the new state, with any unsupported bits
+ * reverted appropriately.
+ */
+
+struct serial_rs485 {
+	__u32	flags;			/* RS485 feature flags */
+#define SER_RS485_ENABLED		(1 << 0)	/* If enabled */
+#define SER_RS485_RTS_ON_SEND		(1 << 1)	/* Logical level for
+							   RTS pin when
+							   sending */
+#define SER_RS485_RTS_AFTER_SEND	(1 << 2)	/* Logical level for
+							   RTS pin after sent*/
+#define SER_RS485_RX_DURING_TX		(1 << 4)
+	__u32	delay_rts_before_send;	/* Delay before send (milliseconds) */
+	__u32	delay_rts_after_send;	/* Delay after send (milliseconds) */
+	__u32	padding[5];		/* Memory is cheap, new structs
+					   are a royal PITA .. */
+};
 
 #ifdef __KERNEL__
-/* Export to allow PCMCIA to use this - Dave Hinds */
-extern int register_serial(struct serial_struct *req);
-extern void unregister_serial(int line);
-
-/* Allow complicated architectures to specify rs_table[] at run time */
-extern int early_serial_setup(struct serial_struct *req);
-
-/* tty port reserved for the HCDP serial console port */
-#define HCDP_SERIAL_CONSOLE_PORT	4
+#include <linux/compiler.h>
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

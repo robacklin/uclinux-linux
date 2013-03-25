@@ -1,6 +1,5 @@
 /*
  * MTD map driver for BIOS Flash on Intel SCB2 boards
- * $Id: scb2_flash.c,v 1.2 2003/01/24 13:09:56 dwmw2 Exp $
  * Copyright (C) 2002 Sun Microsystems, Inc.
  * Tim Hockin <thockin@sun.com>
  *
@@ -14,7 +13,7 @@
  * try to request it here, but if it fails, we carry on anyway.
  *
  * This is how the chip is attached, so said the schematic:
- * * a 4 MiB (32 Mb) 16 bit chip
+ * * a 4 MiB (32 Mib) 16 bit chip
  * * a 1 MiB memory region
  * * A20 and A21 pulled up
  * * D8-D15 ignored
@@ -31,28 +30,28 @@
  *
  * The actual BIOS layout has been mostly reverse engineered.  Intel BIOS
  * updates for this board include 10 related (*.bio - &.bi9) binary files and
- * another seperate (*.bbo) binary file.  The 10 files are 64k of data + a
+ * another separate (*.bbo) binary file.  The 10 files are 64k of data + a
  * small header.  If the headers are stripped off, the 10 64k files can be
  * concatenated into a 640k image.  This is your BIOS image, proper.  The
- * seperate .bbo file also has a small header.  It is the 'Boot Block'
+ * separate .bbo file also has a small header.  It is the 'Boot Block'
  * recovery BIOS.  Once the header is stripped, no further prep is needed.
  * As best I can tell, the BIOS is arranged as such:
  * offset 0x00000 to 0x4ffff (320k):  unknown - SCSI BIOS, etc?
  * offset 0x50000 to 0xeffff (640k):  BIOS proper
  * offset 0xf0000 ty 0xfffff (64k):   Boot Block region
  *
- * Intel's BIOS update program flashes the BIOS and Boot Block in seperate
+ * Intel's BIOS update program flashes the BIOS and Boot Block in separate
  * steps.  Probably a wise thing to do.
  */
 
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
 #include <linux/mtd/cfi.h>
-#include <linux/config.h>
 #include <linux/pci.h>
 #include <linux/pci_ids.h>
 
@@ -60,65 +59,13 @@
 #define SCB2_ADDR	0xfff00000
 #define SCB2_WINDOW	0x00100000
 
-static __u8 scb2_read8(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readb(map->map_priv_1 + ofs);
-}
 
-static __u16 scb2_read16(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readw(map->map_priv_1 + ofs);
-}
-
-static __u32 scb2_read32(struct map_info *map, unsigned long ofs)
-{
-	return __raw_readl(map->map_priv_1 + ofs);
-}
-
-static void scb2_copy_from(struct map_info *map, void *to,
-				 unsigned long from, ssize_t len)
-{
-	memcpy_fromio(to, map->map_priv_1 + from, len);
-}
-
-static void scb2_write8(struct map_info *map, __u8 d, unsigned long adr)
-{
-	__raw_writeb(d, map->map_priv_1 + adr);
-	mb();
-}
-
-static void scb2_write16(struct map_info *map, __u16 d, unsigned long adr)
-{
-	__raw_writew(d, map->map_priv_1 + adr);
-	mb();
-}
-
-static void scb2_write32(struct map_info *map, __u32 d, unsigned long adr)
-{
-	__raw_writel(d, map->map_priv_1 + adr);
-	mb();
-}
-
-static void scb2_copy_to(struct map_info *map, unsigned long to,
-			       const void *from, ssize_t len)
-{
-	memcpy_toio(map->map_priv_1 + to, from, len);
-}
-
-static void *scb2_ioaddr;
+static void __iomem *scb2_ioaddr;
 static struct mtd_info *scb2_mtd;
-struct map_info scb2_map = {
-	name:      "SCB2 BIOS Flash",
-	size:      0,
-	buswidth:  1,
-	read8:     scb2_read8,
-	read16:    scb2_read16,
-	read32:    scb2_read32,
-	copy_from: scb2_copy_from,
-	write8:    scb2_write8,
-	write16:   scb2_write16,
-	write32:   scb2_write32,
-	copy_to:   scb2_copy_to,
+static struct map_info scb2_map = {
+	.name =      "SCB2 BIOS Flash",
+	.size =      0,
+	.bankwidth =  1,
 };
 static int region_fail;
 
@@ -131,11 +78,13 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 	struct cfi_private *cfi = map->fldrv_priv;
 
 	/* barf if this doesn't look right */
-	if (cfi->cfiq->InterfaceDesc != 1) {
+	if (cfi->cfiq->InterfaceDesc != CFI_INTERFACE_X16_ASYNC) {
 		printk(KERN_ERR MODNAME ": unsupported InterfaceDesc: %#x\n",
 		    cfi->cfiq->InterfaceDesc);
 		return -1;
 	}
+
+	/* I wasn't here. I didn't see. dwmw2. */
 
 	/* the chip is sometimes bigger than the map - what a waste */
 	mtd->size = map->size;
@@ -169,7 +118,8 @@ scb2_fixup_mtd(struct mtd_info *mtd)
 		struct mtd_erase_region_info *region = &mtd->eraseregions[i];
 
 		if (region->numblocks * region->erasesize > mtd->size) {
-			region->numblocks = (mtd->size / region->erasesize);
+			region->numblocks = ((unsigned long)mtd->size /
+						region->erasesize);
 			done = 1;
 		} else {
 			region->numblocks = 0;
@@ -211,8 +161,11 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return -ENOMEM;
 	}
 
-	scb2_map.map_priv_1 = (unsigned long)scb2_ioaddr;
+	scb2_map.phys = SCB2_ADDR;
+	scb2_map.virt = scb2_ioaddr;
 	scb2_map.size = SCB2_WINDOW;
+
+	simple_map_init(&scb2_map);
 
 	/* try to find a chip */
 	scb2_mtd = do_map_probe("cfi_probe", &scb2_map);
@@ -225,9 +178,9 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return -ENODEV;
 	}
 
-	scb2_mtd->module = THIS_MODULE;
+	scb2_mtd->owner = THIS_MODULE;
 	if (scb2_fixup_mtd(scb2_mtd) < 0) {
-		del_mtd_device(scb2_mtd);
+		mtd_device_unregister(scb2_mtd);
 		map_destroy(scb2_mtd);
 		iounmap(scb2_ioaddr);
 		if (!region_fail)
@@ -235,10 +188,11 @@ scb2_flash_probe(struct pci_dev *dev, const struct pci_device_id *ent)
 		return -ENODEV;
 	}
 
-	printk(KERN_NOTICE MODNAME ": chip size %x at offset %x\n",
-	       scb2_mtd->size, SCB2_WINDOW - scb2_mtd->size);
+	printk(KERN_NOTICE MODNAME ": chip size 0x%llx at offset 0x%llx\n",
+	       (unsigned long long)scb2_mtd->size,
+	       (unsigned long long)(SCB2_WINDOW - scb2_mtd->size));
 
-	add_mtd_device(scb2_mtd);
+	mtd_device_register(scb2_mtd, NULL, 0);
 
 	return 0;
 }
@@ -250,10 +204,9 @@ scb2_flash_remove(struct pci_dev *dev)
 		return;
 
 	/* disable flash writes */
-	if (scb2_mtd->lock)
-		scb2_mtd->lock(scb2_mtd, 0, scb2_mtd->size);
+	mtd_lock(scb2_mtd, 0, scb2_mtd->size);
 
-	del_mtd_device(scb2_mtd);
+	mtd_device_unregister(scb2_mtd);
 	map_destroy(scb2_mtd);
 
 	iounmap(scb2_ioaddr);
@@ -264,27 +217,27 @@ scb2_flash_remove(struct pci_dev *dev)
 	pci_set_drvdata(dev, NULL);
 }
 
-static struct pci_device_id scb2_flash_pci_ids[] __devinitdata = {
+static struct pci_device_id scb2_flash_pci_ids[] = {
 	{
-	  vendor: PCI_VENDOR_ID_SERVERWORKS,
-	  device: PCI_DEVICE_ID_SERVERWORKS_CSB5,
-	  subvendor: PCI_ANY_ID,
-	  subdevice: PCI_ANY_ID
+	  .vendor = PCI_VENDOR_ID_SERVERWORKS,
+	  .device = PCI_DEVICE_ID_SERVERWORKS_CSB5,
+	  .subvendor = PCI_ANY_ID,
+	  .subdevice = PCI_ANY_ID
 	},
 	{ 0, }
 };
 
 static struct pci_driver scb2_flash_driver = {
-	name:     "Intel SCB2 BIOS Flash",
-	id_table: scb2_flash_pci_ids,
-	probe:    scb2_flash_probe,
-	remove:   __devexit_p(scb2_flash_remove),
+	.name =     "Intel SCB2 BIOS Flash",
+	.id_table = scb2_flash_pci_ids,
+	.probe =    scb2_flash_probe,
+	.remove =   __devexit_p(scb2_flash_remove),
 };
 
 static int __init
 scb2_flash_init(void)
 {
-	return pci_module_init(&scb2_flash_driver);
+	return pci_register_driver(&scb2_flash_driver);
 }
 
 static void __exit

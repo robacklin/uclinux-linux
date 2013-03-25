@@ -58,7 +58,7 @@ below:
  video_y
 
    This describes the character position of cursor on VGA console, and
-   is otherwise unused. (should not used for other console types, and
+   is otherwise unused. (should not be used for other console types, and
    should not be used for other purposes).
 
  memc_control_reg
@@ -97,7 +97,7 @@ below:
  initrd_size
 
    This describes the kernel virtual start address and size of the
-   inital ramdisk.
+   initial ramdisk.
 
  rd_start
 

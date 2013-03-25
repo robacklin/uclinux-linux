@@ -11,13 +11,16 @@
 
 #include <asm/irq.h>
 #include <asm/mach/pci.h>
-#include <asm/hardware/dec21285.h>
+#include <asm/mach-types.h>
 
 /* cats host-specific stuff */
 static int irqmap_cats[] __initdata = { IRQ_PCI, IRQ_IN0, IRQ_IN1, IRQ_IN3 };
 
-static int __init cats_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init cats_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
+	if (dev->irq >= 255)
+		return -1;	/* not a valid interrupt. */
+
 	if (dev->irq >= 128)
 		return dev->irq & 0x1f;
 
@@ -31,10 +34,25 @@ static int __init cats_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return -1;
 }
 
-struct hw_pci cats_pci __initdata = {
-	.setup_resources	= dc21285_setup_resources,
-	.init			= dc21285_init,
-	.mem_offset		= DC21285_PCI_MEM,
-	.swizzle		= no_swizzle,
+/*
+ * why not the standard PCI swizzle?  does this prevent 4-port tulip
+ * cards being used (ie, pci-pci bridge based cards)?
+ */
+static struct hw_pci cats_pci __initdata = {
+	.swizzle		= NULL,
 	.map_irq		= cats_map_irq,
+	.nr_controllers		= 1,
+	.setup			= dc21285_setup,
+	.scan			= dc21285_scan_bus,
+	.preinit		= dc21285_preinit,
+	.postinit		= dc21285_postinit,
 };
+
+static int __init cats_pci_init(void)
+{
+	if (machine_is_cats())
+		pci_common_init(&cats_pci);
+	return 0;
+}
+
+subsys_initcall(cats_pci_init);

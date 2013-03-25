@@ -4,14 +4,10 @@
 /* bridge-specific defines for netfilter. 
  */
 
-#include <linux/config.h>
 #include <linux/netfilter.h>
-#if defined(__KERNEL__) && defined(CONFIG_NETFILTER)
-#include <asm/atomic.h>
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
 #include <linux/if_ether.h>
-#endif
-#endif
+#include <linux/if_vlan.h>
+#include <linux/if_pppox.h>
 
 /* Bridge Hooks */
 /* After promisc drops, checksum checks. */
@@ -30,12 +26,6 @@
 
 #ifdef __KERNEL__
 
-#define BRNF_PKT_TYPE			0x01
-#define BRNF_BRIDGED_DNAT		0x02
-#define BRNF_DONT_TAKE_PARENT		0x04
-#define BRNF_BRIDGED			0x08
-#define BRNF_NF_BRIDGE_PREROUTING	0x10
-
 enum nf_br_hook_priorities {
 	NF_BR_PRI_FIRST = INT_MIN,
 	NF_BR_PRI_NAT_DST_BRIDGED = -300,
@@ -47,57 +37,86 @@ enum nf_br_hook_priorities {
 	NF_BR_PRI_LAST = INT_MAX,
 };
 
-#ifdef CONFIG_NETFILTER
-static inline
-struct nf_bridge_info *nf_bridge_alloc(struct sk_buff *skb)
-{
-	struct nf_bridge_info **nf_bridge = &(skb->nf_bridge);
+#ifdef CONFIG_BRIDGE_NETFILTER
 
-	if ((*nf_bridge = kmalloc(sizeof(**nf_bridge), GFP_ATOMIC)) != NULL) {
-		atomic_set(&(*nf_bridge)->use, 1);
-		(*nf_bridge)->mask = 0;
-		(*nf_bridge)->physindev = (*nf_bridge)->physoutdev = NULL;
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-		(*nf_bridge)->netoutdev = NULL;
-#endif
-	}
-
-	return *nf_bridge;
-}
+#define BRNF_PKT_TYPE			0x01
+#define BRNF_BRIDGED_DNAT		0x02
+#define BRNF_BRIDGED			0x04
+#define BRNF_NF_BRIDGE_PREROUTING	0x08
+#define BRNF_8021Q			0x10
+#define BRNF_PPPoE			0x20
 
 /* Only used in br_forward.c */
-static inline
-void nf_bridge_maybe_copy_header(struct sk_buff *skb)
+extern int nf_bridge_copy_header(struct sk_buff *skb);
+static inline int nf_bridge_maybe_copy_header(struct sk_buff *skb)
 {
-	if (skb->nf_bridge) {
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-		if (skb->protocol == __constant_htons(ETH_P_8021Q)) {
-			memcpy(skb->data - 18, skb->nf_bridge->hh, 18);
-			skb_push(skb, 4);
-		} else
-#endif
-			memcpy(skb->data - 16, skb->nf_bridge->hh, 16);
+	if (skb->nf_bridge &&
+	    skb->nf_bridge->mask & (BRNF_BRIDGED | BRNF_BRIDGED_DNAT))
+		return nf_bridge_copy_header(skb);
+  	return 0;
+}
+
+static inline unsigned int nf_bridge_encap_header_len(const struct sk_buff *skb)
+{
+	switch (skb->protocol) {
+	case __cpu_to_be16(ETH_P_8021Q):
+		return VLAN_HLEN;
+	case __cpu_to_be16(ETH_P_PPP_SES):
+		return PPPOE_SES_HLEN;
+	default:
+		return 0;
 	}
 }
 
-static inline
-void nf_bridge_save_header(struct sk_buff *skb)
+static inline unsigned int nf_bridge_mtu_reduction(const struct sk_buff *skb)
 {
-        int header_size = 16;
+	if (unlikely(skb->nf_bridge->mask & BRNF_PPPoE))
+		return PPPOE_SES_HLEN;
+	return 0;
+}
 
-#if defined(CONFIG_VLAN_8021Q) || defined(CONFIG_VLAN_8021Q_MODULE)
-	if (skb->protocol == __constant_htons(ETH_P_8021Q))
-		header_size = 18;
-#endif
-	memcpy(skb->nf_bridge->hh, skb->data - header_size, header_size);
+extern int br_handle_frame_finish(struct sk_buff *skb);
+/* Only used in br_device.c */
+static inline int br_nf_pre_routing_finish_bridge_slow(struct sk_buff *skb)
+{
+	struct nf_bridge_info *nf_bridge = skb->nf_bridge;
+
+	skb_pull(skb, ETH_HLEN);
+	nf_bridge->mask ^= BRNF_BRIDGED_DNAT;
+	skb_copy_to_linear_data_offset(skb, -(ETH_HLEN-ETH_ALEN),
+				       skb->nf_bridge->data, ETH_HLEN-ETH_ALEN);
+	skb->dev = nf_bridge->physindev;
+	return br_handle_frame_finish(skb);
+}
+
+/* This is called by the IP fragmenting code and it ensures there is
+ * enough room for the encapsulating header (if there is one). */
+static inline unsigned int nf_bridge_pad(const struct sk_buff *skb)
+{
+	if (skb->nf_bridge)
+		return nf_bridge_encap_header_len(skb);
+	return 0;
 }
 
 struct bridge_skb_cb {
 	union {
-		__u32 ipv4;
+		__be32 ipv4;
 	} daddr;
 };
-#endif /* CONFIG_NETFILTER */
+
+static inline void br_drop_fake_rtable(struct sk_buff *skb)
+{
+	struct dst_entry *dst = skb_dst(skb);
+
+	if (dst && (dst->flags & DST_FAKE_RTABLE))
+		skb_dst_drop(skb);
+}
+
+#else
+#define nf_bridge_maybe_copy_header(skb)	(0)
+#define nf_bridge_pad(skb)			(0)
+#define br_drop_fake_rtable(skb)	        do { } while (0)
+#endif /* CONFIG_BRIDGE_NETFILTER */
 
 #endif /* __KERNEL__ */
 #endif

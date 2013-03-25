@@ -1,4 +1,4 @@
-/*  
+/*
  *  (C) 2004 Margit Schubert-While <margitsw@t-online.de>
  *
  *  This program is free software; you can redistribute it and/or modify
@@ -16,7 +16,7 @@
  *
  */
 
-/*  
+/*
  *	Compatibility header file to aid support of different kernel versions
  */
 
@@ -29,20 +29,13 @@
 
 #include <linux/device.h>
 #include <linux/firmware.h>
-#include <linux/config.h>
 #include <linux/moduleparam.h>
 #include <linux/workqueue.h>
 #include <linux/compiler.h>
 
-#if !defined(CONFIG_FW_LOADER) && !defined(CONFIG_FW_LOADER_MODULE)
-#error Firmware Loading is not configured in the kernel !
-#endif
-
 #ifndef __iomem
 #define __iomem
 #endif
-
-#define prism54_synchronize_irq(irq) synchronize_irq(irq)
 
 #define PRISM_FW_PDEV		&priv->pdev->dev
 

@@ -3,13 +3,12 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (c) 1996, 1998, 1999 by Ralf Baechle
+ * Copyright (c) 1996, 1998, 1999, 2004 by Ralf Baechle
  * Copyright (c) 1999 Silicon Graphics, Inc.
  */
 #include <asm/asm.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/regdef.h>
-#include <asm/sgidefs.h>
 
 #define EX(insn,reg,addr,handler)			\
 9:	insn	reg, addr;				\
@@ -23,18 +22,18 @@
  * Return 0 for error
  */
 LEAF(__strlen_user_asm)
-	LONG_L		v0, THREAD_CURDS($28)	# pointer ok?
+	LONG_L		v0, TI_ADDR_LIMIT($28)	# pointer ok?
 	and		v0, a0
-	bltz		v0, fault
+	bnez		v0, .Lfault
 
 FEXPORT(__strlen_user_nocheck_asm)
 	move		v0, a0
-1:	EX(lb, t0, (v0), fault)
-	addiu		v0, 1
+1:	EX(lb, t0, (v0), .Lfault)
+	PTR_ADDIU	v0, 1
 	bnez		t0, 1b
-	subu		v0, a0
+	PTR_SUBU	v0, a0
 	jr		ra
 	END(__strlen_user_asm)
 
-fault:	move		v0, zero
+.Lfault:	move		v0, zero
 	jr		ra

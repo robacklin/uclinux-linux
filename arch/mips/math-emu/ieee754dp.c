@@ -3,8 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -57,6 +56,7 @@ ieee754dp ieee754dp_xcpt(ieee754dp r, const char *op, ...)
 	ax.rv.dp = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.dp;
 }
 
@@ -83,6 +83,7 @@ ieee754dp ieee754dp_nanxcpt(ieee754dp r, const char *op, ...)
 	ax.rv.dp = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.dp;
 }
 
@@ -124,14 +125,14 @@ static u64 get_rounding(int sn, u64 xm)
 }
 
 
-/* generate a normal/denormal number with over,under handeling
+/* generate a normal/denormal number with over,under handling
  * sn is sign
  * xe is an unbiased exponent
  * xm is 3bit extended precision value.
  */
 ieee754dp ieee754dp_format(int sn, int xe, u64 xm)
 {
-	assert(xm);		/* we dont gen exact zeros (probably should) */
+	assert(xm);		/* we don't gen exact zeros (probably should) */
 
 	assert((xm >> (DP_MBITS + 1 + 3)) == 0);	/* no execess */
 	assert(xm & (DP_HIDDEN_BIT << 3));
@@ -146,7 +147,6 @@ ieee754dp ieee754dp_format(int sn, int xe, u64 xm)
 
 			switch(ieee754_csr.rm) {
 			case IEEE754_RN:
-				return ieee754dp_zero(sn);
 			case IEEE754_RZ:
 				return ieee754dp_zero(sn);
 			case IEEE754_RU:    /* toward +Infinity */

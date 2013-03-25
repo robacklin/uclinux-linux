@@ -1,3 +1,6 @@
+#ifndef _HIL_H_
+#define _HIL_H_
+
 /*
  * Hewlett Packard Human Interface Loop (HP-HIL) Protocol -- header.
  *
@@ -165,14 +168,14 @@ enum hil_command {
 	HIL_CMD_PR6	= 0x45,	/* Prompt6 */
 	HIL_CMD_PR7	= 0x46,	/* Prompt7 */
 	HIL_CMD_PRM	= 0x47,	/* Prompt (General Purpose) */
-	HIL_CMD_AK1	= 0x48,	/* Acknowlege1 */  
-	HIL_CMD_AK2	= 0x49,	/* Acknowlege2 */
-	HIL_CMD_AK3	= 0x4a,	/* Acknowlege3 */
-	HIL_CMD_AK4	= 0x4b,	/* Acknowlege4 */
-	HIL_CMD_AK5	= 0x4c,	/* Acknowlege5 */
-	HIL_CMD_AK6	= 0x4d,	/* Acknowlege6 */
-	HIL_CMD_AK7	= 0x4e,	/* Acknowlege7 */
-	HIL_CMD_ACK	= 0x4f,	/* Acknowlege (General Purpose) */
+	HIL_CMD_AK1	= 0x48,	/* Acknowledge1 */  
+	HIL_CMD_AK2	= 0x49,	/* Acknowledge2 */
+	HIL_CMD_AK3	= 0x4a,	/* Acknowledge3 */
+	HIL_CMD_AK4	= 0x4b,	/* Acknowledge4 */
+	HIL_CMD_AK5	= 0x4c,	/* Acknowledge5 */
+	HIL_CMD_AK6	= 0x4d,	/* Acknowledge6 */
+	HIL_CMD_AK7	= 0x4e,	/* Acknowledge7 */
+	HIL_CMD_ACK	= 0x4f,	/* Acknowledge (General Purpose) */
 
 	/* 0x50 to 0x78 reserved for future use  */
 	/* 0x80 to 0xEF device-specific commands */
@@ -387,6 +390,79 @@ enum hil_command {
 "english.us"		/* 0x1f United States */	\
 
 
+/* HIL keycodes */
+#define HIL_KEYCODES_SET1_TBLSIZE 128
+#define HIL_KEYCODES_SET1 	\
+   KEY_5,		KEY_RESERVED,	KEY_RIGHTALT,	KEY_LEFTALT,	\
+   KEY_RIGHTSHIFT,	KEY_LEFTSHIFT,	KEY_LEFTCTRL,	KEY_SYSRQ,	\
+   KEY_KP4,		KEY_KP8,	KEY_KP5,	KEY_KP9,	\
+   KEY_KP6,		KEY_KP7,	KEY_KPCOMMA,	KEY_KPENTER,	\
+   KEY_KP1,		KEY_KPSLASH,	KEY_KP2,	KEY_KPPLUS,	\
+   KEY_KP3,		KEY_KPASTERISK,	KEY_KP0,	KEY_KPMINUS,	\
+   KEY_B,		KEY_V,		KEY_C,		KEY_X,		\
+   KEY_Z,		KEY_RESERVED,	KEY_RESERVED,   KEY_ESC,	\
+   KEY_6,		KEY_F10,	KEY_3,		KEY_F11,	\
+   KEY_KPDOT,		KEY_F9,		KEY_TAB /*KP*/,	KEY_F12,	\
+   KEY_H,		KEY_G,		KEY_F,		KEY_D,		\
+   KEY_S,		KEY_A,		KEY_RESERVED,	KEY_CAPSLOCK,	\
+   KEY_U,		KEY_Y,		KEY_T,		KEY_R,		\
+   KEY_E,		KEY_W,		KEY_Q,		KEY_TAB,	\
+   KEY_7,		KEY_6,		KEY_5,		KEY_4,		\
+   KEY_3,		KEY_2,		KEY_1,		KEY_GRAVE,	\
+   KEY_F13,		KEY_F14,	KEY_F15,	KEY_F16,	\
+   KEY_F17,		KEY_F18,	KEY_F19,	KEY_F20,	\
+   KEY_MENU,		KEY_F4,		KEY_F3,		KEY_F2,		\
+   KEY_F1,		KEY_VOLUMEUP,	KEY_STOP,	KEY_SENDFILE,	\
+   KEY_SYSRQ,		KEY_F5,		KEY_F6,		KEY_F7,		\
+   KEY_F8,		KEY_VOLUMEDOWN,	KEY_DEL_EOL,	KEY_DEL_EOS,	\
+   KEY_8,		KEY_9,		KEY_0,		KEY_MINUS,	\
+   KEY_EQUAL,		KEY_BACKSPACE,	KEY_INS_LINE,	KEY_DEL_LINE,	\
+   KEY_I,		KEY_O,		KEY_P,		KEY_LEFTBRACE,	\
+   KEY_RIGHTBRACE,	KEY_BACKSLASH,	KEY_INSERT,	KEY_DELETE,	\
+   KEY_J,		KEY_K,		KEY_L,		KEY_SEMICOLON,	\
+   KEY_APOSTROPHE,	KEY_ENTER,	KEY_HOME,	KEY_PAGEUP,	\
+   KEY_M,		KEY_COMMA,	KEY_DOT,	KEY_SLASH,	\
+   KEY_BACKSLASH,	KEY_SELECT,	KEY_102ND,	KEY_PAGEDOWN,	\
+   KEY_N,		KEY_SPACE,	KEY_NEXT,	KEY_RESERVED,	\
+   KEY_LEFT,		KEY_DOWN,	KEY_UP,		KEY_RIGHT
+
+
+#define HIL_KEYCODES_SET3_TBLSIZE 128
+#define HIL_KEYCODES_SET3 	\
+  KEY_RESERVED,	KEY_ESC,	KEY_1,		KEY_2,			\
+  KEY_3,	KEY_4,		KEY_5,		KEY_6,			\
+  KEY_7,	KEY_8,		KEY_9,		KEY_0,			\
+  KEY_MINUS,	KEY_EQUAL,	KEY_BACKSPACE,	KEY_TAB,		\
+  KEY_Q,	KEY_W,		KEY_E,		KEY_R,			\
+  KEY_T,	KEY_Y,		KEY_U,		KEY_I,			\
+  KEY_O,	KEY_P,		KEY_LEFTBRACE,	KEY_RIGHTBRACE,		\
+  KEY_ENTER,	KEY_LEFTCTRL,	KEY_A,		KEY_S,			\
+  KEY_D,	KEY_F,		KEY_G,		KEY_H,			\
+  KEY_J,	KEY_K,		KEY_L,		KEY_SEMICOLON,		\
+  KEY_APOSTROPHE,KEY_GRAVE,	KEY_LEFTSHIFT,	KEY_BACKSLASH,		\
+  KEY_Z,	KEY_X,		KEY_C,		KEY_V,			\
+  KEY_B,	KEY_N,		KEY_M,		KEY_COMMA,		\
+  KEY_DOT,	KEY_SLASH,	KEY_RIGHTSHIFT,	KEY_KPASTERISK,		\
+  KEY_LEFTALT,	KEY_SPACE,	KEY_CAPSLOCK,	KEY_F1,			\
+  KEY_F2,	KEY_F3,		KEY_F4,		KEY_F5,			\
+  KEY_F6,	KEY_F7,		KEY_F8,		KEY_F9,			\
+  KEY_F10,	KEY_NUMLOCK,	KEY_SCROLLLOCK,	KEY_KP7,		\
+  KEY_KP8,	KEY_KP9,	KEY_KPMINUS,	KEY_KP4,		\
+  KEY_KP5,	KEY_KP6,	KEY_KPPLUS,	KEY_KP1,		\
+  KEY_KP2,	KEY_KP3,	KEY_KP0,	KEY_KPDOT,		\
+  KEY_SYSRQ,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,		\
+  KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,		\
+  KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,		\
+  KEY_UP,	KEY_LEFT,	KEY_DOWN,	KEY_RIGHT,		\
+  KEY_HOME,	KEY_PAGEUP,	KEY_END,	KEY_PAGEDOWN,		\
+  KEY_INSERT,	KEY_DELETE,	KEY_102ND,	KEY_RESERVED,		\
+  KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,		\
+  KEY_F1,	KEY_F2,		KEY_F3,		KEY_F4,			\
+  KEY_F5,	KEY_F6,		KEY_F7,		KEY_F8,			\
+  KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,		\
+  KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED,	KEY_RESERVED
+
+
 /* Response to POL command, the "poll record header" */
 
 #define HIL_POL_NUM_AXES_MASK	0x03	/* Number of axis reported */
@@ -403,3 +479,5 @@ enum hil_command {
 #define HIL_POL_CHARTYPE_SET3	0x70	/* Keycode Set 3 */
 #define HIL_POL_AXIS_ALT	0x80	/* Data is from axis set 2 */
 
+
+#endif /* _HIL_H_ */

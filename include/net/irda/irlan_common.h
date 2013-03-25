@@ -17,7 +17,7 @@
  *     published by the Free Software Foundation; either version 2 of 
  *     the License, or (at your option) any later version.
  *
- *     Neither Dag Brattli nor University of Tromsø admit liability nor
+ *     Neither Dag Brattli nor University of TromsÃ¸ admit liability nor
  *     provide warranty for any of this software. This material is 
  *     provided "AS-IS" and at no charge.
  *
@@ -33,7 +33,6 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 
-#include <net/irda/irqueue.h>
 #include <net/irda/irttp.h>
 
 #define IRLAN_MTU        1518
@@ -99,7 +98,15 @@
 #define IRLAN_SHORT  1
 #define IRLAN_ARRAY  2
 
-#define IRLAN_MAX_HEADER (TTP_HEADER+LMP_HEADER+LAP_MAX_HEADER)
+/* IrLAN sits on top if IrTTP */
+#define IRLAN_MAX_HEADER (TTP_HEADER+LMP_HEADER)
+/* 1 byte for the command code and 1 byte for the parameter count */
+#define IRLAN_CMD_HEADER 2
+
+#define IRLAN_STRING_PARAMETER_LEN(name, value) (1 + strlen((name)) + 2 \
+						+ strlen ((value)))
+#define IRLAN_BYTE_PARAMETER_LEN(name)          (1 + strlen((name)) + 2 + 1)
+#define IRLAN_SHORT_PARAMETER_LEN(name)         (1 + strlen((name)) + 2 + 2)
 
 /*
  *  IrLAN client
@@ -161,11 +168,9 @@ struct irlan_provider_cb {
  *  IrLAN control block
  */
 struct irlan_cb {
-	irda_queue_t q; /* Must be first */
-
 	int    magic;
-	struct net_device dev;        /* Ethernet device structure*/
-	struct net_device_stats stats;
+	struct list_head  dev_list;
+	struct net_device *dev;        /* Ethernet device structure*/
 
 	__u32 saddr;               /* Source device address */
 	__u32 daddr;               /* Destination device address */
@@ -192,7 +197,6 @@ struct irlan_cb {
 	struct timer_list watchdog_timer;
 };
 
-struct irlan_cb *irlan_open(__u32 saddr, __u32 daddr);
 void irlan_close(struct irlan_cb *self);
 void irlan_close_tsaps(struct irlan_cb *self);
 
@@ -204,14 +208,13 @@ void irlan_open_data_tsap(struct irlan_cb *self);
 
 int irlan_run_ctrl_tx_queue(struct irlan_cb *self);
 
+struct irlan_cb *irlan_get_any(void);
 void irlan_get_provider_info(struct irlan_cb *self);
-void irlan_get_unicast_addr(struct irlan_cb *self);
 void irlan_get_media_char(struct irlan_cb *self);
 void irlan_open_data_channel(struct irlan_cb *self);
 void irlan_close_data_channel(struct irlan_cb *self);
 void irlan_set_multicast_filter(struct irlan_cb *self, int status);
 void irlan_set_broadcast_filter(struct irlan_cb *self, int status);
-void irlan_open_unicast_addr(struct irlan_cb *self);
 
 int irlan_insert_byte_param(struct sk_buff *skb, char *param, __u8 value);
 int irlan_insert_short_param(struct sk_buff *skb, char *param, __u16 value);
@@ -220,9 +223,6 @@ int irlan_insert_array_param(struct sk_buff *skb, char *name, __u8 *value,
 			     __u16 value_len);
 
 int irlan_extract_param(__u8 *buf, char *name, char *value, __u16 *len);
-void print_ret_code(__u8 code);
-
-extern hashbin_t *irlan;
 
 #endif
 

@@ -8,7 +8,9 @@
 # Copyright (C) 1995-2000 Russell King
 #
 
-SYSTEM	=$(TOPDIR)/$(LINUX)
+targets := Image zImage bootpImage
+
+SYSTEM	=$(LINUX)
 
 ZTEXTADDR	 = 0x02080000
 PARAMS_PHYS	 = 0x0207c000
@@ -25,8 +27,15 @@ endif
 
 export	SYSTEM ZTEXTADDR ZBSSADDR ZRELADDR INITRD_PHYS INITRD_VIRT PARAMS_PHYS
 
-Image:	$(CONFIGURE) $(SYSTEM)
-	$(OBJCOPY) -O binary -R .note -R .comment -g -S $(SYSTEM) $@
+Image: $(obj)/Image
+
+targets: $(obj)/Image
+
+$(obj)/Image: vmlinux FORCE
+	$(OBJCOPY) -O binary -R .note -R .comment -S vmlinux $@
+
+#$(obj)/Image:	$(CONFIGURE) $(SYSTEM)
+#	$(OBJCOPY) -O binary -R .note -R .comment -g -S $(SYSTEM) $@
 
 bzImage: zImage
 
@@ -36,7 +45,7 @@ zImage:	$(CONFIGURE) compressed/$(LINUX)
 bootpImage: bootp/bootp
 	$(OBJCOPY) -O binary -R .note -R .comment -S bootp/bootp $@
 
-compressed/$(LINUX): $(TOPDIR)/$(LINUX) dep
+compressed/$(LINUX): $(LINUX) dep
 	@$(MAKE) -C compressed $(LINUX)
 
 bootp/bootp: zImage initrd
@@ -50,16 +59,15 @@ initrd:
 # installation
 #
 install: $(CONFIGURE) Image
-	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) Image $(TOPDIR)/System.map "$(INSTALL_PATH)"
+	sh ./install.sh $(KERNELRELEASE) Image System.map "$(INSTALL_PATH)"
 
 zinstall: $(CONFIGURE) zImage
-	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION) zImage $(TOPDIR)/System.map "$(INSTALL_PATH)"
+	sh ./install.sh $(KERNELRELEASE) zImage System.map "$(INSTALL_PATH)"
 
 #
 # miscellany
 #
 mrproper clean:
-	$(RM) Image zImage bootpImage
 #	@$(MAKE) -C compressed clean
 #	@$(MAKE) -C bootp clean
 

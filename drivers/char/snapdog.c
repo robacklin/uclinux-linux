@@ -14,17 +14,18 @@
 /****************************************************************************/
  
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/miscdevice.h>
 #include <linux/watchdog.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/reboot.h>
+#include <linux/jiffies.h>
+#include <linux/sched.h>
 #include <asm/uaccess.h>
+#include <asm/irq_regs.h>
 
 /****************************************************************************/
 /*
@@ -72,17 +73,17 @@
 #if defined(CONFIG_MACH_ESS710) || defined(CONFIG_MACH_IVPN) || \
     defined(CONFIG_MACH_SG560) || defined(CONFIG_MACH_SG580) || \
     defined(CONFIG_MACH_SG640) || defined(CONFIG_MACH_SG720) || \
-	defined(CONFIG_MACH_SG590)
+    defined(CONFIG_MACH_SG590) || defined(CONFIG_MACH_SE5100)
 	#include <asm/io.h>
 
 	static inline void enable_dog(void)
 	{
-		*IXP425_GPIO_GPCLKR &= 0xffff0000;
+		*IXP4XX_GPIO_GPCLKR &= 0xffff0000;
 	}
 
 	static inline void poke_the_dog(void)
 	{
-		*IXP425_GPIO_GPOUTR ^= 0x4000;
+		*IXP4XX_GPIO_GPOUTR ^= 0x4000;
 	}
 
 	static inline void the_dog_is_dead(void) {}
@@ -95,12 +96,11 @@
 
 	static inline void enable_dog(void)
 	{
-		*IXP425_GPIO_GPOER &= ~0x2000;
 	}
 
 	static inline void poke_the_dog(void)
 	{
-		*IXP425_GPIO_GPOUTR ^= 0x2000;
+		*IXP4XX_GPIO_GPOUTR ^= 0x2000;
 	}
 
 	static inline void the_dog_is_dead(void) {}
@@ -108,17 +108,18 @@
 	#define HAS_HW_SERVICE 1
 #endif
 
-#if defined(CONFIG_MACH_SG560USB) || defined(CONFIG_MACH_SG565) || \
-    defined(CONFIG_MACH_SHIVA1100)
+#if defined(CONFIG_MACH_SG560USB) || defined(CONFIG_MACH_SG560ADSL) || \
+    defined(CONFIG_MACH_SG565) || defined(CONFIG_MACH_SHIVA1100)
 	#include <asm/io.h>
+	#include <mach/sg.h>
 
 	static volatile unsigned char *wdtcs2;
 
 	static inline void enable_dog(void)
 	{
 		/* CS7 is watchdog alive. Set it to 8bit and writable */
-		*IXP425_EXP_CS7 = 0xbfff0003;
-		wdtcs2 = (volatile unsigned char *) ioremap(IXP425_EXP_BUS_CS7_BASE_PHYS, 512);
+		*SG565_WATCHDOG_EXP_CS = 0xbfff0003;
+		wdtcs2 = (volatile unsigned char *) ioremap(SG565_WATCHDOG_BASE_PHYS, 512);
 	}
 
 	static inline void poke_the_dog(void)
@@ -150,36 +151,205 @@
 	#define HAS_HW_SERVICE 1
 #endif
 
-#ifdef CONFIG_MTD_NETtel
-	/* AMD SC520 based hardware platforms */
-	#include <asm/io.h>
+#if defined(CONFIG_SG590) || defined(CONFIG_SG8200)
+	#include <asm/mach-cavium-octeon/gpio.h>
 
-	static unsigned long mmcr;
-	static volatile u16 *wdtmrctl;
+	static int wdt_state;
 
 	static inline void enable_dog(void)
 	{
-		mmcr = ioremap(0xfffef000, 4096);
-		if (mmcr) {
-			wdtmrctl = (volatile u16 *) (mmcr + 0xcb0);
-			*wdtmrctl = 0x3333;
-			*wdtmrctl = 0xcccc;
-			*wdtmrctl = 0xc008;
-		}
+		octeon_gpio_config(9, OCTEON_GPIO_OUTPUT);
 	}
 
 	static inline void poke_the_dog(void)
 	{
-		if (wdtmrctl) {
-			*wdtmrctl = 0xaaaa;
-			*wdtmrctl = 0x5555;
-		}
+		if (wdt_state++ & 1)
+			octeon_gpio_clear(0x1 << 9);
+		else
+			octeon_gpio_set(0x1 << 9);
 	}
 
 	static inline void the_dog_is_dead(void) {}
 
 	#define HAS_HW_SERVICE 1
 #endif
+
+#if defined(CONFIG_MACH_ACM500X) || defined(CONFIG_MACH_IM42xx) || \
+	defined(CONFIG_MACH_CM41xx) || defined(CONFIG_MACH_IM4004)
+#ifdef CONFIG_MACH_ACM500X
+#include <mach/platform.h>
+#include <mach/ks8692_utils.h>
+#endif
+	extern void service_watchdog(void);
+
+	static inline void enable_dog(void)
+	{
+#ifdef CONFIG_MACH_ACM500X
+		/* Use GPIO 4 as Output */
+		u32 reg = KS8692_READ_REG(KS8692_GPIO_MODE);
+		reg |= (1 << 4);
+		KS8692_WRITE_REG(KS8692_GPIO_MODE, reg);
+#endif
+	}
+
+	static inline void poke_the_dog(void)
+	{
+#ifdef CONFIG_MACH_ACM500X
+		/* Toggle GPIO4 */
+		u32 reg = KS8692_READ_REG(KS8692_GPIO_DATA);
+		reg ^= (1 << 4); 
+		KS8692_WRITE_REG(KS8692_GPIO_DATA, reg);
+#endif
+		service_watchdog();		
+	}
+
+	static inline void the_dog_is_dead(void) 
+	{
+		emergency_restart();
+	}
+
+	#define HAS_HW_SERVICE 1
+#endif
+
+#if defined(CONFIG_MACH_ACM550X)
+#include <mach/ks8692_utils.h>
+
+	static inline void enable_dog(void)
+	{
+		/* Use GPIO 4 as Output */
+		u32 reg = KS8692_READ_REG(KS8692_GPIO_MODE);
+		reg |= (1 << 4);
+		KS8692_WRITE_REG(KS8692_GPIO_MODE, reg);
+	}
+
+	static inline void poke_the_dog(void)
+	{
+		/* Toggle GPIO4 */
+		u32 reg = KS8692_READ_REG(KS8692_GPIO_DATA);
+		reg ^= (1 << 4); 
+		KS8692_WRITE_REG(KS8692_GPIO_DATA, reg);
+	}
+
+	static inline void the_dog_is_dead(void) {}
+
+	#define HAS_HW_SERVICE 1
+#endif
+
+#if defined(CONFIG_MACH_UTM400)
+	#include <asm/gpio.h>
+
+	static int wdt_state;
+
+	static int dog_initted = 0;
+
+	static inline void enable_dog(void) { dog_initted = 1; }
+
+	static inline void poke_the_dog(void)
+	{
+		if (dog_initted)
+			gpio_set_value(44, wdt_state++ & 0x1);
+	}
+
+	static inline void the_dog_is_dead(void) {}
+
+	#define HAS_HW_SERVICE 1
+#endif
+
+#ifdef CONFIG_UTM2000
+	#include <asm/io.h>
+	#include "../watchdog/iwdt.h"
+
+	#define	WDT_INDEX	0x4e
+	#define	WDT_DATA	0x4f
+
+	static u16 wdt_iobase;
+
+	static void wdt_get_iobase(void)
+	{
+		outb(0x80, WDT_INDEX);
+		outb(0x86, WDT_INDEX);
+
+		outb(0x07, WDT_INDEX);
+		outb(0x06, WDT_DATA);
+
+		outb(0x60, WDT_INDEX);
+		wdt_iobase = inb(WDT_DATA) << 8;
+		outb(0x61, WDT_INDEX);
+		wdt_iobase |= inb(WDT_DATA);
+
+		outb(0x68, WDT_INDEX);
+		outb(0x08, WDT_INDEX);
+	}
+
+	static inline void poke_the_dog(void)
+	{
+		if (wdt_iobase) {
+			unsigned long flags;
+			local_irq_save(flags);
+			outb(0x80, wdt_iobase + WDT_RLD_REG0);
+			outb(0x86, wdt_iobase + WDT_RLD_REG0);
+			outb(0x01, wdt_iobase + WDT_RLD_REG1);
+			local_irq_restore(flags);
+		}
+	}
+
+	#define	T1	2000		/* Primary counter is 2s */
+	#define	T2	100		/* Secondary count is 100ms */
+
+	static inline void enable_dog(void)
+	{
+		wdt_get_iobase();
+		printk("snapdog: internal WDT watchdog I/0 address 0x%x\n",
+			wdt_iobase);
+
+		if (wdt_iobase == 0) {
+			printk("snapdog: WDT hardware not found!\n");
+			return;
+		}
+
+		/* Clear timeout condition */
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb(0x02, wdt_iobase + WDT_RLD_REG1);
+
+		/* Set timer pre-load counters */
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb((T1 & 0xff), wdt_iobase + WDT_PRELD1_REG0);
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb(((T1 >> 8) & 0xff), wdt_iobase + WDT_PRELD1_REG1);
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb(((T1 >> 16) & 0xff), wdt_iobase + WDT_PRELD1_REG2);
+
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb((T2 & 0xff), wdt_iobase + WDT_PRELD2_REG0);
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb(((T2 >> 8) & 0xff), wdt_iobase + WDT_PRELD2_REG1);
+		outb(0x80, wdt_iobase + WDT_RLD_REG0);
+		outb(0x86, wdt_iobase + WDT_RLD_REG0);
+		outb(((T2 >> 16) & 0xff), wdt_iobase + WDT_PRELD2_REG2);
+
+		/* Set WDT config */
+		outb(0, wdt_iobase + WDT_CONFIG_REG);
+
+		poke_the_dog();
+
+		/* Enable the watchdog, and then lock it */
+		outb(WDT_ENABLE, wdt_iobase + WDT_LOCK_REG);
+		outb(WDT_ENABLE | WDT_LOCK, wdt_iobase + WDT_LOCK_REG);
+
+		poke_the_dog();
+	}
+
+	static inline void the_dog_is_dead(void) {}
+
+	#define HAS_HW_SERVICE 1
+#endif
+
 
 #ifndef HAS_HW_SERVICE
 	static inline void enable_dog(void) {}
@@ -196,7 +366,7 @@
 static unsigned long snapdog_last = 0;
 static unsigned long snapdog_next = 0;
 static int           snapdog_service_required = 0;
-static int           snapdog_busy = 0;
+static unsigned long snapdog_busy = 0;
 static int           snapdog_kernel = 0;
 static int           snapdog_timeout = 60;
 static int           snapdog_ltimeout = 300;
@@ -205,19 +375,19 @@ static int           snapdog_quiet = 0;
 static int           snapdog_warned = 0;
 static int           snapdog_stackdump = 64;
 
-MODULE_PARM(snapdog_kernel, "i");
+module_param(snapdog_kernel, int, 0);
 MODULE_PARM_DESC(snapdog_kernel,
 		"Watchdog is kernel only (userland servicing not required)");
 
-MODULE_PARM(snapdog_timeout, "i");
+module_param(snapdog_timeout, int, 0);
 MODULE_PARM_DESC(snapdog_timeout,
 		"Watchdog timeout for user service in seconds");
 
-MODULE_PARM(snapdog_ltimeout, "i");
+module_param(snapdog_ltimeout, int, 0);
 MODULE_PARM_DESC(snapdog_ltimeout,
 		"Watchdog 'long' timeout for user service in seconds");
 
-MODULE_PARM(snapdog_stackdump, "i");
+module_param(snapdog_stackdump, int, 0);
 MODULE_PARM_DESC(snapdog_stackdump,
 		"Number of long words to dump from the stack");
 
@@ -228,7 +398,7 @@ MODULE_PARM_DESC(snapdog_stackdump,
  * just a stub :-(
  */
 
-static void show_stack(struct pt_regs *regs)
+static void snapdog_show_stack(struct pt_regs *regs)
 {
 	unsigned long i;
 	unsigned long *addr = &i;
@@ -258,8 +428,9 @@ static void show_stack(struct pt_regs *regs)
  */
 
 void
-snapdog_service(struct pt_regs *regs)
+snapdog_service(void)
 {
+	struct pt_regs *regs;
 	int the_dog_is_alive = 0;
 
 	if (snapdog_kernel) {
@@ -267,7 +438,7 @@ snapdog_service(struct pt_regs *regs)
 	} else if (!snapdog_service_required) {
 		the_dog_is_alive = 1;
 	} else if (snapdog_next < snapdog_last) {
-		if (jiffies < snapdog_next || jiffies > snapdog_last)
+		if (jiffies < snapdog_next || jiffies >= snapdog_last)
 			the_dog_is_alive = 1;
 	} else if (jiffies >= snapdog_last && jiffies < snapdog_next) {
 		the_dog_is_alive = 1;
@@ -278,9 +449,10 @@ snapdog_service(struct pt_regs *regs)
 	else if (!snapdog_warned) {
 		snapdog_warned = 1;
 		printk(KERN_CRIT "snapdog: expired, allowing system reboot.\n");
+		regs = get_irq_regs();
 		if (regs) {
 			show_regs(regs);
-			show_stack(regs);
+			snapdog_show_stack(regs);
 		}
 		the_dog_is_dead();
 	}
@@ -345,7 +517,6 @@ snapdog_open(struct inode *inode, struct file *file)
 static int
 snapdog_release(struct inode *inode, struct file *file)
 {
-	lock_kernel();
 	if (!snapdog_quiet) {
 		if (!snapdog_service_required) {
 			printk(KERN_INFO
@@ -356,18 +527,16 @@ snapdog_release(struct inode *inode, struct file *file)
 		}
 	}
 	clear_bit(0, &snapdog_busy);
-	unlock_kernel();
-
 	return 0;
 }
 
 /****************************************************************************/
 
 static ssize_t
-snapdog_write(struct file *file, const char *data, size_t len, loff_t *ppos)
+snapdog_write(struct file *file, const char __user *data, size_t len, loff_t *ppos)
 {
 	/*  Can't seek (pwrite) on this device  */
-	if (ppos != &file->f_pos)
+	if (*ppos != file->f_pos)
 		return -ESPIPE;
 
 	/*
@@ -402,16 +571,15 @@ snapdog_write(struct file *file, const char *data, size_t len, loff_t *ppos)
 
 /****************************************************************************/
 
-static int
+static long
 snapdog_ioctl(
-	struct inode *inode,
 	struct file *file,
 	unsigned int cmd,
 	unsigned long arg)
 {
 	static struct watchdog_info ident = {
-		options: WDIOF_MAGICCLOSE,
-		identity: "HW/SW Watchdog for SnapGear",
+		.options = WDIOF_MAGICCLOSE,
+		.identity = "HW/SW Watchdog for SnapGear",
 	};
 
 	switch (cmd) {
@@ -419,13 +587,13 @@ snapdog_ioctl(
 		return(-ENOIOCTLCMD);
 
 	case WDIOC_GETSUPPORT:
-		if (copy_to_user((struct watchdog_info *) arg, &ident, sizeof(ident)))
+		if (copy_to_user((struct watchdog_info __user *) arg, &ident, sizeof(ident)))
 			return -EFAULT;
 		return(0);
 
 	case WDIOC_GETSTATUS:
 	case WDIOC_GETBOOTSTATUS:
-		return(put_user(0, (int *) arg));
+		return(put_user(0, (int __user *) arg));
 
 	case WDIOC_KEEPALIVE:
 		snapdog_user_service();
@@ -436,18 +604,18 @@ snapdog_ioctl(
 /****************************************************************************/
 
 static struct file_operations snapdog_fops = {
-	owner:		THIS_MODULE,
-	write:		snapdog_write,
-	ioctl:		snapdog_ioctl,
-	open:		snapdog_open,
-	release:	snapdog_release,
+	.owner		= THIS_MODULE,
+	.write		= snapdog_write,
+	.unlocked_ioctl	= snapdog_ioctl,
+	.open		= snapdog_open,
+	.release	= snapdog_release,
 };
 
 
 static struct miscdevice snapdog_miscdev = {
-	minor:		WATCHDOG_MINOR,
-	name:		"snapdog",
-	fops:		&snapdog_fops,
+	.minor		= WATCHDOG_MINOR,
+	.name		= "watchdog",
+	.fops		= &snapdog_fops,
 };
 
 /****************************************************************************/
@@ -462,7 +630,7 @@ watchdog_init(void)
 
 	enable_dog();
 
-       	ret = misc_register(&snapdog_miscdev);
+	ret = misc_register(&snapdog_miscdev);
 	if (ret)
 		return ret;
 

@@ -5,6 +5,9 @@
  * Copyright (C) 1996 Paul Mackerras.
  */
 
+#ifndef _LINUX_CUDA_H
+#define _LINUX_CUDA_H
+
 /* CUDA commands (2nd byte) */
 #define CUDA_WARM_START		0
 #define CUDA_AUTOPOLL		1
@@ -29,9 +32,10 @@
 #ifdef __KERNEL__
 
 extern int find_via_cuda(void);
-extern int via_cuda_start(void);
 extern int cuda_request(struct adb_request *req,
 			void (*done)(struct adb_request *), int nbytes, ...);
 extern void cuda_poll(void);
 
 #endif	/* __KERNEL */
+
+#endif /* _LINUX_CUDA_H */

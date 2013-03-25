@@ -19,7 +19,7 @@
 	lduh		@(gr3,gr0),gr3
 	andicc		gr3,#0x100,gr0,icc0
 	bne		icc0,0,999f
-	
+
 	setlos		#~\val,gr3
 	st		gr3,@(gr30,gr0)
 	membar
@@ -41,10 +41,10 @@
 
 .macro LEDS val
 .endm
-#endif	
+#endif
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 __sdram_base = 0x00000000		/* base address to which SDRAM relocated */
 #else
-__sdram_base = 0xc0000000		/* base address to which SDRAM relocated */
+__sdram_base = __page_offset		/* base address to which SDRAM relocated */
 #endif

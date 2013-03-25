@@ -1,167 +1,99 @@
-#
-# arch/microblaze/Makefile
-#
-# This file is included by the global makefile so that you can add your own
-# architecture-specific flags and dependencies. Remember to do have actions
-# for "archclean" and "archdep" for cleaning up and making dependencies for
-# this architecture
-#
-# This file is subject to the terms and conditions of the GNU General Public
-# License.  See the file "COPYING" in the main directory of this archive
-# for more details.
-#
-
-#
-# If you want the kernel build to build modules outside of the tree
-# then define this and pass it to the main linux makefile
-#
-ifdef EXTRA_MODULE_DIRS
-SUBDIRS += $(EXTRA_MODULE_DIRS)
-endif
-
-ARCH_DIR = arch/$(ARCH)
-
-# work out which gcc version we are using
-GCC_VER = $(shell $(CC) -v 2>&1|grep version|cut -d " " -f 3)
-
-# split into major and minor numbers
-GCC_MAJOR = $(shell echo $(GCC_VER) | cut -d '.' -f 1)
-GCC_MINOR = $(shell echo $(GCC_VER) | cut -d '.' -f 2)  
-
-# setup memory model
-ifdef CONFIG_MODEL_RAM
-MODEL = ram
-endif
-ifdef CONFIG_MODEL_ROM
-MODEL = rom
-endif
-export MODEL
-
-# Find out which board/platform we are compiling for
-include arch/$(ARCH)/Boards.mk
-
-# get the compiler, flags and targets from the platform
-# Microblaze is transitioning towards nice multi-platform build
-# but we must not break old targets yet (Suzaku, mbvanilla_net)
-ifdef PLATFORM
-
-CFLAGS += -DPLATFORM=$(PLATFORM)
-
-include $(ARCH_DIR)/platform/$(PLATFORM)/Rules.make
-
-arch/$(ARCH)/empty.o:
-	$(CROSS_COMPILE)gcc -o arch/$(ARCH)/empty.o -c arch/$(ARCH)/empty.c
-
-bootstrap:
-	@$(MAKEBOOT) bootstrap
-
-archmrproper:
-
-archdep:
-
-else  ##### The old way!
-# old way of doing things, for back-compatability
-# it would be nice to delete this eventually 
-
-GCC_DIR = $(shell $(CC) -v 2>&1 | grep specs | sed -e 's/.* \(.*\)specs/\1\./')
-
-INCGCC = $(GCC_DIR)/include
-
-
-# C library shenanigans.
-# mb-gcc 2.95 split some of the libgcc stuff out into the standalone
-# libc.a, with different versions of the libs for different HW mul/div/shift
-# support.  We don't support this, instead just linking against bog-standard
-# standalone libc.a.  This costs us performance.
-#
-# New compiler (mb-gcc-3.4.x) at least uses libgcc correctly, so we no longer
-# have to link against standalone libc.a.  However, we must explicilty point
-# the right, optimised version of libgcc.a.  
-
-ifeq ($(GCC_MAJOR),2)
-	LIBGCC = $(GCC_DIR)/libgcc.a
-	LIBGCC += $(GCC_DIR)/../../../../microblaze/lib/libc.a
+ifeq ($(CONFIG_MMU),y)
+UTS_SYSNAME = -DUTS_SYSNAME=\"Linux\"
 else
-	# Build up path to correct libgcc.a
-	LIBGCC := $(GCC_DIR)
-
-	ifeq ($(CONFIG_XILINX_MICROBLAZE0_USE_BARREL),1)
-		LIBGCC := $(LIBGCC)/bs
-	endif
-
-	ifeq ($(CONFIG_XILINX_MICROBLAZE0_USE_HW_MUL),1)
-		LIBGCC := $(LIBGCC)/m
-	endif
-
-	LIBGCC := $(LIBGCC)/libgcc.a
+UTS_SYSNAME = -DUTS_SYSNAME=\"uClinux\"
 endif
 
-CFLAGS += -fno-builtin
-CFLAGS += -DNO_MM -DNO_FPU -D__ELF__ -DMAGIC_ROM_PTR
-CFLAGS += -D__linux__
-CFLAGS += -I$(INCGCC)
+# What CPU vesion are we building for, and crack it open
+# as major.minor.rev
+CPU_VER   := $(shell echo $(CONFIG_XILINX_MICROBLAZE0_HW_VER))
+CPU_MAJOR := $(shell echo $(CPU_VER) | cut -d '.' -f 1)
+CPU_MINOR := $(shell echo $(CPU_VER) | cut -d '.' -f 2)
+CPU_REV   := $(shell echo $(CPU_VER) | cut -d '.' -f 3)
 
-ifdef CONFIG_MICROBLAZE_HARD_MULT
-	CFLAGS += -mno-xl-soft-mul
+export CPU_VER CPU_MAJOR CPU_MINOR CPU_REV
+
+# Use cpu-related CONFIG_ vars to set compile options.
+# The various CONFIG_XILINX cpu features options are integers 0/1/2...
+# rather than bools y/n
+
+# Work out HW multipler support. This is tricky.
+# 1. Spartan2 has no HW multipliers.
+# 2. MicroBlaze v3.x always uses them, except in Spartan 2
+# 3. All other FPGa/CPU ver combos, we can trust the CONFIG_ settings
+ifeq (,$(findstring spartan2,$(CONFIG_XILINX_MICROBLAZE0_FAMILY)))
+  ifeq ($(CPU_MAJOR),3)
+    CPUFLAGS-1 += -mno-xl-soft-mul
+  else
+    # USE_HW_MUL can be 0, 1, or 2, defining a hierarchy of HW Mul support.
+    CPUFLAGS-$(subst 1,,$(CONFIG_XILINX_MICROBLAZE0_USE_HW_MUL)) += -mxl-multiply-high
+    CPUFLAGS-$(CONFIG_XILINX_MICROBLAZE0_USE_HW_MUL) += -mno-xl-soft-mul
+  endif
+endif
+CPUFLAGS-$(CONFIG_XILINX_MICROBLAZE0_USE_DIV) += -mno-xl-soft-div
+CPUFLAGS-$(CONFIG_XILINX_MICROBLAZE0_USE_BARREL) += -mxl-barrel-shift
+CPUFLAGS-$(CONFIG_XILINX_MICROBLAZE0_USE_PCMP_INSTR) += -mxl-pattern-compare
+
+CPUFLAGS-1 += $(call cc-option,-mcpu=v$(CPU_VER))
+
+# r31 holds current when in kernel mode
+KBUILD_CFLAGS += -ffixed-r31 $(CPUFLAGS-1) $(CPUFLAGS-2)
+
+LDFLAGS		:=
+LDFLAGS_vmlinux	:=
+
+head-y := arch/microblaze/kernel/head.o
+libs-y += arch/microblaze/lib/
+core-y += arch/microblaze/kernel/
+core-y += arch/microblaze/mm/
+core-y += arch/microblaze/platform/
+core-$(CONFIG_PCI) += arch/microblaze/pci/
+
+drivers-$(CONFIG_OPROFILE) += arch/microblaze/oprofile/
+
+boot := arch/microblaze/boot
+
+# Are we making a simpleImage.<boardname> target? If so, crack out the boardname
+DTB:=$(subst simpleImage.,,$(filter simpleImage.%, $(MAKECMDGOALS)))
+
+ifneq ($(DTB),)
+	core-y	+= $(boot)/
 endif
 
-ifdef CONFIG_MICROBLAZE_HARD_DIV
-	CFLAGS += -mno-xl-soft-div
+# defines filename extension depending memory management type
+ifeq ($(CONFIG_MMU),)
+MMU := -nommu
 endif
 
-ifdef CONFIG_MICROBLAZE_HARD_BARREL
-	CFLAGS += -mxl-barrel-shift
-endif
+export MMU DTB
 
-HEAD := $(ARCH_DIR)/kernel/head.o
+all: linux.bin
 
-SUBDIRS += $(ARCH_DIR)/kernel $(ARCH_DIR)/mm $(ARCH_DIR)/lib $(ARCH_DIR)/xilinx_ocp
-
-CORE_FILES := $(ARCH_DIR)/kernel/kernel.o $(ARCH_DIR)/mm/mm.o $(CORE_FILES)
-CORE_FILES += $(ARCH_DIR)/xilinx_ocp/xilinx_ocp.o
-
-LIBS += $(ARCH_DIR)/lib/lib.a $(LIBGCC)
-
-
-# Deal with the initial contents of the blkmem device
-ifdef ROOT_FS_IMAGE 
-# Embed it in the kernel
-
-ROOT_FS_IMAGE_OBJ = root_fs_image.o
-
-CORE_FILES += $(ROOT_FS_IMAGE_OBJ)
-
-$(LINUX) : $(ROOT_FS_IMAGE_OBJ)
-
-# Note that we use the build-system's objcopy, as the microblaze tools 
-# are fairly old, and don't have the --rename-section option.
-$(ROOT_FS_IMAGE_OBJ): $(ROOT_FS_IMAGE)
-	objcopy -I binary -O elf32-big --rename-section .data=.root,alloc,load,readonly,data,contents $< $@
-
-endif # ROOT_FS_IMAGE
-
-
-#kernel linker script
-LD_SCRIPT := linux.ld
-
-LINKFLAGS = -T $(LD_SCRIPT) 
-$(LINUX) : $(LD_SCRIPT)
-$(LD_SCRIPT): $(ARCH_DIR)/linux.ld.in
-	$(CPP) -P -x assembler-with-cpp $(AFLAGS) $< > $@
-
-
-bootstrap:
-	@$(MAKEBOOT) bootstrap
-
-archmrproper:
-
-archdep:
+# With make 3.82 we cannot mix normal and wildcard targets
+BOOT_TARGETS1 = linux.bin linux.bin.gz
+BOOT_TARGETS2 = simpleImage.%
 
 archclean:
-	rm -f $(LD_SCRIPT)
-	rm -f $(LINUX)
-	rm -f $(ARCH_DIR)/kernel/microblaze_defs.h $(ARCH_DIR)/kernel/microblaze_defs.d
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-endif #PLATFORM
+$(BOOT_TARGETS1): vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
+$(BOOT_TARGETS2): vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $(boot)/$@
 
+define archhelp
+  echo '* linux.bin    - Create raw binary'
+  echo '  linux.bin.gz - Create compressed raw binary'
+  echo '  simpleImage.<dt> - ELF image with $(arch)/boot/dts/<dt>.dts linked in'
+  echo '                   - stripped elf with fdt blob'
+  echo '  simpleImage.<dt>.unstrip - full ELF image with fdt blob'
+  echo '  *_defconfig      - Select default config from arch/microblaze/configs'
+  echo ''
+  echo '  Targets with <dt> embed a device tree blob inside the image'
+  echo '  These targets support board with firmware that does not'
+  echo '  support passing a device tree directly. Replace <dt> with the'
+  echo '  name of a dts file from the arch/microblaze/boot/dts/ directory'
+  echo '  (minus the .dts extension).'
+endef
 
+MRPROPER_FILES += $(boot)/simpleImage.*

@@ -1,6 +1,6 @@
 /* head.S: kernel entry point for FR-V kernel
  *
- * Copyright (C) 2003 Red Hat, Inc. All Rights Reserved.
+ * Copyright (C) 2003, 2004 Red Hat, Inc. All Rights Reserved.
  * Written by David Howells (dhowells@redhat.com)
  *
  * This program is free software; you can redistribute it and/or
@@ -9,12 +9,12 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/threads.h>
 #include <linux/linkage.h>
+#include <asm/thread_info.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/spr-regs.h>
 #include <asm/mb86943a.h>
 #include <asm/cache.h>
@@ -28,7 +28,7 @@
 #   command line string
 #
 ###############################################################################
-	.section	.text.head,"ax"
+	__HEAD
 	.balign		4
 
 	.globl		_boot, __head_reference
@@ -80,8 +80,8 @@ __head_reference:
 	subcc		gr7,gr8,gr0,icc0
 	bne		icc0,#0,__head_no_parameters
 
-	sethi.p		%hi(saved_command_line-1),gr6
-	setlo		%lo(saved_command_line-1),gr6
+	sethi.p		%hi(redboot_command_line-1),gr6
+	setlo		%lo(redboot_command_line-1),gr6
 	sethi.p		%hi(__head_reference),gr4
 	setlo		%lo(__head_reference),gr4
 	sub		gr6,gr4,gr6
@@ -108,7 +108,7 @@ __head_no_parameters:
 #   fiddling with the SDRAM controller registers
 #
 ###############################################################################
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	call		__head_fr451_describe_sdram
 
 #else
@@ -134,7 +134,7 @@ __head_do_sdram:
 	or		gr17,gr0,gr21
 	or.p		gr17,gr0,gr22
 	or		gr17,gr0,gr23
-	
+
 	# consult the SDRAM controller CS address registers
 	cld		@(gr14,gr0 ),gr20,	cc0,#1	; DBR0 / DARS0
 	cld		@(gr14,gr11),gr21,	cc1,#1	; DBR1 / DARS1
@@ -281,7 +281,7 @@ __head_kernel_moved:
 #
 ###############################################################################
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	LEDS		0x3301
 	call		__head_fr451_set_busctl
 	LEDS		0x3303
@@ -334,45 +334,49 @@ __head_done_memmap:
 #
 ###############################################################################
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 #define MMUMODE		HSR0_EIMMU|HSR0_EDMMU|HSR0_EXMMU|HSR0_EDAT|HSR0_XEDAT
 #else
 #define MMUMODE		HSR0_EIMMU|HSR0_EDMMU
 #endif
 
 	movsg		hsr0,gr5
-#if defined(CONFIG_DCACHE_DISABLE)
+
 	sethi.p		%hi(MMUMODE),gr4
 	setlo		%lo(MMUMODE),gr4
-#else	
+	or		gr4,gr5,gr5
+
 #if defined(CONFIG_FRV_DEFL_CACHE_WTHRU)
-	sethi.p		%hi(HSR0_DCE|HSR0_CBM_WRITE_THRU|MMUMODE),gr4
-	setlo		%lo(HSR0_DCE|HSR0_CBM_WRITE_THRU|MMUMODE),gr4
+	sethi.p		%hi(HSR0_DCE|HSR0_CBM_WRITE_THRU),gr4
+	setlo		%lo(HSR0_DCE|HSR0_CBM_WRITE_THRU),gr4
 #elif defined(CONFIG_FRV_DEFL_CACHE_WBACK)
-	sethi.p		%hi(HSR0_DCE|HSR0_CBM_COPY_BACK|MMUMODE),gr4
-	setlo		%lo(HSR0_DCE|HSR0_CBM_COPY_BACK|MMUMODE),gr4
-#else
-#error Indeterminate default cache configuration
-#endif
-#if defined(CONFIG_FRV_DEFL_CACHE_NWA)
+	sethi.p		%hi(HSR0_DCE|HSR0_CBM_COPY_BACK),gr4
+	setlo		%lo(HSR0_DCE|HSR0_CBM_COPY_BACK),gr4
+#elif defined(CONFIG_FRV_DEFL_CACHE_WBEHIND)
+	sethi.p		%hi(HSR0_DCE|HSR0_CBM_COPY_BACK),gr4
+	setlo		%lo(HSR0_DCE|HSR0_CBM_COPY_BACK),gr4
+
 	movsg		psr,gr6
 	srli		gr6,#24,gr6
-	cmpi		gr6,#0x50,icc0 // FR451
+	cmpi		gr6,#0x50,icc0		// FR451
 	beq		icc0,#0,0f
-	cmpi		gr6,#0x40,icc0 // FR405
+	cmpi		gr6,#0x40,icc0		// FR405
 	bne		icc0,#0,1f
-    0:
+0:
 	# turn off write-allocate
 	sethi.p		%hi(HSR0_NWA),gr6
 	setlo		%lo(HSR0_NWA),gr6
 	or		gr4,gr6,gr4
-    1:
+1:
+
+#else
+#error No default cache configuration set
 #endif
-#endif  /* CONFIG_DCACHE_DISABLE */
 
 	or		gr4,gr5,gr5
 	movgs		gr5,hsr0
 	bar
+
 	LEDS		0x0008
 
 	sethi.p		%hi(__head_mmu_enabled),gr19
@@ -385,7 +389,7 @@ __head_mmu_enabled:
 
 	LEDS		0x0009
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	call		__head_fr451_finalise_protection
 #endif
 
@@ -445,8 +449,9 @@ __head_mmu_enabled:
 	sethi.p		%hi(__entry_usertrap_table),gr4
 	setlo		%lo(__entry_usertrap_table),gr4
 
-	lddi.p		@(gr28,#0),gr28		; load __frame & current
-	
+	lddi		@(gr28,#0),gr28		; load __frame & current
+	ldi.p		@(gr29,#4),gr15		; set current_thread
+
 	or		gr0,gr0,fp
 	or		gr28,gr0,sp
 
@@ -460,11 +465,11 @@ __head_mmu_enabled:
 	setlo		%lo(#PSR_EM|PSR_EF|PSR_CM|PSR_NEM),gr4
 	or		gr22,gr4,gr22
 	movgs		gr22,psr
-	
+
 	andi		gr22,#~(PSR_PIL|PSR_PS|PSR_S),gr22
 	ori		gr22,#PSR_ET,gr22
 	sti		gr22,@(gr28,REG_PSR)
-	
+
 
 ###############################################################################
 #
@@ -492,25 +497,27 @@ __head_mmu_enabled:
 	or.p		gr3,gr0,gr12
 	or		gr3,gr0,gr13
 	or.p		gr3,gr0,gr14
-	or		gr3,gr0,gr15
-	or.p		gr3,gr0,gr17
-	or		gr3,gr0,gr18
-	or.p		gr3,gr0,gr19
-	or		gr3,gr0,gr20
-	or.p		gr3,gr0,gr21
-	or		gr3,gr0,gr23
-	or.p		gr3,gr0,gr24
-	or		gr3,gr0,gr25
-	or.p		gr3,gr0,gr26
-	or		gr3,gr0,gr27
-#	or.p		gr3,gr0,gr30
+	or		gr3,gr0,gr17
+	or.p		gr3,gr0,gr18
+	or		gr3,gr0,gr19
+	or.p		gr3,gr0,gr20
+	or		gr3,gr0,gr21
+	or.p		gr3,gr0,gr23
+	or		gr3,gr0,gr24
+	or.p		gr3,gr0,gr25
+	or		gr3,gr0,gr26
+	or.p		gr3,gr0,gr27
+#	or		gr3,gr0,gr30
 	or		gr3,gr0,gr31
 	movgs		gr0,lr
 	movgs		gr0,lcr
 	movgs		gr0,ccr
 	movgs		gr0,cccr
 
-#ifndef CONFIG_UCLINUX
+	# initialise the virtual interrupt handling
+	subcc		gr0,gr0,gr0,icc2		/* set Z, clear C */
+
+#ifdef CONFIG_MMU
 	movgs		gr3,scr2
 	movgs		gr3,scr3
 #endif
@@ -529,13 +536,13 @@ __debug_stub_init_break:
 	# above and get to the kernel this way
 	# look at arch/frv/kernel/debug-stub.c: debug_stub_init() to see what you've missed
 	call		start_kernel
-	
+
 	.globl		__head_end
 __head_end:
 	.size		_boot, .-_boot
 
 	# provide a point for GDB to place a break
-	.section	.text.start,"ax"
+	.section	.text..start,"ax"
 	.globl		_start
 	.balign		4
 _start:

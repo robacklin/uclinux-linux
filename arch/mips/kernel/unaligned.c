@@ -72,42 +72,49 @@
  *       A store crossing a page boundary might be executed only partially.
  *       Undo the partial store in this case.
  */
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
+#include <linux/sched.h>
+#include <linux/debugfs.h>
+#include <linux/perf_event.h>
 
 #include <asm/asm.h>
 #include <asm/branch.h>
 #include <asm/byteorder.h>
+#include <asm/cop2.h>
 #include <asm/inst.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 
 #define STR(x)  __STR(x)
 #define __STR(x)  #x
 
-#ifdef CONFIG_PROC_FS
-unsigned long unaligned_instructions;
+enum {
+	UNALIGNED_ACTION_QUIET,
+	UNALIGNED_ACTION_SIGNAL,
+	UNALIGNED_ACTION_SHOW,
+};
+#ifdef CONFIG_DEBUG_FS
+static u32 unaligned_instructions;
+static u32 unaligned_action;
+#else
+#define unaligned_action UNALIGNED_ACTION_QUIET
 #endif
+extern void show_registers(struct pt_regs *regs);
 
-static inline int emulate_load_store_insn(struct pt_regs *regs,
-	void *addr, unsigned long pc,
-	unsigned long **regptr, unsigned long *newvalue)
+static void emulate_load_store_insn(struct pt_regs *regs,
+	void __user *addr, unsigned int __user *pc)
 {
 	union mips_instruction insn;
-	unsigned long value, fixup;
+	unsigned long value;
 	unsigned int res;
-	unsigned long tmpvalue;
 
-	regs->regs[0] = 0;
-	*regptr=NULL;
+	perf_sw_event(PERF_COUNT_SW_EMULATION_FAULTS, 1, regs, 0);
 
 	/*
 	 * This load never faults.
 	 */
-	__get_user(insn.word, (unsigned int *)pc);
+	__get_user(insn.word, pc);
 
 	switch (insn.i_format.opcode) {
 	/*
@@ -143,7 +150,7 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 	 * The remaining opcodes are the ones that are really of interest.
 	 */
 	case lh_op:
-		if (verify_area(VERIFY_READ, addr, 2))
+		if (!access_ok(VERIFY_READ, addr, 2))
 			goto sigbus;
 
 		__asm__ __volatile__ (".set\tnoat\n"
@@ -171,60 +178,42 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 			: "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
-		*newvalue = value;
-		*regptr = &regs->regs[insn.i_format.rt];
+		compute_return_epc(regs);
+		regs->regs[insn.i_format.rt] = value;
 		break;
 
 	case lw_op:
-		if (verify_area(VERIFY_READ, addr, 4))
+		if (!access_ok(VERIFY_READ, addr, 4))
 			goto sigbus;
 
 		__asm__ __volatile__ (
 #ifdef __BIG_ENDIAN
-#if !defined(CONFIG_RTL865X)
-			"1:\tlwl\t%0, (%3)\n"
-			"2:\tlwr\t%0, 3(%3)\n\t"
-#else
-			"1:\tlbu\t%2, (%3)\n"
-			"\tnop\n"
-			"sll\t%2, 24\n"
-			"move\t%0,	%2\n"
-			"\tlbu\t%2,	1(%3)\n"
-			"\tnop\n"
-			"sll\t%2,	16\n"
-			"or\t%0,	%2\n"
-			"2:\tlbu\t%2, 2(%3)\n"
-			"\tnop\n"
-			"sll\t%2, 	8\n"
-			"or\t%0,	%2\n"
-			"\tlbu\t%2,	3(%3)\n"
-			"\tnop\n"
-			"or\t%0,	%2\n"
-#endif
+			"1:\tlwl\t%0, (%2)\n"
+			"2:\tlwr\t%0, 3(%2)\n\t"
 #endif
 #ifdef __LITTLE_ENDIAN
-			"1:\tlwl\t%0, 3(%3)\n"
-			"2:\tlwr\t%0, (%3)\n\t"
+			"1:\tlwl\t%0, 3(%2)\n"
+			"2:\tlwr\t%0, (%2)\n\t"
 #endif
 			"li\t%1, 0\n"
 			"3:\t.section\t.fixup,\"ax\"\n\t"
-			"4:\tli\t%1, %4\n\t"
+			"4:\tli\t%1, %3\n\t"
 			"j\t3b\n\t"
 			".previous\n\t"
 			".section\t__ex_table,\"a\"\n\t"
 			STR(PTR)"\t1b, 4b\n\t"
 			STR(PTR)"\t2b, 4b\n\t"
 			".previous"
-			: "=&r" (value), "=r" (res), "=&r" (tmpvalue)
+			: "=&r" (value), "=r" (res)
 			: "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
-		*newvalue = value;
-		*regptr = &regs->regs[insn.i_format.rt];
+		compute_return_epc(regs);
+		regs->regs[insn.i_format.rt] = value;
 		break;
 
 	case lhu_op:
-		if (verify_area(VERIFY_READ, addr, 2))
+		if (!access_ok(VERIFY_READ, addr, 2))
 			goto sigbus;
 
 		__asm__ __volatile__ (
@@ -253,12 +242,12 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 			: "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
-		*newvalue = value;
-		*regptr = &regs->regs[insn.i_format.rt];
+		compute_return_epc(regs);
+		regs->regs[insn.i_format.rt] = value;
 		break;
 
 	case lwu_op:
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 		/*
 		 * A 32-bit kernel might be running on a 64-bit processor.  But
 		 * if we're on a 32-bit processor and an i-cache incoherency
@@ -266,7 +255,7 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		 * would blow up, so for now we don't handle unaligned 64-bit
 		 * instructions on 32-bit kernels.
 		 */
-		if (verify_area(VERIFY_READ, addr, 4))
+		if (!access_ok(VERIFY_READ, addr, 4))
 			goto sigbus;
 
 		__asm__ __volatile__ (
@@ -293,16 +282,16 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 			: "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
-		*newvalue = value;
-		*regptr = &regs->regs[insn.i_format.rt];
+		compute_return_epc(regs);
+		regs->regs[insn.i_format.rt] = value;
 		break;
-#endif /* CONFIG_MIPS64 */
+#endif /* CONFIG_64BIT */
 
 		/* Cannot handle 64-bit instructions in 32-bit kernel */
 		goto sigill;
 
 	case ld_op:
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 		/*
 		 * A 32-bit kernel might be running on a 64-bit processor.  But
 		 * if we're on a 32-bit processor and an i-cache incoherency
@@ -310,7 +299,7 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		 * would blow up, so for now we don't handle unaligned 64-bit
 		 * instructions on 32-bit kernels.
 		 */
-		if (verify_area(VERIFY_READ, addr, 8))
+		if (!access_ok(VERIFY_READ, addr, 8))
 			goto sigbus;
 
 		__asm__ __volatile__ (
@@ -335,16 +324,16 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 			: "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
-		*newvalue = value;
-		*regptr = &regs->regs[insn.i_format.rt];
+		compute_return_epc(regs);
+		regs->regs[insn.i_format.rt] = value;
 		break;
-#endif /* CONFIG_MIPS64 */
+#endif /* CONFIG_64BIT */
 
 		/* Cannot handle 64-bit instructions in 32-bit kernel */
 		goto sigill;
 
 	case sh_op:
-		if (verify_area(VERIFY_WRITE, addr, 2))
+		if (!access_ok(VERIFY_WRITE, addr, 2))
 			goto sigbus;
 
 		value = regs->regs[insn.i_format.rt];
@@ -377,27 +366,18 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 			: "r" (value), "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
+		compute_return_epc(regs);
 		break;
 
 	case sw_op:
-		if (verify_area(VERIFY_WRITE, addr, 4))
+		if (!access_ok(VERIFY_WRITE, addr, 4))
 			goto sigbus;
 
 		value = regs->regs[insn.i_format.rt];
 		__asm__ __volatile__ (
 #ifdef __BIG_ENDIAN
-#if !defined(CONFIG_RTL865X)
 			"1:\tswl\t%1,(%2)\n"
 			"2:\tswr\t%1, 3(%2)\n\t"
-#else
-			"1:\tsb\t%1, 3(%2)\n"
-			"  \tsrl\t%1, 8\n"
-			"  \tsb\t%1, 2(%2)\n"
-			"  \tsrl\t%1, 8\n"
-			"2:\tsb\t%1, 1(%2)\n"
-			"  \tsrl\t%1, 8\n"
-			"  \tsb\t%1, 0(%2)\n"
-#endif
 #endif
 #ifdef __LITTLE_ENDIAN
 			"1:\tswl\t%1, 3(%2)\n"
@@ -417,10 +397,11 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		: "r" (value), "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
+		compute_return_epc(regs);
 		break;
 
 	case sd_op:
-#ifdef CONFIG_MIPS64
+#ifdef CONFIG_64BIT
 		/*
 		 * A 32-bit kernel might be running on a 64-bit processor.  But
 		 * if we're on a 32-bit processor and an i-cache incoherency
@@ -428,7 +409,7 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		 * would blow up, so for now we don't handle unaligned 64-bit
 		 * instructions on 32-bit kernels.
 		 */
-		if (verify_area(VERIFY_WRITE, addr, 8))
+		if (!access_ok(VERIFY_WRITE, addr, 8))
 			goto sigbus;
 
 		value = regs->regs[insn.i_format.rt];
@@ -455,8 +436,9 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		: "r" (value), "r" (addr), "i" (-EFAULT));
 		if (res)
 			goto fault;
+		compute_return_epc(regs);
 		break;
-#endif /* CONFIG_MIPS64 */
+#endif /* CONFIG_64BIT */
 
 		/* Cannot handle 64-bit instructions in 32-bit kernel */
 		goto sigill;
@@ -470,17 +452,27 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		 */
 		goto sigbus;
 
+	/*
+	 * COP2 is available to implementor for application specific use.
+	 * It's up to applications to register a notifier chain and do
+	 * whatever they have to do, including possible sending of signals.
+	 */
 	case lwc2_op:
+		cu2_notifier_call_chain(CU2_LWC2_OP, regs);
+		break;
+
 	case ldc2_op:
+		cu2_notifier_call_chain(CU2_LDC2_OP, regs);
+		break;
+
 	case swc2_op:
+		cu2_notifier_call_chain(CU2_SWC2_OP, regs);
+		break;
+
 	case sdc2_op:
-		/*
-		 * These are the coprocessor 2 load/stores.  The current
-		 * implementations don't use cp2 and cp2 should always be
-		 * disabled in c0_status.  So send SIGILL.
-                 * (No longer true: The Sony Praystation uses cp2 for
-                 * 3D matrix operations.  Dunno if that thingy has a MMU ...)
-		 */
+		cu2_notifier_call_chain(CU2_SDC2_OP, regs);
+		break;
+
 	default:
 		/*
 		 * Pheeee...  We encountered an yet unknown instruction or
@@ -489,60 +481,40 @@ static inline int emulate_load_store_insn(struct pt_regs *regs,
 		goto sigill;
 	}
 
-#ifdef CONFIG_PROC_FS
+#ifdef CONFIG_DEBUG_FS
 	unaligned_instructions++;
 #endif
 
-	return 0;
+	return;
 
 fault:
 	/* Did we have an exception handler installed? */
-	fixup = search_exception_table(exception_epc(regs));
-	if (fixup) {
-		long new_epc;
-		new_epc = fixup_exception(dpf_reg, fixup, regs->cp0_epc);
-		printk(KERN_DEBUG "%s: Forwarding exception at [<%lx>] (%lx)\n",
-		       current->comm, regs->cp0_epc, new_epc);
-		regs->cp0_epc = new_epc;
-		return 1;
-	}
+	if (fixup_exception(regs))
+		return;
 
-	die_if_kernel ("Unhandled kernel unaligned access", regs);
-	send_sig(SIGSEGV, current, 1);
+	die_if_kernel("Unhandled kernel unaligned access", regs);
+	force_sig(SIGSEGV, current);
 
-	return 0;
+	return;
 
 sigbus:
 	die_if_kernel("Unhandled kernel unaligned access", regs);
-	send_sig(SIGBUS, current, 1);
+	force_sig(SIGBUS, current);
 
-	return 0;
+	return;
 
 sigill:
 	die_if_kernel("Unhandled kernel unaligned access or invalid instruction", regs);
-	send_sig(SIGILL, current, 1);
-
-	return 0;
+	force_sig(SIGILL, current);
 }
 
 asmlinkage void do_ade(struct pt_regs *regs)
 {
-	unsigned long *regptr, newval;
-	extern int do_dsemulret(struct pt_regs *);
+	unsigned int __user *pc;
 	mm_segment_t seg;
-	unsigned long pc;
 
-	/*
-	 * Address errors may be deliberately induced by the FPU emulator to
-	 * retake control of the CPU after executing the instruction in the
-	 * delay slot of an emulated branch.
-	 */
-	/* Terminate if exception was recognized as a delay slot return */
-	if (do_dsemulret(regs))
-		return;
-
-	/* Otherwise handle as normal */
-
+	perf_sw_event(PERF_COUNT_SW_ALIGNMENT_FAULTS,
+			1, regs, regs->cp0_badvaddr);
 	/*
 	 * Did we catch a fault trying to load an instruction?
 	 * Or are we running in MIPS16 mode?
@@ -550,9 +522,13 @@ asmlinkage void do_ade(struct pt_regs *regs)
 	if ((regs->cp0_badvaddr == regs->cp0_epc) || (regs->cp0_epc & 0x1))
 		goto sigbus;
 
-	pc = exception_epc(regs);
-	if ((current->thread.mflags & MF_FIXADE) == 0)
+	pc = (unsigned int __user *) exception_epc(regs);
+	if (user_mode(regs) && !test_thread_flag(TIF_FIXADE))
 		goto sigbus;
+	if (unaligned_action == UNALIGNED_ACTION_SIGNAL)
+		goto sigbus;
+	else if (unaligned_action == UNALIGNED_ACTION_SHOW)
+		show_registers(regs);
 
 	/*
 	 * Do branch emulation only if we didn't forward the exception.
@@ -561,16 +537,7 @@ asmlinkage void do_ade(struct pt_regs *regs)
 	seg = get_fs();
 	if (!user_mode(regs))
 		set_fs(KERNEL_DS);
-	if (!emulate_load_store_insn(regs, (void *)regs->cp0_badvaddr, pc,
-	                             &regptr, &newval)) {
-		compute_return_epc(regs);
-		/*
-		 * Now that branch is evaluated, update the dest
-		 * register if necessary
-		 */
-		if (regptr)
-			*regptr = newval;
-	}
+	emulate_load_store_insn(regs, (void __user *)regs->cp0_badvaddr, pc);
 	set_fs(seg);
 
 	return;
@@ -583,3 +550,24 @@ sigbus:
 	 * XXX On return from the signal handler we should advance the epc
 	 */
 }
+
+#ifdef CONFIG_DEBUG_FS
+extern struct dentry *mips_debugfs_dir;
+static int __init debugfs_unaligned(void)
+{
+	struct dentry *d;
+
+	if (!mips_debugfs_dir)
+		return -ENODEV;
+	d = debugfs_create_u32("unaligned_instructions", S_IRUGO,
+			       mips_debugfs_dir, &unaligned_instructions);
+	if (!d)
+		return -ENOMEM;
+	d = debugfs_create_u32("unaligned_action", S_IRUGO | S_IWUSR,
+			       mips_debugfs_dir, &unaligned_action);
+	if (!d)
+		return -ENOMEM;
+	return 0;
+}
+__initcall(debugfs_unaligned);
+#endif

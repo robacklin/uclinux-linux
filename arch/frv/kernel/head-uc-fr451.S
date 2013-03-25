@@ -9,12 +9,11 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/threads.h>
 #include <linux/linkage.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
 #include <asm/spr-regs.h>
 #include <asm/mb86943a.h>
 #include "head.inc"
@@ -32,7 +31,7 @@
 #define __400_LCR	0xfe000100
 #define __400_LSBR	0xfe000c00
 
-	.section	.text.init,"ax"
+	__INIT
 	.balign		4
 
 ###############################################################################
@@ -160,7 +159,7 @@ __head_fr451_set_protection:
 	# the FR451 also has an extra trap base register
 	movsg		tbr,gr4
 	movgs		gr4,btbr
-	
+
 	# turn on the timers as appropriate
 	movgs		gr0,timerh
 	movgs		gr0,timerl
@@ -170,6 +169,6 @@ __head_fr451_set_protection:
 	setlo		%lo(HSR0_ETMI),gr5
 	or		gr4,gr5,gr4
 	movgs		gr4,hsr0
-	
+
 	LEDS		0x3300
 	jmpl		@(gr27,gr0)

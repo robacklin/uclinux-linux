@@ -1,87 +1,58 @@
+/*
+ * Copyright (C) 2008-2009 Michal Simek <monstr@monstr.eu>
+ * Copyright (C) 2008-2009 PetaLogix
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+
 #include <linux/module.h>
-#include <linux/linkage.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/mm.h>
-#include <linux/user.h>
-#include <linux/elfcore.h>
+#include <linux/cryptohash.h>
+#include <linux/delay.h>
 #include <linux/in6.h>
-#include <linux/interrupt.h>
-#include <linux/config.h>
+#include <linux/syscalls.h>
 
-#include <asm/setup.h>
-#include <asm/pgalloc.h>
-#include <asm/irq.h>
-#include <asm/io.h>
-#include <asm/semaphore.h>
 #include <asm/checksum.h>
-#include <asm/hardirq.h>
-#include <asm/softirq.h>
-#include <asm/current.h>
+#include <asm/cacheflush.h>
+#include <linux/io.h>
+#include <asm/page.h>
+#include <linux/ftrace.h>
+#include <linux/uaccess.h>
 
-//for module enable: we may not use trap_table
-//extern void *trap_table;
-//EXPORT_SYMBOL (trap_table);
+extern char *_ebss;
+EXPORT_SYMBOL_GPL(_ebss);
 
-/* platform dependent support */
-extern void dump_thread (struct pt_regs *, struct user *);
-EXPORT_SYMBOL (dump_thread);
-EXPORT_SYMBOL (kernel_thread);
-EXPORT_SYMBOL (__bug);
-
-EXPORT_SYMBOL (enable_irq);
-EXPORT_SYMBOL (disable_irq);
-EXPORT_SYMBOL (current);
-
-/* Networking helper routines. */
-EXPORT_SYMBOL (csum_partial_copy);
-EXPORT_SYMBOL (csum_partial_copy_from_user);
-EXPORT_SYMBOL (ip_compute_csum);
-EXPORT_SYMBOL (ip_fast_csum);
-
-/* string / mem functions */
-EXPORT_SYMBOL_NOVERS (strcpy);
-EXPORT_SYMBOL_NOVERS (strncpy);
-EXPORT_SYMBOL_NOVERS (strcat);
-EXPORT_SYMBOL_NOVERS (strncat);
-EXPORT_SYMBOL_NOVERS (strcmp);
-EXPORT_SYMBOL_NOVERS (strncmp);
-EXPORT_SYMBOL_NOVERS (strchr);
-EXPORT_SYMBOL_NOVERS (strlen);
-EXPORT_SYMBOL_NOVERS (strnlen);
-EXPORT_SYMBOL_NOVERS (strpbrk);
-EXPORT_SYMBOL_NOVERS (strtok);
-EXPORT_SYMBOL_NOVERS (strrchr);
-EXPORT_SYMBOL_NOVERS (strstr);
-EXPORT_SYMBOL_NOVERS (memset);
-EXPORT_SYMBOL_NOVERS (memcpy);
-EXPORT_SYMBOL_NOVERS (memmove);
-EXPORT_SYMBOL_NOVERS (memcmp);
-EXPORT_SYMBOL_NOVERS (memscan);
-
-/* semaphores */
-EXPORT_SYMBOL_NOVERS (__down);
-EXPORT_SYMBOL_NOVERS (__down_interruptible);
-EXPORT_SYMBOL_NOVERS (__down_trylock);
-EXPORT_SYMBOL_NOVERS (__up);
+#ifdef CONFIG_FUNCTION_TRACER
+extern void _mcount(void);
+EXPORT_SYMBOL(_mcount);
+#endif
 
 /*
- * libgcc functions - functions that are used internally by the
- * compiler...  (prototypes are not correct though, but that
- * doesn't really matter since they're not versioned).
+ * Assembly functions that may be used (directly or indirectly) by modules
  */
-extern void __ashldi3 (void);
-extern void __ashrdi3 (void);
-extern void __lshrdi3 (void);
-extern void __muldi3 (void); //for module enable
-extern void __negdi2 (void);
-extern void __mulsi3 (void);
-extern void __divsi3 (void);
+EXPORT_SYMBOL(__copy_tofrom_user);
+EXPORT_SYMBOL(__strncpy_user);
 
-EXPORT_SYMBOL_NOVERS (__ashldi3);
-EXPORT_SYMBOL_NOVERS (__ashrdi3);
-EXPORT_SYMBOL_NOVERS (__lshrdi3);
-EXPORT_SYMBOL_NOVERS (__muldi3); //for module enable
-EXPORT_SYMBOL_NOVERS (__mulsi3); 
-EXPORT_SYMBOL_NOVERS (__divsi3); //for module enable
-EXPORT_SYMBOL_NOVERS (__negdi2);
+#ifdef CONFIG_OPT_LIB_ASM
+EXPORT_SYMBOL(memcpy);
+EXPORT_SYMBOL(memmove);
+#endif
+
+#ifdef CONFIG_MMU
+EXPORT_SYMBOL(empty_zero_page);
+#endif
+
+EXPORT_SYMBOL(mbc);
+
+extern void __divsi3(void);
+EXPORT_SYMBOL(__divsi3);
+extern void __modsi3(void);
+EXPORT_SYMBOL(__modsi3);
+extern void __mulsi3(void);
+EXPORT_SYMBOL(__mulsi3);
+extern void __udivsi3(void);
+EXPORT_SYMBOL(__udivsi3);
+extern void __umodsi3(void);
+EXPORT_SYMBOL(__umodsi3);

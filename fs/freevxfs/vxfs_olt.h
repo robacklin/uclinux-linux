@@ -30,8 +30,6 @@
 #ifndef _VXFS_OLT_H_
 #define _VXFS_OLT_H_
 
-#ident "$Id: vxfs_olt.h,v 1.5 2001/04/25 18:11:23 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - Object Location Table data structures.
  *
@@ -62,7 +60,7 @@ enum {
  *
  * The Object Location Table header is placed at the beginning of each
  * OLT extent.  It is used to fing certain filesystem-wide metadata, e.g.
- * the inital inode list, the fileset header or the device configuration.
+ * the initial inode list, the fileset header or the device configuration.
  */
 struct vxfs_olt {
 	u_int32_t	olt_magic;	/* magic number			*/

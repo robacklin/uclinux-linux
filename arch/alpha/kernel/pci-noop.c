@@ -7,8 +7,13 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
+#include <linux/gfp.h>
+#include <linux/capability.h>
+#include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
+#include <linux/dma-mapping.h>
+#include <linux/scatterlist.h>
 
 #include "proto.h"
 
@@ -48,7 +53,6 @@ asmlinkage long
 sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 {
 	struct pci_controller *hose;
-	struct pci_dev *dev;
 
 	/* from hose or from bus.devfn */
 	if (which & IOBASE_FROM_HOSE) {
@@ -102,41 +106,84 @@ sys_pciconfig_write(unsigned long bus, unsigned long dfn,
 	else
 		return -ENODEV;
 }
-/* stubs for the routines in pci_iommu.c */
-void *
-pci_alloc_consistent(struct pci_dev *pdev, size_t size, dma_addr_t *dma_addrp)
+
+static void *alpha_noop_alloc_coherent(struct device *dev, size_t size,
+				       dma_addr_t *dma_handle, gfp_t gfp,
+				       struct dma_attrs *attrs)
 {
-	return (void *)0;
+	void *ret;
+
+	if (!dev || *dev->dma_mask >= 0xffffffffUL)
+		gfp &= ~GFP_DMA;
+	ret = (void *)__get_free_pages(gfp, get_order(size));
+	if (ret) {
+		memset(ret, 0, size);
+		*dma_handle = virt_to_phys(ret);
+	}
+	return ret;
 }
-void
-pci_free_consistent(struct pci_dev *pdev, size_t size, void *cpu_addr,
-		    dma_addr_t dma_addr)
+
+static void alpha_noop_free_coherent(struct device *dev, size_t size,
+				     void *cpu_addr, dma_addr_t dma_addr,
+				     struct dma_attrs *attrs)
 {
+	free_pages((unsigned long)cpu_addr, get_order(size));
 }
-dma_addr_t
-pci_map_single(struct pci_dev *pdev, void *cpu_addr, size_t size,
-	       int direction)
+
+static dma_addr_t alpha_noop_map_page(struct device *dev, struct page *page,
+				      unsigned long offset, size_t size,
+				      enum dma_data_direction dir,
+				      struct dma_attrs *attrs)
 {
-	return (dma_addr_t)0;
+	return page_to_pa(page) + offset;
 }
-void
-pci_unmap_single(struct pci_dev *pdev, dma_addr_t dma_addr, size_t size,
-		 int direction)
+
+static int alpha_noop_map_sg(struct device *dev, struct scatterlist *sgl, int nents,
+			     enum dma_data_direction dir, struct dma_attrs *attrs)
 {
+	int i;
+	struct scatterlist *sg;
+
+	for_each_sg(sgl, sg, nents, i) {
+		void *va;
+
+		BUG_ON(!sg_page(sg));
+		va = sg_virt(sg);
+		sg_dma_address(sg) = (dma_addr_t)virt_to_phys(va);
+		sg_dma_len(sg) = sg->length;
+	}
+
+	return nents;
 }
-int
-pci_map_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,
-	   int direction)
+
+static int alpha_noop_mapping_error(struct device *dev, dma_addr_t dma_addr)
 {
 	return 0;
 }
-void
-pci_unmap_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,
-	     int direction)
+
+static int alpha_noop_supported(struct device *dev, u64 mask)
 {
+	return mask < 0x00ffffffUL ? 0 : 1;
 }
-int
-pci_dma_supported(struct pci_dev *hwdev, dma_addr_t mask)
+
+static int alpha_noop_set_mask(struct device *dev, u64 mask)
 {
+	if (!dev->dma_mask || !dma_supported(dev, mask))
+		return -EIO;
+
+	*dev->dma_mask = mask;
 	return 0;
 }
+
+struct dma_map_ops alpha_noop_ops = {
+	.alloc			= alpha_noop_alloc_coherent,
+	.free			= alpha_noop_free_coherent,
+	.map_page		= alpha_noop_map_page,
+	.map_sg			= alpha_noop_map_sg,
+	.mapping_error		= alpha_noop_mapping_error,
+	.dma_supported		= alpha_noop_supported,
+	.set_dma_mask		= alpha_noop_set_mask,
+};
+
+struct dma_map_ops *dma_ops = &alpha_noop_ops;
+EXPORT_SYMBOL(dma_ops);

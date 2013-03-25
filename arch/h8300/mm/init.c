@@ -1,7 +1,7 @@
 /*
  *  linux/arch/h8300/mm/init.c
  *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@uClinux.org>,
+ *  Copyright (C) 1998  D. Jeff Dionne <jeff@lineo.ca>,
  *                      Kenneth Albanowski <kjahds@kjahds.com>,
  *  Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
  *
@@ -13,36 +13,31 @@
  *  Copyright (C) 1995  Hamish Macdonald
  *
  *  JAN/1999 -- hacked to support ColdFire (gerg@snapgear.com)
- *  DEC/2000 -- linux 2.4 support <davidm@lineo.com>
+ *  DEC/2000 -- linux 2.4 support <davidm@snapgear.com>
  */
 
-#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/mm.h>
-#include <linux/swap.h>
 #include <linux/kernel.h>
+#include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
+#include <linux/ptrace.h>
+#include <linux/mman.h>
+#include <linux/mm.h>
+#include <linux/swap.h>
+#include <linux/init.h>
+#include <linux/highmem.h>
+#include <linux/pagemap.h>
 #include <linux/bootmem.h>
+#include <linux/gfp.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
-#include <asm/virtconvert.h>
 
 #undef DEBUG
-
-static unsigned long totalram_pages = 0;
-
-extern void die_if_kernel(char *,struct pt_regs *,long);
-
-extern void free_initmem(void);
 
 /*
  * BAD_PAGE is the page that is used for page faults when linux
@@ -65,40 +60,6 @@ unsigned long empty_zero_page;
 
 extern unsigned long rom_length;
 
-void show_mem(void)
-{
-    unsigned long i;
-    int free = 0, total = 0, reserved = 0, shared = 0;
-    int cached = 0;
-
-    printk("\nMem-info:\n");
-    show_free_areas();
-#if 0
-    printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-#endif
-    i = max_mapnr;
-    while (i-- > 0) {
-	total++;
-	if (PageReserved(mem_map+i))
-	    reserved++;
-	else if (PageSwapCache(mem_map+i))
-	    cached++;
-	else if (!page_count(mem_map+i))
-	    free++;
-	else
-	    shared += page_count(mem_map+i) - 1;
-    }
-    printk("%d pages of RAM\n",total);
-    printk("%d free pages\n",free);
-    printk("%d reserved pages\n",reserved);
-    printk("%d pages shared\n",shared);
-    printk("%d pages swap cached\n",cached);
-#if 0
-    printk("%ld pages in page table cache\n",pgtable_cache_size);
-#endif
-    show_buffers();
-}
-
 extern unsigned long memory_start;
 extern unsigned long memory_end;
 
@@ -106,13 +67,13 @@ extern unsigned long memory_end;
  * paging_init() continues the virtual memory environment setup which
  * was begun by the code in arch/head.S.
  * The parameters are pointers to where to stick the starting and ending
- * addresses  of available kernel virtual memory.
+ * addresses of available kernel virtual memory.
  */
-void paging_init(void)
+void __init paging_init(void)
 {
 	/*
-	 * make sure start_mem is page aligned,  otherwise bootmem and
-	 * page_alloc get different views og the world
+	 * Make sure start_mem is page aligned,  otherwise bootmem and
+	 * page_alloc get different views og the world.
 	 */
 #ifdef DEBUG
 	unsigned long start_mem = PAGE_ALIGN(memory_start);
@@ -125,8 +86,8 @@ void paging_init(void)
 #endif
 
 	/*
-	 * initialize the bad page table and bad page to point
-	 * to a couple of allocated pages
+	 * Initialize the bad page table and bad page to point
+	 * to a couple of allocated pages.
 	 */
 	empty_bad_page_table = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
 	empty_bad_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
@@ -134,7 +95,7 @@ void paging_init(void)
 	memset((void *)empty_zero_page, 0, PAGE_SIZE);
 
 	/*
-	 * Set up SFC/DFC registers (user data space)
+	 * Set up SFC/DFC registers (user data space).
 	 */
 	set_fs (USER_DS);
 
@@ -146,30 +107,30 @@ void paging_init(void)
 #endif
 
 	{
-		unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+		unsigned long zones_size[MAX_NR_ZONES] = {0, };
 
 		zones_size[ZONE_DMA]     = 0 >> PAGE_SHIFT;
 		zones_size[ZONE_NORMAL]  = (end_mem - PAGE_OFFSET) >> PAGE_SHIFT;
 #ifdef CONFIG_HIGHMEM
 		zones_size[ZONE_HIGHMEM] = 0;
 #endif
-		free_area_init_node(0, NULL, NULL, zones_size, PAGE_OFFSET, NULL);
+		free_area_init(zones_size);
 	}
 }
 
-void mem_init(void)
+void __init mem_init(void)
 {
 	int codek = 0, datak = 0, initk = 0;
 	/* DAVIDM look at setup memory map generically with reserved area */
 	unsigned long tmp;
 	extern char _etext, _stext, _sdata, _ebss, __init_begin, __init_end;
-	extern unsigned char _ramend, _ramstart;
+	extern unsigned long  _ramend, _ramstart;
 	unsigned long len = &_ramend - &_ramstart;
 	unsigned long start_mem = memory_start; /* DAVIDM - these must start at end of kernel */
 	unsigned long end_mem   = memory_end; /* DAVIDM - this must not include kernel stack at top */
 
 #ifdef DEBUG
-	printk("Mem_init: start=%lx, end=%lx\n", start_mem, end_mem);
+	printk(KERN_DEBUG "Mem_init: start=%lx, end=%lx\n", start_mem, end_mem);
 #endif
 
 	end_mem &= PAGE_MASK;
@@ -186,7 +147,7 @@ void mem_init(void)
 	initk = (&__init_begin - &__init_end) >> 10;
 
 	tmp = nr_free_pages() << PAGE_SHIFT;
-	printk("Memory available: %luk/%luk RAM, %luk/%luk ROM (%dk kernel code, %dk data)\n",
+	printk(KERN_INFO "Memory available: %luk/%luk RAM, %luk/%luk ROM (%dk kernel code, %dk data)\n",
 	       tmp >> 10,
 	       len >> 10,
 	       (rom_length > 0) ? ((rom_length >> 10) - codek) : 0,
@@ -203,7 +164,7 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 	int pages = 0;
 	for (; start < end; start += PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
+		init_page_count(virt_to_page(start));
 		free_page(start);
 		totalram_pages++;
 		pages++;
@@ -212,25 +173,8 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 }
 #endif
 
-
-void si_meminfo(struct sysinfo *val)
-{
-    unsigned long i;
-
-    i = max_mapnr;
-    val->totalram = totalram_pages;
-    val->sharedram = 0;
-    val->freeram = nr_free_pages();
-    val->bufferram = atomic_read(&buffermem_pages);
-    val->totalhigh = 0;
-    val->freehigh = 0;
-    val->mem_unit = PAGE_SIZE;
-    return;
-}
-
-
 void
-free_initmem()
+free_initmem(void)
 {
 #ifdef CONFIG_RAMKERNEL
 	unsigned long addr;
@@ -243,14 +187,14 @@ free_initmem()
 	/* next to check that the page we free is not a partial page */
 	for (; addr + PAGE_SIZE < (unsigned long)(&__init_end); addr +=PAGE_SIZE) {
 		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
+		init_page_count(virt_to_page(addr));
 		free_page(addr);
 		totalram_pages++;
 	}
-	printk("Freeing unused kernel memory: %ldk freed (0x%x - 0x%x)\n",
+	printk(KERN_INFO "Freeing unused kernel memory: %ldk freed (0x%x - 0x%x)\n",
 			(addr - PAGE_ALIGN((long) &__init_begin)) >> 10,
-			PAGE_ALIGN((unsigned)(&__init_begin)),
-			(unsigned)(addr - PAGE_SIZE));
+			(int)(PAGE_ALIGN((unsigned long)(&__init_begin))),
+			(int)(addr - PAGE_SIZE));
 #endif
 }
 

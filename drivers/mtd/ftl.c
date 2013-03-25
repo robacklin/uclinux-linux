@@ -1,5 +1,4 @@
 /* This version ported to the Linux-MTD system by dwmw2@infradead.org
- * $Id: ftl.c,v 1.45 2003/01/24 23:31:27 dwmw2 Exp $
  *
  * Fixes: Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  * - fixes some leaks on failure in build_maps and ftl_notify_add, cleanups
@@ -27,7 +26,7 @@
 
     The initial developer of the original code is David A. Hinds
     <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
-    are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
+    are Copyright © 1999 David A. Hinds.  All Rights Reserved.
 
     Alternatively, the contents of this file may be used under the
     terms of the GNU General Public License version 2 (the "GPL"), in
@@ -52,65 +51,34 @@
 
     Use of the FTL format for non-PCMCIA applications may be an
     infringement of these patents.  For additional information,
-    contact M-Systems (http://www.m-sys.com) directly.
-      
+    contact M-Systems directly. M-Systems since acquired by Sandisk. 
+
 ======================================================================*/
+#include <linux/mtd/blktrans.h>
 #include <linux/module.h>
-#include <linux/mtd/compatmac.h>
 #include <linux/mtd/mtd.h>
 /*#define PSYCHO_DEBUG */
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/major.h>
 #include <linux/fs.h>
-#include <linux/ioctl.h>
+#include <linux/init.h>
 #include <linux/hdreg.h>
-
-#if (LINUX_VERSION_CODE >= 0x20100)
 #include <linux/vmalloc.h>
-#endif
-#if (LINUX_VERSION_CODE >= 0x20303)
 #include <linux/blkpg.h>
-#endif
+#include <asm/uaccess.h>
 
 #include <linux/mtd/ftl.h>
-/*====================================================================*/
-/* Stuff which really ought to be in compatmac.h */
-
-#if (LINUX_VERSION_CODE < 0x20328)
-#define register_disk(dev, drive, minors, ops, size) \
-    do { (dev)->part[(drive)*(minors)].nr_sects = size; \
-        if (size == 0) (dev)->part[(drive)*(minors)].start_sect = -1; \
-        resetup_one_dev(dev, drive); } while (0)
-#endif
-
-#if (LINUX_VERSION_CODE < 0x20320)
-#define BLK_DEFAULT_QUEUE(n)    blk_dev[n].request_fn
-#define blk_init_queue(q, req)  q = (req)
-#define blk_cleanup_queue(q)    q = NULL
-#define request_arg_t           void
-#else
-#define request_arg_t           request_queue_t *q
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,14)
-#define BLK_INC_USE_COUNT MOD_INC_USE_COUNT
-#define BLK_DEC_USE_COUNT MOD_DEC_USE_COUNT
-#else
-#define BLK_INC_USE_COUNT do {} while(0)
-#define BLK_DEC_USE_COUNT do {} while(0)
-#endif
 
 /*====================================================================*/
 
 /* Parameters that can be set with 'insmod' */
 static int shuffle_freq = 50;
-MODULE_PARM(shuffle_freq, "i");
+module_param(shuffle_freq, int, 0);
 
 /*====================================================================*/
 
@@ -119,19 +87,6 @@ MODULE_PARM(shuffle_freq, "i");
 #define FTL_MAJOR	44
 #endif
 
-/* Funky stuff for setting up a block device */
-#define MAJOR_NR		FTL_MAJOR
-#define DEVICE_NAME		"ftl"
-#define DEVICE_REQUEST		do_ftl_request
-#define DEVICE_ON(device)
-#define DEVICE_OFF(device)
-
-#define DEVICE_NR(minor)	((minor)>>5)
-#define REGION_NR(minor)	(((minor)>>3)&3)
-#define PART_NR(minor)		((minor)&7)
-#define MINOR_NR(dev,reg,part)	(((dev)<<5)+((reg)<<3)+(part))
-
-#include <linux/blk.h>
 
 /*====================================================================*/
 
@@ -142,8 +97,7 @@ MODULE_PARM(shuffle_freq, "i");
 #define MAX_REGION	4
 
 /* Maximum number of partitions in an FTL region */
-#define PART_BITS	3
-#define MAX_PART	8
+#define PART_BITS	4
 
 /* Maximum number of outstanding erase requests per socket */
 #define MAX_ERASE	8
@@ -154,45 +108,28 @@ MODULE_PARM(shuffle_freq, "i");
 
 /* Each memory region corresponds to a minor device */
 typedef struct partition_t {
-    struct mtd_info	*mtd;
-    u_int32_t		state;
-    u_int32_t		*VirtualBlockMap;
-    u_int32_t		*VirtualPageMap;
-    u_int32_t		FreeTotal;
+    struct mtd_blktrans_dev mbd;
+    uint32_t		state;
+    uint32_t		*VirtualBlockMap;
+    uint32_t		*VirtualPageMap;
+    uint32_t		FreeTotal;
     struct eun_info_t {
-	u_int32_t		Offset;
-	u_int32_t		EraseCount;
-	u_int32_t		Free;
-	u_int32_t		Deleted;
+	uint32_t		Offset;
+	uint32_t		EraseCount;
+	uint32_t		Free;
+	uint32_t		Deleted;
     } *EUNInfo;
     struct xfer_info_t {
-	u_int32_t		Offset;
-	u_int32_t		EraseCount;
-	u_int16_t		state;
+	uint32_t		Offset;
+	uint32_t		EraseCount;
+	uint16_t		state;
     } *XferInfo;
-    u_int16_t		bam_index;
-    u_int32_t		*bam_cache;
-    u_int16_t		DataUnits;
-    u_int32_t		BlocksPerUnit;
+    uint16_t		bam_index;
+    uint32_t		*bam_cache;
+    uint16_t		DataUnits;
+    uint32_t		BlocksPerUnit;
     erase_unit_header_t	header;
-#if 0
-    region_info_t	region;
-    memory_handle_t	handle;
-#endif
-    atomic_t		open;
 } partition_t;
-
-partition_t *myparts[MAX_MTD_DEVICES];
-
-static void ftl_notify_add(struct mtd_info *mtd);
-static void ftl_notify_remove(struct mtd_info *mtd);
-
-void ftl_freepart(partition_t *part);
-
-static struct mtd_notifier ftl_notifier = {
-	add:	ftl_notify_add,
-	remove:	ftl_notify_remove,
-};
 
 /* Partition state flags */
 #define FTL_FORMATTED	0x01
@@ -204,77 +141,38 @@ static struct mtd_notifier ftl_notifier = {
 #define XFER_PREPARED	0x03
 #define XFER_FAILED	0x04
 
-static struct hd_struct ftl_hd[MINOR_NR(MAX_DEV, 0, 0)];
-static int ftl_sizes[MINOR_NR(MAX_DEV, 0, 0)];
-static int ftl_blocksizes[MINOR_NR(MAX_DEV, 0, 0)];
-
-static struct gendisk ftl_gendisk = {
-    major:		FTL_MAJOR,
-    major_name:		"ftl",
-    minor_shift:	PART_BITS,
-    max_p:		MAX_PART,
-#if (LINUX_VERSION_CODE < 0x20328)
-    max_nr:		MAX_DEV*MAX_PART,
-#endif
-    part:		ftl_hd,
-    sizes:		ftl_sizes,
-};
-
 /*====================================================================*/
 
-static int ftl_ioctl(struct inode *inode, struct file *file,
-		     u_int cmd, u_long arg);
-static int ftl_open(struct inode *inode, struct file *file);
-static release_t ftl_close(struct inode *inode, struct file *file);
-static int ftl_reread_partitions(int minor);
 
 static void ftl_erase_callback(struct erase_info *done);
 
-#if LINUX_VERSION_CODE < 0x20326
-static struct file_operations ftl_blk_fops = {
-    open:	ftl_open,
-    release:	ftl_close,
-    ioctl:	ftl_ioctl,
-    read:	block_read,
-    write:	block_write,
-    fsync:	block_fsync
-};
-#else
-static struct block_device_operations ftl_blk_fops = {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,14)
-    owner:	THIS_MODULE,
-#endif
-    open:	ftl_open,
-    release:	ftl_close,
-    ioctl:	ftl_ioctl,
-};
-#endif
 
 /*======================================================================
 
     Scan_header() checks to see if a memory region contains an FTL
     partition.  build_maps() reads all the erase unit headers, builds
     the erase unit map, and then builds the virtual page map.
-    
+
 ======================================================================*/
 
 static int scan_header(partition_t *part)
 {
     erase_unit_header_t header;
     loff_t offset, max_offset;
-    int ret;
+    size_t ret;
+    int err;
     part->header.FormattedSize = 0;
-    max_offset = (0x100000<part->mtd->size)?0x100000:part->mtd->size;
+    max_offset = (0x100000<part->mbd.mtd->size)?0x100000:part->mbd.mtd->size;
     /* Search first megabyte for a valid FTL header */
     for (offset = 0;
 	 (offset + sizeof(header)) < max_offset;
-	 offset += part->mtd->erasesize ? : 0x2000) {
+	 offset += part->mbd.mtd->erasesize ? : 0x2000) {
 
-	ret = part->mtd->read(part->mtd, offset, sizeof(header), &ret, 
-			      (unsigned char *)&header);
-	
-	if (ret) 
-	    return ret;
+	err = mtd_read(part->mbd.mtd, offset, sizeof(header), &ret,
+                       (unsigned char *)&header);
+
+	if (err)
+	    return err;
 
 	if (strcmp(header.DataOrgTuple+3, "FTL100") == 0) break;
     }
@@ -283,15 +181,15 @@ static int scan_header(partition_t *part)
 	printk(KERN_NOTICE "ftl_cs: FTL header not found.\n");
 	return -ENOENT;
     }
-    if ((le16_to_cpu(header.NumEraseUnits) > 65536) || header.BlockSize != 9 ||
+    if (header.BlockSize != 9 ||
 	(header.EraseUnitSize < 10) || (header.EraseUnitSize > 31) ||
 	(header.NumTransferUnits >= le16_to_cpu(header.NumEraseUnits))) {
 	printk(KERN_NOTICE "ftl_cs: FTL header corrupt!\n");
 	return -1;
     }
-    if ((1 << header.EraseUnitSize) != part->mtd->erasesize) {
+    if ((1 << header.EraseUnitSize) != part->mbd.mtd->erasesize) {
 	printk(KERN_NOTICE "ftl: FTL EraseUnitSize %x != MTD erasesize %x\n",
-	       1 << header.EraseUnitSize,part->mtd->erasesize);
+	       1 << header.EraseUnitSize,part->mbd.mtd->erasesize);
 	return -1;
     }
     part->header = header;
@@ -301,8 +199,8 @@ static int scan_header(partition_t *part)
 static int build_maps(partition_t *part)
 {
     erase_unit_header_t header;
-    u_int16_t xvalid, xtrans, i;
-    u_int blocks, j;
+    uint16_t xvalid, xtrans, i;
+    unsigned blocks, j;
     int hdr_ok, ret = -1;
     ssize_t retval;
     loff_t offset;
@@ -326,10 +224,10 @@ static int build_maps(partition_t *part)
     for (i = 0; i < le16_to_cpu(part->header.NumEraseUnits); i++) {
 	offset = ((i + le16_to_cpu(part->header.FirstPhysicalEUN))
 		      << part->header.EraseUnitSize);
-	ret = part->mtd->read(part->mtd, offset, sizeof(header), &retval, 
-			      (unsigned char *)&header);
-	
-	if (ret) 
+	ret = mtd_read(part->mbd.mtd, offset, sizeof(header), &retval,
+                       (unsigned char *)&header);
+
+	if (ret)
 	    goto out_XferInfo;
 
 	ret = -1;
@@ -368,17 +266,17 @@ static int build_maps(partition_t *part)
 	       "don't add up!\n");
 	goto out_XferInfo;
     }
-    
+
     /* Set up virtual page map */
     blocks = le32_to_cpu(header.FormattedSize) >> header.BlockSize;
-    part->VirtualBlockMap = vmalloc(blocks * sizeof(u_int32_t));
+    part->VirtualBlockMap = vmalloc(blocks * sizeof(uint32_t));
     if (!part->VirtualBlockMap)
 	    goto out_XferInfo;
 
-    memset(part->VirtualBlockMap, 0xff, blocks * sizeof(u_int32_t));
+    memset(part->VirtualBlockMap, 0xff, blocks * sizeof(uint32_t));
     part->BlocksPerUnit = (1 << header.EraseUnitSize) >> header.BlockSize;
 
-    part->bam_cache = kmalloc(part->BlocksPerUnit * sizeof(u_int32_t),
+    part->bam_cache = kmalloc(part->BlocksPerUnit * sizeof(uint32_t),
 			      GFP_KERNEL);
     if (!part->bam_cache)
 	    goto out_VirtualBlockMap;
@@ -390,12 +288,12 @@ static int build_maps(partition_t *part)
 	part->EUNInfo[i].Free = 0;
 	part->EUNInfo[i].Deleted = 0;
 	offset = part->EUNInfo[i].Offset + le32_to_cpu(header.BAMOffset);
-	
-	ret = part->mtd->read(part->mtd, offset,  
-			      part->BlocksPerUnit * sizeof(u_int32_t), &retval, 
-			      (unsigned char *)part->bam_cache);
-	
-	if (ret) 
+
+	ret = mtd_read(part->mbd.mtd, offset,
+                       part->BlocksPerUnit * sizeof(uint32_t), &retval,
+                       (unsigned char *)part->bam_cache);
+
+	if (ret)
 		goto out_bam_cache;
 
 	for (j = 0; j < part->BlocksPerUnit; j++) {
@@ -410,7 +308,7 @@ static int build_maps(partition_t *part)
 		part->EUNInfo[i].Deleted++;
 	}
     }
-    
+
     ret = 0;
     goto out;
 
@@ -430,33 +328,34 @@ out:
 
     Erase_xfer() schedules an asynchronous erase operation for a
     transfer unit.
-    
+
 ======================================================================*/
 
 static int erase_xfer(partition_t *part,
-		      u_int16_t xfernum)
+		      uint16_t xfernum)
 {
     int ret;
     struct xfer_info_t *xfer;
     struct erase_info *erase;
 
     xfer = &part->XferInfo[xfernum];
-    DEBUG(1, "ftl_cs: erasing xfer unit at 0x%x\n", xfer->Offset);
+    pr_debug("ftl_cs: erasing xfer unit at 0x%x\n", xfer->Offset);
     xfer->state = XFER_ERASING;
 
     /* Is there a free erase slot? Always in MTD. */
-    
-    
+
+
     erase=kmalloc(sizeof(struct erase_info), GFP_KERNEL);
-    if (!erase) 
+    if (!erase)
             return -ENOMEM;
 
+    erase->mtd = part->mbd.mtd;
     erase->callback = ftl_erase_callback;
     erase->addr = xfer->Offset;
     erase->len = 1 << part->header.EraseUnitSize;
     erase->priv = (u_long)part;
-    
-    ret = part->mtd->erase(part->mtd, erase);
+
+    ret = mtd_erase(part->mbd.mtd, erase);
 
     if (!ret)
 	    xfer->EraseCount++;
@@ -470,7 +369,7 @@ static int erase_xfer(partition_t *part,
 
     Prepare_xfer() takes a freshly erased transfer unit and gives
     it an appropriate header.
-    
+
 ======================================================================*/
 
 static void ftl_erase_callback(struct erase_info *erase)
@@ -478,7 +377,7 @@ static void ftl_erase_callback(struct erase_info *erase)
     partition_t *part;
     struct xfer_info_t *xfer;
     int i;
-    
+
     /* Look up the transfer unit */
     part = (partition_t *)(erase->priv);
 
@@ -509,45 +408,45 @@ static int prepare_xfer(partition_t *part, int i)
     erase_unit_header_t header;
     struct xfer_info_t *xfer;
     int nbam, ret;
-    u_int32_t ctl;
+    uint32_t ctl;
     ssize_t retlen;
     loff_t offset;
 
     xfer = &part->XferInfo[i];
     xfer->state = XFER_FAILED;
-    
-    DEBUG(1, "ftl_cs: preparing xfer unit at 0x%x\n", xfer->Offset);
+
+    pr_debug("ftl_cs: preparing xfer unit at 0x%x\n", xfer->Offset);
 
     /* Write the transfer unit header */
     header = part->header;
     header.LogicalEUN = cpu_to_le16(0xffff);
     header.EraseCount = cpu_to_le32(xfer->EraseCount);
 
-    ret = part->mtd->write(part->mtd, xfer->Offset, sizeof(header),
-			   &retlen, (u_char *)&header);
+    ret = mtd_write(part->mbd.mtd, xfer->Offset, sizeof(header), &retlen,
+                    (u_char *)&header);
 
     if (ret) {
 	return ret;
     }
 
     /* Write the BAM stub */
-    nbam = (part->BlocksPerUnit * sizeof(u_int32_t) +
+    nbam = (part->BlocksPerUnit * sizeof(uint32_t) +
 	    le32_to_cpu(part->header.BAMOffset) + SECTOR_SIZE - 1) / SECTOR_SIZE;
 
     offset = xfer->Offset + le32_to_cpu(part->header.BAMOffset);
     ctl = cpu_to_le32(BLOCK_CONTROL);
 
-    for (i = 0; i < nbam; i++, offset += sizeof(u_int32_t)) {
+    for (i = 0; i < nbam; i++, offset += sizeof(uint32_t)) {
 
-	ret = part->mtd->write(part->mtd, offset, sizeof(u_int32_t), 
-			       &retlen, (u_char *)&ctl);
+	ret = mtd_write(part->mbd.mtd, offset, sizeof(uint32_t), &retlen,
+                        (u_char *)&ctl);
 
 	if (ret)
 	    return ret;
     }
     xfer->state = XFER_PREPARED;
     return 0;
-    
+
 } /* prepare_xfer */
 
 /*======================================================================
@@ -559,59 +458,59 @@ static int prepare_xfer(partition_t *part, int i)
     All data blocks are copied to the corresponding blocks in the
     target unit, so the virtual block map does not need to be
     updated.
-    
+
 ======================================================================*/
 
-static int copy_erase_unit(partition_t *part, u_int16_t srcunit,
-			   u_int16_t xferunit)
+static int copy_erase_unit(partition_t *part, uint16_t srcunit,
+			   uint16_t xferunit)
 {
     u_char buf[SECTOR_SIZE];
     struct eun_info_t *eun;
     struct xfer_info_t *xfer;
-    u_int32_t src, dest, free, i;
-    u_int16_t unit;
+    uint32_t src, dest, free, i;
+    uint16_t unit;
     int ret;
     ssize_t retlen;
     loff_t offset;
-    u_int16_t srcunitswap = cpu_to_le16(srcunit);
+    uint16_t srcunitswap = cpu_to_le16(srcunit);
 
     eun = &part->EUNInfo[srcunit];
     xfer = &part->XferInfo[xferunit];
-    DEBUG(2, "ftl_cs: copying block 0x%x to 0x%x\n",
+    pr_debug("ftl_cs: copying block 0x%x to 0x%x\n",
 	  eun->Offset, xfer->Offset);
-	
-    
+
+
     /* Read current BAM */
     if (part->bam_index != srcunit) {
 
 	offset = eun->Offset + le32_to_cpu(part->header.BAMOffset);
 
-	ret = part->mtd->read(part->mtd, offset, 
-			      part->BlocksPerUnit * sizeof(u_int32_t),
-			      &retlen, (u_char *) (part->bam_cache));
+	ret = mtd_read(part->mbd.mtd, offset,
+                       part->BlocksPerUnit * sizeof(uint32_t), &retlen,
+                       (u_char *)(part->bam_cache));
 
 	/* mark the cache bad, in case we get an error later */
 	part->bam_index = 0xffff;
 
 	if (ret) {
-	    printk( KERN_WARNING "ftl: Failed to read BAM cache in copy_erase_unit()!\n");                
+	    printk( KERN_WARNING "ftl: Failed to read BAM cache in copy_erase_unit()!\n");
 	    return ret;
 	}
     }
-    
+
     /* Write the LogicalEUN for the transfer unit */
     xfer->state = XFER_UNKNOWN;
     offset = xfer->Offset + 20; /* Bad! */
     unit = cpu_to_le16(0x7fff);
 
-    ret = part->mtd->write(part->mtd, offset, sizeof(u_int16_t),
-			   &retlen, (u_char *) &unit);
-    
+    ret = mtd_write(part->mbd.mtd, offset, sizeof(uint16_t), &retlen,
+                    (u_char *)&unit);
+
     if (ret) {
 	printk( KERN_WARNING "ftl: Failed to write back to BAM cache in copy_erase_unit()!\n");
 	return ret;
     }
-    
+
     /* Copy all data blocks from source unit to transfer unit */
     src = eun->Offset; dest = xfer->Offset;
 
@@ -624,16 +523,16 @@ static int copy_erase_unit(partition_t *part, u_int16_t srcunit,
 	    break;
 	case BLOCK_DATA:
 	case BLOCK_REPLACEMENT:
-	    ret = part->mtd->read(part->mtd, src, SECTOR_SIZE,
-                        &retlen, (u_char *) buf);
+	    ret = mtd_read(part->mbd.mtd, src, SECTOR_SIZE, &retlen,
+                           (u_char *)buf);
 	    if (ret) {
 		printk(KERN_WARNING "ftl: Error reading old xfer unit in copy_erase_unit\n");
 		return ret;
             }
 
 
-	    ret = part->mtd->write(part->mtd, dest, SECTOR_SIZE,
-                        &retlen, (u_char *) buf);
+	    ret = mtd_write(part->mbd.mtd, dest, SECTOR_SIZE, &retlen,
+                            (u_char *)buf);
 	    if (ret)  {
 		printk(KERN_WARNING "ftl: Error writing new xfer unit in copy_erase_unit\n");
 		return ret;
@@ -651,25 +550,27 @@ static int copy_erase_unit(partition_t *part, u_int16_t srcunit,
     }
 
     /* Write the BAM to the transfer unit */
-    ret = part->mtd->write(part->mtd, xfer->Offset + le32_to_cpu(part->header.BAMOffset), 
-                    part->BlocksPerUnit * sizeof(int32_t), &retlen, 
-		    (u_char *)part->bam_cache);
+    ret = mtd_write(part->mbd.mtd,
+                    xfer->Offset + le32_to_cpu(part->header.BAMOffset),
+                    part->BlocksPerUnit * sizeof(int32_t),
+                    &retlen,
+                    (u_char *)part->bam_cache);
     if (ret) {
 	printk( KERN_WARNING "ftl: Error writing BAM in copy_erase_unit\n");
 	return ret;
     }
 
-    
+
     /* All clear? Then update the LogicalEUN again */
-    ret = part->mtd->write(part->mtd, xfer->Offset + 20, sizeof(u_int16_t),
-			   &retlen, (u_char *)&srcunitswap);
+    ret = mtd_write(part->mbd.mtd, xfer->Offset + 20, sizeof(uint16_t),
+                    &retlen, (u_char *)&srcunitswap);
 
     if (ret) {
 	printk(KERN_WARNING "ftl: Error writing new LogicalEUN in copy_erase_unit\n");
 	return ret;
-    }    
-    
-    
+    }
+
+
     /* Update the maps and usage stats*/
     i = xfer->EraseCount;
     xfer->EraseCount = eun->EraseCount;
@@ -681,10 +582,10 @@ static int copy_erase_unit(partition_t *part, u_int16_t srcunit,
     part->FreeTotal += free;
     eun->Free = free;
     eun->Deleted = 0;
-    
+
     /* Now, the cache should be valid for the new block */
     part->bam_index = srcunit;
-    
+
     return 0;
 } /* copy_erase_unit */
 
@@ -699,19 +600,19 @@ static int copy_erase_unit(partition_t *part, u_int16_t srcunit,
     unit with the fewest erases, and usually pick the data unit with
     the most deleted blocks.  But with a small probability, pick the
     oldest data unit instead.  This means that we generally postpone
-    the next reclaimation as long as possible, but shuffle static
+    the next reclamation as long as possible, but shuffle static
     stuff around a bit for wear leveling.
-    
+
 ======================================================================*/
 
 static int reclaim_block(partition_t *part)
 {
-    u_int16_t i, eun, xfer;
-    u_int32_t best;
+    uint16_t i, eun, xfer;
+    uint32_t best;
     int queued, ret;
 
-    DEBUG(0, "ftl_cs: reclaiming space...\n");
-    DEBUG(3, "NumTransferUnits == %x\n", part->header.NumTransferUnits);
+    pr_debug("ftl_cs: reclaiming space...\n");
+    pr_debug("NumTransferUnits == %x\n", part->header.NumTransferUnits);
     /* Pick the least erased transfer unit */
     best = 0xffffffff; xfer = 0xffff;
     do {
@@ -719,22 +620,22 @@ static int reclaim_block(partition_t *part)
 	for (i = 0; i < part->header.NumTransferUnits; i++) {
 	    int n=0;
 	    if (part->XferInfo[i].state == XFER_UNKNOWN) {
-		DEBUG(3,"XferInfo[%d].state == XFER_UNKNOWN\n",i);
+		pr_debug("XferInfo[%d].state == XFER_UNKNOWN\n",i);
 		n=1;
 		erase_xfer(part, i);
 	    }
 	    if (part->XferInfo[i].state == XFER_ERASING) {
-		DEBUG(3,"XferInfo[%d].state == XFER_ERASING\n",i);
+		pr_debug("XferInfo[%d].state == XFER_ERASING\n",i);
 		n=1;
 		queued = 1;
 	    }
 	    else if (part->XferInfo[i].state == XFER_ERASED) {
-		DEBUG(3,"XferInfo[%d].state == XFER_ERASED\n",i);
+		pr_debug("XferInfo[%d].state == XFER_ERASED\n",i);
 		n=1;
 		prepare_xfer(part, i);
 	    }
 	    if (part->XferInfo[i].state == XFER_PREPARED) {
-		DEBUG(3,"XferInfo[%d].state == XFER_PREPARED\n",i);
+		pr_debug("XferInfo[%d].state == XFER_PREPARED\n",i);
 		n=1;
 		if (part->XferInfo[i].EraseCount <= best) {
 		    best = part->XferInfo[i].EraseCount;
@@ -742,24 +643,23 @@ static int reclaim_block(partition_t *part)
 		}
 	    }
 		if (!n)
-		    DEBUG(3,"XferInfo[%d].state == %x\n",i, part->XferInfo[i].state);
+		    pr_debug("XferInfo[%d].state == %x\n",i, part->XferInfo[i].state);
 
 	}
 	if (xfer == 0xffff) {
 	    if (queued) {
-		DEBUG(1, "ftl_cs: waiting for transfer "
+		pr_debug("ftl_cs: waiting for transfer "
 		      "unit to be prepared...\n");
-		if (part->mtd->sync)
-			part->mtd->sync(part->mtd);
+		mtd_sync(part->mbd.mtd);
 	    } else {
 		static int ne = 0;
 		if (++ne < 5)
 		    printk(KERN_NOTICE "ftl_cs: reclaim failed: no "
 			   "suitable transfer units!\n");
 		else
-		    DEBUG(1, "ftl_cs: reclaim failed: no "
+		    pr_debug("ftl_cs: reclaim failed: no "
 			  "suitable transfer units!\n");
-			
+
 		return -EIO;
 	    }
 	}
@@ -767,7 +667,7 @@ static int reclaim_block(partition_t *part)
 
     eun = 0;
     if ((jiffies % shuffle_freq) == 0) {
-	DEBUG(1, "ftl_cs: recycling freshest block...\n");
+	pr_debug("ftl_cs: recycling freshest block...\n");
 	best = 0xffffffff;
 	for (i = 0; i < part->DataUnits; i++)
 	    if (part->EUNInfo[i].EraseCount <= best) {
@@ -787,7 +687,7 @@ static int reclaim_block(partition_t *part)
 		printk(KERN_NOTICE "ftl_cs: reclaim failed: "
 		       "no free blocks!\n");
 	    else
-		DEBUG(1,"ftl_cs: reclaim failed: "
+		pr_debug("ftl_cs: reclaim failed: "
 		       "no free blocks!\n");
 
 	    return -EIO;
@@ -808,7 +708,7 @@ static int reclaim_block(partition_t *part)
     returns the block index -- the erase unit is just the currently
     cached unit.  If there are no free blocks, it returns 0 -- this
     is never a valid data block because it contains the header.
-    
+
 ======================================================================*/
 
 #ifdef PSYCHO_DEBUG
@@ -824,13 +724,13 @@ static void dump_lists(partition_t *part)
 }
 #endif
 
-static u_int32_t find_free(partition_t *part)
+static uint32_t find_free(partition_t *part)
 {
-    u_int16_t stop, eun;
-    u_int32_t blk;
+    uint16_t stop, eun;
+    uint32_t blk;
     size_t retlen;
     int ret;
-    
+
     /* Find an erase unit with some free space */
     stop = (part->bam_index == 0xffff) ? 0 : part->bam_index;
     eun = stop;
@@ -842,17 +742,18 @@ static u_int32_t find_free(partition_t *part)
 
     if (part->EUNInfo[eun].Free == 0)
 	return 0;
-    
+
     /* Is this unit's BAM cached? */
     if (eun != part->bam_index) {
 	/* Invalidate cache */
 	part->bam_index = 0xffff;
 
-	ret = part->mtd->read(part->mtd, 
-		       part->EUNInfo[eun].Offset + le32_to_cpu(part->header.BAMOffset),
-		       part->BlocksPerUnit * sizeof(u_int32_t),
-		       &retlen, (u_char *) (part->bam_cache));
-	
+	ret = mtd_read(part->mbd.mtd,
+                       part->EUNInfo[eun].Offset + le32_to_cpu(part->header.BAMOffset),
+                       part->BlocksPerUnit * sizeof(uint32_t),
+                       &retlen,
+                       (u_char *)(part->bam_cache));
+
 	if (ret) {
 	    printk(KERN_WARNING"ftl: Error reading BAM in find_free\n");
 	    return 0;
@@ -872,99 +773,27 @@ static u_int32_t find_free(partition_t *part)
 	printk(KERN_NOTICE "ftl_cs: bad free list!\n");
 	return 0;
     }
-    DEBUG(2, "ftl_cs: found free block at %d in %d\n", blk, eun);
+    pr_debug("ftl_cs: found free block at %d in %d\n", blk, eun);
     return blk;
-    
+
 } /* find_free */
-
-/*======================================================================
-
-    This gets a memory handle for the region corresponding to the
-    minor device number.
-    
-======================================================================*/
-
-static int ftl_open(struct inode *inode, struct file *file)
-{
-    int minor = MINOR(inode->i_rdev);
-    partition_t *partition;
-
-    if (minor>>4 >= MAX_MTD_DEVICES)
-	return -ENODEV;
-
-    partition = myparts[minor>>4];
-
-    if (!partition)
-	return -ENODEV;
-
-    if (partition->state != FTL_FORMATTED)
-	return -ENXIO;
-    
-    if (ftl_gendisk.part[minor].nr_sects == 0)
-	return -ENXIO;
-
-    BLK_INC_USE_COUNT;
-
-    if (!get_mtd_device(partition->mtd, -1)) {
-	    BLK_DEC_USE_COUNT;
-	    return -ENXIO;
-    }
-    
-    if ((file->f_mode & 2) && !(partition->mtd->flags & MTD_CLEAR_BITS) ) {
-	    put_mtd_device(partition->mtd);
-	    BLK_DEC_USE_COUNT;
-            return -EROFS;
-    }
-    
-    DEBUG(0, "ftl_cs: ftl_open(%d)\n", minor);
-
-    atomic_inc(&partition->open);
-
-    return 0;
-}
-
-/*====================================================================*/
-
-static release_t ftl_close(struct inode *inode, struct file *file)
-{
-    int minor = MINOR(inode->i_rdev);
-    partition_t *part = myparts[minor >> 4];
-    int i;
-    
-    DEBUG(0, "ftl_cs: ftl_close(%d)\n", minor);
-
-    /* Wait for any pending erase operations to complete */
-    if (part->mtd->sync)
-	    part->mtd->sync(part->mtd);
-    
-    for (i = 0; i < part->header.NumTransferUnits; i++) {
-	if (part->XferInfo[i].state == XFER_ERASED)
-	    prepare_xfer(part, i);
-    }
-
-    atomic_dec(&part->open);
-
-    put_mtd_device(part->mtd);
-    BLK_DEC_USE_COUNT;
-    release_return(0);
-} /* ftl_close */
 
 
 /*======================================================================
 
     Read a series of sectors from an FTL partition.
-    
+
 ======================================================================*/
 
 static int ftl_read(partition_t *part, caddr_t buffer,
 		    u_long sector, u_long nblocks)
 {
-    u_int32_t log_addr, bsize;
+    uint32_t log_addr, bsize;
     u_long i;
     int ret;
     size_t offset, retlen;
-    
-    DEBUG(2, "ftl_cs: ftl_read(0x%p, 0x%lx, %ld)\n",
+
+    pr_debug("ftl_cs: ftl_read(0x%p, 0x%lx, %ld)\n",
 	  part, sector, nblocks);
     if (!(part->state & FTL_FORMATTED)) {
 	printk(KERN_NOTICE "ftl_cs: bad partition\n");
@@ -983,8 +812,8 @@ static int ftl_read(partition_t *part, caddr_t buffer,
 	else {
 	    offset = (part->EUNInfo[log_addr / bsize].Offset
 			  + (log_addr % bsize));
-	    ret = part->mtd->read(part->mtd, offset, SECTOR_SIZE,
-			   &retlen, (u_char *) buffer);
+	    ret = mtd_read(part->mbd.mtd, offset, SECTOR_SIZE, &retlen,
+                           (u_char *)buffer);
 
 	    if (ret) {
 		printk(KERN_WARNING "Error reading MTD device in ftl_read()\n");
@@ -999,31 +828,31 @@ static int ftl_read(partition_t *part, caddr_t buffer,
 /*======================================================================
 
     Write a series of sectors to an FTL partition
-    
+
 ======================================================================*/
 
-static int set_bam_entry(partition_t *part, u_int32_t log_addr,
-			 u_int32_t virt_addr)
+static int set_bam_entry(partition_t *part, uint32_t log_addr,
+			 uint32_t virt_addr)
 {
-    u_int32_t bsize, blk, le_virt_addr;
+    uint32_t bsize, blk, le_virt_addr;
 #ifdef PSYCHO_DEBUG
-    u_int32_t old_addr;
+    uint32_t old_addr;
 #endif
-    u_int16_t eun;
+    uint16_t eun;
     int ret;
     size_t retlen, offset;
 
-    DEBUG(2, "ftl_cs: set_bam_entry(0x%p, 0x%x, 0x%x)\n",
+    pr_debug("ftl_cs: set_bam_entry(0x%p, 0x%x, 0x%x)\n",
 	  part, log_addr, virt_addr);
     bsize = 1 << part->header.EraseUnitSize;
     eun = log_addr / bsize;
     blk = (log_addr % bsize) / SECTOR_SIZE;
-    offset = (part->EUNInfo[eun].Offset + blk * sizeof(u_int32_t) +
+    offset = (part->EUNInfo[eun].Offset + blk * sizeof(uint32_t) +
 		  le32_to_cpu(part->header.BAMOffset));
-    
+
 #ifdef PSYCHO_DEBUG
-    ret = part->mtd->read(part->mtd, offset, sizeof(u_int32_t),
-                        &retlen, (u_char *)&old_addr);
+    ret = mtd_read(part->mbd.mtd, offset, sizeof(uint32_t), &retlen,
+                   (u_char *)&old_addr);
     if (ret) {
 	printk(KERN_WARNING"ftl: Error reading old_addr in set_bam_entry: %d\n",ret);
 	return ret;
@@ -1059,8 +888,8 @@ static int set_bam_entry(partition_t *part, u_int32_t log_addr,
 #endif
 	part->bam_cache[blk] = le_virt_addr;
     }
-    ret = part->mtd->write(part->mtd, offset, sizeof(u_int32_t),
-                            &retlen, (u_char *)&le_virt_addr);
+    ret = mtd_write(part->mbd.mtd, offset, sizeof(uint32_t), &retlen,
+                    (u_char *)&le_virt_addr);
 
     if (ret) {
 	printk(KERN_NOTICE "ftl_cs: set_bam_entry() failed!\n");
@@ -1073,12 +902,12 @@ static int set_bam_entry(partition_t *part, u_int32_t log_addr,
 static int ftl_write(partition_t *part, caddr_t buffer,
 		     u_long sector, u_long nblocks)
 {
-    u_int32_t bsize, log_addr, virt_addr, old_addr, blk;
+    uint32_t bsize, log_addr, virt_addr, old_addr, blk;
     u_long i;
     int ret;
     size_t retlen, offset;
 
-    DEBUG(2, "ftl_cs: ftl_write(0x%p, %ld, %ld)\n",
+    pr_debug("ftl_cs: ftl_write(0x%p, %ld, %ld)\n",
 	  part, sector, nblocks);
     if (!(part->state & FTL_FORMATTED)) {
 	printk(KERN_NOTICE "ftl_cs: bad partition\n");
@@ -1090,7 +919,7 @@ static int ftl_write(partition_t *part, caddr_t buffer,
 	if (ret)
 	    return ret;
     }
-    
+
     bsize = 1 << part->header.EraseUnitSize;
 
     virt_addr = sector * SECTOR_SIZE | BLOCK_DATA;
@@ -1114,22 +943,21 @@ static int ftl_write(partition_t *part, caddr_t buffer,
 	log_addr = part->bam_index * bsize + blk * SECTOR_SIZE;
 	part->EUNInfo[part->bam_index].Free--;
 	part->FreeTotal--;
-	if (set_bam_entry(part, log_addr, 0xfffffffe)) 
+	if (set_bam_entry(part, log_addr, 0xfffffffe))
 	    return -EIO;
 	part->EUNInfo[part->bam_index].Deleted++;
 	offset = (part->EUNInfo[part->bam_index].Offset +
 		      blk * SECTOR_SIZE);
-	ret = part->mtd->write(part->mtd, offset, SECTOR_SIZE, &retlen, 
-                                     buffer);
+	ret = mtd_write(part->mbd.mtd, offset, SECTOR_SIZE, &retlen, buffer);
 
 	if (ret) {
 	    printk(KERN_NOTICE "ftl_cs: block write failed!\n");
 	    printk(KERN_NOTICE "ftl_cs:   log_addr = 0x%x, virt_addr"
-		   " = 0x%x, Offset = 0x%x\n", log_addr, virt_addr,
+		   " = 0x%x, Offset = 0x%zx\n", log_addr, virt_addr,
 		   offset);
 	    return -EIO;
 	}
-	
+
 	/* Only delete the old entry when the new entry is ready */
 	old_addr = part->VirtualBlockMap[sector+i];
 	if (old_addr != 0xffffffff) {
@@ -1144,309 +972,141 @@ static int ftl_write(partition_t *part, caddr_t buffer,
 	    return -EIO;
 	part->VirtualBlockMap[sector+i] = log_addr;
 	part->EUNInfo[part->bam_index].Deleted--;
-	
+
 	buffer += SECTOR_SIZE;
 	virt_addr += SECTOR_SIZE;
     }
     return 0;
 } /* ftl_write */
 
-/*======================================================================
-
-    IOCTL calls for getting device parameters.
-
-======================================================================*/
-
-static int ftl_ioctl(struct inode *inode, struct file *file,
-		     u_int cmd, u_long arg)
+static int ftl_getgeo(struct mtd_blktrans_dev *dev, struct hd_geometry *geo)
 {
-    struct hd_geometry *geo = (struct hd_geometry *)arg;
-    int ret = 0, minor = MINOR(inode->i_rdev);
-    partition_t *part= myparts[minor >> 4];
-    u_long sect;
+	partition_t *part = (void *)dev;
+	u_long sect;
 
-    if (!part)
-	return -ENODEV; /* How? */
-
-    switch (cmd) {
-    case HDIO_GETGEO:
-	ret = verify_area(VERIFY_WRITE, (long *)arg, sizeof(*geo));
-	if (ret) return ret;
-	/* Sort of arbitrary: round size down to 4K boundary */
+	/* Sort of arbitrary: round size down to 4KiB boundary */
 	sect = le32_to_cpu(part->header.FormattedSize)/SECTOR_SIZE;
-	put_user(1, (char *)&geo->heads);
-	put_user(8, (char *)&geo->sectors);
-	put_user((sect>>3), (short *)&geo->cylinders);
-	put_user(ftl_hd[minor].start_sect, (u_long *)&geo->start);
-	break;
-    case BLKGETSIZE:
-	ret = put_user(ftl_hd[minor].nr_sects, (unsigned long *)arg);
-	break;
-#ifdef BLKGETSIZE64
-    case BLKGETSIZE64:
-	ret = put_user((u64)ftl_hd[minor].nr_sects << 9, (u64 *)arg);
-	break;
-#endif
-    case BLKRRPART:
-	ret = ftl_reread_partitions(minor);
-	break;
-#if (LINUX_VERSION_CODE < 0x20303)
-    case BLKFLSBUF:
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
-	if (!capable(CAP_SYS_ADMIN)) return -EACCES;
-#endif
-	fsync_dev(inode->i_rdev);
-	invalidate_buffers(inode->i_rdev);
-	break;
-    RO_IOCTLS(inode->i_rdev, arg);
-#else
-    case BLKROSET:
-    case BLKROGET:
-    case BLKFLSBUF:
-	ret = blk_ioctl(inode->i_rdev, cmd, arg);
-	break;
-#endif
-    default:
-	ret = -EINVAL;
-    }
 
-    return ret;
-} /* ftl_ioctl */
+	geo->heads = 1;
+	geo->sectors = 8;
+	geo->cylinders = sect >> 3;
 
-/*======================================================================
-
-    Handler for block device requests
-
-======================================================================*/
-
-static int ftl_reread_partitions(int minor)
-{
-    partition_t *part = myparts[minor >> 4];
-    int i, whole;
-
-    DEBUG(0, "ftl_cs: ftl_reread_partition(%d)\n", minor);
-    if ((atomic_read(&part->open) > 1)) {
-	    return -EBUSY;
-    }
-    whole = minor & ~(MAX_PART-1);
-
-    i = MAX_PART - 1;
-    while (i-- > 0) {
-	if (ftl_hd[whole+i].nr_sects > 0) {
-	    kdev_t rdev = MKDEV(FTL_MAJOR, whole+i);
-
-	    invalidate_device(rdev, 1);
-	}
-	ftl_hd[whole+i].start_sect = 0;
-	ftl_hd[whole+i].nr_sects = 0;
-    }
-
-    scan_header(part);
-
-    register_disk(&ftl_gendisk, whole >> PART_BITS, MAX_PART,
-		  &ftl_blk_fops, le32_to_cpu(part->header.FormattedSize)/SECTOR_SIZE);
-
-#ifdef PCMCIA_DEBUG
-    for (i = 0; i < MAX_PART; i++) {
-	if (ftl_hd[whole+i].nr_sects > 0)
-	    printk(KERN_INFO "  %d: start %ld size %ld\n", i,
-		   ftl_hd[whole+i].start_sect,
-		   ftl_hd[whole+i].nr_sects);
-    }
-#endif
-    return 0;
+	return 0;
 }
 
-/*======================================================================
-
-    Handler for block device requests
-
-======================================================================*/
-
-static void do_ftl_request(request_arg_t)
+static int ftl_readsect(struct mtd_blktrans_dev *dev,
+			      unsigned long block, char *buf)
 {
-    int ret, minor;
-    partition_t *part;
+	return ftl_read((void *)dev, buf, block, 1);
+}
 
-    do {
-      //	    sti();
-	INIT_REQUEST;
+static int ftl_writesect(struct mtd_blktrans_dev *dev,
+			      unsigned long block, char *buf)
+{
+	return ftl_write((void *)dev, buf, block, 1);
+}
 
-	minor = MINOR(CURRENT->rq_dev);
-	
-	part = myparts[minor >> 4];
-	if (part) {
-	  ret = 0;
-	  
-	  switch (CURRENT->cmd) {
-	  case READ:
-	    ret = ftl_read(part, CURRENT->buffer,
-			   CURRENT->sector+ftl_hd[minor].start_sect,
-			   CURRENT->current_nr_sectors);
-	    if (ret) printk("ftl_read returned %d\n", ret);
-	    break;
-	    
-	  case WRITE:
-	    ret = ftl_write(part, CURRENT->buffer,
-			    CURRENT->sector+ftl_hd[minor].start_sect,
-			    CURRENT->current_nr_sectors);
-	    if (ret) printk("ftl_write returned %d\n", ret);
-	    break;
-	    
-	  default:
-	    panic("ftl_cs: unknown block command!\n");
-	    
-	  }
-	} else {
-	  ret = 1;
-	  printk("NULL part in ftl_request\n");
+static int ftl_discardsect(struct mtd_blktrans_dev *dev,
+			   unsigned long sector, unsigned nr_sects)
+{
+	partition_t *part = (void *)dev;
+	uint32_t bsize = 1 << part->header.EraseUnitSize;
+
+	pr_debug("FTL erase sector %ld for %d sectors\n",
+	      sector, nr_sects);
+
+	while (nr_sects) {
+		uint32_t old_addr = part->VirtualBlockMap[sector];
+		if (old_addr != 0xffffffff) {
+			part->VirtualBlockMap[sector] = 0xffffffff;
+			part->EUNInfo[old_addr/bsize].Deleted++;
+			if (set_bam_entry(part, old_addr, 0))
+				return -EIO;
+		}
+		nr_sects--;
+		sector++;
 	}
-	 
-	if (!ret) {
-	  CURRENT->sector += CURRENT->current_nr_sectors;
-	}
-	
-	end_request((ret == 0) ? 1 : 0);
-    } while (1);
-} /* do_ftl_request */
 
+	return 0;
+}
 /*====================================================================*/
 
-void ftl_freepart(partition_t *part)
+static void ftl_freepart(partition_t *part)
 {
-    if (part->VirtualBlockMap) {
 	vfree(part->VirtualBlockMap);
 	part->VirtualBlockMap = NULL;
-    }
-    if (part->VirtualPageMap) {
 	kfree(part->VirtualPageMap);
 	part->VirtualPageMap = NULL;
-    }
-    if (part->EUNInfo) {
 	kfree(part->EUNInfo);
 	part->EUNInfo = NULL;
-    }
-    if (part->XferInfo) {
 	kfree(part->XferInfo);
 	part->XferInfo = NULL;
-    }
-    if (part->bam_cache) {
 	kfree(part->bam_cache);
 	part->bam_cache = NULL;
-    }
-    
 } /* ftl_freepart */
 
-static void ftl_notify_add(struct mtd_info *mtd)
+static void ftl_add_mtd(struct mtd_blktrans_ops *tr, struct mtd_info *mtd)
 {
 	partition_t *partition;
-	int device;
 
-	for (device=0; device < MAX_MTD_DEVICES && myparts[device]; device++)
-		;
+	partition = kzalloc(sizeof(partition_t), GFP_KERNEL);
 
-	if (device == MAX_MTD_DEVICES) {
-		printk(KERN_NOTICE "Maximum number of FTL partitions reached\n"
-		       "Not scanning <%s>\n", mtd->name);
-		return;
-	}
-
-	partition = kmalloc(sizeof(partition_t), GFP_KERNEL);
-		
 	if (!partition) {
 		printk(KERN_WARNING "No memory to scan for FTL on %s\n",
 		       mtd->name);
 		return;
-	}    
+	}
 
-	memset(partition, 0, sizeof(partition_t));
+	partition->mbd.mtd = mtd;
 
-	partition->mtd = mtd;
-
-	if ((scan_header(partition) == 0) && 
+	if ((scan_header(partition) == 0) &&
 	    (build_maps(partition) == 0)) {
-		
+
 		partition->state = FTL_FORMATTED;
-		atomic_set(&partition->open, 0);
-		myparts[device] = partition;
-		ftl_reread_partitions(device << 4);
 #ifdef PCMCIA_DEBUG
-		printk(KERN_INFO "ftl_cs: opening %d kb FTL partition\n",
+		printk(KERN_INFO "ftl_cs: opening %d KiB FTL partition\n",
 		       le32_to_cpu(partition->header.FormattedSize) >> 10);
 #endif
-	} else
-		kfree(partition);
+		partition->mbd.size = le32_to_cpu(partition->header.FormattedSize) >> 9;
+
+		partition->mbd.tr = tr;
+		partition->mbd.devnum = -1;
+		if (!add_mtd_blktrans_dev((void *)partition))
+			return;
+	}
+
+	ftl_freepart(partition);
+	kfree(partition);
 }
 
-static void ftl_notify_remove(struct mtd_info *mtd)
+static void ftl_remove_dev(struct mtd_blktrans_dev *dev)
 {
-        int i,j;
-
-	/* Q: What happens if you try to remove a device which has
-	 *    a currently-open FTL partition on it?
-	 *
-	 * A: You don't. The ftl_open routine is responsible for
-	 *    increasing the use count of the driver module which
-	 *    it uses.
-	 */
-
-	/* That's the theory, anyway :) */
-
-	for (i=0; i< MAX_MTD_DEVICES; i++)
-		if (myparts[i] && myparts[i]->mtd == mtd) {
-
-			if (myparts[i]->state == FTL_FORMATTED)
-				ftl_freepart(myparts[i]);
-			
-			myparts[i]->state = 0;
-			for (j=0; j<16; j++) {
-				ftl_gendisk.part[j].nr_sects=0;
-				ftl_gendisk.part[j].start_sect=0;
-			}
-			kfree(myparts[i]);
-			myparts[i] = NULL;
-		}
+	del_mtd_blktrans_dev(dev);
+	ftl_freepart((partition_t *)dev);
 }
 
-int init_ftl(void)
-{
-    int i;
+static struct mtd_blktrans_ops ftl_tr = {
+	.name		= "ftl",
+	.major		= FTL_MAJOR,
+	.part_bits	= PART_BITS,
+	.blksize 	= SECTOR_SIZE,
+	.readsect	= ftl_readsect,
+	.writesect	= ftl_writesect,
+	.discard	= ftl_discardsect,
+	.getgeo		= ftl_getgeo,
+	.add_mtd	= ftl_add_mtd,
+	.remove_dev	= ftl_remove_dev,
+	.owner		= THIS_MODULE,
+};
 
-    memset(myparts, 0, sizeof(myparts));
-    
-    DEBUG(0, "$Id: ftl.c,v 1.45 2003/01/24 23:31:27 dwmw2 Exp $\n");
-    
-    if (register_blkdev(FTL_MAJOR, "ftl", &ftl_blk_fops)) {
-	printk(KERN_NOTICE "ftl_cs: unable to grab major "
-	       "device number!\n");
-	return -EAGAIN;
-    }
-    
-    for (i = 0; i < MINOR_NR(MAX_DEV, 0, 0); i++)
-	ftl_blocksizes[i] = 1024;
-    for (i = 0; i < MAX_DEV*MAX_PART; i++) {
-	ftl_hd[i].nr_sects = 0;
-	ftl_hd[i].start_sect = 0;
-    }
-    blksize_size[FTL_MAJOR] = ftl_blocksizes;
-    ftl_gendisk.major = FTL_MAJOR;
-    blk_init_queue(BLK_DEFAULT_QUEUE(FTL_MAJOR), &do_ftl_request);
-    add_gendisk(&ftl_gendisk);
-    
-    register_mtd_user(&ftl_notifier);
-    
-    return 0;
+static int __init init_ftl(void)
+{
+	return register_mtd_blktrans(&ftl_tr);
 }
 
 static void __exit cleanup_ftl(void)
 {
-    unregister_mtd_user(&ftl_notifier);
-
-    unregister_blkdev(FTL_MAJOR, "ftl");
-    blk_cleanup_queue(BLK_DEFAULT_QUEUE(FTL_MAJOR));
-    blksize_size[FTL_MAJOR] = NULL;
-
-    del_gendisk(&ftl_gendisk);
+	deregister_mtd_blktrans(&ftl_tr);
 }
 
 module_init(init_ftl);

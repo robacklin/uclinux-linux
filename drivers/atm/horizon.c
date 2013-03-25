@@ -38,11 +38,13 @@
 #include <linux/delay.h>
 #include <linux/uio.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/ioport.h>
+#include <linux/wait.h>
+#include <linux/slab.h>
 
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 #include <asm/uaccess.h>
 #include <asm/string.h>
 #include <asm/byteorder.h>
@@ -167,13 +169,13 @@ static inline void __init show_version (void) {
   Real Time (cdv and max CDT given)
   
   CBR(pcr)             pcr bandwidth always available
-  rtVBR(pcr,scr,mbs)   scr bandwidth always available, upto pcr at mbs too
+  rtVBR(pcr,scr,mbs)   scr bandwidth always available, up to pcr at mbs too
   
   Non Real Time
   
-  nrtVBR(pcr,scr,mbs)  scr bandwidth always available, upto pcr at mbs too
+  nrtVBR(pcr,scr,mbs)  scr bandwidth always available, up to pcr at mbs too
   UBR()
-  ABR(mcr,pcr)         mcr bandwidth always available, upto pcr (depending) too
+  ABR(mcr,pcr)         mcr bandwidth always available, up to pcr (depending) too
   
   mbs is max burst size (bucket)
   pcr and scr have associated cdvt values
@@ -354,8 +356,7 @@ static inline void __init show_version (void) {
 
 /********** globals **********/
 
-static hrz_dev * hrz_devs = NULL;
-static struct timer_list housekeeping;
+static void do_housekeeping (unsigned long arg);
 
 static unsigned short debug = 0;
 static unsigned short vpi_bits = 0;
@@ -424,7 +425,7 @@ static inline void FLUSH_RX_CHANNEL (hrz_dev * dev, u16 channel) {
   return;
 }
 
-static inline void WAIT_FLUSH_RX_COMPLETE (hrz_dev * dev) {
+static void WAIT_FLUSH_RX_COMPLETE (hrz_dev * dev) {
   while (rd_regw (dev, RX_CHANNEL_PORT_OFF) & FLUSH_CHANNEL)
     ;
   return;
@@ -435,7 +436,7 @@ static inline void SELECT_RX_CHANNEL (hrz_dev * dev, u16 channel) {
   return;
 }
 
-static inline void WAIT_UPDATE_COMPLETE (hrz_dev * dev) {
+static void WAIT_UPDATE_COMPLETE (hrz_dev * dev) {
   while (rd_regw (dev, RX_CHANNEL_PORT_OFF) & RX_CHANNEL_UPDATE_IN_PROGRESS)
     ;
   return;
@@ -481,7 +482,6 @@ static inline void dump_skb (char * prefix, unsigned int vc, struct sk_buff * sk
   return;
 }
 
-#if 0 /* unused and in conflict with <asm-ppc/system.h> */
 static inline void dump_regs (hrz_dev * dev) {
 #ifdef DEBUG_HORIZON
   PRINTD (DBG_REGS, "CONTROL 0: %#x", rd_regl (dev, CONTROL_0_REG));
@@ -495,7 +495,6 @@ static inline void dump_regs (hrz_dev * dev) {
 #endif
   return;
 }
-#endif
 
 static inline void dump_framer (hrz_dev * dev) {
 #ifdef DEBUG_HORIZON
@@ -599,127 +598,112 @@ static inline u16 rx_q_entry_to_rx_channel (u32 x) {
 
 // p ranges from 1 to a power of 2
 #define CR_MAXPEXP 4
-
+ 
 static int make_rate (const hrz_dev * dev, u32 c, rounding r,
-		      u16 * bits, unsigned int * actual) {
+		      u16 * bits, unsigned int * actual)
+{
+	// note: rounding the rate down means rounding 'p' up
+	const unsigned long br = test_bit(ultra, &dev->flags) ? BR_ULT : BR_HRZ;
   
-  // note: rounding the rate down means rounding 'p' up
+	u32 div = CR_MIND;
+	u32 pre;
   
-  const unsigned long br = test_bit (ultra, (hrz_flags *) &dev->flags) ?
-    BR_ULT : BR_HRZ;
+	// br_exp and br_man are used to avoid overflowing (c*maxp*2^d) in
+	// the tests below. We could think harder about exact possibilities
+	// of failure...
   
-  u32 div = CR_MIND;
-  u32 pre;
+	unsigned long br_man = br;
+	unsigned int br_exp = 0;
   
-  // local fn to build the timer bits
-  int set_cr (void) {
-    // paranoia
-    if (div > CR_MAXD || (!pre) || pre > 1<<CR_MAXPEXP) {
-      PRINTD (DBG_QOS, "set_cr internal failure: d=%u p=%u",
-	      div, pre);
-      return -EINVAL;
-    } else {
-      if (bits)
-	*bits = (div<<CLOCK_SELECT_SHIFT) | (pre-1);
-      if (actual) {
-	*actual = (br + (pre<<div) - 1) / (pre<<div);
-	PRINTD (DBG_QOS, "actual rate: %u", *actual);
-      }
-      return 0;
-    }
-  }
+	PRINTD (DBG_QOS|DBG_FLOW, "make_rate b=%lu, c=%u, %s", br, c,
+		r == round_up ? "up" : r == round_down ? "down" : "nearest");
   
-  // br_exp and br_man are used to avoid overflowing (c*maxp*2^d) in
-  // the tests below. We could think harder about exact possibilities
-  // of failure...
+	// avoid div by zero
+	if (!c) {
+		PRINTD (DBG_QOS|DBG_ERR, "zero rate is not allowed!");
+		return -EINVAL;
+	}
   
-  unsigned long br_man = br;
-  unsigned int br_exp = 0;
+	while (br_exp < CR_MAXPEXP + CR_MIND && (br_man % 2 == 0)) {
+		br_man = br_man >> 1;
+		++br_exp;
+	}
+	// (br >>br_exp) <<br_exp == br and
+	// br_exp <= CR_MAXPEXP+CR_MIND
   
-  PRINTD (DBG_QOS|DBG_FLOW, "make_rate b=%lu, c=%u, %s", br, c,
-	  (r == round_up) ? "up" : (r == round_down) ? "down" : "nearest");
+	if (br_man <= (c << (CR_MAXPEXP+CR_MIND-br_exp))) {
+		// Equivalent to: B <= (c << (MAXPEXP+MIND))
+		// take care of rounding
+		switch (r) {
+			case round_down:
+				pre = DIV_ROUND_UP(br, c<<div);
+				// but p must be non-zero
+				if (!pre)
+					pre = 1;
+				break;
+			case round_nearest:
+				pre = DIV_ROUND_CLOSEST(br, c<<div);
+				// but p must be non-zero
+				if (!pre)
+					pre = 1;
+				break;
+			default:	/* round_up */
+				pre = br/(c<<div);
+				// but p must be non-zero
+				if (!pre)
+					return -EINVAL;
+		}
+		PRINTD (DBG_QOS, "A: p=%u, d=%u", pre, div);
+		goto got_it;
+	}
   
-  // avoid div by zero
-  if (!c) {
-    PRINTD (DBG_QOS|DBG_ERR, "zero rate is not allowed!");
-    return -EINVAL;
-  }
-  
-  while (br_exp < CR_MAXPEXP + CR_MIND && (br_man % 2 == 0)) {
-    br_man = br_man >> 1;
-    ++br_exp;
-  }
-  // (br >>br_exp) <<br_exp == br and
-  // br_exp <= CR_MAXPEXP+CR_MIND
-  
-  if (br_man <= (c << (CR_MAXPEXP+CR_MIND-br_exp))) {
-    // Equivalent to: B <= (c << (MAXPEXP+MIND))
-    // take care of rounding
-    switch (r) {
-      case round_down:
-	pre = (br+(c<<div)-1)/(c<<div);
-	// but p must be non-zero
-	if (!pre)
-	  pre = 1;
-	break;
-      case round_nearest:
-	pre = (br+(c<<div)/2)/(c<<div);
-	// but p must be non-zero
-	if (!pre)
-	  pre = 1;
-	break;
-      case round_up:
-	pre = br/(c<<div);
-	// but p must be non-zero
-	if (!pre)
-	  return -EINVAL;
-	break;
-    }
-    PRINTD (DBG_QOS, "A: p=%u, d=%u", pre, div);
-    return set_cr ();
-  }
-  
-  // at this point we have
-  // d == MIND and (c << (MAXPEXP+MIND)) < B
-  while (div < CR_MAXD) {
-    div++;
-    if (br_man <= (c << (CR_MAXPEXP+div-br_exp))) {
-      // Equivalent to: B <= (c << (MAXPEXP+d))
-      // c << (MAXPEXP+d-1) < B <= c << (MAXPEXP+d)
-      // 1 << (MAXPEXP-1) < B/2^d/c <= 1 << MAXPEXP
-      // MAXP/2 < B/c2^d <= MAXP
-      // take care of rounding
-      switch (r) {
-	case round_down:
-	  pre = (br+(c<<div)-1)/(c<<div);
-	  break;
-	case round_nearest:
-	  pre = (br+(c<<div)/2)/(c<<div);
-	  break;
-	case round_up:
-	  pre = br/(c<<div);
-	  break;
-      }
-      PRINTD (DBG_QOS, "B: p=%u, d=%u", pre, div);
-      return set_cr ();
-    }
-  }
-  // at this point we have
-  // d == MAXD and (c << (MAXPEXP+MAXD)) < B
-  // but we cannot go any higher
-  // take care of rounding
-  switch (r) {
-    case round_down:
-      return -EINVAL;
-      break;
-    case round_nearest:
-      break;
-    case round_up:
-      break;
-  }
-  pre = 1 << CR_MAXPEXP;
-  PRINTD (DBG_QOS, "C: p=%u, d=%u", pre, div);
-  return set_cr ();
+	// at this point we have
+	// d == MIND and (c << (MAXPEXP+MIND)) < B
+	while (div < CR_MAXD) {
+		div++;
+		if (br_man <= (c << (CR_MAXPEXP+div-br_exp))) {
+			// Equivalent to: B <= (c << (MAXPEXP+d))
+			// c << (MAXPEXP+d-1) < B <= c << (MAXPEXP+d)
+			// 1 << (MAXPEXP-1) < B/2^d/c <= 1 << MAXPEXP
+			// MAXP/2 < B/c2^d <= MAXP
+			// take care of rounding
+			switch (r) {
+				case round_down:
+					pre = DIV_ROUND_UP(br, c<<div);
+					break;
+				case round_nearest:
+					pre = DIV_ROUND_CLOSEST(br, c<<div);
+					break;
+				default: /* round_up */
+					pre = br/(c<<div);
+			}
+			PRINTD (DBG_QOS, "B: p=%u, d=%u", pre, div);
+			goto got_it;
+		}
+	}
+	// at this point we have
+	// d == MAXD and (c << (MAXPEXP+MAXD)) < B
+	// but we cannot go any higher
+	// take care of rounding
+	if (r == round_down)
+		return -EINVAL;
+	pre = 1 << CR_MAXPEXP;
+	PRINTD (DBG_QOS, "C: p=%u, d=%u", pre, div);
+got_it:
+	// paranoia
+	if (div > CR_MAXD || (!pre) || pre > 1<<CR_MAXPEXP) {
+		PRINTD (DBG_QOS, "set_cr internal failure: d=%u p=%u",
+			div, pre);
+		return -EINVAL;
+	} else {
+		if (bits)
+			*bits = (div<<CLOCK_SELECT_SHIFT) | (pre-1);
+		if (actual) {
+			*actual = DIV_ROUND_UP(br, pre<<div);
+			PRINTD (DBG_QOS, "actual rate: %u", *actual);
+		}
+		return 0;
+	}
 }
 
 static int make_rate_with_tolerance (const hrz_dev * dev, u32 c, rounding r, unsigned int tol,
@@ -813,7 +797,7 @@ static void hrz_change_vc_qos (ATM_RXER * rxer, MAAL_QOS * qos) {
 
 /********** free an skb (as per ATM device driver documentation) **********/
 
-static inline void hrz_kfree_skb (struct sk_buff * skb) {
+static void hrz_kfree_skb (struct sk_buff * skb) {
   if (ATM_SKB(skb)->vcc->pop) {
     ATM_SKB(skb)->vcc->pop (ATM_SKB(skb)->vcc, skb);
   } else {
@@ -960,7 +944,7 @@ static void hrz_close_rx (hrz_dev * dev, u16 vc) {
 // to be fixed soon, so do not define TAILRECUSRIONWORKS unless you
 // are sure it does as you may otherwise overflow the kernel stack.
 
-// giving this fn a return value would help GCC, alledgedly
+// giving this fn a return value would help GCC, allegedly
 
 static void rx_schedule (hrz_dev * dev, int irq) {
   unsigned int rx_bytes;
@@ -1051,8 +1035,8 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 	  struct atm_vcc * vcc = ATM_SKB(skb)->vcc;
 	  // VC layer stats
 	  atomic_inc(&vcc->stats->rx);
-	  skb->stamp = xtime;
-	  // end of our responsability
+	  __net_timestamp(skb);
+	  // end of our responsibility
 	  vcc->push (vcc, skb);
 	}
       }
@@ -1093,7 +1077,7 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 
 /********** handle RX bus master complete events **********/
 
-static inline void rx_bus_master_complete_handler (hrz_dev * dev) {
+static void rx_bus_master_complete_handler (hrz_dev * dev) {
   if (test_bit (rx_busy, &dev->flags)) {
     rx_schedule (dev, 1);
   } else {
@@ -1106,14 +1090,12 @@ static inline void rx_bus_master_complete_handler (hrz_dev * dev) {
 
 /********** (queue to) become the next TX thread **********/
 
-static inline int tx_hold (hrz_dev * dev) {
-  while (test_and_set_bit (tx_busy, &dev->flags)) {
-    PRINTD (DBG_TX, "sleeping at tx lock %p %u", dev, dev->flags);
-    interruptible_sleep_on (&dev->tx_queue);
-    PRINTD (DBG_TX, "woken at tx lock %p %u", dev, dev->flags);
-    if (signal_pending (current))
-      return -1;
-  }
+static int tx_hold (hrz_dev * dev) {
+  PRINTD (DBG_TX, "sleeping at tx lock %p %lu", dev, dev->flags);
+  wait_event_interruptible(dev->tx_queue, (!test_and_set_bit(tx_busy, &dev->flags)));
+  PRINTD (DBG_TX, "woken at tx lock %p %lu", dev, dev->flags);
+  if (signal_pending (current))
+    return -1;
   PRINTD (DBG_TX, "set tx_busy for dev %p", dev);
   return 0;
 }
@@ -1201,7 +1183,7 @@ static void tx_schedule (hrz_dev * const dev, int irq) {
 	// tx_regions == 0
 	// that's all folks - end of frame
 	struct sk_buff * skb = dev->tx_skb;
-	dev->tx_iovec = 0;
+	dev->tx_iovec = NULL;
 	
 	// VC layer stats
 	atomic_inc(&ATM_SKB(skb)->vcc->stats->tx);
@@ -1251,7 +1233,7 @@ static void tx_schedule (hrz_dev * const dev, int irq) {
 
 /********** handle TX bus master complete events **********/
 
-static inline void tx_bus_master_complete_handler (hrz_dev * dev) {
+static void tx_bus_master_complete_handler (hrz_dev * dev) {
   if (test_bit (tx_busy, &dev->flags)) {
     tx_schedule (dev, 1);
   } else {
@@ -1265,7 +1247,7 @@ static inline void tx_bus_master_complete_handler (hrz_dev * dev) {
 /********** move RX Q pointer to next item in circular buffer **********/
 
 // called only from IRQ sub-handler
-static inline u32 rx_queue_entry_next (hrz_dev * dev) {
+static u32 rx_queue_entry_next (hrz_dev * dev) {
   u32 rx_queue_entry;
   spin_lock (&dev->mem_lock);
   rx_queue_entry = rd_mem (dev, &dev->rx_q_entry->entry);
@@ -1289,7 +1271,7 @@ static inline void rx_disabled_handler (hrz_dev * dev) {
 /********** handle RX data received by device **********/
 
 // called from IRQ handler
-static inline void rx_data_av_handler (hrz_dev * dev) {
+static void rx_data_av_handler (hrz_dev * dev) {
   u32 rx_queue_entry;
   u32 rx_queue_entry_flags;
   u16 rx_len;
@@ -1401,38 +1383,19 @@ static inline void rx_data_av_handler (hrz_dev * dev) {
 
 /********** interrupt handler **********/
 
-static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs) {
-  hrz_dev * dev = hrz_devs;
+static irqreturn_t interrupt_handler(int irq, void *dev_id)
+{
+  hrz_dev *dev = dev_id;
   u32 int_source;
   unsigned int irq_ok;
-  (void) pt_regs;
   
   PRINTD (DBG_FLOW, "interrupt_handler: %p", dev_id);
-  
-  if (!dev_id) {
-    PRINTD (DBG_IRQ|DBG_ERR, "irq with NULL dev_id: %d", irq);
-    return;
-  }
-  // Did one of our cards generate the interrupt?
-  while (dev) {
-    if (dev == dev_id)
-      break;
-    dev = dev->prev;
-  }
-  if (!dev) {
-    PRINTD (DBG_IRQ, "irq not for me: %d", irq);
-    return;
-  }
-  if (irq != dev->irq) {
-    PRINTD (DBG_IRQ|DBG_ERR, "irq mismatch: %d", irq);
-    return;
-  }
   
   // definitely for us
   irq_ok = 0;
   while ((int_source = rd_regl (dev, INT_SOURCE_REG_OFF)
 	  & INTERESTING_INTERRUPTS)) {
-    // In the interests of fairness, the (inline) handlers below are
+    // In the interests of fairness, the handlers below are
     // called in sequence and without immediate return to the head of
     // the while loop. This is only of issue for slow hosts (or when
     // debugging messages are on). Really slow hosts may find a fast
@@ -1471,39 +1434,32 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   }
   
   PRINTD (DBG_IRQ|DBG_FLOW, "interrupt_handler done: %p", dev_id);
+  if (irq_ok)
+	return IRQ_HANDLED;
+  return IRQ_NONE;
 }
 
 /********** housekeeping **********/
 
-static void set_timer (struct timer_list * timer, unsigned int delay) {
-  timer->expires = jiffies + delay;
-  add_timer (timer);
-  return;
-}
-
 static void do_housekeeping (unsigned long arg) {
   // just stats at the moment
-  hrz_dev * dev = hrz_devs;
-  (void) arg;
-  // data is set to zero at module unload
-  if (housekeeping.data) {
-    while (dev) {
-      // collect device-specific (not driver/atm-linux) stats here
-      dev->tx_cell_count += rd_regw (dev, TX_CELL_COUNT_OFF);
-      dev->rx_cell_count += rd_regw (dev, RX_CELL_COUNT_OFF);
-      dev->hec_error_count += rd_regw (dev, HEC_ERROR_COUNT_OFF);
-      dev->unassigned_cell_count += rd_regw (dev, UNASSIGNED_CELL_COUNT_OFF);
-      dev = dev->prev;
-    }
-    set_timer (&housekeeping, HZ/10);
-  }
+  hrz_dev * dev = (hrz_dev *) arg;
+
+  // collect device-specific (not driver/atm-linux) stats here
+  dev->tx_cell_count += rd_regw (dev, TX_CELL_COUNT_OFF);
+  dev->rx_cell_count += rd_regw (dev, RX_CELL_COUNT_OFF);
+  dev->hec_error_count += rd_regw (dev, HEC_ERROR_COUNT_OFF);
+  dev->unassigned_cell_count += rd_regw (dev, UNASSIGNED_CELL_COUNT_OFF);
+
+  mod_timer (&dev->housekeeping, jiffies + HZ/10);
+
   return;
 }
 
 /********** find an idle channel for TX and set it up **********/
 
 // called with tx_busy set
-static inline short setup_idle_tx_channel (hrz_dev * dev, hrz_vcc * vcc) {
+static short setup_idle_tx_channel (hrz_dev * dev, hrz_vcc * vcc) {
   unsigned short idle_channels;
   short tx_channel = -1;
   unsigned int spin_count;
@@ -1546,8 +1502,8 @@ static inline short setup_idle_tx_channel (hrz_dev * dev, hrz_vcc * vcc) {
     // a.k.a. prepare the channel and remember that we have done so.
     
     tx_ch_desc * tx_desc = &memmap->tx_descs[tx_channel];
-    u16 rd_ptr;
-    u16 wr_ptr;
+    u32 rd_ptr;
+    u32 wr_ptr;
     u16 channel = vcc->channel;
     
     unsigned long flags;
@@ -1689,10 +1645,8 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
     unsigned short d = 0;
     char * s = skb->data;
     if (*s++ == 'D') {
-      for (i = 0; i < 4; ++i) {
-	d = (d<<4) | ((*s <= '9') ? (*s - '0') : (*s - 'a' + 10));
-	++s;
-      }
+	for (i = 0; i < 4; ++i)
+		d = (d << 4) | hex_to_bin(*s++);
       PRINTK (KERN_INFO, "debug bitmap is now %hx", debug = d);
     }
   }
@@ -1774,7 +1728,7 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
     if (tx_iovcnt) {
       // scatter gather transfer
       dev->tx_regions = tx_iovcnt;
-      dev->tx_iovec = 0;		/* @@@ needs rewritten */
+      dev->tx_iovec = NULL;		/* @@@ needs rewritten */
       dev->tx_bytes = 0;
       PRINTD (DBG_TX|DBG_BUS, "TX start scatter-gather transfer (iovec %p, len %d)",
 	      skb->data, tx_len);
@@ -1784,7 +1738,7 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
     } else {
       // simple transfer
       dev->tx_regions = 0;
-      dev->tx_iovec = 0;
+      dev->tx_iovec = NULL;
       dev->tx_bytes = tx_len;
       dev->tx_addr = skb->data;
       PRINTD (DBG_TX|DBG_BUS, "TX start simple transfer (addr %p, len %d)",
@@ -1801,7 +1755,7 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
 
 /********** reset a card **********/
 
-static void __init hrz_reset (const hrz_dev * dev) {
+static void hrz_reset (const hrz_dev * dev) {
   u32 control_0_reg = rd_regl (dev, CONTROL_0_REG);
   
   // why not set RESET_HORIZON to one and wait for the card to
@@ -1822,22 +1776,22 @@ static void __init hrz_reset (const hrz_dev * dev) {
 
 /********** read the burnt in address **********/
 
-static u16 __init read_bia (const hrz_dev * dev, u16 addr) {
+static void WRITE_IT_WAIT (const hrz_dev *dev, u32 ctrl)
+{
+	wr_regl (dev, CONTROL_0_REG, ctrl);
+	udelay (5);
+}
   
+static void CLOCK_IT (const hrz_dev *dev, u32 ctrl)
+{
+	// DI must be valid around rising SK edge
+	WRITE_IT_WAIT(dev, ctrl & ~SEEPROM_SK);
+	WRITE_IT_WAIT(dev, ctrl | SEEPROM_SK);
+}
+
+static u16 __devinit read_bia (const hrz_dev * dev, u16 addr)
+{
   u32 ctrl = rd_regl (dev, CONTROL_0_REG);
-  
-  void WRITE_IT_WAIT (void) {
-    wr_regl (dev, CONTROL_0_REG, ctrl);
-    udelay (5);
-  }
-  
-  void CLOCK_IT (void) {
-    // DI must be valid around rising SK edge
-    ctrl &= ~SEEPROM_SK;
-    WRITE_IT_WAIT();
-    ctrl |= SEEPROM_SK;
-    WRITE_IT_WAIT();
-  }
   
   const unsigned int addr_bits = 6;
   const unsigned int data_bits = 16;
@@ -1847,17 +1801,17 @@ static u16 __init read_bia (const hrz_dev * dev, u16 addr) {
   u16 res;
   
   ctrl &= ~(SEEPROM_CS | SEEPROM_SK | SEEPROM_DI);
-  WRITE_IT_WAIT();
+  WRITE_IT_WAIT(dev, ctrl);
   
   // wake Serial EEPROM and send 110 (READ) command
   ctrl |=  (SEEPROM_CS | SEEPROM_DI);
-  CLOCK_IT();
+  CLOCK_IT(dev, ctrl);
   
   ctrl |= SEEPROM_DI;
-  CLOCK_IT();
+  CLOCK_IT(dev, ctrl);
   
   ctrl &= ~SEEPROM_DI;
-  CLOCK_IT();
+  CLOCK_IT(dev, ctrl);
   
   for (i=0; i<addr_bits; i++) {
     if (addr & (1 << (addr_bits-1)))
@@ -1865,7 +1819,7 @@ static u16 __init read_bia (const hrz_dev * dev, u16 addr) {
     else
       ctrl &= ~SEEPROM_DI;
     
-    CLOCK_IT();
+    CLOCK_IT(dev, ctrl);
     
     addr = addr << 1;
   }
@@ -1877,21 +1831,21 @@ static u16 __init read_bia (const hrz_dev * dev, u16 addr) {
   for (i=0;i<data_bits;i++) {
     res = res >> 1;
     
-    CLOCK_IT();
+    CLOCK_IT(dev, ctrl);
     
     if (rd_regl (dev, CONTROL_0_REG) & SEEPROM_DO)
       res |= (1 << (data_bits-1));
   }
   
   ctrl &= ~(SEEPROM_SK | SEEPROM_CS);
-  WRITE_IT_WAIT();
+  WRITE_IT_WAIT(dev, ctrl);
   
   return res;
 }
 
 /********** initialise a card **********/
 
-static int __init hrz_init (hrz_dev * dev) {
+static int __devinit hrz_init (hrz_dev * dev) {
   int onefivefive;
   
   u16 chan;
@@ -2012,7 +1966,7 @@ static int __init hrz_init (hrz_dev * dev) {
   // Set the max AAL5 cell count to be just enough to contain the
   // largest AAL5 frame that the user wants to receive
   wr_regw (dev, MAX_AAL5_CELL_COUNT_OFF,
-	   (max_rx_size + ATM_AAL5_TRAILER + ATM_CELL_PAYLOAD - 1) / ATM_CELL_PAYLOAD);
+	   DIV_ROUND_UP(max_rx_size + ATM_AAL5_TRAILER, ATM_CELL_PAYLOAD));
   
   // Enable receive
   wr_regw (dev, RX_CONFIG_OFF, rd_regw (dev, RX_CONFIG_OFF) | RX_ENABLE);
@@ -2173,7 +2127,8 @@ static int atm_pcr_check (struct atm_trafprm * tp, unsigned int pcr) {
 
 /********** open VC **********/
 
-static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
+static int hrz_open (struct atm_vcc *atm_vcc)
+{
   int error;
   u16 channel;
   
@@ -2184,6 +2139,8 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   hrz_dev * dev = HRZ_DEV(atm_vcc->dev);
   hrz_vcc vcc;
   hrz_vcc * vccp; // allocated late
+  short vpi = atm_vcc->vpi;
+  int vci = atm_vcc->vci;
   PRINTD (DBG_FLOW|DBG_VCC, "hrz_open %x %x", vpi, vci);
   
 #ifdef ATM_VPI_UNSPEC
@@ -2193,14 +2150,6 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
     return -EINVAL;
   }
 #endif
-  
-  // deal with possibly wildcarded VCs
-  error = atm_find_ci (atm_vcc, &vpi, &vci);
-  if (error) {
-    PRINTD (DBG_WARN|DBG_VCC, "atm_find_ci failed!");
-    return error;
-  }
-  PRINTD (DBG_VCC, "atm_find_ci gives %x %x", vpi, vci);
   
   error = vpivci_to_channel (&channel, vpi, vci);
   if (error) {
@@ -2296,7 +2245,7 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
 	// we take "the PCR" as a rate-cap
 	// not reserved
 	vcc.tx_rate = 0;
-	make_rate (dev, 1<<30, round_nearest, &vcc.tx_pcr_bits, 0);
+	make_rate (dev, 1<<30, round_nearest, &vcc.tx_pcr_bits, NULL);
 	vcc.tx_xbr_bits = ABR_RATE_TYPE;
 	break;
       }
@@ -2556,8 +2505,6 @@ static int hrz_open (struct atm_vcc * atm_vcc, short vpi, int vci) {
   }
   
   // success, set elements of atm_vcc
-  atm_vcc->vpi = vpi;
-  atm_vcc->vci = vci;
   atm_vcc->dev_data = (void *) vccp;
   
   // indicate readiness
@@ -2603,7 +2550,7 @@ static void hrz_close (struct atm_vcc * atm_vcc) {
       PRINTK (KERN_ERR, "%s atm_vcc=%p rxer[channel]=%p",
 	      "arghhh! we're going to die!",
 	      atm_vcc, dev->rxer[channel]);
-    dev->rxer[channel] = 0;
+    dev->rxer[channel] = NULL;
   }
   
   // atomically release our rate reservation
@@ -2642,7 +2589,7 @@ static int hrz_getsockopt (struct atm_vcc * atm_vcc, int level, int optname,
 }
 
 static int hrz_setsockopt (struct atm_vcc * atm_vcc, int level, int optname,
-			   void *optval, int optlen) {
+			   void *optval, unsigned int optlen) {
   hrz_dev * dev = HRZ_DEV(atm_vcc->dev);
   PRINTD (DBG_FLOW|DBG_VCC, "hrz_setsockopt");
   switch (level) {
@@ -2661,18 +2608,6 @@ static int hrz_setsockopt (struct atm_vcc * atm_vcc, int level, int optname,
   return -EINVAL;
 }
 #endif
-
-static int hrz_sg_send (struct atm_vcc * atm_vcc,
-			unsigned long start,
-			unsigned long size) {
-  if (atm_vcc->qos.aal == ATM_AAL5) {
-    PRINTD (DBG_FLOW|DBG_VCC, "hrz_sg_send: yes");
-    return 1;
-  } else {
-    PRINTD (DBG_FLOW|DBG_VCC, "hrz_sg_send: no");
-    return 0;
-  }
-}
 
 #if 0
 static int hrz_ioctl (struct atm_dev * atm_dev, unsigned int cmd, void *arg) {
@@ -2744,169 +2679,183 @@ static int hrz_proc_read (struct atm_dev * atm_dev, loff_t * pos, char * page) {
 }
 
 static const struct atmdev_ops hrz_ops = {
-  open:		hrz_open,
-  close:	hrz_close,
-  send:		hrz_send,
-  sg_send:	hrz_sg_send,
-  proc_read:	hrz_proc_read,
-  owner:	THIS_MODULE,
+  .open	= hrz_open,
+  .close	= hrz_close,
+  .send	= hrz_send,
+  .proc_read	= hrz_proc_read,
+  .owner	= THIS_MODULE,
 };
 
-static int __init hrz_probe (void) {
-  struct pci_dev * pci_dev;
-  int devs;
-  
-  PRINTD (DBG_FLOW, "hrz_probe");
-  
-  devs = 0;
-  pci_dev = NULL;
-  while ((pci_dev = pci_find_device
-	  (PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_HORIZON, pci_dev)
-	  )) {
-    hrz_dev * dev;
-    
-    // adapter slot free, read resources from PCI configuration space
-    u32 iobase = pci_resource_start (pci_dev, 0);
-    u32 * membase = bus_to_virt (pci_resource_start (pci_dev, 1));
-    u8 irq = pci_dev->irq;
-    
-    /* XXX DEV_LABEL is a guess */
-    if (!request_region (iobase, HRZ_IO_EXTENT, DEV_LABEL))
-  	  continue;
+static int __devinit hrz_probe(struct pci_dev *pci_dev, const struct pci_device_id *pci_ent)
+{
+	hrz_dev * dev;
+	int err = 0;
 
-    if (pci_enable_device (pci_dev))
-      continue;
-    
-    dev = kmalloc (sizeof(hrz_dev), GFP_KERNEL);
-    if (!dev) {
-      // perhaps we should be nice: deregister all adapters and abort?
-      PRINTD (DBG_ERR, "out of memory");
-      continue;
-    }
-    
-    memset (dev, 0, sizeof(hrz_dev));
-    
-    // grab IRQ and install handler - move this someplace more sensible
-    if (request_irq (irq,
-		     interrupt_handler,
-		     SA_SHIRQ, /* irqflags guess */
-		     DEV_LABEL, /* name guess */
-		     dev)) {
-      PRINTD (DBG_WARN, "request IRQ failed!");
-      // free_irq is at "endif"
-    } else {
-      
-      PRINTD (DBG_INFO, "found Madge ATM adapter (hrz) at: IO %x, IRQ %u, MEM %p",
-	      iobase, irq, membase);
-      
-      dev->atm_dev = atm_dev_register (DEV_LABEL, &hrz_ops, -1, NULL);
-      if (!(dev->atm_dev)) {
-	PRINTD (DBG_ERR, "failed to register Madge ATM adapter");
-      } else {
+	// adapter slot free, read resources from PCI configuration space
+	u32 iobase = pci_resource_start (pci_dev, 0);
+	u32 * membase = bus_to_virt (pci_resource_start (pci_dev, 1));
+	unsigned int irq;
 	unsigned char lat;
-	
-	PRINTD (DBG_INFO, "registered Madge ATM adapter (no. %d) (%p) at %p",
-		dev->atm_dev->number, dev, dev->atm_dev);
+
+	PRINTD (DBG_FLOW, "hrz_probe");
+
+	if (pci_enable_device(pci_dev))
+		return -EINVAL;
+
+	/* XXX DEV_LABEL is a guess */
+	if (!request_region(iobase, HRZ_IO_EXTENT, DEV_LABEL)) {
+		err = -EINVAL;
+		goto out_disable;
+	}
+
+	dev = kzalloc(sizeof(hrz_dev), GFP_KERNEL);
+	if (!dev) {
+		// perhaps we should be nice: deregister all adapters and abort?
+		PRINTD(DBG_ERR, "out of memory");
+		err = -ENOMEM;
+		goto out_release;
+	}
+
+	pci_set_drvdata(pci_dev, dev);
+
+	// grab IRQ and install handler - move this someplace more sensible
+	irq = pci_dev->irq;
+	if (request_irq(irq,
+			interrupt_handler,
+			IRQF_SHARED, /* irqflags guess */
+			DEV_LABEL, /* name guess */
+			dev)) {
+		PRINTD(DBG_WARN, "request IRQ failed!");
+		err = -EINVAL;
+		goto out_free;
+	}
+
+	PRINTD(DBG_INFO, "found Madge ATM adapter (hrz) at: IO %x, IRQ %u, MEM %p",
+	       iobase, irq, membase);
+
+	dev->atm_dev = atm_dev_register(DEV_LABEL, &pci_dev->dev, &hrz_ops, -1,
+					NULL);
+	if (!(dev->atm_dev)) {
+		PRINTD(DBG_ERR, "failed to register Madge ATM adapter");
+		err = -EINVAL;
+		goto out_free_irq;
+	}
+
+	PRINTD(DBG_INFO, "registered Madge ATM adapter (no. %d) (%p) at %p",
+	       dev->atm_dev->number, dev, dev->atm_dev);
 	dev->atm_dev->dev_data = (void *) dev;
 	dev->pci_dev = pci_dev; 
-	
+
 	// enable bus master accesses
-	pci_set_master (pci_dev);
-	
+	pci_set_master(pci_dev);
+
 	// frobnicate latency (upwards, usually)
-	pci_read_config_byte (pci_dev, PCI_LATENCY_TIMER, &lat);
+	pci_read_config_byte(pci_dev, PCI_LATENCY_TIMER, &lat);
 	if (pci_lat) {
-	  PRINTD (DBG_INFO, "%s PCI latency timer from %hu to %hu",
-		  "changing", lat, pci_lat);
-	  pci_write_config_byte (pci_dev, PCI_LATENCY_TIMER, pci_lat);
+		PRINTD(DBG_INFO, "%s PCI latency timer from %hu to %hu",
+		       "changing", lat, pci_lat);
+		pci_write_config_byte(pci_dev, PCI_LATENCY_TIMER, pci_lat);
 	} else if (lat < MIN_PCI_LATENCY) {
-	  PRINTK (KERN_INFO, "%s PCI latency timer from %hu to %hu",
-		  "increasing", lat, MIN_PCI_LATENCY);
-	  pci_write_config_byte (pci_dev, PCI_LATENCY_TIMER, MIN_PCI_LATENCY);
+		PRINTK(KERN_INFO, "%s PCI latency timer from %hu to %hu",
+		       "increasing", lat, MIN_PCI_LATENCY);
+		pci_write_config_byte(pci_dev, PCI_LATENCY_TIMER, MIN_PCI_LATENCY);
 	}
-	
+
 	dev->iobase = iobase;
 	dev->irq = irq; 
 	dev->membase = membase; 
-	
+
 	dev->rx_q_entry = dev->rx_q_reset = &memmap->rx_q_entries[0];
 	dev->rx_q_wrap  = &memmap->rx_q_entries[RX_CHANS-1];
-	
+
 	// these next three are performance hacks
 	dev->last_vc = -1;
 	dev->tx_last = -1;
 	dev->tx_idle = 0;
-	
+
 	dev->tx_regions = 0;
 	dev->tx_bytes = 0;
-	dev->tx_skb = 0;
-	dev->tx_iovec = 0;
-	
+	dev->tx_skb = NULL;
+	dev->tx_iovec = NULL;
+
 	dev->tx_cell_count = 0;
 	dev->rx_cell_count = 0;
 	dev->hec_error_count = 0;
 	dev->unassigned_cell_count = 0;
-	
+
 	dev->noof_spare_buffers = 0;
-	
+
 	{
-	  unsigned int i;
-	  for (i = 0; i < TX_CHANS; ++i)
-	    dev->tx_channel_record[i] = -1;
+		unsigned int i;
+		for (i = 0; i < TX_CHANS; ++i)
+			dev->tx_channel_record[i] = -1;
 	}
-	
+
 	dev->flags = 0;
-	
+
 	// Allocate cell rates and remember ASIC version
 	// Fibre: ATM_OC3_PCR = 1555200000/8/270*260/53 - 29/53
 	// Copper: (WRONG) we want 6 into the above, close to 25Mb/s
 	// Copper: (plagarise!) 25600000/8/270*260/53 - n/53
-	
-	if (hrz_init (dev)) {
-	  // to be really pedantic, this should be ATM_OC3c_PCR
-	  dev->tx_avail = ATM_OC3_PCR;
-	  dev->rx_avail = ATM_OC3_PCR;
-	  set_bit (ultra, &dev->flags); // NOT "|= ultra" !
+
+	if (hrz_init(dev)) {
+		// to be really pedantic, this should be ATM_OC3c_PCR
+		dev->tx_avail = ATM_OC3_PCR;
+		dev->rx_avail = ATM_OC3_PCR;
+		set_bit(ultra, &dev->flags); // NOT "|= ultra" !
 	} else {
-	  dev->tx_avail = ((25600000/8)*26)/(27*53);
-	  dev->rx_avail = ((25600000/8)*26)/(27*53);
-	  PRINTD (DBG_WARN, "Buggy ASIC: no TX bus-mastering.");
+		dev->tx_avail = ((25600000/8)*26)/(27*53);
+		dev->rx_avail = ((25600000/8)*26)/(27*53);
+		PRINTD(DBG_WARN, "Buggy ASIC: no TX bus-mastering.");
 	}
-	
+
 	// rate changes spinlock
-	spin_lock_init (&dev->rate_lock);
-	
+	spin_lock_init(&dev->rate_lock);
+
 	// on-board memory access spinlock; we want atomic reads and
 	// writes to adapter memory (handles IRQ and SMP)
-	spin_lock_init (&dev->mem_lock);
-	
-#if LINUX_VERSION_CODE >= 0x20303
-	init_waitqueue_head (&dev->tx_queue);
-#else
-	dev->tx_queue = 0;
-#endif
-	
+	spin_lock_init(&dev->mem_lock);
+
+	init_waitqueue_head(&dev->tx_queue);
+
 	// vpi in 0..4, vci in 6..10
 	dev->atm_dev->ci_range.vpi_bits = vpi_bits;
 	dev->atm_dev->ci_range.vci_bits = 10-vpi_bits;
-	
-	// update count and linked list
-	++devs;
-	dev->prev = hrz_devs;
-	hrz_devs = dev;
-	// success
-	continue;
-	
-	/* not currently reached */
-	atm_dev_deregister (dev->atm_dev);
-      } /* atm_dev_register */
-      free_irq (irq, dev);
-	
-    } /* request_irq */
-    kfree (dev);
-    release_region(iobase, HRZ_IO_EXTENT);
-  } /* kmalloc and while */
-  return devs;
+
+	init_timer(&dev->housekeeping);
+	dev->housekeeping.function = do_housekeeping;
+	dev->housekeeping.data = (unsigned long) dev;
+	mod_timer(&dev->housekeeping, jiffies);
+
+out:
+	return err;
+
+out_free_irq:
+	free_irq(dev->irq, dev);
+out_free:
+	kfree(dev);
+out_release:
+	release_region(iobase, HRZ_IO_EXTENT);
+out_disable:
+	pci_disable_device(pci_dev);
+	goto out;
+}
+
+static void __devexit hrz_remove_one(struct pci_dev *pci_dev)
+{
+	hrz_dev *dev;
+
+	dev = pci_get_drvdata(pci_dev);
+
+	PRINTD(DBG_INFO, "closing %p (atm_dev = %p)", dev, dev->atm_dev);
+	del_timer_sync(&dev->housekeeping);
+	hrz_reset(dev);
+	atm_dev_deregister(dev->atm_dev);
+	free_irq(dev->irq, dev);
+	release_region(dev->iobase, HRZ_IO_EXTENT);
+	kfree(dev);
+
+	pci_disable_device(pci_dev);
 }
 
 static void __init hrz_check_args (void) {
@@ -2932,28 +2881,38 @@ static void __init hrz_check_args (void) {
   return;
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
 MODULE_AUTHOR(maintainer_string);
 MODULE_DESCRIPTION(description_string);
 MODULE_LICENSE("GPL");
-MODULE_PARM(debug, "h");
-MODULE_PARM(vpi_bits, "h");
-MODULE_PARM(max_tx_size, "i");
-MODULE_PARM(max_rx_size, "i");
-MODULE_PARM(pci_lat, "b");
+module_param(debug, ushort, 0644);
+module_param(vpi_bits, ushort, 0);
+module_param(max_tx_size, int, 0);
+module_param(max_rx_size, int, 0);
+module_param(pci_lat, byte, 0);
 MODULE_PARM_DESC(debug, "debug bitmap, see .h file");
 MODULE_PARM_DESC(vpi_bits, "number of bits (0..4) to allocate to VPIs");
 MODULE_PARM_DESC(max_tx_size, "maximum size of TX AAL5 frames");
 MODULE_PARM_DESC(max_rx_size, "maximum size of RX AAL5 frames");
 MODULE_PARM_DESC(pci_lat, "PCI latency in bus cycles");
 
+static struct pci_device_id hrz_pci_tbl[] = {
+	{ PCI_VENDOR_ID_MADGE, PCI_DEVICE_ID_MADGE_HORIZON, PCI_ANY_ID, PCI_ANY_ID,
+	  0, 0, 0 },
+	{ 0, }
+};
+
+MODULE_DEVICE_TABLE(pci, hrz_pci_tbl);
+
+static struct pci_driver hrz_driver = {
+	.name =		"horizon",
+	.probe =	hrz_probe,
+	.remove =	__devexit_p(hrz_remove_one),
+	.id_table =	hrz_pci_tbl,
+};
+
 /********** module entry **********/
 
-int init_module (void) {
-  int devs;
-  
+static int __init hrz_module_init (void) {
   // sanity check - cast is needed since printk does not support %Zu
   if (sizeof(struct MEMMAP) != 128*1024/4) {
     PRINTK (KERN_ERR, "Fix struct MEMMAP (is %lu fakewords).",
@@ -2967,80 +2926,16 @@ int init_module (void) {
   hrz_check_args();
   
   // get the juice
-  devs = hrz_probe();
-  
-  if (devs) {
-    init_timer (&housekeeping);
-    housekeeping.function = do_housekeeping;
-    // paranoia
-    housekeeping.data = 1;
-    set_timer (&housekeeping, 0);
-  } else {
-    PRINTK (KERN_ERR, "no (usable) adapters found");
-  }
-  
-  return devs ? 0 : -ENODEV;
+  return pci_register_driver(&hrz_driver);
 }
 
 /********** module exit **********/
 
-void cleanup_module (void) {
-  hrz_dev * dev;
+static void __exit hrz_module_exit (void) {
   PRINTD (DBG_FLOW, "cleanup_module");
-  
-  // paranoia
-  housekeeping.data = 0;
-  del_timer (&housekeeping);
-  
-  while (hrz_devs) {
-    dev = hrz_devs;
-    hrz_devs = dev->prev;
-    
-    PRINTD (DBG_INFO, "closing %p (atm_dev = %p)", dev, dev->atm_dev);
-    hrz_reset (dev);
-    atm_dev_deregister (dev->atm_dev);
-    free_irq (dev->irq, dev);
-    release_region (dev->iobase, HRZ_IO_EXTENT);
-    kfree (dev);
-  }
-  
-  return;
+
+  pci_unregister_driver(&hrz_driver);
 }
 
-#else
-
-/********** monolithic entry **********/
-
-int __init hrz_detect (void) {
-  int devs;
-  
-  // sanity check - cast is needed since printk does not support %Zu
-  if (sizeof(struct MEMMAP) != 128*1024/4) {
-    PRINTK (KERN_ERR, "Fix struct MEMMAP (is %lu fakewords).",
-	    (unsigned long) sizeof(struct MEMMAP));
-    return 0;
-  }
-  
-  show_version();
-  
-  // what about command line arguments?
-  // check arguments
-  hrz_check_args();
-  
-  // get the juice
-  devs = hrz_probe();
-  
-  if (devs) {
-    init_timer (&housekeeping);
-    housekeeping.function = do_housekeeping;
-    // paranoia
-    housekeeping.data = 1;
-    set_timer (&housekeeping, 0);
-  } else {
-    PRINTK (KERN_ERR, "no (usable) adapters found");
-  }
-
-  return devs;
-}
-
-#endif
+module_init(hrz_module_init);
+module_exit(hrz_module_exit);

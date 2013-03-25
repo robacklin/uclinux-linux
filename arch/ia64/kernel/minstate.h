@@ -1,71 +1,23 @@
-#include <linux/config.h>
+
+#include <asm/cache.h>
 
 #include "entry.h"
+#include "paravirt_inst.h"
 
-/*
- * For ivt.s we want to access the stack virtually so we don't have to disable translation
- * on interrupts.
- *
- *  On entry:
- *	r1:	pointer to current task (ar.k6)
- */
-#define MINSTATE_START_SAVE_MIN_VIRT								\
-	dep r1=-1,r1,61,3;				/* r1 = current (virtual) */		\
-(pUser)	mov ar.rsc=0;		/* set enforced lazy mode, pl 0, little-endian, loadrs=0 */	\
-	;;											\
-(pUser)	addl r22=IA64_RBS_OFFSET,r1;			/* compute base of RBS */		\
-(pUser)	mov r24=ar.rnat;									\
-(pKern) mov r1=sp;					/* get sp  */				\
-	;;											\
-(pUser)	addl r1=IA64_STK_OFFSET-IA64_PT_REGS_SIZE,r1;	/* compute base of memory stack */	\
-(pUser)	mov r23=ar.bspstore;				/* save ar.bspstore */			\
-	;;											\
-(pKern) addl r1=-IA64_PT_REGS_SIZE,r1;			/* if in kernel mode, use sp (r12) */	\
-(pUser)	mov ar.bspstore=r22;				/* switch to kernel RBS */		\
-	;;											\
-(pUser)	mov r18=ar.bsp;										\
-(pUser)	mov ar.rsc=0x3;		/* set eager mode, pl 0, little-endian, loadrs=0 */		\
-
-#define MINSTATE_END_SAVE_MIN_VIRT								\
-	or r13=r13,r14;		/* make `current' a kernel virtual address */			\
-	bsw.1;			/* switch back to bank 1 (must be last in insn group) */	\
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+/* read ar.itc in advance, and use it before leaving bank 0 */
+#define ACCOUNT_GET_STAMP				\
+(pUStk) mov.m r20=ar.itc;
+#define ACCOUNT_SYS_ENTER				\
+(pUStk) br.call.spnt rp=account_sys_enter		\
 	;;
-
-/*
- * For mca_asm.S we want to access the stack physically since the state is saved before we
- * go virtual and don't want to destroy the iip or ipsr.
- */
-#define MINSTATE_START_SAVE_MIN_PHYS								\
-(pKern) movl sp=ia64_init_stack+IA64_STK_OFFSET-IA64_PT_REGS_SIZE;				\
-(pUser)	mov ar.rsc=0;		/* set enforced lazy mode, pl 0, little-endian, loadrs=0 */	\
-(pUser)	addl r22=IA64_RBS_OFFSET,r1;		/* compute base of register backing store */	\
-	;;											\
-(pUser)	mov r24=ar.rnat;									\
-(pKern) dep r1=0,sp,61,3;				/* compute physical addr of sp	*/	\
-(pUser)	addl r1=IA64_STK_OFFSET-IA64_PT_REGS_SIZE,r1;	/* compute base of memory stack */	\
-(pUser)	mov r23=ar.bspstore;				/* save ar.bspstore */			\
-(pUser)	dep r22=-1,r22,61,3;				/* compute kernel virtual addr of RBS */\
-	;;											\
-(pKern) addl r1=-IA64_PT_REGS_SIZE,r1;		/* if in kernel mode, use sp (r12) */		\
-(pUser)	mov ar.bspstore=r22;			/* switch to kernel RBS */			\
-	;;											\
-(pUser)	mov r18=ar.bsp;										\
-(pUser)	mov ar.rsc=0x3;		/* set eager mode, pl 0, little-endian, loadrs=0 */		\
-
-#define MINSTATE_END_SAVE_MIN_PHYS								\
-	or r12=r12,r14;		/* make sp a kernel virtual address */				\
-	or r13=r13,r14;		/* make `current' a kernel virtual address */			\
-	;;
-
-#ifdef MINSTATE_VIRT
-# define MINSTATE_START_SAVE_MIN	MINSTATE_START_SAVE_MIN_VIRT
-# define MINSTATE_END_SAVE_MIN		MINSTATE_END_SAVE_MIN_VIRT
+#else
+#define ACCOUNT_GET_STAMP
+#define ACCOUNT_SYS_ENTER
 #endif
 
-#ifdef MINSTATE_PHYS
-# define MINSTATE_START_SAVE_MIN	MINSTATE_START_SAVE_MIN_PHYS
-# define MINSTATE_END_SAVE_MIN		MINSTATE_END_SAVE_MIN_PHYS
-#endif
+.section ".data..patch.rse", "a"
+.previous
 
 /*
  * DO_SAVE_MIN switches to the kernel stacks (if necessary) and saves
@@ -92,26 +44,43 @@
  * Note that psr.ic is NOT turned on by this macro.  This is so that
  * we can pass interruption state as arguments to a handler.
  */
-#define DO_SAVE_MIN(COVER,SAVE_IFS,EXTRA)							\
-	mov r29=cr.ipsr;									\
-	mov r17=IA64_KR(CURRENT);		/* r1 = current (physical) */			\
-	mov r20=r1;										\
-	mov r27=ar.rsc;										\
-	mov r25=ar.unat;									\
-	mov r26=ar.pfs;										\
-	mov r21=ar.fpsr;									\
-	mov r28=cr.iip;										\
-	COVER;											\
+#define IA64_NATIVE_DO_SAVE_MIN(__COVER,SAVE_IFS,EXTRA,WORKAROUND)				\
+	mov r16=IA64_KR(CURRENT);	/* M */							\
+	mov r27=ar.rsc;			/* M */							\
+	mov r20=r1;			/* A */							\
+	mov r25=ar.unat;		/* M */							\
+	MOV_FROM_IPSR(p0,r29);		/* M */							\
+	mov r26=ar.pfs;			/* I */							\
+	MOV_FROM_IIP(r28);			/* M */						\
+	mov r21=ar.fpsr;		/* M */							\
+	__COVER;				/* B;; (or nothing) */				\
 	;;											\
-	invala;											\
-	extr.u r16=r29,32,2;		/* extract psr.cpl */					\
+	adds r16=IA64_TASK_THREAD_ON_USTACK_OFFSET,r16;						\
 	;;											\
-	cmp.eq pKern,pUser=r0,r16;	/* are we in kernel mode already? (psr.cpl==0) */	\
-	mov r1=r17; 										\
+	ld1 r17=[r16];				/* load current->thread.on_ustack flag */	\
+	st1 [r16]=r0;				/* clear current->thread.on_ustack flag */	\
+	adds r1=-IA64_TASK_THREAD_ON_USTACK_OFFSET,r16						\
 	/* switch from user to kernel RBS: */							\
 	;;											\
+	invala;				/* M */							\
 	SAVE_IFS;										\
-	MINSTATE_START_SAVE_MIN									\
+	cmp.eq pKStk,pUStk=r0,r17;		/* are we in kernel mode already? */		\
+	;;											\
+(pUStk)	mov ar.rsc=0;		/* set enforced lazy mode, pl 0, little-endian, loadrs=0 */	\
+	;;											\
+(pUStk)	mov.m r24=ar.rnat;									\
+(pUStk)	addl r22=IA64_RBS_OFFSET,r1;			/* compute base of RBS */		\
+(pKStk) mov r1=sp;					/* get sp  */				\
+	;;											\
+(pUStk) lfetch.fault.excl.nt1 [r22];								\
+(pUStk)	addl r1=IA64_STK_OFFSET-IA64_PT_REGS_SIZE,r1;	/* compute base of memory stack */	\
+(pUStk)	mov r23=ar.bspstore;				/* save ar.bspstore */			\
+	;;											\
+(pUStk)	mov ar.bspstore=r22;				/* switch to kernel RBS */		\
+(pKStk) addl r1=-IA64_PT_REGS_SIZE,r1;			/* if in kernel mode, use sp (r12) */	\
+	;;											\
+(pUStk)	mov r18=ar.bsp;										\
+(pUStk)	mov ar.rsc=0x3;		/* set eager mode, pl 0, little-endian, loadrs=0 */		\
 	adds r17=2*L1_CACHE_BYTES,r1;		/* really: biggest cache-line size */		\
 	adds r16=PT(CR_IPSR),r1;								\
 	;;											\
@@ -119,64 +88,66 @@
 	st8 [r16]=r29;		/* save cr.ipsr */						\
 	;;											\
 	lfetch.fault.excl.nt1 [r17];								\
+	tbit.nz p15,p0=r29,IA64_PSR_I_BIT;							\
+	mov r29=b0										\
 	;;											\
+	WORKAROUND;										\
 	adds r16=PT(R8),r1;	/* initialize first base pointer */				\
 	adds r17=PT(R9),r1;	/* initialize second base pointer */				\
+(pKStk)	mov r18=r0;		/* make sure r18 isn't NaT */					\
 	;;											\
 .mem.offset 0,0; st8.spill [r16]=r8,16;								\
 .mem.offset 8,0; st8.spill [r17]=r9,16;								\
-	;;											\
+        ;;											\
 .mem.offset 0,0; st8.spill [r16]=r10,24;							\
-.mem.offset 8,0; st8.spill [r17]=r11,32;							\
+.mem.offset 8,0; st8.spill [r17]=r11,24;							\
+        ;;											\
+	st8 [r16]=r28,16;	/* save cr.iip */						\
+	st8 [r17]=r30,16;	/* save cr.ifs */						\
+(pUStk)	sub r18=r18,r22;	/* r18=RSE.ndirty*8 */						\
+	mov r8=ar.ccv;										\
+	mov r9=ar.csd;										\
+	mov r10=ar.ssd;										\
+	movl r11=FPSR_DEFAULT;   /* L-unit */							\
 	;;											\
-	st8 [r16]=r28,8;	/* save cr.iip */						\
-	mov r28=b0;          	/* rCRIIP=branch reg b0 */					\
-(pKern)	mov r18=r0;		/* make sure r18 isn't NaT */					\
-	mov r8=ar.ccv;                                                                          \
-	mov r9=ar.csd;                                                                          \
-	mov r10=ar.ssd;                                                                         \
-	movl r11=FPSR_DEFAULT;   /* L-unit */                                                   \
-	;;											\
-	st8 [r16]=r30,16;	/* save cr.ifs */						\
-	st8 [r17]=r25,16;	/* save ar.unat */						\
-(pUser)	sub r18=r18,r22;	/* r18=RSE.ndirty*8 */						\
-	;;											\
-	st8 [r16]=r26,16;	/* save ar.pfs */						\
-	st8 [r17]=r27,16;	/* save ar.rsc */						\
-	tbit.nz p15,p0=r29,IA64_PSR_I_BIT							\
-	;;			/* avoid RAW on r16 & r17 */					\
-(pKern)	adds r16=16,r16;	/* skip over ar_rnat field */					\
-(pKern)	adds r17=16,r17;	/* skip over ar_bspstore field */				\
-(pUser)	st8 [r16]=r24,16;	/* save ar.rnat */						\
-(pUser)	st8 [r17]=r23,16;	/* save ar.bspstore */					  	\
-	;;											\
-	st8 [r16]=r31,16;	/* save predicates */						\
-	st8 [r17]=r28,16;	/* save b0 */							\
+	st8 [r16]=r25,16;	/* save ar.unat */						\
+	st8 [r17]=r26,16;	/* save ar.pfs */						\
 	shl r18=r18,16;		/* compute ar.rsc to be used for "loadrs" */			\
 	;;											\
-	st8 [r16]=r18,16;	/* save ar.rsc value for "loadrs" */				\
-	st8.spill [r17]=r20,16;	/* save original r1 */						\
+	st8 [r16]=r27,16;	/* save ar.rsc */						\
+(pUStk)	st8 [r17]=r24,16;	/* save ar.rnat */						\
+(pKStk)	adds r17=16,r17;	/* skip over ar_rnat field */					\
+	;;			/* avoid RAW on r16 & r17 */					\
+(pUStk)	st8 [r16]=r23,16;	/* save ar.bspstore */						\
+	st8 [r17]=r31,16;	/* save predicates */						\
+(pKStk)	adds r16=16,r16;	/* skip over ar_bspstore field */				\
 	;;											\
-.mem.offset 0,0; st8.spill [r16]=r12,16;							\
-.mem.offset 8,0; st8.spill [r17]=r13,16;							\
+	st8 [r16]=r29,16;	/* save b0 */							\
+	st8 [r17]=r18,16;	/* save ar.rsc value for "loadrs" */				\
 	cmp.eq pNonSys,pSys=r0,r0	/* initialize pSys=0, pNonSys=1 */			\
 	;;											\
-.mem.offset 0,0; st8 [r16]=r21,PT(R14)-PT(AR_FPSR); 	/* ar.fpsr */				\
-.mem.offset 8,0; st8.spill [r17]=r15,PT(R3)-PT(R15);						\
+.mem.offset 0,0; st8.spill [r16]=r20,16;	/* save original r1 */				\
+.mem.offset 8,0; st8.spill [r17]=r12,16;							\
 	adds r12=-16,r1;	/* switch to kernel memory stack (with 16 bytes of scratch) */	\
 	;;											\
+.mem.offset 0,0; st8.spill [r16]=r13,16;							\
+.mem.offset 8,0; st8.spill [r17]=r21,16;	/* save ar.fpsr */				\
 	mov r13=IA64_KR(CURRENT);	/* establish `current' */				\
-.mem.offset 0,0; st8.spill [r16]=r14,8;								\
-	dep r14=-1,r0,61,3;									\
+	;;											\
+.mem.offset 0,0; st8.spill [r16]=r15,16;							\
+.mem.offset 8,0; st8.spill [r17]=r14,16;							\
 	;;											\
 .mem.offset 0,0; st8.spill [r16]=r2,16;								\
 .mem.offset 8,0; st8.spill [r17]=r3,16;								\
+	ACCOUNT_GET_STAMP									\
 	adds r2=IA64_PT_REGS_R16_OFFSET,r1;							\
 	;;											\
 	EXTRA;											\
 	movl r1=__gp;		/* establish kernel global pointer */				\
 	;;											\
-	MINSTATE_END_SAVE_MIN
+	ACCOUNT_SYS_ENTER									\
+	bsw.1;			/* switch back to bank 1 (must be last in insn group) */	\
+	;;
 
 /*
  * SAVE_REST saves the remainder of pt_regs (with psr.ic on).
@@ -233,13 +204,47 @@
 	stf.spill [r3]=f11;			\
 	adds r25=PT(B7)-PT(F11),r3;		\
 	;;					\
-	st8 [r24]=r18,16;	/* b6 */	\
-	st8 [r25]=r19,16;	/* b7 */	\
+	st8 [r24]=r18,16;       /* b6 */	\
+	st8 [r25]=r19,16;       /* b7 */	\
 	;;					\
-	st8 [r24]=r9;		/* ar.csd */	\
-	st8 [r25]=r10;		/* ar.ssd */	\
+	st8 [r24]=r9;        	/* ar.csd */	\
+	st8 [r25]=r10;      	/* ar.ssd */	\
 	;;
 
-#define SAVE_MIN_WITH_COVER	DO_SAVE_MIN(cover, mov r30=cr.ifs,)
-#define SAVE_MIN_WITH_COVER_R19	DO_SAVE_MIN(cover, mov r30=cr.ifs, mov r15=r19)
-#define SAVE_MIN		DO_SAVE_MIN(     , mov r30=r0, )
+#define RSE_WORKAROUND				\
+(pUStk) extr.u r17=r18,3,6;			\
+(pUStk)	sub r16=r18,r22;			\
+[1:](pKStk)	br.cond.sptk.many 1f;		\
+	.xdata4 ".data..patch.rse",1b-.		\
+	;;					\
+	cmp.ge p6,p7 = 33,r17;			\
+	;;					\
+(p6)	mov r17=0x310;				\
+(p7)	mov r17=0x308;				\
+	;;					\
+	cmp.leu p1,p0=r16,r17;			\
+(p1)	br.cond.sptk.many 1f;			\
+	dep.z r17=r26,0,62;			\
+	movl r16=2f;				\
+	;;					\
+	mov ar.pfs=r17;				\
+	dep r27=r0,r27,16,14;			\
+	mov b0=r16;				\
+	;;					\
+	br.ret.sptk b0;				\
+	;;					\
+2:						\
+	mov ar.rsc=r0				\
+	;;					\
+	flushrs;				\
+	;;					\
+	mov ar.bspstore=r22			\
+	;;					\
+	mov r18=ar.bsp;				\
+	;;					\
+1:						\
+	.pred.rel "mutex", pKStk, pUStk
+
+#define SAVE_MIN_WITH_COVER	DO_SAVE_MIN(COVER, mov r30=cr.ifs, , RSE_WORKAROUND)
+#define SAVE_MIN_WITH_COVER_R19	DO_SAVE_MIN(COVER, mov r30=cr.ifs, mov r15=r19, RSE_WORKAROUND)
+#define SAVE_MIN			DO_SAVE_MIN(     , mov r30=r0, , )

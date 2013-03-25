@@ -1,309 +1,257 @@
 /*
- * arch/microblaze/kernel/process.c -- Arch-dependent process handling
+ * Copyright (C) 2008-2009 Michal Simek <monstr@monstr.eu>
+ * Copyright (C) 2008-2009 PetaLogix
+ * Copyright (C) 2006 Atmark Techno, Inc.
  *
- *  Copyright (C) 2001,2002  NEC Corporation
- *  Copyright (C) 2001,2002  Miles Bader <miles@gnu.org>
- *
- * This file is subject to the terms and conditions of the GNU General
- * Public License.  See the file COPYING in the main directory of this
- * archive for more details.
- *
- * Written by Miles Bader <miles@gnu.org>
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License. See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
 
-#include <linux/config.h>
-#include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
-#include <linux/stddef.h>
-#include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/slab.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/reboot.h>
+#include <linux/pm.h>
+#include <linux/tick.h>
+#include <linux/bitops.h>
+#include <asm/pgalloc.h>
+#include <asm/uaccess.h> /* for USER_DS macros */
+#include <asm/cacheflush.h>
 
-#include <asm/uaccess.h>
-#include <asm/system.h>
-#include <asm/setup.h>
-#include <asm/pgtable.h>
-
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-struct mm_struct init_mm = INIT_MM (init_mm);
-
-union task_union init_task_union
-__attribute__ ((section (".data.init_task"), aligned (KERNEL_STACK_SIZE)))
-	= { task: INIT_TASK (init_task_union.task) };
-
-asmlinkage void ret_from_fork (void);
-
-
-/* The idle loop.  */
-static void default_idle (void)
+void show_regs(struct pt_regs *regs)
 {
-	while (1) {
-		while (! current->need_resched)
-		{
-			asm ("nop;nop;nop; nop; nop; nop; nop" ::: "cc");
-		}
-		schedule ();
+	printk(KERN_INFO " Registers dump: mode=%X\r\n", regs->pt_mode);
+	printk(KERN_INFO " r1=%08lX, r2=%08lX, r3=%08lX, r4=%08lX\n",
+				regs->r1, regs->r2, regs->r3, regs->r4);
+	printk(KERN_INFO " r5=%08lX, r6=%08lX, r7=%08lX, r8=%08lX\n",
+				regs->r5, regs->r6, regs->r7, regs->r8);
+	printk(KERN_INFO " r9=%08lX, r10=%08lX, r11=%08lX, r12=%08lX\n",
+				regs->r9, regs->r10, regs->r11, regs->r12);
+	printk(KERN_INFO " r13=%08lX, r14=%08lX, r15=%08lX, r16=%08lX\n",
+				regs->r13, regs->r14, regs->r15, regs->r16);
+	printk(KERN_INFO " r17=%08lX, r18=%08lX, r19=%08lX, r20=%08lX\n",
+				regs->r17, regs->r18, regs->r19, regs->r20);
+	printk(KERN_INFO " r21=%08lX, r22=%08lX, r23=%08lX, r24=%08lX\n",
+				regs->r21, regs->r22, regs->r23, regs->r24);
+	printk(KERN_INFO " r25=%08lX, r26=%08lX, r27=%08lX, r28=%08lX\n",
+				regs->r25, regs->r26, regs->r27, regs->r28);
+	printk(KERN_INFO " r29=%08lX, r30=%08lX, r31=%08lX, rPC=%08lX\n",
+				regs->r29, regs->r30, regs->r31, regs->pc);
+	printk(KERN_INFO " msr=%08lX, ear=%08lX, esr=%08lX, fsr=%08lX\n",
+				regs->msr, regs->ear, regs->esr, regs->fsr);
+}
+
+void (*pm_idle)(void);
+void (*pm_power_off)(void) = NULL;
+EXPORT_SYMBOL(pm_power_off);
+
+static int hlt_counter = 1;
+
+void disable_hlt(void)
+{
+	hlt_counter++;
+}
+EXPORT_SYMBOL(disable_hlt);
+
+void enable_hlt(void)
+{
+	hlt_counter--;
+}
+EXPORT_SYMBOL(enable_hlt);
+
+static int __init nohlt_setup(char *__unused)
+{
+	hlt_counter = 1;
+	return 1;
+}
+__setup("nohlt", nohlt_setup);
+
+static int __init hlt_setup(char *__unused)
+{
+	hlt_counter = 0;
+	return 1;
+}
+__setup("hlt", hlt_setup);
+
+void default_idle(void)
+{
+	if (likely(hlt_counter)) {
+		local_irq_disable();
+		stop_critical_timings();
+		cpu_relax();
+		start_critical_timings();
+		local_irq_enable();
+	} else {
+		clear_thread_flag(TIF_POLLING_NRFLAG);
+		smp_mb__after_clear_bit();
+		local_irq_disable();
+		while (!need_resched())
+			cpu_sleep();
+		local_irq_enable();
+		set_thread_flag(TIF_POLLING_NRFLAG);
 	}
 }
 
-void (*idle)(void) = default_idle;
-
-/*
- * The idle thread. There's no useful work to be
- * done, so just try to conserve power and have a
- * low exit latency (ie sit in a loop waiting for
- * somebody to say that they'd like to reschedule)
- */
-void cpu_idle (void)
+void cpu_idle(void)
 {
+	set_thread_flag(TIF_POLLING_NRFLAG);
+
 	/* endless idle loop with no priority at all */
-	init_idle ();
-	current->nice = 20;
-	current->counter = -100;
-	(*idle) ();
-}
+	while (1) {
+		void (*idle)(void) = pm_idle;
 
-struct spec_reg_name {
-	const char *name;
-	int gpr;
-};
+		if (!idle)
+			idle = default_idle;
 
-struct spec_reg_name spec_reg_names[] = {
-	{ "sp", GPR_SP },
-	{ "gp", GPR_GP },
-	{ "ep", GPR_EP },
-	{ "lp", GPR_LP },
-	{ 0, 0 }
-};
+		tick_nohz_idle_enter();
+		rcu_idle_enter();
+		while (!need_resched())
+			idle();
+		rcu_idle_exit();
+		tick_nohz_idle_exit();
 
-void show_regs (struct pt_regs *regs)
-{
-	int gpr_base, gpr_offs;
-
-	printk ("     pc 0x%08lx    psw 0x%08lx                       kernel_mode %d\n",
-		regs->pc, regs->psw, regs->kernel_mode);
-
-	for (gpr_base = 0; gpr_base < NUM_GPRS; gpr_base += 4) {
-		for (gpr_offs = 0; gpr_offs < 4; gpr_offs++) {
-			int gpr = gpr_base + gpr_offs;
-			long val = regs->gpr[gpr];
-			struct spec_reg_name *srn;
-
-			for (srn = spec_reg_names; srn->name; srn++)
-				if (srn->gpr == gpr)
-					break;
-
-			if (srn->name)
-				printk ("%7s 0x%08lx", srn->name, val);
-			else
-				printk ("    r%02d 0x%08lx", gpr, val);
-		}
-
-		printk ("\n");
+		schedule_preempt_disabled();
+		check_pgt_cache();
 	}
 }
 
-/*
- * This is the mechanism for creating a new kernel thread.
- *
- * NOTE! Only a kernel-only process (ie the swapper or direct descendants who
- * haven't done an "execve()") should use this: it will work within a system
- * call from a "real" process, but the process memory space will not be free'd
- * until both the parent and the child have exited.
- */
-int arch_kernel_thread (int (*fn)(void *), void *arg, unsigned long flags)
+void flush_thread(void)
 {
-	register mm_segment_t fs = get_fs ();
-	register unsigned long arg0;
-	register unsigned long ret;
+}
 
-	/* Somewhere to save syscall return value */
-	unsigned long ret_sav;
+int copy_thread(unsigned long clone_flags, unsigned long usp,
+		unsigned long unused,
+		struct task_struct *p, struct pt_regs *regs)
+{
+	struct pt_regs *childregs = task_pt_regs(p);
+	struct thread_info *ti = task_thread_info(p);
 
-	set_fs (KERNEL_DS);
+	*childregs = *regs;
+	if (user_mode(regs))
+		childregs->r1 = usp;
+	else
+		childregs->r1 = ((unsigned long) ti) + THREAD_SIZE;
 
-	/* Clone this thread.  */
-	arg0 = flags | CLONE_VM;
-	asm volatile (	"addik	r12, r0, %1	\n\t"
-			"addk	r5, r0, %2	\n\t"
-			"brki	r14, 0x8;	\n\t"
-			"addk	%0, r3, r0	\n\t"
-		        : "=r" (ret) 
-			: "i" (__NR_clone), "r" (arg0)
-		        : "r3", "r4", "r5", "r12", "r14", "cc");
-	if (ret == 0) {
-		/* In child thread, call FN and exit.  */
-		arg0 = (*fn) (arg);
-		asm volatile (	"addik	r12, r0, %1	\n\t"
-				"addk	r5, r0, %2	\n\t"
-				"brki	r14, 0x8	\n\t"
-				"addk	%0, r3, r0	\n\t"
-			        : "=r" (ret) 
-				: "i" (__NR_exit), "r" (arg0)
-			        : "r3", "r4", "r5", "r12", "r14", "cc");
+#ifndef CONFIG_MMU
+	memset(&ti->cpu_context, 0, sizeof(struct cpu_context));
+	ti->cpu_context.r1 = (unsigned long)childregs;
+	ti->cpu_context.msr = (unsigned long)childregs->msr;
+#else
+
+	/* if creating a kernel thread then update the current reg (we don't
+	 * want to use the parent's value when restoring by POP_STATE) */
+	if (kernel_mode(regs))
+		/* save new current on stack to use POP_STATE */
+		childregs->CURRENT_TASK = (unsigned long)p;
+	/* if returning to user then use the parent's value of this register */
+
+	/* if we're creating a new kernel thread then just zeroing all
+	 * the registers. That's OK for a brand new thread.*/
+	/* Pls. note that some of them will be restored in POP_STATE */
+	if (kernel_mode(regs))
+		memset(&ti->cpu_context, 0, sizeof(struct cpu_context));
+	/* if this thread is created for fork/vfork/clone, then we want to
+	 * restore all the parent's context */
+	/* in addition to the registers which will be restored by POP_STATE */
+	else {
+		ti->cpu_context = *(struct cpu_context *)regs;
+		childregs->msr |= MSR_UMS;
 	}
 
-	/* In parent.  */
-	set_fs (fs);
+	/* FIXME STATE_SAVE_PT_OFFSET; */
+	ti->cpu_context.r1  = (unsigned long)childregs;
+	/* we should consider the fact that childregs is a copy of the parent
+	 * regs which were saved immediately after entering the kernel state
+	 * before enabling VM. This MSR will be restored in switch_to and
+	 * RETURN() and we want to have the right machine state there
+	 * specifically this state must have INTs disabled before and enabled
+	 * after performing rtbd
+	 * compose the right MSR for RETURN(). It will work for switch_to also
+	 * excepting for VM and UMS
+	 * don't touch UMS , CARRY and cache bits
+	 * right now MSR is a copy of parent one */
+	childregs->msr |= MSR_BIP;
+	childregs->msr &= ~MSR_EIP;
+	childregs->msr |= MSR_IE;
+	childregs->msr &= ~MSR_VM;
+	childregs->msr |= MSR_VMS;
+	childregs->msr |= MSR_EE; /* exceptions will be enabled*/
 
-	return ret;
-}
+	ti->cpu_context.msr = (childregs->msr|MSR_VM);
+	ti->cpu_context.msr &= ~MSR_UMS; /* switch_to to kernel mode */
+	ti->cpu_context.msr &= ~MSR_IE;
+#endif
+	ti->cpu_context.r15 = (unsigned long)ret_from_fork - 8;
 
-void flush_thread (void)
-{
-	set_fs (USER_DS);
-}
-
-int copy_thread (int nr, unsigned long clone_flags,
-		 unsigned long stack_start, unsigned long stack_size,
-		 struct task_struct *p, struct pt_regs *regs)
-{
-	/* Start pushing stuff from the top of the childs kernel stack.  */
-	unsigned long orig_ksp = (unsigned long)p + KERNEL_STACK_SIZE;
-	unsigned long ksp = orig_ksp;
-
-	/* We push two `state save' stack fames (see entry.S) on the new
-	   kernel stack:
-	     1) The innermost one is what switch_thread would have
-	        pushed, and is used when we context switch to the child
-		thread for the first time.  It's set up to return to
-		ret_from_fork in entry.S.
-	     2) The outermost one (nearest the top) is what a syscall
-	        trap would have pushed, and is set up to return to the
-		same location as the parent thread, but with a return
-		value of 0. */
-	struct pt_regs *child_switch_regs, *child_trap_regs;
-
-	/* Trap frame.  */
-	ksp -= STATE_SAVE_SIZE;
-	child_trap_regs = (struct pt_regs *)(ksp + STATE_SAVE_PT_OFFSET);
-	/* Switch frame.  */
-	ksp -= STATE_SAVE_SIZE;
-	child_switch_regs = (struct pt_regs *)(ksp + STATE_SAVE_PT_OFFSET);
-
-	/* First copy parent's register state to child.  */
-	*child_switch_regs = *regs;
-	*child_trap_regs = *regs;
-
-	/* switch_thread returns to the restored value of the lp
-	   register (r15), so we make that the place where we want to
-	   jump when the child thread begins running.  
-	   switch_thread returns control to a thread via the instruction
-		rtsd r15, 8
-	   so this offset must be factored in here
-         */
-	child_switch_regs->gpr[GPR_LP] = ((microblaze_reg_t)ret_from_fork)-8;
-
-        if (regs->kernel_mode)
-                /* Since we're returning to kernel-mode, make sure the child's
-                   stored kernel stack pointer agrees with what the actual
-                   stack pointer will be at that point (the trap return code
-                   always restores the SP, even when returning to
-                   kernel-mode).  */
-                child_trap_regs->gpr[GPR_SP] = orig_ksp;
-        else
-                /* Set the child's user-mode stack-pointer (the name
-                   `stack_start' is a misnomer, it's just the initial SP
-                   value).  */
-                child_trap_regs->gpr[GPR_SP] = stack_start;
-
-	/* Thread state for the child (everything else is on the stack).  */
-	p->thread.ksp = ksp;
+	if (clone_flags & CLONE_SETTLS)
+		;
 
 	return 0;
 }
 
+#ifndef CONFIG_MMU
 /*
- * fill in the user structure for a core dump..
+ * Return saved PC of a blocked thread.
  */
-void dump_thread (struct pt_regs *regs, struct user *dump)
+unsigned long thread_saved_pc(struct task_struct *tsk)
 {
-#if 0  /* Later.  XXX */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = regs->gpr[GPR_SP];
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk +
-					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
+	struct cpu_context *ctx =
+		&(((struct thread_info *)(tsk->stack))->cpu_context);
 
-	if (dump->start_stack < TASK_SIZE)
-		dump->u_ssize = ((unsigned long) (TASK_SIZE - dump->start_stack)) >> PAGE_SHIFT;
-
-	dump->u_ar0 = (struct user_regs_struct *)((int)&dump->regs - (int)dump);
-	dump->regs = *regs;
-	dump->u_fpvalid = 0;
-#endif
+	/* Check whether the thread is blocked in resume() */
+	if (in_sched_functions(ctx->r15))
+		return (unsigned long)ctx->r15;
+	else
+		return ctx->r14;
 }
-
-/*
- * sys_execve() executes a new program.
- */
-asmlinkage int sys_execve (char *name, char **argv, char **envp,
-			    struct pt_regs *regs)
-{
-	char *filename = getname (name);
-	int error = PTR_ERR (filename);
-
-	if (! IS_ERR (filename)) {
-		error = do_execve (filename, argv, envp, regs);
-		putname (filename);
-	}
-
-	return error;
-}
-
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here (void);
-extern void scheduling_functions_end_here (void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
-
-unsigned long get_wchan (struct task_struct *p)
-{
-#if 0  /* Barf.  Figure out the stack-layout later.  XXX  */
-	unsigned long fp, pc;
-	int count = 0;
-
-	if (!p || p == current || p->state == TASK_RUNNING)
-		return 0;
-
-	pc = thread_saved_pc (&p->thread);
-
-	/* This quite disgusting function walks up the stack, following
-	   saved return address, until it something that's out of bounds
-	   (as defined by `first_sched' and `last_sched').  It then
-	   returns the last PC that was in-bounds.  */
-	do {
-		if (fp < stack_page + sizeof (struct task_struct) ||
-		    fp >= 8184+stack_page)
-			return 0;
-		pc = ((unsigned long *)fp)[1];
-		/* FIXME: This depends on the order of these functions. */
-		if (pc < first_sched || pc >= last_sched)
-			return pc;
-		fp = *(unsigned long *) fp;
-	} while (count++ < 16);
 #endif
 
+static void kernel_thread_helper(int (*fn)(void *), void *arg)
+{
+	fn(arg);
+	do_exit(-1);
+}
+
+int kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
+{
+	struct pt_regs regs;
+
+	memset(&regs, 0, sizeof(regs));
+	/* store them in non-volatile registers */
+	regs.r5 = (unsigned long)fn;
+	regs.r6 = (unsigned long)arg;
+	local_save_flags(regs.msr);
+	regs.pc = (unsigned long)kernel_thread_helper;
+	regs.pt_mode = 1;
+
+	return do_fork(flags | CLONE_VM | CLONE_UNTRACED, 0,
+			&regs, 0, NULL, NULL);
+}
+EXPORT_SYMBOL_GPL(kernel_thread);
+
+unsigned long get_wchan(struct task_struct *p)
+{
+/* TBD (used by procfs) */
 	return 0;
 }
 
-void show_trace_task (struct task_struct *t)
+/* Set up a thread for executing a new program */
+void start_thread(struct pt_regs *regs, unsigned long pc, unsigned long usp)
 {
-        /* blarg XXX */
-	printk ("show_trace_task: KSP = 0x%lx, USP = 0x%lx, UPC = 0x%lx\n",
-		t->thread.ksp, KSTK_ESP (t), KSTK_EIP (t));
+	regs->pc = pc;
+	regs->r1 = usp;
+	regs->pt_mode = 0;
+#ifdef CONFIG_MMU
+	regs->msr |= MSR_UMS;
+#endif
 }
+
+#ifdef CONFIG_MMU
+#include <linux/elfcore.h>
+/*
+ * Set up a thread for executing a new program
+ */
+int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs)
+{
+	return 0; /* MicroBlaze has no separate FPU registers */
+}
+#endif /* CONFIG_MMU */

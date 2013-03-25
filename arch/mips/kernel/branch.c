@@ -1,6 +1,4 @@
 /*
- * Branch and jump emulation.
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -11,36 +9,32 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
+#include <linux/module.h>
 #include <asm/branch.h>
 #include <asm/cpu.h>
+#include <asm/cpu-features.h>
+#include <asm/fpu.h>
 #include <asm/inst.h>
 #include <asm/ptrace.h>
 #include <asm/uaccess.h>
-#include <asm/processor.h>
 
-/*
- * Compute the return address and do emulate branch simulation, if required.
+/**
+ * __compute_return_epc_for_insn - Computes the return address and do emulate
+ *				    branch simulation, if required.
+ *
+ * @regs:	Pointer to pt_regs
+ * @insn:	branch instruction to decode
+ * @returns:	-EFAULT on error and forces SIGBUS, and on success
+ *		returns 0 or BRANCH_LIKELY_TAKEN as appropriate after
+ *		evaluating the branch.
  */
-int __compute_return_epc(struct pt_regs *regs)
+int __compute_return_epc_for_insn(struct pt_regs *regs,
+				   union mips_instruction insn)
 {
-	unsigned int *addr, bit, fcr31;
-	long epc;
-	union mips_instruction insn;
+	unsigned int bit, fcr31, dspcontrol;
+	long epc = regs->cp0_epc;
+	int ret = 0;
 
-	epc = regs->cp0_epc;
-	if (epc & 3)
-		goto unaligned;
-
-	/*
-	 * Read the instruction
-	 */
-	addr = (unsigned int *) (unsigned long) epc;
-	if (__get_user(insn.word, addr)) {
-		force_sig(SIGSEGV, current);
-		return -EFAULT;
-	}
-
-	regs->regs[0] = 0;
 	switch (insn.i_format.opcode) {
 	/*
 	 * jr and jalr are in r_format format.
@@ -65,18 +59,22 @@ int __compute_return_epc(struct pt_regs *regs)
 		switch (insn.i_format.rt) {
 	 	case bltz_op:
 		case bltzl_op:
-			if ((long)regs->regs[insn.i_format.rs] < 0)
+			if ((long)regs->regs[insn.i_format.rs] < 0) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == bltzl_op)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
 
 		case bgez_op:
 		case bgezl_op:
-			if ((long)regs->regs[insn.i_format.rs] >= 0)
+			if ((long)regs->regs[insn.i_format.rs] >= 0) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == bgezl_op)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
@@ -84,9 +82,11 @@ int __compute_return_epc(struct pt_regs *regs)
 		case bltzal_op:
 		case bltzall_op:
 			regs->regs[31] = epc + 8;
-			if ((long)regs->regs[insn.i_format.rs] < 0)
+			if ((long)regs->regs[insn.i_format.rs] < 0) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == bltzall_op)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
@@ -94,9 +94,24 @@ int __compute_return_epc(struct pt_regs *regs)
 		case bgezal_op:
 		case bgezall_op:
 			regs->regs[31] = epc + 8;
-			if ((long)regs->regs[insn.i_format.rs] >= 0)
+			if ((long)regs->regs[insn.i_format.rs] >= 0) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == bgezall_op)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
+				epc += 8;
+			regs->cp0_epc = epc;
+			break;
+
+		case bposge32_op:
+			if (!cpu_has_dsp)
+				goto sigill;
+
+			dspcontrol = rddsp(0x01);
+
+			if (dspcontrol >= 32) {
+				epc = epc + 4 + (insn.i_format.simmediate << 2);
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
@@ -122,9 +137,11 @@ int __compute_return_epc(struct pt_regs *regs)
 	case beq_op:
 	case beql_op:
 		if (regs->regs[insn.i_format.rs] ==
-		    regs->regs[insn.i_format.rt])
+		    regs->regs[insn.i_format.rt]) {
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
-		else
+			if (insn.i_format.rt == beql_op)
+				ret = BRANCH_LIKELY_TAKEN;
+		} else
 			epc += 8;
 		regs->cp0_epc = epc;
 		break;
@@ -132,9 +149,11 @@ int __compute_return_epc(struct pt_regs *regs)
 	case bne_op:
 	case bnel_op:
 		if (regs->regs[insn.i_format.rs] !=
-		    regs->regs[insn.i_format.rt])
+		    regs->regs[insn.i_format.rt]) {
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
-		else
+			if (insn.i_format.rt == bnel_op)
+				ret = BRANCH_LIKELY_TAKEN;
+		} else
 			epc += 8;
 		regs->cp0_epc = epc;
 		break;
@@ -142,9 +161,11 @@ int __compute_return_epc(struct pt_regs *regs)
 	case blez_op: /* not really i_format */
 	case blezl_op:
 		/* rt field assumed to be zero */
-		if ((long)regs->regs[insn.i_format.rs] <= 0)
+		if ((long)regs->regs[insn.i_format.rs] <= 0) {
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
-		else
+			if (insn.i_format.rt == bnel_op)
+				ret = BRANCH_LIKELY_TAKEN;
+		} else
 			epc += 8;
 		regs->cp0_epc = epc;
 		break;
@@ -152,9 +173,11 @@ int __compute_return_epc(struct pt_regs *regs)
 	case bgtz_op:
 	case bgtzl_op:
 		/* rt field assumed to be zero */
-		if ((long)regs->regs[insn.i_format.rs] > 0)
+		if ((long)regs->regs[insn.i_format.rs] > 0) {
 			epc = epc + 4 + (insn.i_format.simmediate << 2);
-		else
+			if (insn.i_format.rt == bnel_op)
+				ret = BRANCH_LIKELY_TAKEN;
+		} else
 			epc += 8;
 		regs->cp0_epc = epc;
 		break;
@@ -163,39 +186,108 @@ int __compute_return_epc(struct pt_regs *regs)
 	 * And now the FPA/cp1 branch instructions.
 	 */
 	case cop1_op:
-		if (!cpu_has_fpu)
-			fcr31 = current->thread.fpu.soft.sr;
-		else
+		preempt_disable();
+		if (is_fpu_owner())
 			asm volatile("cfc1\t%0,$31" : "=r" (fcr31));
+		else
+			fcr31 = current->thread.fpu.fcr31;
+		preempt_enable();
+
 		bit = (insn.i_format.rt >> 2);
 		bit += (bit != 0);
 		bit += 23;
-		switch (insn.i_format.rt) {
+		switch (insn.i_format.rt & 3) {
 		case 0:	/* bc1f */
 		case 2:	/* bc1fl */
-			if (~fcr31 & (1 << bit))
+			if (~fcr31 & (1 << bit)) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == 2)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
 
 		case 1:	/* bc1t */
 		case 3:	/* bc1tl */
-			if (fcr31 & (1 << bit))
+			if (fcr31 & (1 << bit)) {
 				epc = epc + 4 + (insn.i_format.simmediate << 2);
-			else
+				if (insn.i_format.rt == 3)
+					ret = BRANCH_LIKELY_TAKEN;
+			} else
 				epc += 8;
 			regs->cp0_epc = epc;
 			break;
 		}
 		break;
+#ifdef CONFIG_CPU_CAVIUM_OCTEON
+	case lwc2_op: /* This is bbit0 on Octeon */
+		if ((regs->regs[insn.i_format.rs] & (1ull<<insn.i_format.rt))
+		     == 0)
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case ldc2_op: /* This is bbit032 on Octeon */
+		if ((regs->regs[insn.i_format.rs] &
+		    (1ull<<(insn.i_format.rt+32))) == 0)
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case swc2_op: /* This is bbit1 on Octeon */
+		if (regs->regs[insn.i_format.rs] & (1ull<<insn.i_format.rt))
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+	case sdc2_op: /* This is bbit132 on Octeon */
+		if (regs->regs[insn.i_format.rs] &
+		    (1ull<<(insn.i_format.rt+32)))
+			epc = epc + 4 + (insn.i_format.simmediate << 2);
+		else
+			epc += 8;
+		regs->cp0_epc = epc;
+		break;
+#endif
 	}
 
-	return 0;
+	return ret;
+
+sigill:
+	printk("%s: DSP branch but not DSP ASE - sending SIGBUS.\n", current->comm);
+	force_sig(SIGBUS, current);
+	return -EFAULT;
+}
+EXPORT_SYMBOL_GPL(__compute_return_epc_for_insn);
+
+int __compute_return_epc(struct pt_regs *regs)
+{
+	unsigned int __user *addr;
+	long epc;
+	union mips_instruction insn;
+
+	epc = regs->cp0_epc;
+	if (epc & 3)
+		goto unaligned;
+
+	/*
+	 * Read the instruction
+	 */
+	addr = (unsigned int __user *) epc;
+	if (__get_user(insn.word, addr)) {
+		force_sig(SIGSEGV, current);
+		return -EFAULT;
+	}
+
+	return __compute_return_epc_for_insn(regs, insn);
 
 unaligned:
 	printk("%s: unaligned epc - sending SIGBUS.\n", current->comm);
 	force_sig(SIGBUS, current);
 	return -EFAULT;
+
 }

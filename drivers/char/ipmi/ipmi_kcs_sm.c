@@ -37,87 +37,114 @@
  * that document.
  */
 
-#include <asm/io.h>
-#include <asm/string.h>		/* Gets rid of memcpy warning */
+#include <linux/kernel.h> /* For printk. */
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/string.h>
+#include <linux/jiffies.h>
+#include <linux/ipmi_msgdefs.h>		/* for completion codes */
+#include "ipmi_si_sm.h"
 
-#include "ipmi_kcs_sm.h"
+/* kcs_debug is a bit-field
+ *	KCS_DEBUG_ENABLE -	turned on for now
+ *	KCS_DEBUG_MSG    -	commands and their responses
+ *	KCS_DEBUG_STATES -	state machine
+ */
+#define KCS_DEBUG_STATES	4
+#define KCS_DEBUG_MSG		2
+#define	KCS_DEBUG_ENABLE	1
 
-/* Set this if you want a printout of why the state machine was hosed
-   when it gets hosed. */
-#define DEBUG_HOSED_REASON
-
-/* Print the state machine state on entry every time. */
-#undef DEBUG_STATE
+static int kcs_debug;
+module_param(kcs_debug, int, 0644);
+MODULE_PARM_DESC(kcs_debug, "debug bitmask, 1=enable, 2=messages, 4=states");
 
 /* The states the KCS driver may be in. */
 enum kcs_states {
-	KCS_IDLE,		/* The KCS interface is currently
-                                   doing nothing. */
-	KCS_START_OP,		/* We are starting an operation.  The
-				   data is in the output buffer, but
-				   nothing has been done to the
-				   interface yet.  This was added to
-				   the state machine in the spec to
-				   wait for the initial IBF. */
-	KCS_WAIT_WRITE_START,	/* We have written a write cmd to the
-				   interface. */
-	KCS_WAIT_WRITE,		/* We are writing bytes to the
-                                   interface. */
-	KCS_WAIT_WRITE_END,	/* We have written the write end cmd
-                                   to the interface, and still need to
-                                   write the last byte. */
-	KCS_WAIT_READ,		/* We are waiting to read data from
-				   the interface. */
-	KCS_ERROR0,		/* State to transition to the error
-				   handler, this was added to the
-				   state machine in the spec to be
-				   sure IBF was there. */
-	KCS_ERROR1,		/* First stage error handler, wait for
-                                   the interface to respond. */
-	KCS_ERROR2,		/* The abort cmd has been written,
-				   wait for the interface to
-				   respond. */
-	KCS_ERROR3,		/* We wrote some data to the
-				   interface, wait for it to switch to
-				   read mode. */
-	KCS_HOSED		/* The hardware failed to follow the
-				   state machine. */
+	/* The KCS interface is currently doing nothing. */
+	KCS_IDLE,
+
+	/*
+	 * We are starting an operation.  The data is in the output
+	 * buffer, but nothing has been done to the interface yet.  This
+	 * was added to the state machine in the spec to wait for the
+	 * initial IBF.
+	 */
+	KCS_START_OP,
+
+	/* We have written a write cmd to the interface. */
+	KCS_WAIT_WRITE_START,
+
+	/* We are writing bytes to the interface. */
+	KCS_WAIT_WRITE,
+
+	/*
+	 * We have written the write end cmd to the interface, and
+	 * still need to write the last byte.
+	 */
+	KCS_WAIT_WRITE_END,
+
+	/* We are waiting to read data from the interface. */
+	KCS_WAIT_READ,
+
+	/*
+	 * State to transition to the error handler, this was added to
+	 * the state machine in the spec to be sure IBF was there.
+	 */
+	KCS_ERROR0,
+
+	/*
+	 * First stage error handler, wait for the interface to
+	 * respond.
+	 */
+	KCS_ERROR1,
+
+	/*
+	 * The abort cmd has been written, wait for the interface to
+	 * respond.
+	 */
+	KCS_ERROR2,
+
+	/*
+	 * We wrote some data to the interface, wait for it to switch
+	 * to read mode.
+	 */
+	KCS_ERROR3,
+
+	/* The hardware failed to follow the state machine. */
+	KCS_HOSED
 };
 
-#define MAX_KCS_READ_SIZE 80
-#define MAX_KCS_WRITE_SIZE 80
+#define MAX_KCS_READ_SIZE IPMI_MAX_MSG_LENGTH
+#define MAX_KCS_WRITE_SIZE IPMI_MAX_MSG_LENGTH
 
 /* Timeouts in microseconds. */
-#define IBF_RETRY_TIMEOUT 1000000
-#define OBF_RETRY_TIMEOUT 1000000
+#define IBF_RETRY_TIMEOUT 5000000
+#define OBF_RETRY_TIMEOUT 5000000
 #define MAX_ERROR_RETRIES 10
+#define ERROR0_OBF_WAIT_JIFFIES (2*HZ)
 
-#define IPMI_ERR_MSG_TRUNCATED	0xc6
-#define IPMI_ERR_UNSPECIFIED	0xff
-
-struct kcs_data
-{
-	enum kcs_states state;
-	unsigned int    port;
-	unsigned char	*addr;
-	unsigned char   write_data[MAX_KCS_WRITE_SIZE];
-	int             write_pos;
-	int             write_count;
-	int             orig_write_count;
-	unsigned char   read_data[MAX_KCS_READ_SIZE];
-	int             read_pos;
-	int	        truncated;
+struct si_sm_data {
+	enum kcs_states  state;
+	struct si_sm_io *io;
+	unsigned char    write_data[MAX_KCS_WRITE_SIZE];
+	int              write_pos;
+	int              write_count;
+	int              orig_write_count;
+	unsigned char    read_data[MAX_KCS_READ_SIZE];
+	int              read_pos;
+	int	         truncated;
 
 	unsigned int  error_retries;
 	long          ibf_timeout;
 	long          obf_timeout;
+	unsigned long  error0_timeout;
 };
 
-void init_kcs_data(struct kcs_data *kcs, unsigned int port, unsigned char *addr)
+static unsigned int init_kcs_data(struct si_sm_data *kcs,
+				  struct si_sm_io *io)
 {
 	kcs->state = KCS_IDLE;
-	kcs->port = port;
-	kcs->addr = addr;
+	kcs->io = io;
 	kcs->write_pos = 0;
 	kcs->write_count = 0;
 	kcs->orig_write_count = 0;
@@ -126,40 +153,29 @@ void init_kcs_data(struct kcs_data *kcs, unsigned int port, unsigned char *addr)
 	kcs->truncated = 0;
 	kcs->ibf_timeout = IBF_RETRY_TIMEOUT;
 	kcs->obf_timeout = OBF_RETRY_TIMEOUT;
+
+	/* Reserve 2 I/O bytes. */
+	return 2;
 }
 
-/* Remember, init_one_kcs() insured port and addr can't both be set */
-
-static inline unsigned char read_status(struct kcs_data *kcs)
+static inline unsigned char read_status(struct si_sm_data *kcs)
 {
-        if (kcs->port)
-		return inb(kcs->port + 1);
-        else
-		return readb(kcs->addr + 1);
+	return kcs->io->inputb(kcs->io, 1);
 }
 
-static inline unsigned char read_data(struct kcs_data *kcs)
+static inline unsigned char read_data(struct si_sm_data *kcs)
 {
-        if (kcs->port)
-		return inb(kcs->port + 0);
-        else
-		return readb(kcs->addr + 0);
+	return kcs->io->inputb(kcs->io, 0);
 }
 
-static inline void write_cmd(struct kcs_data *kcs, unsigned char data)
+static inline void write_cmd(struct si_sm_data *kcs, unsigned char data)
 {
-        if (kcs->port)
-		outb(data, kcs->port + 1);
-        else
-		writeb(data, kcs->addr + 1);
+	kcs->io->outputb(kcs->io, 1, data);
 }
 
-static inline void write_data(struct kcs_data *kcs, unsigned char data)
+static inline void write_data(struct si_sm_data *kcs, unsigned char data)
 {
-        if (kcs->port)
-		outb(data, kcs->port + 0);
-        else
-		writeb(data, kcs->addr + 0);
+	kcs->io->outputb(kcs->io, 0, data);
 }
 
 /* Control codes. */
@@ -179,27 +195,28 @@ static inline void write_data(struct kcs_data *kcs, unsigned char data)
 #define GET_STATUS_OBF(status) ((status) & 0x01)
 
 
-static inline void write_next_byte(struct kcs_data *kcs)
+static inline void write_next_byte(struct si_sm_data *kcs)
 {
 	write_data(kcs, kcs->write_data[kcs->write_pos]);
 	(kcs->write_pos)++;
 	(kcs->write_count)--;
 }
 
-static inline void start_error_recovery(struct kcs_data *kcs, char *reason)
+static inline void start_error_recovery(struct si_sm_data *kcs, char *reason)
 {
 	(kcs->error_retries)++;
 	if (kcs->error_retries > MAX_ERROR_RETRIES) {
-#ifdef DEBUG_HOSED_REASON
-		printk("ipmi_kcs_sm: kcs hosed: %s\n", reason);
-#endif
+		if (kcs_debug & KCS_DEBUG_ENABLE)
+			printk(KERN_DEBUG "ipmi_kcs_sm: kcs hosed: %s\n",
+			       reason);
 		kcs->state = KCS_HOSED;
 	} else {
+		kcs->error0_timeout = jiffies + ERROR0_OBF_WAIT_JIFFIES;
 		kcs->state = KCS_ERROR0;
 	}
 }
 
-static inline void read_next_byte(struct kcs_data *kcs)
+static inline void read_next_byte(struct si_sm_data *kcs)
 {
 	if (kcs->read_pos >= MAX_KCS_READ_SIZE) {
 		/* Throw the data away and mark it truncated. */
@@ -212,9 +229,8 @@ static inline void read_next_byte(struct kcs_data *kcs)
 	write_data(kcs, KCS_READ_BYTE);
 }
 
-static inline int check_ibf(struct kcs_data *kcs,
-			    unsigned char   status,
-			    long            time)
+static inline int check_ibf(struct si_sm_data *kcs, unsigned char status,
+			    long time)
 {
 	if (GET_STATUS_IBF(status)) {
 		kcs->ibf_timeout -= time;
@@ -229,11 +245,10 @@ static inline int check_ibf(struct kcs_data *kcs,
 	return 1;
 }
 
-static inline int check_obf(struct kcs_data *kcs,
-			    unsigned char   status,
-			    long            time)
+static inline int check_obf(struct si_sm_data *kcs, unsigned char status,
+			    long time)
 {
-	if (! GET_STATUS_OBF(status)) {
+	if (!GET_STATUS_OBF(status)) {
 		kcs->obf_timeout -= time;
 		if (kcs->obf_timeout < 0) {
 		    start_error_recovery(kcs, "OBF not ready in time");
@@ -245,13 +260,13 @@ static inline int check_obf(struct kcs_data *kcs,
 	return 1;
 }
 
-static void clear_obf(struct kcs_data *kcs, unsigned char status)
+static void clear_obf(struct si_sm_data *kcs, unsigned char status)
 {
 	if (GET_STATUS_OBF(status))
 		read_data(kcs);
 }
 
-static void restart_kcs_transaction(struct kcs_data *kcs)
+static void restart_kcs_transaction(struct si_sm_data *kcs)
 {
 	kcs->write_count = kcs->orig_write_count;
 	kcs->write_pos = 0;
@@ -262,16 +277,25 @@ static void restart_kcs_transaction(struct kcs_data *kcs)
 	write_cmd(kcs, KCS_WRITE_START);
 }
 
-int start_kcs_transaction(struct kcs_data *kcs, char *data, unsigned int size)
+static int start_kcs_transaction(struct si_sm_data *kcs, unsigned char *data,
+				 unsigned int size)
 {
-	if ((size < 2) || (size > MAX_KCS_WRITE_SIZE)) {
-		return -1;
-	}
+	unsigned int i;
 
-	if ((kcs->state != KCS_IDLE) && (kcs->state != KCS_HOSED)) {
-		return -2;
-	}
+	if (size < 2)
+		return IPMI_REQ_LEN_INVALID_ERR;
+	if (size > MAX_KCS_WRITE_SIZE)
+		return IPMI_REQ_LEN_EXCEEDED_ERR;
 
+	if ((kcs->state != KCS_IDLE) && (kcs->state != KCS_HOSED))
+		return IPMI_NOT_IN_MY_STATE_ERR;
+
+	if (kcs_debug & KCS_DEBUG_MSG) {
+		printk(KERN_DEBUG "start_kcs_transaction -");
+		for (i = 0; i < size; i++)
+			printk(" %02x", (unsigned char) (data [i]));
+		printk("\n");
+	}
 	kcs->error_retries = 0;
 	memcpy(kcs->write_data, data, size);
 	kcs->write_count = size;
@@ -284,7 +308,8 @@ int start_kcs_transaction(struct kcs_data *kcs, char *data, unsigned int size)
 	return 0;
 }
 
-int kcs_get_result(struct kcs_data *kcs, unsigned char *data, int length)
+static int get_kcs_result(struct si_sm_data *kcs, unsigned char *data,
+			  unsigned int length)
 {
 	if (length < kcs->read_pos) {
 		kcs->read_pos = length;
@@ -300,9 +325,11 @@ int kcs_get_result(struct kcs_data *kcs, unsigned char *data, int length)
 		kcs->read_pos = 3;
 	}
 	if (kcs->truncated) {
-		/* Report a truncated error.  We might overwrite
-		   another error, but that's too bad, the user needs
-		   to know it was truncated. */
+		/*
+		 * Report a truncated error.  We might overwrite
+		 * another error, but that's too bad, the user needs
+		 * to know it was truncated.
+		 */
 		data[2] = IPMI_ERR_MSG_TRUNCATED;
 		kcs->truncated = 0;
 	}
@@ -310,22 +337,24 @@ int kcs_get_result(struct kcs_data *kcs, unsigned char *data, int length)
 	return kcs->read_pos;
 }
 
-/* This implements the state machine defined in the IPMI manual, see
-   that for details on how this works.  Divide that flowchart into
-   sections delimited by "Wait for IBF" and this will become clear. */
-enum kcs_result kcs_event(struct kcs_data *kcs, long time)
+/*
+ * This implements the state machine defined in the IPMI manual, see
+ * that for details on how this works.  Divide that flowchart into
+ * sections delimited by "Wait for IBF" and this will become clear.
+ */
+static enum si_sm_result kcs_event(struct si_sm_data *kcs, long time)
 {
 	unsigned char status;
 	unsigned char state;
 
 	status = read_status(kcs);
 
-#ifdef DEBUG_STATE
-	printk("  State = %d, %x\n", kcs->state, status);
-#endif
+	if (kcs_debug & KCS_DEBUG_STATES)
+		printk(KERN_DEBUG "KCS: State = %d, %x\n", kcs->state, status);
+
 	/* All states wait for ibf, so just do it here. */
 	if (!check_ibf(kcs, status, time))
-		return KCS_CALL_WITH_DELAY;
+		return SI_SM_CALL_WITH_DELAY;
 
 	/* Just about everything looks at the KCS state, so grab that, too. */
 	state = GET_STATUS_STATE(status);
@@ -336,12 +365,12 @@ enum kcs_result kcs_event(struct kcs_data *kcs, long time)
 		clear_obf(kcs, status);
 
 		if (GET_STATUS_ATN(status))
-			return KCS_ATTN;
+			return SI_SM_ATTN;
 		else
-			return KCS_SM_IDLE;
+			return SI_SM_IDLE;
 
 	case KCS_START_OP:
-		if (state != KCS_IDLE) {
+		if (state != KCS_IDLE_STATE) {
 			start_error_recovery(kcs,
 					     "State machine not idle at start");
 			break;
@@ -383,11 +412,12 @@ enum kcs_result kcs_event(struct kcs_data *kcs, long time)
 			write_next_byte(kcs);
 		}
 		break;
-		
+
 	case KCS_WAIT_WRITE_END:
 		if (state != KCS_WRITE_STATE) {
 			start_error_recovery(kcs,
-					     "Not in write state for write end");
+					     "Not in write state"
+					     " for write end");
 			break;
 		}
 		clear_obf(kcs, status);
@@ -404,26 +434,33 @@ enum kcs_result kcs_event(struct kcs_data *kcs, long time)
 		}
 
 		if (state == KCS_READ_STATE) {
-			if (! check_obf(kcs, status, time))
-				return KCS_CALL_WITH_DELAY;
+			if (!check_obf(kcs, status, time))
+				return SI_SM_CALL_WITH_DELAY;
 			read_next_byte(kcs);
 		} else {
-			/* We don't implement this exactly like the state
-			   machine in the spec.  Some broken hardware
-			   does not write the final dummy byte to the
-			   read register.  Thus obf will never go high
-			   here.  We just go straight to idle, and we
-			   handle clearing out obf in idle state if it
-			   happens to come in. */
+			/*
+			 * We don't implement this exactly like the state
+			 * machine in the spec.  Some broken hardware
+			 * does not write the final dummy byte to the
+			 * read register.  Thus obf will never go high
+			 * here.  We just go straight to idle, and we
+			 * handle clearing out obf in idle state if it
+			 * happens to come in.
+			 */
 			clear_obf(kcs, status);
 			kcs->orig_write_count = 0;
 			kcs->state = KCS_IDLE;
-			return KCS_TRANSACTION_COMPLETE;
+			return SI_SM_TRANSACTION_COMPLETE;
 		}
 		break;
 
 	case KCS_ERROR0:
 		clear_obf(kcs, status);
+		status = read_status(kcs);
+		if (GET_STATUS_OBF(status))
+			/* controller isn't responding */
+			if (time_before(jiffies, kcs->error0_timeout))
+				return SI_SM_CALL_WITH_TICK_DELAY;
 		write_cmd(kcs, KCS_GET_STATUS_ABORT);
 		kcs->state = KCS_ERROR1;
 		break;
@@ -433,21 +470,21 @@ enum kcs_result kcs_event(struct kcs_data *kcs, long time)
 		write_data(kcs, 0);
 		kcs->state = KCS_ERROR2;
 		break;
-		
+
 	case KCS_ERROR2:
 		if (state != KCS_READ_STATE) {
 			start_error_recovery(kcs,
 					     "Not in read state for error2");
 			break;
 		}
-		if (! check_obf(kcs, status, time))
-			return KCS_CALL_WITH_DELAY;
+		if (!check_obf(kcs, status, time))
+			return SI_SM_CALL_WITH_DELAY;
 
 		clear_obf(kcs, status);
 		write_data(kcs, KCS_READ_BYTE);
 		kcs->state = KCS_ERROR3;
 		break;
-		
+
 	case KCS_ERROR3:
 		if (state != KCS_IDLE_STATE) {
 			start_error_recovery(kcs,
@@ -455,31 +492,59 @@ enum kcs_result kcs_event(struct kcs_data *kcs, long time)
 			break;
 		}
 
-		if (! check_obf(kcs, status, time))
-			return KCS_CALL_WITH_DELAY;
+		if (!check_obf(kcs, status, time))
+			return SI_SM_CALL_WITH_DELAY;
 
 		clear_obf(kcs, status);
 		if (kcs->orig_write_count) {
 			restart_kcs_transaction(kcs);
 		} else {
 			kcs->state = KCS_IDLE;
-			return KCS_TRANSACTION_COMPLETE;
+			return SI_SM_TRANSACTION_COMPLETE;
 		}
 		break;
-			
+
 	case KCS_HOSED:
 		break;
 	}
 
 	if (kcs->state == KCS_HOSED) {
-		init_kcs_data(kcs, kcs->port, kcs->addr);
-		return KCS_SM_HOSED;
+		init_kcs_data(kcs, kcs->io);
+		return SI_SM_HOSED;
 	}
 
-	return KCS_CALL_WITHOUT_DELAY;
+	return SI_SM_CALL_WITHOUT_DELAY;
 }
 
-int kcs_size(void)
+static int kcs_size(void)
 {
-	return sizeof(struct kcs_data);
+	return sizeof(struct si_sm_data);
 }
+
+static int kcs_detect(struct si_sm_data *kcs)
+{
+	/*
+	 * It's impossible for the KCS status register to be all 1's,
+	 * (assuming a properly functioning, self-initialized BMC)
+	 * but that's what you get from reading a bogus address, so we
+	 * test that first.
+	 */
+	if (read_status(kcs) == 0xff)
+		return 1;
+
+	return 0;
+}
+
+static void kcs_cleanup(struct si_sm_data *kcs)
+{
+}
+
+struct si_sm_handlers kcs_smi_handlers = {
+	.init_data         = init_kcs_data,
+	.start_transaction = start_kcs_transaction,
+	.get_result        = get_kcs_result,
+	.event             = kcs_event,
+	.detect            = kcs_detect,
+	.cleanup           = kcs_cleanup,
+	.size              = kcs_size,
+};

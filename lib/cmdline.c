@@ -12,10 +12,27 @@
  *
  */
 
-#include <linux/module.h>
+#include <linux/export.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 
+/*
+ *	If a hyphen was found in get_option, this will handle the
+ *	range of numbers, M-N.  This will expand the range and insert
+ *	the values[M, M+1, ..., N] into the ints array in get_options.
+ */
+
+static int get_range(char **str, int *pint)
+{
+	int x, inc_counter, upper_range;
+
+	(*str)++;
+	upper_range = simple_strtol((*str), NULL, 0);
+	inc_counter = upper_range - *pint;
+	for (x = *pint; x < upper_range; x++)
+		*pint++ = x;
+	return inc_counter;
+}
 
 /**
  *	get_option - Parse integer from an option string
@@ -26,9 +43,10 @@
  *	comma as well.
  *
  *	Return values:
- *	0 : no int in string
- *	1 : int found, no subsequent comma
- *	2 : int found including a subsequent comma
+ *	0 - no int in string
+ *	1 - int found, no subsequent comma
+ *	2 - int found including a subsequent comma
+ *	3 - hyphen found to denote a range
  */
 
 int get_option (char **str, int *pint)
@@ -44,6 +62,8 @@ int get_option (char **str, int *pint)
 		(*str)++;
 		return 2;
 	}
+	if (**str == '-')
+		return 3;
 
 	return 1;
 }
@@ -55,7 +75,8 @@ int get_option (char **str, int *pint)
  *	@ints: integer array
  *
  *	This function parses a string containing a comma-separated
- *	list of integers.  The parse halts when the array is
+ *	list of integers, a hyphen-separated range of _positive_ integers,
+ *	or a combination of both.  The parse halts when the array is
  *	full, or when no more numbers can be retrieved from the
  *	string.
  *
@@ -64,26 +85,38 @@ int get_option (char **str, int *pint)
  *	completely parseable).
  */
  
-char *get_options (char *str, int nints, int *ints)
+char *get_options(const char *str, int nints, int *ints)
 {
 	int res, i = 1;
 
 	while (i < nints) {
-		res = get_option (&str, ints + i);
+		res = get_option ((char **)&str, ints + i);
 		if (res == 0)
 			break;
+		if (res == 3) {
+			int range_nums;
+			range_nums = get_range((char **)&str, ints + i);
+			if (range_nums < 0)
+				break;
+			/*
+			 * Decrement the result by one to leave out the
+			 * last number in the range.  The next iteration
+			 * will handle the upper number in the range
+			 */
+			i += (range_nums - 1);
+		}
 		i++;
 		if (res == 1)
 			break;
 	}
 	ints[0] = i - 1;
-	return (str);
+	return (char *)str;
 }
 
 /**
  *	memparse - parse a string with mem suffixes into a number
  *	@ptr: Where parse begins
- *	@retptr: (output) Pointer to next char after parse completes
+ *	@retptr: (output) Optional pointer to next char after parse completes
  *
  *	Parses a string into a number.  The number stored at @ptr is
  *	potentially suffixed with %K (for kilobytes, or 1024 bytes),
@@ -93,11 +126,13 @@ char *get_options (char *str, int nints, int *ints)
  *	megabyte, or one gigabyte, respectively.
  */
 
-unsigned long long memparse (char *ptr, char **retptr)
+unsigned long long memparse(const char *ptr, char **retptr)
 {
-	unsigned long long ret = simple_strtoull (ptr, retptr, 0);
+	char *endptr;	/* local pointer to end of parsed string */
 
-	switch (**retptr) {
+	unsigned long long ret = simple_strtoull(ptr, &endptr, 0);
+
+	switch (*endptr) {
 	case 'G':
 	case 'g':
 		ret <<= 10;
@@ -107,10 +142,14 @@ unsigned long long memparse (char *ptr, char **retptr)
 	case 'K':
 	case 'k':
 		ret <<= 10;
-		(*retptr)++;
+		endptr++;
 	default:
 		break;
 	}
+
+	if (retptr)
+		*retptr = endptr;
+
 	return ret;
 }
 

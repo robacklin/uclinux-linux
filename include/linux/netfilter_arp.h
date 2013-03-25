@@ -5,7 +5,6 @@
  * (C)2002 Rusty Russell IBM -- This code is GPL.
  */
 
-#include <linux/config.h>
 #include <linux/netfilter.h>
 
 /* There is no PF_ARP. */
@@ -14,7 +13,7 @@
 /* ARP Hooks */
 #define NF_ARP_IN	0
 #define NF_ARP_OUT	1
-#define NF_ARP_NUMHOOKS	2
+#define NF_ARP_FORWARD	2
+#define NF_ARP_NUMHOOKS	3
 
-static DECLARE_MUTEX(arpt_mutex);
 #endif /* __LINUX_ARP_NETFILTER_H */

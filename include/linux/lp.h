@@ -98,6 +98,9 @@
 
 #ifdef __KERNEL__
 
+#include <linux/wait.h>
+#include <linux/mutex.h>
+
 /* Magic numbers for defining port-device mappings */
 #define LP_PARPORT_UNSPEC -4
 #define LP_PARPORT_AUTO -3
@@ -142,7 +145,7 @@ struct lp_struct {
 #endif
 	wait_queue_head_t waitq;
 	unsigned int last_error;
-	struct semaphore port_mutex;
+	struct mutex port_mutex;
 	wait_queue_head_t dataq;
 	long timeout;
 	unsigned int best_mode;
@@ -182,12 +185,6 @@ struct lp_struct {
  * It is used only in the lp_init() and lp_reset() routine.
  */
 #define LP_DELAY 	50
-
-/*
- * function prototypes
- */
-
-extern int lp_init(void);
 
 #endif
 

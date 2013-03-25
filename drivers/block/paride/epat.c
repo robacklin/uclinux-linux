@@ -19,6 +19,7 @@
 #define EPAT_VERSION      "1.02"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -29,6 +30,12 @@
 
 #define j44(a,b)		(((a>>4)&0x0f)+(b&0xf0))
 #define j53(a,b)		(((a>>3)&0x1f)+((b<<4)&0xe0))
+
+static int epatc8;
+
+module_param(epatc8, int, 0);
+MODULE_PARM_DESC(epatc8, "support for the Shuttle EP1284 chip, "
+	"used in any recent Imation SuperDisk (LS-120) drive.");
 
 /* cont =  0   IDE register file
    cont =  1   IDE control registers
@@ -208,15 +215,18 @@ static void epat_connect ( PIA *pi )
 {       pi->saved_r0 = r0();
         pi->saved_r2 = r2();
 
-#ifdef CONFIG_PARIDE_EPATC8
  	/* Initialize the chip */
-        CPP(0);CPP(0x40);CPP(0xe0);              
-        w0(0);w2(1);w2(4);
-        WR(0x8,0x12);WR(0xc,0x14);WR(0x12,0x10);
-        WR(0xe,0xf);WR(0xf,4);
-     /* WR(0xe,0xa);WR(0xf,4); */
-        WR(0xe,0xd);WR(0xf,0);
-     /* CPP(0x30); */
+	CPP(0);
+
+	if (epatc8) {
+		CPP(0x40);CPP(0xe0);
+		w0(0);w2(1);w2(4);
+		WR(0x8,0x12);WR(0xc,0x14);WR(0x12,0x10);
+		WR(0xe,0xf);WR(0xf,4);
+		/* WR(0xe,0xa);WR(0xf,4); */
+		WR(0xe,0xd);WR(0xf,0);
+		/* CPP(0x30); */
+	}
 
         /* Connect to the chip */
 	CPP(0xe0);
@@ -226,15 +236,10 @@ static void epat_connect ( PIA *pi )
           /* Request EPP */
           w0(0x40);w2(6);w2(7);w2(4);w2(0xc);w2(4);
         }
-#else
- 	CPP(0); CPP(0xe0);
-	w0(0); w2(1); w2(4);
-	if (pi->mode >= 3) {
-		w0(0); w2(1); w2(4); w2(0xc);
-		w0(0x40); w2(6); w2(7); w2(4); w2(0xc); w2(4);
+
+	if (!epatc8) {
+		WR(8,0x10); WR(0xc,0x14); WR(0xa,0x38); WR(0x12,0x10);
 	}
-	WR(8,0x10); WR(0xc,0x14); WR(0xa,0x38); WR(0x12,0x10);
-#endif
 }
 
 static void epat_disconnect (PIA *pi)
@@ -300,45 +305,36 @@ static void epat_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void epat_init_proto( PIA *pi)
+static struct pi_protocol epat = {
+	.owner		= THIS_MODULE,
+	.name		= "epat",
+	.max_mode	= 6,
+	.epp_first	= 3,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= epat_write_regr,
+	.read_regr	= epat_read_regr,
+	.write_block	= epat_write_block,
+	.read_block	= epat_read_block,
+	.connect	= epat_connect,
+	.disconnect	= epat_disconnect,
+	.test_proto	= epat_test_proto,
+	.log_adapter	= epat_log_adapter,
+};
 
-{  	MOD_INC_USE_COUNT;
-}
-
-static void epat_release_proto( PIA *pi)
-
-{	MOD_DEC_USE_COUNT;
-}
-
-struct pi_protocol epat = {"epat",0,6,3,1,1,
-			   epat_write_regr,
-			   epat_read_regr,
-			   epat_write_block,
-			   epat_read_block,
-			   epat_connect,
-			   epat_disconnect,
-			   0,
-			   0,
-			   epat_test_proto,
-			   epat_log_adapter,
-			   epat_init_proto,
-			   epat_release_proto
-			  };
-
-
-#ifdef MODULE
-
-int	init_module(void)
-
-{	return pi_register( &epat) - 1;
-}
-
-void	cleanup_module(void)
-
-{	pi_unregister( &epat);
-}
-
+static int __init epat_init(void)
+{
+#ifdef CONFIG_PARIDE_EPATC8
+	epatc8 = 1;
 #endif
+	return paride_register(&epat);
+}
 
-/* end of epat.c */
+static void __exit epat_exit(void)
+{
+	paride_unregister(&epat);
+}
+
 MODULE_LICENSE("GPL");
+module_init(epat_init)
+module_exit(epat_exit)

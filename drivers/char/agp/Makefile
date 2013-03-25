@@ -1,18 +1,22 @@
-#
-# Makefile for the agpgart device driver.  This driver adds a user
-# space ioctl interface to use agp memory.  It also adds a kernel interface
-# that other drivers could use to manipulate agp memory.
+agpgart-y := backend.o frontend.o generic.o isoch.o
 
-O_TARGET	:= agp.o
+agpgart-$(CONFIG_COMPAT)	+= compat_ioctl.o
 
-export-objs := agpgart_be.o
-
-list-multi := agpgart.o
-agpgart-objs := agpgart_fe.o agpgart_be.o
-
-obj-$(CONFIG_AGP) += agpgart.o
-
-include $(TOPDIR)/Rules.make
-
-agpgart.o: $(agpgart-objs)
-	$(LD) $(LD_RFLAG) -r -o $@ $(agpgart-objs)
+obj-$(CONFIG_AGP)		+= agpgart.o
+obj-$(CONFIG_AGP_ALI)		+= ali-agp.o
+obj-$(CONFIG_AGP_ATI)		+= ati-agp.o
+obj-$(CONFIG_AGP_AMD)		+= amd-k7-agp.o
+obj-$(CONFIG_AGP_AMD64)		+= amd64-agp.o
+obj-$(CONFIG_AGP_ALPHA_CORE)	+= alpha-agp.o
+obj-$(CONFIG_AGP_EFFICEON)	+= efficeon-agp.o
+obj-$(CONFIG_AGP_HP_ZX1)	+= hp-agp.o
+obj-$(CONFIG_AGP_PARISC)	+= parisc-agp.o
+obj-$(CONFIG_AGP_I460)		+= i460-agp.o
+obj-$(CONFIG_AGP_INTEL)		+= intel-agp.o
+obj-$(CONFIG_AGP_INTEL)		+= intel-gtt.o
+obj-$(CONFIG_AGP_NVIDIA)	+= nvidia-agp.o
+obj-$(CONFIG_AGP_SGI_TIOCA)	+= sgi-agp.o
+obj-$(CONFIG_AGP_SIS)		+= sis-agp.o
+obj-$(CONFIG_AGP_SWORKS)	+= sworks-agp.o
+obj-$(CONFIG_AGP_UNINORTH)	+= uninorth-agp.o
+obj-$(CONFIG_AGP_VIA)		+= via-agp.o

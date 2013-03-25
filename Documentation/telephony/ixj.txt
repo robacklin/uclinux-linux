@@ -51,7 +51,7 @@ be removed to protect the rights of others.
 Specifically, very old Internet PhoneJACK cards have non-standard
 G.723.1 codecs (due to the early nature of the DSPs in those days).
 The auto-conversion code to bring those cards into compliance with
-todays standards is available as a binary only module to those people
+today's standards is available as a binary only module to those people
 needing it.  If you bought your card after 1997 or so, you are OK -
 it's only the very old cards that are affected.
 
@@ -108,14 +108,9 @@ applications.
 
 1.4  Where to get things
 
-You can download the latest versions of the driver from:
+Info on latest versions of the driver are here:
 
-http://www.quicknet.net/develop.htm
-
-You can download the latest version of this document from:
-
-http://www.quicknet.net/develop.htm
-
+http://web.archive.org/web/*/http://www.quicknet.net/develop.htm
 
 1.5  Mailing List
 
@@ -305,21 +300,14 @@ driver, like this:
 
 which will result in the needed drivers getting loaded automatically.
 
-   g.  if you are planning on using kerneld to automatically load the 
-module for you, then you need to edit /etc/conf.modules and add the 
+   g.  if you are planning on having the kernel automatically request
+the module for you, then you need to edit /etc/conf.modules and add the
 following lines:
 
 	options ixj dspio=0x340 xio=0x330 ixjdebug=0
 
 If you do this, then when you execute an application that uses the
-module kerneld will load the module for you.  Note that to do this,
-you need to have your kernel set to support kerneld.  You can check
-for this by looking at /usr/src/linux/.config and you should see this:
-
-	# Loadable module support
-	#
-	<snip>
-	CONFIG_KMOD=y
+module the kernel will request that it is loaded.
 
   h.  if you want non-root users to be able to read and write to the 
 ixj devices (this is a good idea!) you should do the following:
@@ -363,7 +351,7 @@ modules.  The command string for the final compile looks like this:
     1.  cp .config /tmp
     2.  make mrproper
     3.  cp /tmp/.config .
-    4.	make dep;make clean;make bzImage;make modules;make modules_install
+    4.	make clean;make bzImage;make modules;make modules_install
 
 This rebuilds both the kernel and all the modules and makes sure they all 
 have the same linkages.  This generally solves the problem once the new 

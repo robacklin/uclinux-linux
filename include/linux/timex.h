@@ -47,112 +47,15 @@
  *      kernel PLL updated to 1994-12-13 specs (rfc-1589)
  * 1997-08-30    Ulrich Windl
  *      Added new constant NTP_PHASE_LIMIT
+ * 2004-08-12    Christoph Lameter
+ *      Reworked time interpolation logic
  */
 #ifndef _LINUX_TIMEX_H
 #define _LINUX_TIMEX_H
 
-#include <asm/param.h>
+#include <linux/time.h>
 
-/*
- * The following defines establish the engineering parameters of the PLL
- * model. The HZ variable establishes the timer interrupt frequency, 100 Hz
- * for the SunOS kernel, 256 Hz for the Ultrix kernel and 1024 Hz for the
- * OSF/1 kernel. The SHIFT_HZ define expresses the same value as the
- * nearest power of two in order to avoid hardware multiply operations.
- */
-#if HZ >= 12 && HZ < 24
-# define SHIFT_HZ	4
-#elif HZ >= 24 && HZ < 48
-# define SHIFT_HZ	5
-#elif HZ >= 48 && HZ < 96
-# define SHIFT_HZ	6
-#elif HZ >= 96 && HZ < 192
-# define SHIFT_HZ	7
-#elif HZ >= 192 && HZ < 384
-# define SHIFT_HZ	8
-#elif HZ >= 384 && HZ < 768
-# define SHIFT_HZ	9
-#elif HZ >= 768 && HZ < 1536
-# define SHIFT_HZ	10
-#else
-# error You lose.
-#endif
-
-/*
- * SHIFT_KG and SHIFT_KF establish the damping of the PLL and are chosen
- * for a slightly underdamped convergence characteristic. SHIFT_KH
- * establishes the damping of the FLL and is chosen by wisdom and black
- * art.
- *
- * MAXTC establishes the maximum time constant of the PLL. With the
- * SHIFT_KG and SHIFT_KF values given and a time constant range from
- * zero to MAXTC, the PLL will converge in 15 minutes to 16 hours,
- * respectively.
- */
-#define SHIFT_KG 6		/* phase factor (shift) */
-#define SHIFT_KF 16		/* PLL frequency factor (shift) */
-#define SHIFT_KH 2		/* FLL frequency factor (shift) */
-#define MAXTC 6			/* maximum time constant (shift) */
-
-/*
- * The SHIFT_SCALE define establishes the decimal point of the time_phase
- * variable which serves as an extension to the low-order bits of the
- * system clock variable. The SHIFT_UPDATE define establishes the decimal
- * point of the time_offset variable which represents the current offset
- * with respect to standard time. The FINEUSEC define represents 1 usec in
- * scaled units.
- *
- * SHIFT_USEC defines the scaling (shift) of the time_freq and
- * time_tolerance variables, which represent the current frequency
- * offset and maximum frequency tolerance.
- *
- * FINEUSEC is 1 us in SHIFT_UPDATE units of the time_phase variable.
- */
-#define SHIFT_SCALE 22		/* phase scale (shift) */
-#define SHIFT_UPDATE (SHIFT_KG + MAXTC) /* time offset scale (shift) */
-#define SHIFT_USEC 16		/* frequency offset scale (shift) */
-#define FINEUSEC (1L << SHIFT_SCALE) /* 1 us in phase units */
-
-#define MAXPHASE 512000L        /* max phase error (us) */
-#define MAXFREQ (512L << SHIFT_USEC)  /* max frequency error (ppm) */
-#define MAXTIME (200L << PPS_AVG) /* max PPS error (jitter) (200 us) */
-#define MINSEC 16L              /* min interval between updates (s) */
-#define MAXSEC 1200L            /* max interval between updates (s) */
-#define	NTP_PHASE_LIMIT	(MAXPHASE << 5)	/* beyond max. dispersion */
-
-/*
- * The following defines are used only if a pulse-per-second (PPS)
- * signal is available and connected via a modem control lead, such as
- * produced by the optional ppsclock feature incorporated in the Sun
- * asynch driver. They establish the design parameters of the frequency-
- * lock loop used to discipline the CPU clock oscillator to the PPS
- * signal.
- *
- * PPS_AVG is the averaging factor for the frequency loop, as well as
- * the time and frequency dispersion.
- *
- * PPS_SHIFT and PPS_SHIFTMAX specify the minimum and maximum
- * calibration intervals, respectively, in seconds as a power of two.
- *
- * PPS_VALID is the maximum interval before the PPS signal is considered
- * invalid and protocol updates used directly instead.
- *
- * MAXGLITCH is the maximum interval before a time offset of more than
- * MAXTIME is believed.
- */
-#define PPS_AVG 2		/* pps averaging constant (shift) */
-#define PPS_SHIFT 2		/* min interval duration (s) (shift) */
-#define PPS_SHIFTMAX 8		/* max interval duration (s) (shift) */
-#define PPS_VALID 120		/* pps signal watchdog max (s) */
-#define MAXGLITCH 30		/* pps signal glitch max (s) */
-
-/*
- * Pick up the architecture specific timex specifications
- */
-#include <asm/timex.h>
-
-/* LATCH is used in the interval timer and ftape setup. */
-#define LATCH  ((CLOCK_TICK_RATE + HZ/2) / HZ)	/* For divider */
+#define NTP_API		4	/* NTP API version */
 
 /*
  * syscall interface - used (mainly by NTP daemon)
@@ -170,7 +73,7 @@ struct timex {
 	long tolerance;		/* clock frequency tolerance (ppm)
 				 * (read only)
 				 */
-	struct timeval time;	/* (read only) */
+	struct timeval time;	/* (read only, except for ADJ_SETOFFSET) */
 	long tick;		/* (modified) usecs between clock ticks */
 
 	long ppsfreq;           /* pps frequency (scaled ppm) (ro) */
@@ -182,9 +85,11 @@ struct timex {
 	long errcnt;            /* calibration errors (ro) */
 	long stbcnt;            /* stability limit exceeded (ro) */
 
+	int tai;		/* TAI offset (ro) */
+
 	int  :32; int  :32; int  :32; int  :32;
 	int  :32; int  :32; int  :32; int  :32;
-	int  :32; int  :32; int  :32; int  :32;
+	int  :32; int  :32; int  :32;
 };
 
 /*
@@ -196,18 +101,31 @@ struct timex {
 #define ADJ_ESTERROR		0x0008	/* estimated time error */
 #define ADJ_STATUS		0x0010	/* clock status */
 #define ADJ_TIMECONST		0x0020	/* pll time constant */
+#define ADJ_TAI			0x0080	/* set TAI offset */
+#define ADJ_SETOFFSET		0x0100  /* add 'time' to current time */
+#define ADJ_MICRO		0x1000	/* select microsecond resolution */
+#define ADJ_NANO		0x2000	/* select nanosecond resolution */
 #define ADJ_TICK		0x4000	/* tick value */
-#define ADJ_OFFSET_SINGLESHOT	0x8001	/* old-fashioned adjtime */
 
-/* xntp 3.4 compatibility names */
+#ifdef __KERNEL__
+#define ADJ_ADJTIME		0x8000	/* switch between adjtime/adjtimex modes */
+#define ADJ_OFFSET_SINGLESHOT	0x0001	/* old-fashioned adjtime */
+#define ADJ_OFFSET_READONLY	0x2000	/* read-only adjtime */
+#else
+#define ADJ_OFFSET_SINGLESHOT	0x8001	/* old-fashioned adjtime */
+#define ADJ_OFFSET_SS_READ	0xa001	/* read-only adjtime */
+#endif
+
+/* NTP userland likes the MOD_ prefix better */
 #define MOD_OFFSET	ADJ_OFFSET
 #define MOD_FREQUENCY	ADJ_FREQUENCY
 #define MOD_MAXERROR	ADJ_MAXERROR
 #define MOD_ESTERROR	ADJ_ESTERROR
 #define MOD_STATUS	ADJ_STATUS
 #define MOD_TIMECONST	ADJ_TIMECONST
-#define MOD_CLKB	ADJ_TICK
-#define MOD_CLKA	ADJ_OFFSET_SINGLESHOT /* 0x8000 in original */
+#define MOD_TAI	ADJ_TAI
+#define MOD_MICRO	ADJ_MICRO
+#define MOD_NANO	ADJ_NANO
 
 
 /*
@@ -229,9 +147,13 @@ struct timex {
 #define STA_PPSERROR	0x0800	/* PPS signal calibration error (ro) */
 
 #define STA_CLOCKERR	0x1000	/* clock hardware fault (ro) */
+#define STA_NANO	0x2000	/* resolution (0 = us, 1 = ns) (ro) */
+#define STA_MODE	0x4000	/* mode (0 = PLL, 1 = FLL) (ro) */
+#define STA_CLK		0x8000	/* clock source (0 = A, 1 = B) (ro) */
 
+/* read-only bits */
 #define STA_RONLY (STA_PPSSIGNAL | STA_PPSJITTER | STA_PPSWANDER | \
-    STA_PPSERROR | STA_CLOCKERR) /* read-only bits */
+	STA_PPSERROR | STA_CLOCKERR | STA_NANO | STA_MODE | STA_CLK)
 
 /*
  * Clock states (time_state)
@@ -245,46 +167,99 @@ struct timex {
 #define TIME_BAD	TIME_ERROR /* bw compat */
 
 #ifdef __KERNEL__
+#include <linux/compiler.h>
+#include <linux/types.h>
+#include <linux/param.h>
+
+#include <asm/timex.h>
+
+/*
+ * SHIFT_PLL is used as a dampening factor to define how much we
+ * adjust the frequency correction for a given offset in PLL mode.
+ * It also used in dampening the offset correction, to define how
+ * much of the current value in time_offset we correct for each
+ * second. Changing this value changes the stiffness of the ntp
+ * adjustment code. A lower value makes it more flexible, reducing
+ * NTP convergence time. A higher value makes it stiffer, increasing
+ * convergence time, but making the clock more stable.
+ *
+ * In David Mills' nanokernel reference implementation SHIFT_PLL is 4.
+ * However this seems to increase convergence time much too long.
+ *
+ * https://lists.ntp.org/pipermail/hackers/2008-January/003487.html
+ *
+ * In the above mailing list discussion, it seems the value of 4
+ * was appropriate for other Unix systems with HZ=100, and that
+ * SHIFT_PLL should be decreased as HZ increases. However, Linux's
+ * clock steering implementation is HZ independent.
+ *
+ * Through experimentation, a SHIFT_PLL value of 2 was found to allow
+ * for fast convergence (very similar to the NTPv3 code used prior to
+ * v2.6.19), with good clock stability.
+ *
+ *
+ * SHIFT_FLL is used as a dampening factor to define how much we
+ * adjust the frequency correction for a given offset in FLL mode.
+ * In David Mills' nanokernel reference implementation SHIFT_FLL is 2.
+ *
+ * MAXTC establishes the maximum time constant of the PLL.
+ */
+#define SHIFT_PLL	2	/* PLL frequency factor (shift) */
+#define SHIFT_FLL	2	/* FLL frequency factor (shift) */
+#define MAXTC		10	/* maximum time constant (shift) */
+
+/*
+ * SHIFT_USEC defines the scaling (shift) of the time_freq and
+ * time_tolerance variables, which represent the current frequency
+ * offset and maximum frequency tolerance.
+ */
+#define SHIFT_USEC 16		/* frequency offset scale (shift) */
+#define PPM_SCALE ((s64)NSEC_PER_USEC << (NTP_SCALE_SHIFT - SHIFT_USEC))
+#define PPM_SCALE_INV_SHIFT 19
+#define PPM_SCALE_INV ((1LL << (PPM_SCALE_INV_SHIFT + NTP_SCALE_SHIFT)) / \
+		       PPM_SCALE + 1)
+
+#define MAXPHASE 500000000L	/* max phase error (ns) */
+#define MAXFREQ 500000		/* max frequency error (ns/s) */
+#define MAXFREQ_SCALED ((s64)MAXFREQ << NTP_SCALE_SHIFT)
+#define MINSEC 256		/* min interval between updates (s) */
+#define MAXSEC 2048		/* max interval between updates (s) */
+#define NTP_PHASE_LIMIT ((MAXPHASE / NSEC_PER_USEC) << 5) /* beyond max. dispersion */
+
 /*
  * kernel variables
  * Note: maximum error = NTP synch distance = dispersion + delay / 2;
  * estimated error = NTP dispersion.
  */
-extern long tick;                      /* timer interrupt period */
-extern int tickadj;			/* amount of adjustment per tick */
+extern unsigned long tick_usec;		/* USER_HZ period (usec) */
+extern unsigned long tick_nsec;		/* ACTHZ          period (nsec) */
 
-/*
- * phase-lock loop variables
- */
-extern int time_state;		/* clock status */
-extern int time_status;		/* clock synchronization status bits */
-extern long time_offset;	/* time adjustment (us) */
-extern long time_constant;	/* pll time constant */
-extern long time_tolerance;	/* frequency tolerance (ppm) */
-extern long time_precision;	/* clock precision (us) */
-extern long time_maxerror;	/* maximum error */
-extern long time_esterror;	/* estimated error */
+extern void ntp_init(void);
+extern void ntp_clear(void);
 
-extern long time_phase;		/* phase offset (scaled us) */
-extern long time_freq;		/* frequency offset (scaled ppm) */
-extern long time_adj;		/* tick adjust (scaled 1 / HZ) */
-extern long time_reftime;	/* time at last adjustment (s) */
+/* Required to safely shift negative values */
+#define shift_right(x, s) ({	\
+	__typeof__(x) __x = (x);	\
+	__typeof__(s) __s = (s);	\
+	__x < 0 ? -(-__x >> __s) : __x >> __s;	\
+})
 
-extern long time_adjust;	/* The amount of adjtime left */
+#define NTP_SCALE_SHIFT		32
 
-/* interface variables pps->timer interrupt */
-extern long pps_offset;		/* pps time offset (us) */
-extern long pps_jitter;		/* time dispersion (jitter) (us) */
-extern long pps_freq;		/* frequency offset (scaled ppm) */
-extern long pps_stabil;		/* frequency dispersion (scaled ppm) */
-extern long pps_valid;		/* pps signal watchdog counter */
+#define NTP_INTERVAL_FREQ  (HZ)
+#define NTP_INTERVAL_LENGTH (NSEC_PER_SEC/NTP_INTERVAL_FREQ)
 
-/* interface variables pps->adjtimex */
-extern int pps_shift;		/* interval duration (s) (shift) */
-extern long pps_jitcnt;		/* jitter limit exceeded */
-extern long pps_calcnt;		/* calibration intervals */
-extern long pps_errcnt;		/* calibration errors */
-extern long pps_stbcnt;		/* stability limit exceeded */
+/* Returns how long ticks are at present, in ns / 2^NTP_SCALE_SHIFT. */
+extern u64 ntp_tick_length(void);
+
+extern int second_overflow(unsigned long secs);
+extern int do_adjtimex(struct timex *);
+extern void hardpps(const struct timespec *, const struct timespec *);
+
+int read_current_timer(unsigned long *timer_val);
+
+/* The clock frequency of the i8253/i8254 PIT */
+#define PIT_TICK_RATE 1193182ul
 
 #endif /* KERNEL */
 

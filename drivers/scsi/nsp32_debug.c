@@ -13,7 +13,7 @@ static const char unknown[] = "UNKNOWN";
 
 static const char * group_0_commands[] = {
 /* 00-03 */ "Test Unit Ready", "Rezero Unit", unknown, "Request Sense",
-/* 04-07 */ "Format Unit", "Read Block Limits", unknown, "Reasssign Blocks",
+/* 04-07 */ "Format Unit", "Read Block Limits", unknown, "Reassign Blocks",
 /* 08-0d */ "Read (6)", unknown, "Write (6)", "Seek (6)", unknown, unknown,
 /* 0e-12 */ unknown, "Read Reverse", "Write Filemarks", "Space", "Inquiry",  
 /* 13-16 */ unknown, "Recover Buffered Data", "Mode Select", "Reserve",
@@ -85,22 +85,22 @@ static void print_opcodek(unsigned char opcode)
 
 static void print_commandk (unsigned char *command)
 {
-	int i, size;
+	int i,s;
 //	printk(KERN_DEBUG);
 	print_opcodek(command[0]);
-	/*printk(KERN_DEBUG "%s ", __FUNCTION__);*/
+	/*printk(KERN_DEBUG "%s ", __func__);*/
 	if ((command[0] >> 5) == 6 ||
 	    (command[0] >> 5) == 7 ) {
-		size = 12; /* vender specific */
+		s = 12; /* vender specific */
 	} else {
-		size = COMMAND_SIZE(command[0]);
+		s = COMMAND_SIZE(command[0]);
 	}
 
 	for ( i = 1; i < s; ++i) {
 		printk("%02x ", command[i]);
 	}
 
-	switch (size) {
+	switch (s) {
 	case 6:
 		printk("LBA=%d len=%d",
 		       (((unsigned int)command[1] & 0x0f) << 16) |
@@ -258,47 +258,6 @@ static void nsp32_print_register(int base)
 		printk("IrqStatus=0x%x, ", nsp32_read2(base, IRQ_STATUS));
 		printk("\n");
 	}
-}
-
-/*
- * Byte dumper
- *
- * ptr:    start address
- * offset: offset value for address section
- * size:   dump size in byte
- */
-static void nsp32_byte_dump(void *ptr, int offset, int size)
-{
-	unsigned char *tmp = ptr;
-	int pos;
-
-	if (size == 0) {
-		return;
-	}
-
-	pos = 0;
-	while(pos < size) {
-		/* address */
-		if (pos % 16 == 0) {
-			printk(/*KERN_DEBUG*/ "%08x:", pos + offset);
-		}
-
-		/* half separator */
-		if (pos % 16 == 8) {
-			printk(" -");
-		}
-
-		printk(" %02x", tmp[pos]);
-
-		/* Don't print "\n" at last line.
-		   Because we can get one more "\n". */
-		if ((pos % 16 == 15) && (pos + 1 != size)) {
-			printk("\n");
-		}
-
-		pos ++;
-	}
-	printk("\n");
 }
 
 /* end */

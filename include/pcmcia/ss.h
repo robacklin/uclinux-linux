@@ -1,36 +1,27 @@
 /*
- * ss.h 1.28 2000/06/12 21:55:40
+ * ss.h
  *
- * The contents of this file are subject to the Mozilla Public License
- * Version 1.1 (the "License"); you may not use this file except in
- * compliance with the License. You may obtain a copy of the License
- * at http://www.mozilla.org/MPL/
- *
- * Software distributed under the License is distributed on an "AS IS"
- * basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
- * the License for the specific language governing rights and
- * limitations under the License. 
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * The initial developer of the original code is David A. Hinds
  * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
- * Alternatively, the contents of this file may be used under the
- * terms of the GNU General Public License version 2 (the "GPL"), in which
- * case the provisions of the GPL are applicable instead of the
- * above.  If you wish to allow the use of your version of this file
- * only under the terms of the GPL and not to allow others to use
- * your version of this file under the MPL, indicate your decision by
- * deleting the provisions above and replace them with the notice and
- * other provisions required by the GPL.  If you do not delete the
- * provisions above, a recipient may use your version of this file
- * under either the MPL or the GPL.
+ * (C) 1999             David A. Hinds
  */
 
 #ifndef _LINUX_SS_H
 #define _LINUX_SS_H
 
-#include <pcmcia/cs_types.h>
+#include <linux/device.h>
+#include <linux/sched.h>	/* task_struct, completion */
+#include <linux/mutex.h>
+
+#ifdef CONFIG_CARDBUS
+#include <linux/pci.h>
+#endif
 
 /* Definitions for card status flags for GetStatus */
 #define SS_WRPROT	0x0001
@@ -48,17 +39,7 @@
 #define SS_3VCARD	0x1000
 #define SS_XVCARD	0x2000
 #define SS_PENDING	0x4000
-
-/* for InquireSocket */
-typedef struct socket_cap_t {
-    u_int	features;
-    u_int	irq_mask;
-    u_int	map_size;
-    ioaddr_t	io_offset;
-    u_char	pci_irq;
-    struct pci_dev *cb_dev;
-    struct bus_operations *bus;
-} socket_cap_t;
+#define SS_ZVCARD	0x8000
 
 /* InquireSocket capabilities */
 #define SS_CAP_PAGE_REGS	0x0001
@@ -70,10 +51,10 @@ typedef struct socket_cap_t {
 
 /* for GetSocket, SetSocket */
 typedef struct socket_state_t {
-    u_int	flags;
-    u_int	csc_mask;
-    u_char	Vcc, Vpp;
-    u_char	io_irq;
+	u_int	flags;
+	u_int	csc_mask;
+	u_char	Vcc, Vpp;
+	u_char	io_irq;
 } socket_state_t;
 
 extern socket_state_t dead_socket;
@@ -85,8 +66,6 @@ extern socket_state_t dead_socket;
 #define SS_DMA_MODE	0x0080
 #define SS_SPKR_ENA	0x0100
 #define SS_OUTPUT_ENA	0x0200
-#define SS_DEBOUNCED	0x0400	/* Tell driver that the debounce delay has ended */
-#define SS_ZVCARD	0x0800
 
 /* Flags for I/O port and memory windows */
 #define MAP_ACTIVE	0x01
@@ -101,49 +80,187 @@ extern socket_state_t dead_socket;
 /* Use this just for bridge windows */
 #define MAP_IOSPACE	0x20
 
+/* power hook operations */
+#define HOOK_POWER_PRE	0x01
+#define HOOK_POWER_POST	0x02
+
 typedef struct pccard_io_map {
-    u_char	map;
-    u_char	flags;
-    u_short	speed;
-    ioaddr_t	start, stop;
+	u_char	map;
+	u_char	flags;
+	u_short	speed;
+	phys_addr_t start, stop;
 } pccard_io_map;
 
 typedef struct pccard_mem_map {
-    u_char	map;
-    u_char	flags;
-    u_short	speed;
-    u_long	sys_start, sys_stop;
-    u_int	card_start;
+	u_char		map;
+	u_char		flags;
+	u_short		speed;
+	phys_addr_t	static_start;
+	u_int		card_start;
+	struct resource	*res;
 } pccard_mem_map;
 
-typedef struct cb_bridge_map {
-    u_char	map;
-    u_char	flags;
-    u_int	start, stop;
-} cb_bridge_map;
+typedef struct io_window_t {
+	u_int			InUse, Config;
+	struct resource		*res;
+} io_window_t;
+
+/* Maximum number of IO windows per socket */
+#define MAX_IO_WIN 2
+
+/* Maximum number of memory windows per socket */
+#define MAX_WIN 4
+
 
 /*
  * Socket operations.
  */
+struct pcmcia_socket;
+struct pccard_resource_ops;
+struct config_t;
+struct pcmcia_callback;
+struct user_info_t;
+
 struct pccard_operations {
-	int (*init)(unsigned int sock);
-	int (*suspend)(unsigned int sock);
-	int (*register_callback)(unsigned int sock, void (*handler)(void *, unsigned int), void * info);
-	int (*inquire_socket)(unsigned int sock, socket_cap_t *cap);
-	int (*get_status)(unsigned int sock, u_int *value);
-	int (*get_socket)(unsigned int sock, socket_state_t *state);
-	int (*set_socket)(unsigned int sock, socket_state_t *state);
-	int (*get_io_map)(unsigned int sock, struct pccard_io_map *io);
-	int (*set_io_map)(unsigned int sock, struct pccard_io_map *io);
-	int (*get_mem_map)(unsigned int sock, struct pccard_mem_map *mem);
-	int (*set_mem_map)(unsigned int sock, struct pccard_mem_map *mem);
-	void (*proc_setup)(unsigned int sock, struct proc_dir_entry *base);
+	int (*init)(struct pcmcia_socket *s);
+	int (*suspend)(struct pcmcia_socket *s);
+	int (*get_status)(struct pcmcia_socket *s, u_int *value);
+	int (*set_socket)(struct pcmcia_socket *s, socket_state_t *state);
+	int (*set_io_map)(struct pcmcia_socket *s, struct pccard_io_map *io);
+	int (*set_mem_map)(struct pcmcia_socket *s, struct pccard_mem_map *mem);
 };
 
-/*
- *  Calls to set up low-level "Socket Services" drivers
+struct pcmcia_socket {
+	struct module			*owner;
+	socket_state_t			socket;
+	u_int				state;
+	u_int				suspended_state;	/* state before suspend */
+	u_short				functions;
+	u_short				lock_count;
+	pccard_mem_map			cis_mem;
+	void __iomem 			*cis_virt;
+	io_window_t			io[MAX_IO_WIN];
+	pccard_mem_map			win[MAX_WIN];
+	struct list_head		cis_cache;
+	size_t				fake_cis_len;
+	u8				*fake_cis;
+
+	struct list_head		socket_list;
+	struct completion		socket_released;
+
+	/* deprecated */
+	unsigned int			sock;		/* socket number */
+
+
+	/* socket capabilities */
+	u_int				features;
+	u_int				irq_mask;
+	u_int				map_size;
+	u_int				io_offset;
+	u_int				pci_irq;
+	struct pci_dev			*cb_dev;
+
+	/* socket setup is done so resources should be able to be allocated.
+	 * Only if set to 1, calls to find_{io,mem}_region are handled, and
+	 * insertio events are actually managed by the PCMCIA layer.*/
+	u8				resource_setup_done;
+
+	/* socket operations */
+	struct pccard_operations	*ops;
+	struct pccard_resource_ops	*resource_ops;
+	void				*resource_data;
+
+	/* Zoom video behaviour is so chip specific its not worth adding
+	   this to _ops */
+	void 				(*zoom_video)(struct pcmcia_socket *,
+						      int);
+
+	/* so is power hook */
+	int (*power_hook)(struct pcmcia_socket *sock, int operation);
+
+	/* allows tuning the CB bridge before loading driver for the CB card */
+#ifdef CONFIG_CARDBUS
+	void (*tune_bridge)(struct pcmcia_socket *sock, struct pci_bus *bus);
+#endif
+
+	/* state thread */
+	struct task_struct		*thread;
+	struct completion		thread_done;
+	unsigned int			thread_events;
+	unsigned int			sysfs_events;
+
+	/* For the non-trivial interaction between these locks,
+	 * see Documentation/pcmcia/locking.txt */
+	struct mutex			skt_mutex;
+	struct mutex			ops_mutex;
+
+	/* protects thread_events and sysfs_events */
+	spinlock_t			thread_lock;
+
+	/* pcmcia (16-bit) */
+	struct pcmcia_callback		*callback;
+
+#if defined(CONFIG_PCMCIA) || defined(CONFIG_PCMCIA_MODULE)
+	/* The following elements refer to 16-bit PCMCIA devices inserted
+	 * into the socket */
+	struct list_head		devices_list;
+
+	/* the number of devices, used only internally and subject to
+	 * incorrectness and change */
+	u8				device_count;
+
+	/* does the PCMCIA card consist of two pseudo devices? */
+	u8				pcmcia_pfc;
+
+	/* non-zero if PCMCIA card is present */
+	atomic_t			present;
+
+	/* IRQ to be used by PCMCIA devices. May not be IRQ 0. */
+	unsigned int			pcmcia_irq;
+
+#endif /* CONFIG_PCMCIA */
+
+	/* socket device */
+	struct device			dev;
+	/* data internal to the socket driver */
+	void				*driver_data;
+	/* status of the card during resume from a system sleep state */
+	int				resume_status;
+};
+
+
+/* socket drivers must define the resource operations type they use. There
+ * are three options:
+ * - pccard_static_ops		iomem and ioport areas are assigned statically
+ * - pccard_iodyn_ops		iomem areas is assigned statically, ioport
+ *				areas dynamically
+ *				If this option is selected, use
+ *				"select PCCARD_IODYN" in Kconfig.
+ * - pccard_nonstatic_ops	iomem and ioport areas are assigned dynamically.
+ *				If this option is selected, use
+ *				"select PCCARD_NONSTATIC" in Kconfig.
+ *
  */
-extern int register_ss_entry(int nsock, struct pccard_operations *ops);
-extern void unregister_ss_entry(struct pccard_operations *ops);
+extern struct pccard_resource_ops pccard_static_ops;
+#if defined(CONFIG_PCMCIA) || defined(CONFIG_PCMCIA_MODULE)
+extern struct pccard_resource_ops pccard_iodyn_ops;
+extern struct pccard_resource_ops pccard_nonstatic_ops;
+#else
+/* If PCMCIA is not used, but only CARDBUS, these functions are not used
+ * at all. Therefore, do not use the large (240K!) rsrc_nonstatic module
+ */
+#define pccard_iodyn_ops pccard_static_ops
+#define pccard_nonstatic_ops pccard_static_ops
+#endif
+
+
+/* socket drivers use this callback in their IRQ handler */
+extern void pcmcia_parse_events(struct pcmcia_socket *socket,
+				unsigned int events);
+
+/* to register and unregister a socket */
+extern int pcmcia_register_socket(struct pcmcia_socket *socket);
+extern void pcmcia_unregister_socket(struct pcmcia_socket *socket);
+
 
 #endif /* _LINUX_SS_H */

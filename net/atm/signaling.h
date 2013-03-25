@@ -1,7 +1,7 @@
 /* net/atm/signaling.h - ATM signaling */
- 
+
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
- 
+
 
 #ifndef NET_ATM_SIGNALING_H
 #define NET_ATM_SIGNALING_H
@@ -9,9 +9,6 @@
 #include <linux/atm.h>
 #include <linux/atmdev.h>
 #include <linux/atmsvc.h>
-
-
-#define WAITING 1 /* for reply: 0: no error, < 0: error, ... */
 
 
 extern struct atm_vcc *sigd; /* needed in svc_release */

@@ -22,15 +22,12 @@
    SOFTWARE IS DISCLAIMED.
 */
 
-/*
- *  $Id: bluetooth.h,v 1.9 2002/05/06 21:11:55 maxk Exp $
- */
-
 #ifndef __BLUETOOTH_H
 #define __BLUETOOTH_H
 
 #include <asm/types.h>
 #include <asm/byteorder.h>
+#include <linux/list.h>
 #include <linux/poll.h>
 #include <net/sock.h>
 
@@ -39,56 +36,87 @@
 #define PF_BLUETOOTH	AF_BLUETOOTH
 #endif
 
+/* Bluetooth versions */
+#define BLUETOOTH_VER_1_1	1
+#define BLUETOOTH_VER_1_2	2
+#define BLUETOOTH_VER_2_0	3
+
 /* Reserv for core and drivers use */
-#define BLUEZ_SKB_RESERVE       8
+#define BT_SKB_RESERVE	8
 
-#ifndef MIN
-#define MIN(a,b) ((a) < (b) ? (a) : (b))
-#endif
-
-#define BTPROTO_L2CAP   0
-#define BTPROTO_HCI     1
-#define BTPROTO_SCO   	2
+#define BTPROTO_L2CAP	0
+#define BTPROTO_HCI	1
+#define BTPROTO_SCO	2
 #define BTPROTO_RFCOMM	3
 #define BTPROTO_BNEP	4
 #define BTPROTO_CMTP	5
 #define BTPROTO_HIDP	6
+#define BTPROTO_AVDTP	7
 
-#define SOL_HCI     0
-#define SOL_L2CAP   6
-#define SOL_SCO     17
-#define SOL_RFCOMM  18
+#define SOL_HCI		0
+#define SOL_L2CAP	6
+#define SOL_SCO		17
+#define SOL_RFCOMM	18
 
-/* Debugging */
-#ifdef CONFIG_BLUEZ_DEBUG
+#define BT_SECURITY	4
+struct bt_security {
+	__u8 level;
+	__u8 key_size;
+};
+#define BT_SECURITY_SDP		0
+#define BT_SECURITY_LOW		1
+#define BT_SECURITY_MEDIUM	2
+#define BT_SECURITY_HIGH	3
 
-#define HCI_CORE_DEBUG		1
-#define HCI_SOCK_DEBUG		1
-#define HCI_UART_DEBUG		1
-#define HCI_USB_DEBUG		1
-//#define HCI_DATA_DUMP		1
+#define BT_DEFER_SETUP	7
 
-#define L2CAP_DEBUG		1
-#define SCO_DEBUG		1
-#define AF_BLUETOOTH_DEBUG	1
+#define BT_FLUSHABLE	8
 
-#endif /* CONFIG_BLUEZ_DEBUG */
+#define BT_FLUSHABLE_OFF	0
+#define BT_FLUSHABLE_ON		1
 
-extern void bluez_dump(char *pref, __u8 *buf, int count);
+#define BT_POWER	9
+struct bt_power {
+	__u8 force_active;
+};
+#define BT_POWER_FORCE_ACTIVE_OFF 0
+#define BT_POWER_FORCE_ACTIVE_ON  1
 
-#if __GNUC__ <= 2 && __GNUC_MINOR__ < 95
-#define __func__ __FUNCTION__
-#endif
+#define BT_CHANNEL_POLICY	10
 
-#define BT_INFO(fmt, arg...) printk(KERN_INFO fmt "\n" , ## arg)
-#define BT_DBG(fmt, arg...)  printk(KERN_INFO "%s: " fmt "\n" , __func__ , ## arg)
-#define BT_ERR(fmt, arg...)  printk(KERN_ERR  "%s: " fmt "\n" , __func__ , ## arg)
+/* BR/EDR only (default policy)
+ *   AMP controllers cannot be used.
+ *   Channel move requests from the remote device are denied.
+ *   If the L2CAP channel is currently using AMP, move the channel to BR/EDR.
+ */
+#define BT_CHANNEL_POLICY_BREDR_ONLY		0
 
-#ifdef HCI_DATA_DUMP
-#define BT_DMP(buf, len)    bluez_dump(__func__, buf, len)
-#else
-#define BT_DMP(D...)
-#endif
+/* BR/EDR Preferred
+ *   Allow use of AMP controllers.
+ *   If the L2CAP channel is currently on AMP, move it to BR/EDR.
+ *   Channel move requests from the remote device are allowed.
+ */
+#define BT_CHANNEL_POLICY_BREDR_PREFERRED	1
+
+/* AMP Preferred
+ *   Allow use of AMP controllers
+ *   If the L2CAP channel is currently on BR/EDR and AMP controller
+ *     resources are available, initiate a channel move to AMP.
+ *   Channel move requests from the remote device are allowed.
+ *   If the L2CAP socket has not been connected yet, try to create
+ *     and configure the channel directly on an AMP controller rather
+ *     than BR/EDR.
+ */
+#define BT_CHANNEL_POLICY_AMP_PREFERRED		2
+
+__printf(1, 2)
+int bt_info(const char *fmt, ...);
+__printf(1, 2)
+int bt_err(const char *fmt, ...);
+
+#define BT_INFO(fmt, ...)	bt_info(fmt "\n", ##__VA_ARGS__)
+#define BT_ERR(fmt, ...)	bt_err(fmt "\n", ##__VA_ARGS__)
+#define BT_DBG(fmt, ...)	pr_debug(fmt "\n", ##__VA_ARGS__)
 
 /* Connection and socket states */
 enum {
@@ -103,16 +131,37 @@ enum {
 	BT_CLOSED
 };
 
-/* Endianness conversions */
-#define htobs(a)	__cpu_to_le16(a)
-#define htobl(a)	__cpu_to_le32(a)
-#define btohs(a)	__le16_to_cpu(a)
-#define btohl(a)	__le32_to_cpu(a)
+/* If unused will be removed by compiler */
+static inline const char *state_to_string(int state)
+{
+	switch (state) {
+	case BT_CONNECTED:
+		return "BT_CONNECTED";
+	case BT_OPEN:
+		return "BT_OPEN";
+	case BT_BOUND:
+		return "BT_BOUND";
+	case BT_LISTEN:
+		return "BT_LISTEN";
+	case BT_CONNECT:
+		return "BT_CONNECT";
+	case BT_CONNECT2:
+		return "BT_CONNECT2";
+	case BT_CONFIG:
+		return "BT_CONFIG";
+	case BT_DISCONN:
+		return "BT_DISCONN";
+	case BT_CLOSED:
+		return "BT_CLOSED";
+	}
+
+	return "invalid state";
+}
 
 /* BD Address */
 typedef struct {
 	__u8 b[6];
-} __attribute__((packed)) bdaddr_t;
+} __packed bdaddr_t;
 
 #define BDADDR_ANY   (&(bdaddr_t) {{0, 0, 0, 0, 0, 0}})
 #define BDADDR_LOCAL (&(bdaddr_t) {{0, 0, 0, 0xff, 0xff, 0xff}})
@@ -133,89 +182,109 @@ bdaddr_t *strtoba(char *str);
 
 /* Common socket structures and functions */
 
-#define bluez_pi(sk) ((struct bluez_pinfo *) &sk->protinfo)
-#define bluez_sk(pi) ((struct sock *) \
-	((void *)pi - (unsigned long)(&((struct sock *)0)->protinfo)))
+#define bt_sk(__sk) ((struct bt_sock *) __sk)
 
-struct bluez_pinfo {
-	bdaddr_t	src;
-	bdaddr_t	dst;
-
+struct bt_sock {
+	struct sock sk;
+	bdaddr_t    src;
+	bdaddr_t    dst;
 	struct list_head accept_q;
 	struct sock *parent;
+	u32 defer_setup;
+	bool suspended;
 };
 
-struct bluez_sock_list {
-	struct sock *head;
-	rwlock_t     lock;
+struct bt_sock_list {
+	struct hlist_head head;
+	rwlock_t          lock;
 };
 
-int  bluez_sock_register(int proto, struct net_proto_family *ops);
-int  bluez_sock_unregister(int proto);
-void bluez_sock_init(struct socket *sock, struct sock *sk);
-void bluez_sock_link(struct bluez_sock_list *l, struct sock *s);
-void bluez_sock_unlink(struct bluez_sock_list *l, struct sock *s);
-int  bluez_sock_recvmsg(struct socket *sock, struct msghdr *msg, int len, int flags, struct scm_cookie *scm);
-uint bluez_sock_poll(struct file * file, struct socket *sock, poll_table *wait);
-int  bluez_sock_wait_state(struct sock *sk, int state, unsigned long timeo);
+int  bt_sock_register(int proto, const struct net_proto_family *ops);
+int  bt_sock_unregister(int proto);
+void bt_sock_link(struct bt_sock_list *l, struct sock *s);
+void bt_sock_unlink(struct bt_sock_list *l, struct sock *s);
+int  bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+				struct msghdr *msg, size_t len, int flags);
+int  bt_sock_stream_recvmsg(struct kiocb *iocb, struct socket *sock,
+			struct msghdr *msg, size_t len, int flags);
+uint bt_sock_poll(struct file * file, struct socket *sock, poll_table *wait);
+int  bt_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg);
+int  bt_sock_wait_state(struct sock *sk, int state, unsigned long timeo);
 
-void bluez_accept_enqueue(struct sock *parent, struct sock *sk);
-struct sock * bluez_accept_dequeue(struct sock *parent, struct socket *newsock);
+void bt_accept_enqueue(struct sock *parent, struct sock *sk);
+void bt_accept_unlink(struct sock *sk);
+struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock);
 
 /* Skb helpers */
-struct bluez_skb_cb {
-	int    incomming;
+struct bt_skb_cb {
+	__u8 pkt_type;
+	__u8 incoming;
+	__u16 expect;
+	__u16 tx_seq;
+	__u8 retries;
+	__u8 sar;
+	__u8 force_active;
 };
-#define bluez_cb(skb)	((struct bluez_skb_cb *)(skb->cb)) 
+#define bt_cb(skb) ((struct bt_skb_cb *)((skb)->cb))
 
-static inline struct sk_buff *bluez_skb_alloc(unsigned int len, int how)
+static inline struct sk_buff *bt_skb_alloc(unsigned int len, gfp_t how)
 {
 	struct sk_buff *skb;
 
-	if ((skb = alloc_skb(len + BLUEZ_SKB_RESERVE, how))) {
-		skb_reserve(skb, BLUEZ_SKB_RESERVE);
-		bluez_cb(skb)->incomming  = 0;
+	if ((skb = alloc_skb(len + BT_SKB_RESERVE, how))) {
+		skb_reserve(skb, BT_SKB_RESERVE);
+		bt_cb(skb)->incoming  = 0;
 	}
 	return skb;
 }
 
-static inline struct sk_buff *bluez_skb_send_alloc(struct sock *sk, unsigned long len, 
-						       int nb, int *err)
+static inline struct sk_buff *bt_skb_send_alloc(struct sock *sk,
+					unsigned long len, int nb, int *err)
 {
 	struct sk_buff *skb;
 
-	if ((skb = sock_alloc_send_skb(sk, len + BLUEZ_SKB_RESERVE, nb, err))) {
-		skb_reserve(skb, BLUEZ_SKB_RESERVE);
-		bluez_cb(skb)->incomming  = 0;
+	release_sock(sk);
+	if ((skb = sock_alloc_send_skb(sk, len + BT_SKB_RESERVE, nb, err))) {
+		skb_reserve(skb, BT_SKB_RESERVE);
+		bt_cb(skb)->incoming  = 0;
+	}
+	lock_sock(sk);
+
+	if (!skb && *err)
+		return NULL;
+
+	*err = sock_error(sk);
+	if (*err)
+		goto out;
+
+	if (sk->sk_shutdown) {
+		*err = -ECONNRESET;
+		goto out;
 	}
 
 	return skb;
+
+out:
+	kfree_skb(skb);
+	return NULL;
 }
 
-static inline int skb_frags_no(struct sk_buff *skb)
-{
-	register struct sk_buff *frag = skb_shinfo(skb)->frag_list;
-	register int n = 1;
+int bt_to_errno(__u16 code);
 
-	for (; frag; frag=frag->next, n++);
-	return n;
-}
+extern int hci_sock_init(void);
+extern void hci_sock_cleanup(void);
 
-int hci_core_init(void);
-int hci_core_cleanup(void);
-int hci_sock_init(void);
-int hci_sock_cleanup(void);
+extern int bt_sysfs_init(void);
+extern void bt_sysfs_cleanup(void);
 
-int bterr(__u16 code);
+extern struct dentry *bt_debugfs;
 
-#ifndef MODULE_LICENSE
-#define MODULE_LICENSE(x)
-#endif
+int l2cap_init(void);
+void l2cap_exit(void);
 
-#ifndef list_for_each_safe
-#define list_for_each_safe(pos, n, head) \
-	for (pos = (head)->next, n = pos->next; pos != (head); \
-		pos = n, n = pos->next)
-#endif
+int sco_init(void);
+void sco_exit(void);
+
+void bt_sock_reclassify_lock(struct sock *sk, int proto);
 
 #endif /* __BLUETOOTH_H */

@@ -1,440 +1,414 @@
 /*
- *      linux/drivers/video/pmagb-b-fb.c
+ *	linux/drivers/video/pmagb-b-fb.c
  *
- *	PMAGB-B TurboChannel framebuffer card support ... derived from:
+ *	PMAGB-B TURBOchannel Smart Frame Buffer (SFB) card support,
+ *	derived from:
  *	"HP300 Topcat framebuffer support (derived from macfb of all things)
  *	Phil Blundell <philb@gnu.org> 1998", the original code can be
- *      found in the file hpfb.c in the same directory.
+ *	found in the file hpfb.c in the same directory.
  *
- *      DECstation related code Copyright (C) 1999, 2000, 2001 by
- *      Michael Engel <engel@unix-ag.org>,
- *      Karsten Merker <merker@linuxtag.org> and 
+ *	DECstation related code Copyright (C) 1999, 2000, 2001 by
+ *	Michael Engel <engel@unix-ag.org>,
+ *	Karsten Merker <merker@linuxtag.org> and
  *	Harald Koerfgen.
- *      This file is subject to the terms and conditions of the GNU General
- *      Public License.  See the file COPYING in the main directory of this
- *      archive for more details.
+ *	Copyright (c) 2005, 2006  Maciej W. Rozycki
  *
+ *	This file is subject to the terms and conditions of the GNU General
+ *	Public License.  See the file COPYING in the main directory of this
+ *	archive for more details.
  */
 
-/*
- *      We currently only support the PMAGB-B in high resolution mode
- *      as I know of no way to detect low resolution mode set via jumper.
- *      KM, 2001/01/07
- */
-
-#include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/timer.h>
-#include <linux/mm.h>
-#include <linux/tty.h>
-#include <linux/slab.h>
+#include <linux/compiler.h>
 #include <linux/delay.h>
-#include <linux/init.h>
+#include <linux/errno.h>
 #include <linux/fb.h>
-#include <asm/bootinfo.h>
-#include <asm/dec/machtype.h>
-#include <asm/dec/tc.h>
-#include "pmagb-b-fb.h"
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/tc.h>
+#include <linux/types.h>
 
-#include <video/fbcon.h>
-#include <video/fbcon-mfb.h>
-#include <video/fbcon-cfb2.h>
-#include <video/fbcon-cfb4.h>
-#include <video/fbcon-cfb8.h>
+#include <asm/io.h>
 
-#define arraysize(x)    (sizeof(x)/sizeof(*(x)))
+#include <video/pmagb-b-fb.h>
 
-struct pmagb_b_ramdac_regs {
-	unsigned char addr_low;
-	unsigned char pad0[3];
-	unsigned char addr_hi;
-	unsigned char pad1[3];
-	unsigned char data;
-	unsigned char pad2[3];
-	unsigned char cmap;
-};
-
-struct pmagb_b_my_fb_info {
-	struct fb_info info;
-	struct pmagb_b_ramdac_regs *bt459_regs;
-	unsigned long pmagbb_fb_start;
-	unsigned long pmagbb_fb_size;
-	unsigned long pmagbb_fb_line_length;
-};
-
-static struct display disp;
-/*
- * Max 3 TURBOchannel slots -> max 3 PMAGB-B :)
- */
-static struct pmagb_b_my_fb_info pmagbb_fb_info[3];
-
-static struct fb_var_screeninfo pmagbbfb_defined = {
-	0, 0, 0, 0,		/* W,H, W, H (virtual) load xres,xres_virtual */
-	0, 0,			/* virtual -> visible no offset */
-	0,			/* depth -> load bits_per_pixel */
-	0,			/* greyscale ? */
-	{0, 0, 0},		/* R */
-	{0, 0, 0},		/* G */
-	{0, 0, 0},		/* B */
-	{0, 0, 0},		/* transparency */
-	0,			/* standard pixel format */
-	FB_ACTIVATE_NOW,
-	274, 195,		/* 14" monitor */
-	FB_ACCEL_NONE,
-	0L, 0L, 0L, 0L, 0L,
-	0L, 0L, 0,		/* No sync info */
-	FB_VMODE_NONINTERLACED,
-	{0, 0, 0, 0, 0, 0}
-};
 
 struct pmagbbfb_par {
+	volatile void __iomem *mmio;
+	volatile void __iomem *smem;
+	volatile u32 __iomem *sfb;
+	volatile u32 __iomem *dac;
+	unsigned int osc0;
+	unsigned int osc1;
+	int slot;
 };
 
-static int currcon = 0;
-static struct pmagbbfb_par current_par;
 
-static void pmagbbfb_encode_var(struct fb_var_screeninfo *var,
-				struct pmagbbfb_par *par)
+static struct fb_var_screeninfo pmagbbfb_defined __devinitdata = {
+	.bits_per_pixel	= 8,
+	.red.length	= 8,
+	.green.length	= 8,
+	.blue.length	= 8,
+	.activate	= FB_ACTIVATE_NOW,
+	.height		= -1,
+	.width		= -1,
+	.accel_flags	= FB_ACCEL_NONE,
+	.sync		= FB_SYNC_ON_GREEN,
+	.vmode		= FB_VMODE_NONINTERLACED,
+};
+
+static struct fb_fix_screeninfo pmagbbfb_fix __devinitdata = {
+	.id		= "PMAGB-BA",
+	.smem_len	= (2048 * 1024),
+	.type		= FB_TYPE_PACKED_PIXELS,
+	.visual		= FB_VISUAL_PSEUDOCOLOR,
+	.mmio_len	= PMAGB_B_FBMEM,
+};
+
+
+static inline void sfb_write(struct pmagbbfb_par *par, unsigned int reg, u32 v)
 {
-	int i = 0;
-	var->xres = 1280;
-	var->yres = 1024;
-	var->xres_virtual = 1280;
-	var->yres_virtual = 1024;
-	var->xoffset = 0;
-	var->yoffset = 0;
-	var->bits_per_pixel = 8;
-	var->grayscale = 0;
-	var->red.offset = 0;
-	var->red.length = 8;
-	var->red.msb_right = 0;
-	var->green.offset = 0;
-	var->green.length = 8;
-	var->green.msb_right = 0;
-	var->blue.offset = 0;
-	var->blue.length = 8;
-	var->blue.msb_right = 0;
-	var->transp.offset = 0;
-	var->transp.length = 0;
-	var->transp.msb_right = 0;
-	var->nonstd = 0;
-	var->activate = 1;
-	var->height = -1;
-	var->width = -1;
-	var->vmode = FB_VMODE_NONINTERLACED;
-	var->pixclock = 0;
-	var->sync = 0;
-	var->left_margin = 0;
-	var->right_margin = 0;
-	var->upper_margin = 0;
-	var->lower_margin = 0;
-	var->hsync_len = 0;
-	var->vsync_len = 0;
-	for (i = 0; i < arraysize(var->reserved); i++)
-		var->reserved[i] = 0;
+	writel(v, par->sfb + reg / 4);
 }
 
-static void pmagbbfb_get_par(struct pmagbbfb_par *par)
+static inline u32 sfb_read(struct pmagbbfb_par *par, unsigned int reg)
 {
-	*par = current_par;
+	return readl(par->sfb + reg / 4);
 }
 
-static int pmagbb_fb_update_var(int con, struct fb_info *info)
+static inline void dac_write(struct pmagbbfb_par *par, unsigned int reg, u8 v)
 {
-	return 0;
+	writeb(v, par->dac + reg / 4);
 }
 
-static int pmagbb_do_fb_set_var(struct fb_var_screeninfo *var,
-				int isactive)
+static inline u8 dac_read(struct pmagbbfb_par *par, unsigned int reg)
 {
-	struct pmagbbfb_par par;
-
-	pmagbbfb_get_par(&par);
-	pmagbbfb_encode_var(var, &par);
-	return 0;
+	return readb(par->dac + reg / 4);
 }
+
+static inline void gp0_write(struct pmagbbfb_par *par, u32 v)
+{
+	writel(v, par->mmio + PMAGB_B_GP0);
+}
+
 
 /*
- * Turn hardware cursor off
+ * Set the palette.
  */
-void pmagbbfb_erase_cursor(struct pmagb_b_my_fb_info *info)
+static int pmagbbfb_setcolreg(unsigned int regno, unsigned int red,
+			      unsigned int green, unsigned int blue,
+			      unsigned int transp, struct fb_info *info)
 {
-	info->bt459_regs->addr_low = 0;
-	info->bt459_regs->addr_hi = 3;
-	info->bt459_regs->data = 0;
-}
+	struct pmagbbfb_par *par = info->par;
 
-/*
- * Write to a Bt459 color map register
- */
-void pmagb_b_bt459_write_colormap(struct pmagb_b_my_fb_info *info,
-				  int reg, __u8 red, __u8 green, __u8 blue)
-{
-	info->bt459_regs->addr_low = (__u8) reg;
-	info->bt459_regs->addr_hi = 0;
-	info->bt459_regs->cmap = red;
-	info->bt459_regs->cmap = green;
-	info->bt459_regs->cmap = blue;
-}
+	if (regno >= info->cmap.len)
+		return 1;
 
-/*
- * Get the palette
- */
+	red   >>= 8;	/* The cmap fields are 16 bits    */
+	green >>= 8;	/* wide, but the hardware colormap */
+	blue  >>= 8;	/* registers are only 8 bits wide */
 
-static int pmagbbfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			     struct fb_info *info)
-{
-	unsigned int i;
-	unsigned int length;
-
-	if (((cmap->start) + (cmap->len)) >= 256) {
-		length = 256 - (cmap->start);
-	} else {
-		length = cmap->len;
-	}
-	for (i = 0; i < length; i++) {
-		/*
-		 * TODO
-		 */
-	}
-	return 0;
-}
-
-/*
- * Set the palette. 
- */
-static int pmagbbfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-			     struct fb_info *info)
-{
-	unsigned int i;
-	__u8 cmap_red, cmap_green, cmap_blue;
-	unsigned int length;
-
-	if (((cmap->start) + (cmap->len)) >= 256)
-		length = 256 - (cmap->start);
-	else
-		length = cmap->len;
-
-	for (i = 0; i < length; i++) {
-		cmap_red = ((cmap->red[i]) >> 8);	/* The cmap fields are 16 bits    */
-		cmap_green = ((cmap->green[i]) >> 8);	/* wide, but the harware colormap */
-		cmap_blue = ((cmap->blue[i]) >> 8);	/* registers are only 8 bits wide */
-
-		pmagb_b_bt459_write_colormap((struct pmagb_b_my_fb_info *)
-					     info, cmap->start + i,
-					     cmap_red, cmap_green,
-					     cmap_blue);
-	}
-	return 0;
-}
-
-static int pmagbbfb_get_var(struct fb_var_screeninfo *var, int con,
-			    struct fb_info *info)
-{
-	struct pmagbbfb_par par;
-	if (con == -1) {
-		pmagbbfb_get_par(&par);
-		pmagbbfb_encode_var(var, &par);
-	} else
-		*var = fb_display[con].var;
-	return 0;
-}
-
-
-static int pmagbbfb_set_var(struct fb_var_screeninfo *var, int con,
-			    struct fb_info *info)
-{
-	int err;
-
-	if ((err = pmagbb_do_fb_set_var(var, 1)))
-		return err;
-	return 0;
-}
-
-static void pmagbbfb_encode_fix(struct fb_fix_screeninfo *fix,
-				struct pmagbbfb_par *par,
-				struct pmagb_b_my_fb_info *info)
-{
-	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
-	strcpy(fix->id, "PMAGB-BA");
-
-	fix->smem_start = info->pmagbb_fb_start;
-	fix->smem_len = info->pmagbb_fb_size;
-	fix->type = FB_TYPE_PACKED_PIXELS;
-	fix->visual = FB_VISUAL_PSEUDOCOLOR;
-	fix->xpanstep = 0;
-	fix->ypanstep = 0;
-	fix->ywrapstep = 0;
-	fix->line_length = info->pmagbb_fb_line_length;
-}
-
-static int pmagbbfb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			    struct fb_info *info)
-{
-	struct pmagbbfb_par par;
-
-	pmagbbfb_get_par(&par);
-	pmagbbfb_encode_fix(fix, &par, (struct pmagb_b_my_fb_info *) info);
+	mb();
+	dac_write(par, BT459_ADDR_LO, regno);
+	dac_write(par, BT459_ADDR_HI, 0x00);
+	wmb();
+	dac_write(par, BT459_CMAP, red);
+	wmb();
+	dac_write(par, BT459_CMAP, green);
+	wmb();
+	dac_write(par, BT459_CMAP, blue);
 
 	return 0;
-}
-
-
-static int pmagbbfb_ioctl(struct inode *inode, struct file *file,
-			  unsigned int cmd, unsigned long arg, int con,
-			  struct fb_info *info)
-{
-	return -EINVAL;
-}
-
-static int pmagbbfb_switch(int con, struct fb_info *info)
-{
-	pmagbb_do_fb_set_var(&fb_display[con].var, 1);
-	currcon = con;
-
-	return 0;
-}
-
-/* 0 unblank, 1 blank, 2 no vsync, 3 no hsync, 4 off */
-
-static void pmagbbfb_blank(int blank, struct fb_info *info)
-{
-	/* Not supported */
-}
-
-static int pmagbbfb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-	MOD_INC_USE_COUNT;
-	return (0);
-}
-
-static void pmagbbfb_set_disp(int con, struct pmagb_b_my_fb_info *info)
-{
-	struct fb_fix_screeninfo fix;
-	struct display *display;
-
-	if (con >= 0)
-		display = &fb_display[con];
-	else
-		display = &disp;	/* used during initialization */
-
-	pmagbbfb_get_fix(&fix, con, (struct fb_info *) info);
-
-	display->screen_base = (char *) fix.smem_start;
-	display->visual = fix.visual;
-	display->type = fix.type;
-	display->type_aux = fix.type_aux;
-	display->ypanstep = fix.ypanstep;
-	display->ywrapstep = fix.ywrapstep;
-	display->line_length = fix.line_length;
-	display->next_line = fix.line_length;
-	display->can_soft_blank = 0;
-	display->inverse = 0;
-	display->scrollmode = SCROLL_YREDRAW;
-	display->dispsw = &fbcon_cfb8;
-}
-
-static int pmagbbfb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return (0);
 }
 
 static struct fb_ops pmagbbfb_ops = {
-	owner:THIS_MODULE,
-	fb_open:pmagbbfb_open,
-	fb_release:pmagbbfb_release,
-	fb_get_fix:pmagbbfb_get_fix,
-	fb_get_var:pmagbbfb_get_var,
-	fb_set_var:pmagbbfb_set_var,
-	fb_get_cmap:pmagbbfb_get_cmap,
-	fb_set_cmap:pmagbbfb_set_cmap,
-	fb_ioctl:pmagbbfb_ioctl,
-	fb_mmap:0,
-	fb_rasterimg:0
+	.owner		= THIS_MODULE,
+	.fb_setcolreg	= pmagbbfb_setcolreg,
+	.fb_fillrect	= cfb_fillrect,
+	.fb_copyarea	= cfb_copyarea,
+	.fb_imageblit	= cfb_imageblit,
 };
 
-int __init pmagbbfb_init_one(int slot)
+
+/*
+ * Turn the hardware cursor off.
+ */
+static void __init pmagbbfb_erase_cursor(struct fb_info *info)
 {
-	unsigned long base_addr = get_tc_base_addr(slot);
-	struct pmagb_b_my_fb_info *ip =
-	    (struct pmagb_b_my_fb_info *) &pmagbb_fb_info[slot];
+	struct pmagbbfb_par *par = info->par;
 
-	printk("PMAGB-BA framebuffer in slot %d\n", slot);
+	mb();
+	dac_write(par, BT459_ADDR_LO, 0x00);
+	dac_write(par, BT459_ADDR_HI, 0x03);
+	wmb();
+	dac_write(par, BT459_DATA, 0x00);
+}
 
-	/*
-	 * Framebuffer display memory base address and friends
-	 */
-	ip->bt459_regs =
-	    (struct pmagb_b_ramdac_regs *) (base_addr +
-					    PMAGB_B_BT459_OFFSET);
-	ip->pmagbb_fb_start = base_addr + PMAGB_B_ONBOARD_FBMEM_OFFSET;
-	ip->pmagbb_fb_size = 1280 * 1024;
-	ip->pmagbb_fb_line_length = 1280;
+/*
+ * Set up screen parameters.
+ */
+static void __devinit pmagbbfb_screen_setup(struct fb_info *info)
+{
+	struct pmagbbfb_par *par = info->par;
 
-	/*
-	 * Configure the Bt459 RAM DAC
-	 */
-	pmagbbfb_erase_cursor(ip);
+	info->var.xres = ((sfb_read(par, SFB_REG_VID_HOR) >>
+			   SFB_VID_HOR_PIX_SHIFT) & SFB_VID_HOR_PIX_MASK) * 4;
+	info->var.xres_virtual = info->var.xres;
+	info->var.yres = (sfb_read(par, SFB_REG_VID_VER) >>
+			  SFB_VID_VER_SL_SHIFT) & SFB_VID_VER_SL_MASK;
+	info->var.yres_virtual = info->var.yres;
+	info->var.left_margin = ((sfb_read(par, SFB_REG_VID_HOR) >>
+				  SFB_VID_HOR_BP_SHIFT) &
+				 SFB_VID_HOR_BP_MASK) * 4;
+	info->var.right_margin = ((sfb_read(par, SFB_REG_VID_HOR) >>
+				   SFB_VID_HOR_FP_SHIFT) &
+				  SFB_VID_HOR_FP_MASK) * 4;
+	info->var.upper_margin = (sfb_read(par, SFB_REG_VID_VER) >>
+				  SFB_VID_VER_BP_SHIFT) & SFB_VID_VER_BP_MASK;
+	info->var.lower_margin = (sfb_read(par, SFB_REG_VID_VER) >>
+				  SFB_VID_VER_FP_SHIFT) & SFB_VID_VER_FP_MASK;
+	info->var.hsync_len = ((sfb_read(par, SFB_REG_VID_HOR) >>
+				SFB_VID_HOR_SYN_SHIFT) &
+			       SFB_VID_HOR_SYN_MASK) * 4;
+	info->var.vsync_len = (sfb_read(par, SFB_REG_VID_VER) >>
+			       SFB_VID_VER_SYN_SHIFT) & SFB_VID_VER_SYN_MASK;
 
-	/*
-	 *      Fill in the available video resolution
-	 */
+	info->fix.line_length = info->var.xres;
+};
 
-	pmagbbfb_defined.xres = 1280;
-	pmagbbfb_defined.yres = 1024;
-	pmagbbfb_defined.xres_virtual = 1280;
-	pmagbbfb_defined.yres_virtual = 1024;
-	pmagbbfb_defined.bits_per_pixel = 8;
+/*
+ * Determine oscillator configuration.
+ */
+static void __devinit pmagbbfb_osc_setup(struct fb_info *info)
+{
+	static unsigned int pmagbbfb_freqs[] __devinitdata = {
+		130808, 119843, 104000, 92980, 74370, 72800,
+		69197, 66000, 65000, 50350, 36000, 32000, 25175
+	};
+	struct pmagbbfb_par *par = info->par;
+	struct tc_bus *tbus = to_tc_dev(info->device)->bus;
+	u32 count0 = 8, count1 = 8, counttc = 16 * 256 + 8;
+	u32 freq0, freq1, freqtc = tc_get_speed(tbus) / 250;
+	int i, j;
 
-	/*
-	 *      Let there be consoles..
-	 */
-	strcpy(ip->info.modename, "PMAGB-BA");
-	ip->info.changevar = NULL;
-	ip->info.node = -1;
-	ip->info.fbops = &pmagbbfb_ops;
-	ip->info.disp = &disp;
-	ip->info.switch_con = &pmagbbfb_switch;
-	ip->info.updatevar = &pmagbb_fb_update_var;
-	ip->info.blank = &pmagbbfb_blank;
-	ip->info.flags = FBINFO_FLAG_DEFAULT;
+	gp0_write(par, 0);				/* select Osc0 */
+	for (j = 0; j < 16; j++) {
+		mb();
+		sfb_write(par, SFB_REG_TCCLK_COUNT, 0);
+		mb();
+		for (i = 0; i < 100; i++) {	/* nominally max. 20.5us */
+			if (sfb_read(par, SFB_REG_TCCLK_COUNT) == 0)
+				break;
+			udelay(1);
+		}
+		count0 += sfb_read(par, SFB_REG_VIDCLK_COUNT);
+	}
 
-	pmagbb_do_fb_set_var(&pmagbbfb_defined, 1);
-	pmagbbfb_get_var(&disp.var, -1, (struct fb_info *) ip);
-	pmagbbfb_set_disp(-1, ip);
+	gp0_write(par, 1);				/* select Osc1 */
+	for (j = 0; j < 16; j++) {
+		mb();
+		sfb_write(par, SFB_REG_TCCLK_COUNT, 0);
 
-	if (register_framebuffer((struct fb_info *) ip) < 0)
-		return 1;
+		for (i = 0; i < 100; i++) {	/* nominally max. 20.5us */
+			if (sfb_read(par, SFB_REG_TCCLK_COUNT) == 0)
+				break;
+			udelay(1);
+		}
+		count1 += sfb_read(par, SFB_REG_VIDCLK_COUNT);
+	}
 
+	freq0 = (freqtc * count0 + counttc / 2) / counttc;
+	par->osc0 = freq0;
+	if (freq0 >= pmagbbfb_freqs[0] - (pmagbbfb_freqs[0] + 32) / 64 &&
+	    freq0 <= pmagbbfb_freqs[0] + (pmagbbfb_freqs[0] + 32) / 64)
+		par->osc0 = pmagbbfb_freqs[0];
+
+	freq1 = (par->osc0 * count1 + count0 / 2) / count0;
+	par->osc1 = freq1;
+	for (i = 0; i < ARRAY_SIZE(pmagbbfb_freqs); i++)
+		if (freq1 >= pmagbbfb_freqs[i] -
+			     (pmagbbfb_freqs[i] + 128) / 256 &&
+		    freq1 <= pmagbbfb_freqs[i] +
+			     (pmagbbfb_freqs[i] + 128) / 256) {
+			par->osc1 = pmagbbfb_freqs[i];
+			break;
+		}
+
+	if (par->osc0 - par->osc1 <= (par->osc0 + par->osc1 + 256) / 512 ||
+	    par->osc1 - par->osc0 <= (par->osc0 + par->osc1 + 256) / 512)
+		par->osc1 = 0;
+
+	gp0_write(par, par->osc1 != 0);			/* reselect OscX */
+
+	info->var.pixclock = par->osc1 ?
+			     (1000000000 + par->osc1 / 2) / par->osc1 :
+			     (1000000000 + par->osc0 / 2) / par->osc0;
+};
+
+
+static int __devinit pmagbbfb_probe(struct device *dev)
+{
+	struct tc_dev *tdev = to_tc_dev(dev);
+	resource_size_t start, len;
+	struct fb_info *info;
+	struct pmagbbfb_par *par;
+	char freq0[12], freq1[12];
+	u32 vid_base;
+	int err;
+
+	info = framebuffer_alloc(sizeof(struct pmagbbfb_par), dev);
+	if (!info) {
+		printk(KERN_ERR "%s: Cannot allocate memory\n", dev_name(dev));
+		return -ENOMEM;
+	}
+
+	par = info->par;
+	dev_set_drvdata(dev, info);
+
+	if (fb_alloc_cmap(&info->cmap, 256, 0) < 0) {
+		printk(KERN_ERR "%s: Cannot allocate color map\n",
+		       dev_name(dev));
+		err = -ENOMEM;
+		goto err_alloc;
+	}
+
+	info->fbops = &pmagbbfb_ops;
+	info->fix = pmagbbfb_fix;
+	info->var = pmagbbfb_defined;
+	info->flags = FBINFO_DEFAULT;
+
+	/* Request the I/O MEM resource.  */
+	start = tdev->resource.start;
+	len = tdev->resource.end - start + 1;
+	if (!request_mem_region(start, len, dev_name(dev))) {
+		printk(KERN_ERR "%s: Cannot reserve FB region\n",
+		       dev_name(dev));
+		err = -EBUSY;
+		goto err_cmap;
+	}
+
+	/* MMIO mapping setup.  */
+	info->fix.mmio_start = start;
+	par->mmio = ioremap_nocache(info->fix.mmio_start, info->fix.mmio_len);
+	if (!par->mmio) {
+		printk(KERN_ERR "%s: Cannot map MMIO\n", dev_name(dev));
+		err = -ENOMEM;
+		goto err_resource;
+	}
+	par->sfb = par->mmio + PMAGB_B_SFB;
+	par->dac = par->mmio + PMAGB_B_BT459;
+
+	/* Frame buffer mapping setup.  */
+	info->fix.smem_start = start + PMAGB_B_FBMEM;
+	par->smem = ioremap_nocache(info->fix.smem_start, info->fix.smem_len);
+	if (!par->smem) {
+		printk(KERN_ERR "%s: Cannot map FB\n", dev_name(dev));
+		err = -ENOMEM;
+		goto err_mmio_map;
+	}
+	vid_base = sfb_read(par, SFB_REG_VID_BASE);
+	info->screen_base = (void __iomem *)par->smem + vid_base * 0x1000;
+	info->screen_size = info->fix.smem_len - 2 * vid_base * 0x1000;
+
+	pmagbbfb_erase_cursor(info);
+	pmagbbfb_screen_setup(info);
+	pmagbbfb_osc_setup(info);
+
+	err = register_framebuffer(info);
+	if (err < 0) {
+		printk(KERN_ERR "%s: Cannot register framebuffer\n",
+		       dev_name(dev));
+		goto err_smem_map;
+	}
+
+	get_device(dev);
+
+	snprintf(freq0, sizeof(freq0), "%u.%03uMHz",
+		 par->osc0 / 1000, par->osc0 % 1000);
+	snprintf(freq1, sizeof(freq1), "%u.%03uMHz",
+		 par->osc1 / 1000, par->osc1 % 1000);
+
+	pr_info("fb%d: %s frame buffer device at %s\n",
+		info->node, info->fix.id, dev_name(dev));
+	pr_info("fb%d: Osc0: %s, Osc1: %s, Osc%u selected\n",
+		info->node, freq0, par->osc1 ? freq1 : "disabled",
+		par->osc1 != 0);
+
+	return 0;
+
+
+err_smem_map:
+	iounmap(par->smem);
+
+err_mmio_map:
+	iounmap(par->mmio);
+
+err_resource:
+	release_mem_region(start, len);
+
+err_cmap:
+	fb_dealloc_cmap(&info->cmap);
+
+err_alloc:
+	framebuffer_release(info);
+	return err;
+}
+
+static int __exit pmagbbfb_remove(struct device *dev)
+{
+	struct tc_dev *tdev = to_tc_dev(dev);
+	struct fb_info *info = dev_get_drvdata(dev);
+	struct pmagbbfb_par *par = info->par;
+	resource_size_t start, len;
+
+	put_device(dev);
+	unregister_framebuffer(info);
+	iounmap(par->smem);
+	iounmap(par->mmio);
+	start = tdev->resource.start;
+	len = tdev->resource.end - start + 1;
+	release_mem_region(start, len);
+	fb_dealloc_cmap(&info->cmap);
+	framebuffer_release(info);
 	return 0;
 }
 
-/* 
- * Initialise the framebuffer
+
+/*
+ * Initialize the framebuffer.
  */
+static const struct tc_device_id pmagbbfb_tc_table[] = {
+	{ "DEC     ", "PMAGB-BA" },
+	{ }
+};
+MODULE_DEVICE_TABLE(tc, pmagbbfb_tc_table);
 
-int __init pmagbbfb_init(void)
+static struct tc_driver pmagbbfb_driver = {
+	.id_table	= pmagbbfb_tc_table,
+	.driver		= {
+		.name	= "pmagbbfb",
+		.bus	= &tc_bus_type,
+		.probe	= pmagbbfb_probe,
+		.remove	= __exit_p(pmagbbfb_remove),
+	},
+};
+
+static int __init pmagbbfb_init(void)
 {
-	int sid;
-	int found = 0;
-
-	if (TURBOCHANNEL) {
-		while ((sid = search_tc_card("PMAGB-BA")) >= 0) {
-			found = 1;
-			claim_tc_card(sid);
-			pmagbbfb_init_one(sid);
-		}
-		return found ? 0 : -ENODEV;
-	} else {
-		return -ENODEV;
-	}
+#ifndef MODULE
+	if (fb_get_options("pmagbbfb", NULL))
+		return -ENXIO;
+#endif
+	return tc_register_driver(&pmagbbfb_driver);
 }
+
+static void __exit pmagbbfb_exit(void)
+{
+	tc_unregister_driver(&pmagbbfb_driver);
+}
+
+
+module_init(pmagbbfb_init);
+module_exit(pmagbbfb_exit);
 
 MODULE_LICENSE("GPL");

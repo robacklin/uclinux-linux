@@ -26,20 +26,28 @@
  */
 
 #include <linux/fs.h>
+#include <linux/namei.h>
 
-static int ufs_readlink(struct dentry *dentry, char *buffer, int buflen)
+#include "ufs_fs.h"
+#include "ufs.h"
+
+
+static void *ufs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	char *s = (char *)dentry->d_inode->u.ufs_i.i_u1.i_symlink;
-	return vfs_readlink(dentry, buffer, buflen, s);
+	struct ufs_inode_info *p = UFS_I(dentry->d_inode);
+	nd_set_link(nd, (char*)p->i_u1.i_symlink);
+	return NULL;
 }
 
-static int ufs_follow_link(struct dentry *dentry, struct nameidata *nd)
-{
-	char *s = (char *)dentry->d_inode->u.ufs_i.i_u1.i_symlink;
-	return vfs_follow_link(nd, s);
-}
+const struct inode_operations ufs_fast_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= ufs_follow_link,
+	.setattr	= ufs_setattr,
+};
 
-struct inode_operations ufs_fast_symlink_inode_operations = {
-	readlink:	ufs_readlink,
-	follow_link:	ufs_follow_link,
+const struct inode_operations ufs_symlink_inode_operations = {
+	.readlink	= generic_readlink,
+	.follow_link	= page_follow_link_light,
+	.put_link	= page_put_link,
+	.setattr	= ufs_setattr,
 };

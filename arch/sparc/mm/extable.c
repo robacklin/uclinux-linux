@@ -2,17 +2,19 @@
  * linux/arch/sparc/mm/extable.c
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <asm/uaccess.h>
 
-extern const struct exception_table_entry __start___ex_table[];
-extern const struct exception_table_entry __stop___ex_table[];
+void sort_extable(struct exception_table_entry *start,
+		  struct exception_table_entry *finish)
+{
+}
 
-static unsigned long
-search_one_table(const struct exception_table_entry *start,
-		 const struct exception_table_entry *end,
-		 unsigned long value, unsigned long *g2)
+/* Caller knows they are in a range if ret->fixup == 0 */
+const struct exception_table_entry *
+search_extable(const struct exception_table_entry *start,
+	       const struct exception_table_entry *last,
+	       unsigned long value)
 {
 	const struct exception_table_entry *walk;
 
@@ -26,63 +28,78 @@ search_one_table(const struct exception_table_entry *start,
 	 *	word 3: last insn address + 4 bytes
 	 *	word 4: fixup code address
 	 *
+	 * Deleted entries are encoded as:
+	 *	word 1: unused
+	 *	word 2: -1
+	 *
 	 * See asm/uaccess.h for more details.
 	 */
 
 	/* 1. Try to find an exact match. */
-	for (walk = start; walk <= end; walk++) {
+	for (walk = start; walk <= last; walk++) {
 		if (walk->fixup == 0) {
 			/* A range entry, skip both parts. */
 			walk++;
 			continue;
 		}
 
+		/* A deleted entry; see trim_init_extable */
+		if (walk->fixup == -1)
+			continue;
+
 		if (walk->insn == value)
-			return walk->fixup;
+			return walk;
 	}
 
 	/* 2. Try to find a range match. */
-	for (walk = start; walk <= (end - 1); walk++) {
+	for (walk = start; walk <= (last - 1); walk++) {
 		if (walk->fixup)
 			continue;
 
-		if (walk[0].insn <= value &&
-		    walk[1].insn > value) {
-			*g2 = (value - walk[0].insn) / 4;
-			return walk[1].fixup;
-		}
+		if (walk[0].insn <= value && walk[1].insn > value)
+			return walk;
+
 		walk++;
 	}
 
-        return 0;
+        return NULL;
 }
 
-extern spinlock_t modlist_lock;
-
-unsigned long
-search_exception_table(unsigned long addr, unsigned long *g2)
+#ifdef CONFIG_MODULES
+/* We could memmove them around; easier to mark the trimmed ones. */
+void trim_init_extable(struct module *m)
 {
-	unsigned long ret = 0, flags;
+	unsigned int i;
+	bool range;
 
-#ifndef CONFIG_MODULES
-	/* There is only the kernel to search.  */
-	ret = search_one_table(__start___ex_table,
-			       __stop___ex_table-1, addr, g2);
-	return ret;
-#else
-	/* The kernel is the last "module" -- no need to treat it special.  */
-	struct module *mp;
+	for (i = 0; i < m->num_exentries; i += range ? 2 : 1) {
+		range = m->extable[i].fixup == 0;
 
-	spin_lock_irqsave(&modlist_lock, flags);
-	for (mp = module_list; mp != NULL; mp = mp->next) {
-		if (mp->ex_table_start == NULL || !(mp->flags & (MOD_RUNNING | MOD_INITIALIZING)))
-			continue;
-		ret = search_one_table(mp->ex_table_start,
-				       mp->ex_table_end-1, addr, g2);
-		if (ret)
-			break;
+		if (within_module_init(m->extable[i].insn, m)) {
+			m->extable[i].fixup = -1;
+			if (range)
+				m->extable[i+1].fixup = -1;
+		}
+		if (range)
+			i++;
 	}
-	spin_unlock_irqrestore(&modlist_lock, flags);
-	return ret;
-#endif
+}
+#endif /* CONFIG_MODULES */
+
+/* Special extable search, which handles ranges.  Returns fixup */
+unsigned long search_extables_range(unsigned long addr, unsigned long *g2)
+{
+	const struct exception_table_entry *entry;
+
+	entry = search_exception_tables(addr);
+	if (!entry)
+		return 0;
+
+	/* Inside range?  Fix g2 and return correct fixup */
+	if (!entry->fixup) {
+		*g2 = (addr - entry->insn) / 4;
+		return (entry + 1)->fixup;
+	}
+
+	return entry->fixup;
 }

@@ -15,18 +15,12 @@
  *  more details.
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/fb.h>
 #include <linux/string.h>
+#include <linux/module.h>
 
-#ifdef CONFIG_FB_COMPAT_XPMAC
-#include <asm/vc_ioctl.h>
-#endif
-
-#include <video/fbcon.h>
-#include <video/macmodes.h>
-
+#include "macmodes.h"
 
     /*
      *  MacOS video mode definitions
@@ -39,12 +33,20 @@
 
 static const struct fb_videomode mac_modedb[] = {
     {
+	/* 512x384, 60Hz, Non-Interlaced (15.67 MHz dot clock) */
+	"mac2", 60, 512, 384, 63828, 80, 16, 19, 1, 32, 3,
+	0, FB_VMODE_NONINTERLACED
+    }, {
 	/* 640x480, 60 Hz, Non-Interlaced (25.175 MHz dotclock) */
 	"mac5", 60, 640, 480, 39722, 32, 32, 33, 10, 96, 2,
 	0, FB_VMODE_NONINTERLACED
     }, {
 	/* 640x480, 67Hz, Non-Interlaced (30.0 MHz dotclock) */
 	"mac6", 67, 640, 480, 33334, 80, 80, 39, 3, 64, 3,
+	0, FB_VMODE_NONINTERLACED
+    }, {
+	/* 640x870, 75Hz (portrait), Non-Interlaced (57.28 MHz dot clock) */
+	"mac7", 75, 640, 870, 17457, 80, 32, 42, 3, 80, 3,
 	0, FB_VMODE_NONINTERLACED
     }, {
 	/* 800x600, 56 Hz, Non-Interlaced (36.00 MHz dotclock) */
@@ -111,10 +113,6 @@ static const struct fb_videomode mac_modedb[] = {
 	"mac1", 60, 512, 384, pixclock, left, right, upper, lower, hslen, vslen,
 	sync, FB_VMODE_INTERLACED
     }, {
-	/* VMODE_512_384_60: 512x384, 60Hz, Non-Interlaced */
-    	"mac2", 60, 512, 384, pixclock, left, right, upper, lower, hslen, vslen,
-	sync, FB_VMODE_NONINTERLACED
-    }, {
 	/* VMODE_640_480_50I: 640x480, 50Hz, Interlaced (PAL) */
 	"mac3", 50, 640, 480, pixclock, left, right, upper, lower, hslen, vslen,
 	sync, FB_VMODE_INTERLACED
@@ -122,10 +120,6 @@ static const struct fb_videomode mac_modedb[] = {
 	/* VMODE_640_480_60I: 640x480, 60Hz, Interlaced (NTSC) */
 	"mac4", 60, 640, 480, pixclock, left, right, upper, lower, hslen, vslen,
 	sync, FB_VMODE_INTERLACED
-    }, {
-	/* VMODE_640_870_75P: 640x870, 75Hz (portrait), Non-Interlaced */
-	"mac7", 75, 640, 870, pixclock, left, right, upper, lower, hslen, vslen,
-	sync, FB_VMODE_NONINTERLACED
     }, {
 	/* VMODE_768_576_50I: 768x576, 50Hz (PAL full frame), Interlaced */
 	"mac8", 50, 768, 576, pixclock, left, right, upper, lower, hslen, vslen,
@@ -140,38 +134,42 @@ static const struct fb_videomode mac_modedb[] = {
      *
      *  These MUST be ordered in
      *    - increasing resolution
-     *    - decreasing refresh rate
+     *    - decreasing pixel clock period
      */
 
 static const struct mode_map {
     int vmode;
     const struct fb_videomode *mode;
 } mac_modes[] = {
+    /* 512x384 */
+    { VMODE_512_384_60, &mac_modedb[0] },
     /* 640x480 */
-    { VMODE_640_480_67, &mac_modedb[1] },
-    { VMODE_640_480_60, &mac_modedb[0] },
+    { VMODE_640_480_60, &mac_modedb[1] },
+    { VMODE_640_480_67, &mac_modedb[2] },
+    /* 640x870 */
+    { VMODE_640_870_75P, &mac_modedb[3] },
     /* 800x600 */
-    { VMODE_800_600_75, &mac_modedb[5] },
-    { VMODE_800_600_72, &mac_modedb[4] },
-    { VMODE_800_600_60, &mac_modedb[3] },
-    { VMODE_800_600_56, &mac_modedb[2] },
+    { VMODE_800_600_56, &mac_modedb[4] },
+    { VMODE_800_600_60, &mac_modedb[5] },
+    { VMODE_800_600_75, &mac_modedb[7] },
+    { VMODE_800_600_72, &mac_modedb[6] },
     /* 832x624 */
-    { VMODE_832_624_75, &mac_modedb[6] },
+    { VMODE_832_624_75, &mac_modedb[8] },
     /* 1024x768 */
-    { VMODE_1024_768_75, &mac_modedb[10] },
-    { VMODE_1024_768_75V, &mac_modedb[9] },
-    { VMODE_1024_768_70, &mac_modedb[8] },
-    { VMODE_1024_768_60, &mac_modedb[7] },
+    { VMODE_1024_768_60, &mac_modedb[9] },
+    { VMODE_1024_768_70, &mac_modedb[10] },
+    { VMODE_1024_768_75V, &mac_modedb[11] },
+    { VMODE_1024_768_75, &mac_modedb[12] },
     /* 1152x768 */
-    { VMODE_1152_768_60, &mac_modedb[14] },
+    { VMODE_1152_768_60, &mac_modedb[16] },
     /* 1152x870 */
-    { VMODE_1152_870_75, &mac_modedb[11] },
+    { VMODE_1152_870_75, &mac_modedb[13] },
     /* 1280x960 */
-    { VMODE_1280_960_75, &mac_modedb[12] },
+    { VMODE_1280_960_75, &mac_modedb[14] },
     /* 1280x1024 */
-    { VMODE_1280_1024_75, &mac_modedb[13] },
+    { VMODE_1280_1024_75, &mac_modedb[15] },
     /* 1600x1024 */
-    { VMODE_1600_1024_60, &mac_modedb[15] },
+    { VMODE_1600_1024_60, &mac_modedb[17] },
     { -1, NULL }
 };
 
@@ -206,171 +204,6 @@ static const struct monitor_map {
     { 0xBEEF, VMODE_1600_1024_60 },	/* 22" Apple Cinema Display */
     { -1,    VMODE_640_480_60 },	/* catch-all, must be last */
 };
-
-#ifdef CONFIG_FB_COMPAT_XPMAC
-struct fb_info *console_fb_info = NULL;
-struct vc_mode display_info;
-
-static u16 palette_red[16];
-static u16 palette_green[16];
-static u16 palette_blue[16];
-static struct fb_cmap palette_cmap = {
-    0, 16, palette_red, palette_green, palette_blue, NULL
-};
-
-
-/**
- *	console_getmode - get current mode
- *	@mode: virtual console mode structure
- *
- *	Populates @mode with the current mode held in the global
- *	display_info structure.
- *
- *	Note, this function is only for XPMAC compatibility.
- *
- *	Returns zero.
- */
-
-int console_getmode(struct vc_mode *mode)
-{
-    *mode = display_info;
-    return 0;
-}
-
-
-/**
- *	console_setmode - sets current console mode
- *	@mode: virtual console mode structure
- *	@doit: boolean, 0 test mode, 1 test and activate mode
- *
- *	Sets @mode for all virtual consoles if @doit is non-zero,
- *	otherwise, test a mode for validity.
- *
- *	Note, this function is only for XPMAC compatibility.
- *
- *	Returns negative errno on error, or zero for success.
- *
- */
-
-int console_setmode(struct vc_mode *mode, int doit)
-{
-    struct fb_var_screeninfo var;
-    int cmode, err;
-
-    if (!console_fb_info)
-        return -EOPNOTSUPP;
-
-    switch(mode->depth) {
-        case 0:
-        case 8:
-            cmode = CMODE_8;
-            break;
-        case 16:
-            cmode = CMODE_16;
-            break;
-        case 24:
-        case 32:
-            cmode = CMODE_32;
-            break;
-        default:
-            return -EINVAL;
-    }
-
-    if ((err = mac_vmode_to_var(mode->mode, cmode, &var)))
-        return err;
-
-    var.activate = FB_ACTIVATE_TEST;
-    err = console_fb_info->fbops->fb_set_var(&var, fg_console,
-                                             console_fb_info);
-    if (err || !doit)
-        return err;
-    else {
-        int unit;
-
-        var.activate = FB_ACTIVATE_NOW;
-        for (unit = 0; unit < MAX_NR_CONSOLES; unit++)
-            if (fb_display[unit].conp &&
-                (GET_FB_IDX(console_fb_info->node) == con2fb_map[unit]))
-                console_fb_info->fbops->fb_set_var(&var, unit,
-                                                   console_fb_info);
-    }
-
-    return 0;
-}
-
-
-/**
- *	console_setcmap - sets palette color map for console
- *	@n_entries: number of entries in the palette (max 16)
- *	@red: value for red component of palette
- *	@green: value for green component of palette
- *	@blue: value for blue component of palette
- *
- *	Sets global palette_cmap structure and activates the palette
- *	on the current console.
- *
- *	Note, this function is only for XPMAC compatibility.
- *
- *	Returns negative errno on error, or zero for success.
- *
- */
-
-int console_setcmap(int n_entries, unsigned char *red, unsigned char *green,
-                    unsigned char *blue)
-{
-    int i, j, n = 0, err;
-
-    if (!console_fb_info)
-        return -EOPNOTSUPP;
-
-    for (i = 0; i < n_entries; i += n) {
-        n = n_entries - i;
-        if (n > 16)
-            n = 16;
-        palette_cmap.start = i;
-        palette_cmap.len = n;
-
-        for (j = 0; j < n; j++) {
-            palette_cmap.red[j] = (red[i+j] << 8) | red[i+j];
-            palette_cmap.green[j] = (green[i+j] << 8) | green[i+j];
-            palette_cmap.blue[j] = (blue[i+j] << 8) | blue[i+j];
-        }
-        err = console_fb_info->fbops->fb_set_cmap(&palette_cmap, 1,
-                                                  fg_console,
-                                                  console_fb_info);
-        if (err)
-            return err;
-    }
-
-    return 0;
-}
-
-
-/**
- *	console_powermode - sets monitor power mode
- *	@mode: power state to set
- *
- *	Sets power state as dictated by @mode.
- *
- *	Note that this function is only for XPMAC compatibility and
- *	doesn't do much.
- *
- *	Returns 0 for %VC_POWERMODE_INQUIRY, -EINVAL for VESA power
- *	settings, or -ENIXIO on failure.
- *
- */
-
-int console_powermode(int mode)
-{
-    if (mode == VC_POWERMODE_INQUIRY)
-        return 0;
-    if (mode < VESA_NO_BLANKING || mode > VESA_POWERDOWN)
-        return -EINVAL;
-    /* Not Supported */
-    return -ENXIO;
-}
-#endif /* CONFIG_FB_COMPAT_XPMAC */
-
 
 /**
  *	mac_vmode_to_var - converts vmode/cmode pair to var structure
@@ -452,7 +285,7 @@ int mac_vmode_to_var(int vmode, int cmode, struct fb_var_screeninfo *var)
     var->vmode = mode->vmode;
     return 0;
 }
-
+EXPORT_SYMBOL(mac_vmode_to_var);
 
 /**
  *	mac_var_to_vmode - convert var structure to MacOS vmode/cmode pair
@@ -470,7 +303,6 @@ int mac_vmode_to_var(int vmode, int cmode, struct fb_var_screeninfo *var)
 int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
 		     int *cmode)
 {
-    const struct fb_videomode *mode = NULL;
     const struct mode_map *map;
 
     if (var->bits_per_pixel <= 8)
@@ -482,8 +314,13 @@ int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
     else
 	return -EINVAL;
 
+    /*
+     * Find the mac_mode with a matching resolution or failing that, the
+     * closest larger resolution. Skip modes with a shorter pixel clock period.
+     */
     for (map = mac_modes; map->vmode != -1; map++) {
-	mode = map->mode;
+	const struct fb_videomode *mode = map->mode;
+
 	if (var->xres > mode->xres || var->yres > mode->yres)
 	    continue;
 	if (var->xres_virtual > mode->xres || var->yres_virtual > mode->yres)
@@ -493,11 +330,28 @@ int mac_var_to_vmode(const struct fb_var_screeninfo *var, int *vmode,
 	if ((var->vmode & FB_VMODE_MASK) != mode->vmode)
 	    continue;
 	*vmode = map->vmode;
+
+	/*
+	 * Having found a good resolution, find the matching pixel clock
+	 * or failing that, the closest longer pixel clock period.
+	 */
+	map++;
+	while (map->vmode != -1) {
+	    const struct fb_videomode *clk_mode = map->mode;
+
+	    if (mode->xres != clk_mode->xres || mode->yres != clk_mode->yres)
+		break;
+	    if (var->pixclock > mode->pixclock)
+	        break;
+	    if (mode->vmode != clk_mode->vmode)
+		continue;
+	    *vmode = map->vmode;
+	    map++;
+	}
 	return 0;
     }
     return -EINVAL;
 }
-
 
 /**
  *	mac_map_monitor_sense - Convert monitor sense to vmode
@@ -519,7 +373,7 @@ int mac_map_monitor_sense(int sense)
 	    break;
     return map->vmode;
 }
-
+EXPORT_SYMBOL(mac_map_monitor_sense);
 
 /**
  *	mac_find_mode - find a video mode
@@ -541,16 +395,20 @@ int mac_map_monitor_sense(int sense)
  *
  */
 
-int __init mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
-			 const char *mode_option, unsigned int default_bpp)
+int mac_find_mode(struct fb_var_screeninfo *var, struct fb_info *info,
+		  const char *mode_option, unsigned int default_bpp)
 {
     const struct fb_videomode *db = NULL;
     unsigned int dbsize = 0;
 
     if (mode_option && !strncmp(mode_option, "mac", 3)) {
+	mode_option += 3;
 	db = mac_modedb;
-	dbsize = sizeof(mac_modedb)/sizeof(*mac_modedb);
+	dbsize = ARRAY_SIZE(mac_modedb);
     }
     return fb_find_mode(var, info, mode_option, db, dbsize,
 			&mac_modedb[DEFAULT_MODEDB_INDEX], default_bpp);
 }
+EXPORT_SYMBOL(mac_find_mode);
+
+MODULE_LICENSE("GPL");

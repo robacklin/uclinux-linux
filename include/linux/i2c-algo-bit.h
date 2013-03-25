@@ -15,24 +15,21 @@
 
     You should have received a copy of the GNU General Public License
     along with this program; if not, write to the Free Software
-    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.                */
+    Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+    MA 02110-1301 USA.							     */
 /* ------------------------------------------------------------------------- */
 
-/* With some changes from Kyösti Mälkki <kmalkki@cc.hut.fi> and even
+/* With some changes from KyÃ¶sti MÃ¤lkki <kmalkki@cc.hut.fi> and even
    Frodo Looijaard <frodol@dds.nl> */
 
-/* $Id: i2c-algo-bit.h,v 1.7 1999/12/21 23:45:58 frodo Exp $ */
-
-#ifndef I2C_ALGO_BIT_H
-#define I2C_ALGO_BIT_H 1
-
-#include <linux/i2c.h>
+#ifndef _LINUX_I2C_ALGO_BIT_H
+#define _LINUX_I2C_ALGO_BIT_H
 
 /* --- Defines for bit-adapters ---------------------------------------	*/
 /*
- * This struct contains the hw-dependent functions of bit-style adapters to 
+ * This struct contains the hw-dependent functions of bit-style adapters to
  * manipulate the line states, and to init any hw-specific features. This is
- * only used if you have more than one hw-type of adapter running. 
+ * only used if you have more than one hw-type of adapter running.
  */
 struct i2c_algo_bit_data {
 	void *data;		/* private data for lowlevel routines */
@@ -40,15 +37,19 @@ struct i2c_algo_bit_data {
 	void (*setscl) (void *data, int state);
 	int  (*getsda) (void *data);
 	int  (*getscl) (void *data);
+	int  (*pre_xfer)  (struct i2c_adapter *);
+	void (*post_xfer) (struct i2c_adapter *);
 
 	/* local settings */
-	int udelay;		/* half-clock-cycle time in microsecs */
-				/* i.e. clock is (500 / udelay) KHz */
-	int mdelay;		/* in millisecs, unused */
+	int udelay;		/* half clock cycle time in us,
+				   minimum 2 us for fast-mode I2C,
+				   minimum 5 us for standard-mode I2C and SMBus,
+				   maximum 50 us for SMBus */
 	int timeout;		/* in jiffies */
 };
 
 int i2c_bit_add_bus(struct i2c_adapter *);
-int i2c_bit_del_bus(struct i2c_adapter *);
+int i2c_bit_add_numbered_bus(struct i2c_adapter *);
+extern const struct i2c_algorithm i2c_bit_algo;
 
-#endif /* I2C_ALGO_BIT_H */
+#endif /* _LINUX_I2C_ALGO_BIT_H */

@@ -1,24 +1,18 @@
 #
 # Makefile for Linux kernel SUN RPC
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := sunrpc.o
 
-export-objs := sunrpc_syms.o
+obj-$(CONFIG_SUNRPC) += sunrpc.o
+obj-$(CONFIG_SUNRPC_GSS) += auth_gss/
+obj-$(CONFIG_SUNRPC_XPRT_RDMA) += xprtrdma/
 
-obj-y    := clnt.o xprt.o sched.o \
-	    auth.o auth_null.o auth_unix.o \
-	    svc.o svcsock.o svcauth.o \
-	    pmap_clnt.o timer.o xdr.o sunrpc_syms.o
-
-obj-$(CONFIG_PROC_FS) += stats.o
-obj-$(CONFIG_SYSCTL) += sysctl.o
-
-obj-m  := $(O_TARGET)
-
-include $(TOPDIR)/Rules.make
+sunrpc-y := clnt.o xprt.o socklib.o xprtsock.o sched.o \
+	    auth.o auth_null.o auth_unix.o auth_generic.o \
+	    svc.o svcsock.o svcauth.o svcauth_unix.o \
+	    addr.o rpcb_clnt.o timer.o xdr.o \
+	    sunrpc_syms.o cache.o rpc_pipe.o \
+	    svc_xprt.o
+sunrpc-$(CONFIG_SUNRPC_BACKCHANNEL) += backchannel_rqst.o bc_svc.o
+sunrpc-$(CONFIG_PROC_FS) += stats.o
+sunrpc-$(CONFIG_SYSCTL) += sysctl.o

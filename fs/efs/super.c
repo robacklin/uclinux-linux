@@ -8,35 +8,151 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/locks.h>
-#include <linux/efs_fs.h>
+#include <linux/exportfs.h>
+#include <linux/slab.h>
+#include <linux/buffer_head.h>
+#include <linux/vfs.h>
+
+#include "efs.h"
 #include <linux/efs_vh.h>
 #include <linux/efs_fs_sb.h>
 
-static DECLARE_FSTYPE_DEV(efs_fs_type, "efs", efs_read_super);
+static int efs_statfs(struct dentry *dentry, struct kstatfs *buf);
+static int efs_fill_super(struct super_block *s, void *d, int silent);
 
-static struct super_operations efs_superblock_operations = {
-	read_inode:	efs_read_inode,
-	statfs:		efs_statfs,
+static struct dentry *efs_mount(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return mount_bdev(fs_type, flags, dev_name, data, efs_fill_super);
+}
+
+static struct file_system_type efs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "efs",
+	.mount		= efs_mount,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
+
+static struct pt_types sgi_pt_types[] = {
+	{0x00,		"SGI vh"},
+	{0x01,		"SGI trkrepl"},
+	{0x02,		"SGI secrepl"},
+	{0x03,		"SGI raw"},
+	{0x04,		"SGI bsd"},
+	{SGI_SYSV,	"SGI sysv"},
+	{0x06,		"SGI vol"},
+	{SGI_EFS,	"SGI efs"},
+	{0x08,		"SGI lv"},
+	{0x09,		"SGI rlv"},
+	{0x0A,		"SGI xfs"},
+	{0x0B,		"SGI xfslog"},
+	{0x0C,		"SGI xlv"},
+	{0x82,		"Linux swap"},
+	{0x83,		"Linux native"},
+	{0,		NULL}
+};
+
+
+static struct kmem_cache * efs_inode_cachep;
+
+static struct inode *efs_alloc_inode(struct super_block *sb)
+{
+	struct efs_inode_info *ei;
+	ei = (struct efs_inode_info *)kmem_cache_alloc(efs_inode_cachep, GFP_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void efs_i_callback(struct rcu_head *head)
+{
+	struct inode *inode = container_of(head, struct inode, i_rcu);
+	kmem_cache_free(efs_inode_cachep, INODE_INFO(inode));
+}
+
+static void efs_destroy_inode(struct inode *inode)
+{
+	call_rcu(&inode->i_rcu, efs_i_callback);
+}
+
+static void init_once(void *foo)
+{
+	struct efs_inode_info *ei = (struct efs_inode_info *) foo;
+
+	inode_init_once(&ei->vfs_inode);
+}
+
+static int init_inodecache(void)
+{
+	efs_inode_cachep = kmem_cache_create("efs_inode_cache",
+				sizeof(struct efs_inode_info),
+				0, SLAB_RECLAIM_ACCOUNT|SLAB_MEM_SPREAD,
+				init_once);
+	if (efs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	kmem_cache_destroy(efs_inode_cachep);
+}
+
+static void efs_put_super(struct super_block *s)
+{
+	kfree(s->s_fs_info);
+	s->s_fs_info = NULL;
+}
+
+static int efs_remount(struct super_block *sb, int *flags, char *data)
+{
+	*flags |= MS_RDONLY;
+	return 0;
+}
+
+static const struct super_operations efs_superblock_operations = {
+	.alloc_inode	= efs_alloc_inode,
+	.destroy_inode	= efs_destroy_inode,
+	.put_super	= efs_put_super,
+	.statfs		= efs_statfs,
+	.remount_fs	= efs_remount,
+};
+
+static const struct export_operations efs_export_ops = {
+	.fh_to_dentry	= efs_fh_to_dentry,
+	.fh_to_parent	= efs_fh_to_parent,
+	.get_parent	= efs_get_parent,
 };
 
 static int __init init_efs_fs(void) {
+	int err;
 	printk("EFS: "EFS_VERSION" - http://aeschi.ch.eu.org/efs/\n");
-	return register_filesystem(&efs_fs_type);
+	err = init_inodecache();
+	if (err)
+		goto out1;
+	err = register_filesystem(&efs_fs_type);
+	if (err)
+		goto out;
+	return 0;
+out:
+	destroy_inodecache();
+out1:
+	return err;
 }
 
 static void __exit exit_efs_fs(void) {
 	unregister_filesystem(&efs_fs_type);
+	destroy_inodecache();
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_efs_fs)
 module_exit(exit_efs_fs)
 
 static efs_block_t efs_validate_vh(struct volume_header *vh) {
 	int		i;
-	unsigned int	cs, csum, *ui;
+	__be32		cs, *ui;
+	int		csum;
 	efs_block_t	sblock = 0; /* shuts up gcc */
 	struct pt_types	*pt_entry;
 	int		pt_type, slice = -1;
@@ -50,8 +166,8 @@ static efs_block_t efs_validate_vh(struct volume_header *vh) {
 		return 0;
 	}
 
-	ui = ((unsigned int *) (vh + 1)) - 1;
-	for(csum = 0; ui >= ((unsigned int *) vh);) {
+	ui = ((__be32 *) (vh + 1)) - 1;
+	for(csum = 0; ui >= ((__be32 *) vh);) {
 		cs = *ui--;
 		csum += be32_to_cpu(cs);
 	}
@@ -112,12 +228,13 @@ static efs_block_t efs_validate_vh(struct volume_header *vh) {
 			sblock);
 #endif
 	}
-	return(sblock);
+	return sblock;
 }
 
 static int efs_validate_super(struct efs_sb_info *sb, struct efs_super *super) {
 
-	if (!IS_EFS_MAGIC(be32_to_cpu(super->fs_magic))) return -1;
+	if (!IS_EFS_MAGIC(be32_to_cpu(super->fs_magic)))
+		return -1;
 
 	sb->fs_magic     = be32_to_cpu(super->fs_magic);
 	sb->total_blocks = be32_to_cpu(super->fs_size);
@@ -131,19 +248,20 @@ static int efs_validate_super(struct efs_sb_info *sb, struct efs_super *super) {
 	return 0;    
 }
 
-struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
-	kdev_t dev = s->s_dev;
+static int efs_fill_super(struct super_block *s, void *d, int silent)
+{
 	struct efs_sb_info *sb;
 	struct buffer_head *bh;
+	struct inode *root;
+	int ret = -EINVAL;
 
- 	sb = SUPER_INFO(s);
+ 	sb = kzalloc(sizeof(struct efs_sb_info), GFP_KERNEL);
+	if (!sb)
+		return -ENOMEM;
+	s->s_fs_info = sb;
  
 	s->s_magic		= EFS_SUPER_MAGIC;
-	s->s_blocksize		= EFS_BLOCKSIZE;
-	s->s_blocksize_bits	= EFS_BLOCKSIZE_BITS;
-	
-	if( set_blocksize(dev, EFS_BLOCKSIZE) < 0)
-	{
+	if (!sb_set_blocksize(s, EFS_BLOCKSIZE)) {
 		printk(KERN_ERR "EFS: device does not support %d byte blocks\n",
 			EFS_BLOCKSIZE);
 		goto out_no_fs_ul;
@@ -191,35 +309,47 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		s->s_flags |= MS_RDONLY;
 	}
 	s->s_op   = &efs_superblock_operations;
-	s->s_root = d_alloc_root(iget(s, EFS_ROOTINODE));
- 
-	if (!(s->s_root)) {
+	s->s_export_op = &efs_export_ops;
+	root = efs_iget(s, EFS_ROOTINODE);
+	if (IS_ERR(root)) {
 		printk(KERN_ERR "EFS: get root inode failed\n");
+		ret = PTR_ERR(root);
 		goto out_no_fs;
 	}
 
-	return(s);
+	s->s_root = d_make_root(root);
+	if (!(s->s_root)) {
+		printk(KERN_ERR "EFS: get root dentry failed\n");
+		ret = -ENOMEM;
+		goto out_no_fs;
+	}
+
+	return 0;
 
 out_no_fs_ul:
 out_no_fs:
-	return(NULL);
+	s->s_fs_info = NULL;
+	kfree(sb);
+	return ret;
 }
 
-int efs_statfs(struct super_block *s, struct statfs *buf) {
-	struct efs_sb_info *sb = SUPER_INFO(s);
+static int efs_statfs(struct dentry *dentry, struct kstatfs *buf) {
+	struct super_block *sb = dentry->d_sb;
+	struct efs_sb_info *sbi = SUPER_INFO(sb);
+	u64 id = huge_encode_dev(sb->s_bdev->bd_dev);
 
 	buf->f_type    = EFS_SUPER_MAGIC;	/* efs magic number */
 	buf->f_bsize   = EFS_BLOCKSIZE;		/* blocksize */
-	buf->f_blocks  = sb->total_groups *	/* total data blocks */
-			(sb->group_size - sb->inode_blocks);
-	buf->f_bfree   = sb->data_free;		/* free data blocks */
-	buf->f_bavail  = sb->data_free;		/* free blocks for non-root */
-	buf->f_files   = sb->total_groups *	/* total inodes */
-			sb->inode_blocks *
+	buf->f_blocks  = sbi->total_groups *	/* total data blocks */
+			(sbi->group_size - sbi->inode_blocks);
+	buf->f_bfree   = sbi->data_free;	/* free data blocks */
+	buf->f_bavail  = sbi->data_free;	/* free blocks for non-root */
+	buf->f_files   = sbi->total_groups *	/* total inodes */
+			sbi->inode_blocks *
 			(EFS_BLOCKSIZE / sizeof(struct efs_dinode));
-	buf->f_ffree   = sb->inode_free;	/* free inodes */
-	buf->f_fsid.val[0] = (sb->fs_magic >> 16) & 0xffff; /* fs ID */
-	buf->f_fsid.val[1] =  sb->fs_magic        & 0xffff; /* fs ID */
+	buf->f_ffree   = sbi->inode_free;	/* free inodes */
+	buf->f_fsid.val[0] = (u32)id;
+	buf->f_fsid.val[1] = (u32)(id >> 32);
 	buf->f_namelen = EFS_MAXNAMELEN;	/* max filename length */
 
 	return 0;

@@ -486,7 +486,7 @@ Appendix: Teles PCMCIA driver
 -----------------------------
 
 See
-   http://www.stud.uni-wuppertal.de/~ea0141/pcmcia.html
+   http://www.linux.no/teles_cs.txt 
 for instructions.
 
 Appendix: Linux and ISDN-leased lines
@@ -504,9 +504,9 @@ to e.g. the Internet:
      cd /usr/src/linux
      make menuconfig
      <ISDN subsystem - ISDN support -- HiSax>
-     make clean; make dep; make zImage; make modules; make modules_install
+     make clean; make zImage; make modules; make modules_install
 2. Install the new kernel
-     cp /usr/src/linux/arch/i386/boot/zImage /etc/kernel/linux.isdn
+     cp /usr/src/linux/arch/x86/boot/zImage /etc/kernel/linux.isdn
      vi /etc/lilo.conf
      <add new kernel in the bootable image section>
      lilo

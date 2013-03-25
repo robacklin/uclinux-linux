@@ -13,10 +13,9 @@
 /* Changes:
 
 	1.01	GRG 1998.05.05	init_proto, release_proto
-	1.01ac	AGC 2002.04.03  added privptr
 */
 
-#define PARIDE_H_VERSION 	"1.01ac"
+#define PARIDE_H_VERSION 	"1.01"
 
 /* Some adapters need to know what kind of device they are in
 
@@ -46,10 +45,8 @@ struct pi_adapter  {
 	int	saved_r0;	     /* saved port state */
 	int	saved_r2;	     /* saved port state */
 	int	reserved;	     /* number of ports reserved */
-	int	private;	     /* for protocol module */
-	void	*privptr;	     /* private pointer for protocol module */
-				     /* For 2.5 just make private a ulong but
-		     			for 2.4 fixups thats a bit risky.. */				
+	unsigned long	private;     /* for protocol module */
+
 	wait_queue_head_t parq;     /* semaphore for parport sharing */
 	void	*pardev;	     /* pointer to pardevice */
 	char	*parname;	     /* parport name */
@@ -96,10 +93,11 @@ extern void pi_connect(PIA *pi);
 extern void pi_disconnect(PIA *pi);
 
 extern void pi_do_claimed(PIA *pi, void (*cont)(void));
+extern int pi_schedule_claimed(PIA *pi, void (*cont)(void));
 
 /* macros and functions exported to the protocol modules */
 
-#define delay_p			(pi->delay?udelay(pi->delay):0)
+#define delay_p			(pi->delay?udelay(pi->delay):(void)0)
 #define out_p(offs,byte)	outb(byte,pi->port+offs); delay_p;
 #define in_p(offs)		(delay_p,inb(pi->port+offs))
 
@@ -158,14 +156,15 @@ struct pi_protocol {
 	int  (*test_proto)(PIA *,char *,int);
 	void (*log_adapter)(PIA *,char *,int);
 	
-	void (*init_proto)(PIA *);
+	int (*init_proto)(PIA *);
 	void (*release_proto)(PIA *);
+	struct module *owner;
 };
 
 typedef struct pi_protocol PIP;
 
-extern int pi_register( PIP * );
-extern void pi_unregister ( PIP * );
+extern int paride_register( PIP * );
+extern void paride_unregister ( PIP * );
 
 #endif /* __DRIVERS_PARIDE_H__ */
 /* end of paride.h */

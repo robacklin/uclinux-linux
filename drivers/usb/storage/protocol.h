@@ -1,8 +1,6 @@
 /* Driver for USB Mass Storage compliant devices
  * Protocol Functions Header File
  *
- * $Id: protocol.h,v 1.4 2001/02/13 07:10:03 mdharm Exp $
- *
  * Current development and maintenance by:
  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
@@ -41,27 +39,19 @@
 #ifndef _PROTOCOL_H_
 #define _PROTOCOL_H_
 
-#include <linux/blk.h>
-#include "scsi.h"
-#include "usb.h"
+/* Protocol handling routines */
+extern void usb_stor_pad12_command(struct scsi_cmnd*, struct us_data*);
+extern void usb_stor_ufi_command(struct scsi_cmnd*, struct us_data*);
+extern void usb_stor_transparent_scsi_command(struct scsi_cmnd*,
+		struct us_data*);
 
-/* Sub Classes */
+/* struct scsi_cmnd transfer buffer access utilities */
+enum xfer_buf_dir	{TO_XFER_BUF, FROM_XFER_BUF};
 
-#define US_SC_RBC	0x01		/* Typically, flash devices */
-#define US_SC_8020	0x02		/* CD-ROM */
-#define US_SC_QIC	0x03		/* QIC-157 Tapes */
-#define US_SC_UFI	0x04		/* Floppy */
-#define US_SC_8070	0x05		/* Removable media */
-#define US_SC_SCSI	0x06		/* Transparent */
-#define US_SC_ISD200    0x07            /* ISD200 ATA */
-#define US_SC_MIN	US_SC_RBC
-#define US_SC_MAX	US_SC_ISD200
+extern unsigned int usb_stor_access_xfer_buf(unsigned char *buffer,
+	unsigned int buflen, struct scsi_cmnd *srb, struct scatterlist **,
+	unsigned int *offset, enum xfer_buf_dir dir);
 
-#define US_SC_DEVICE	0xff		/* Use device's value */
-
-extern void usb_stor_ATAPI_command(Scsi_Cmnd*, struct us_data*);
-extern void usb_stor_qic157_command(Scsi_Cmnd*, struct us_data*);
-extern void usb_stor_ufi_command(Scsi_Cmnd*, struct us_data*);
-extern void usb_stor_transparent_scsi_command(Scsi_Cmnd*, struct us_data*);
-
+extern void usb_stor_set_xfer_buf(unsigned char *buffer,
+	unsigned int buflen, struct scsi_cmnd *srb);
 #endif

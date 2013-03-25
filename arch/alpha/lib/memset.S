@@ -1,5 +1,5 @@
 /*
- * linux/arch/alpha/memset.S
+ * linux/arch/alpha/lib/memset.S
  *
  * This is an efficient (and small) implementation of the C library "memset()"
  * function for the alpha.
@@ -17,6 +17,7 @@
 	.set noat
 	.set noreorder
 .text
+	.globl memset
 	.globl __memset
 	.globl __memsetw
 	.globl __constant_c_memset
@@ -120,8 +121,4 @@ __memsetw:
 
 	.end __memsetw
 
-#ifdef __ELF__
- .weak memset; memset = __memset
-#else
- .weakext memset, __memset
-#endif
+memset = __memset

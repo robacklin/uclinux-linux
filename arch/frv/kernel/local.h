@@ -12,7 +12,7 @@
 #ifndef _FRV_LOCAL_H
 #define _FRV_LOCAL_H
 
-#include <asm/vmlinux.h>
+#include <asm/sections.h>
 
 #ifndef __ASSEMBLY__
 
@@ -50,6 +50,9 @@ extern void (*__power_switch_wake_cleanup)(void);
 
 /* time.c */
 extern void time_divisor_init(void);
+
+/* cmode.S */
+extern asmlinkage void frv_change_cmode(int);
 
 
 #endif /* __ASSEMBLY__ */

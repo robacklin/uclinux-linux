@@ -23,4 +23,5 @@ ENTRY(strchr)
 		teq	r2, r1
 		movne	r0, #0
 		subeq	r0, r0, #1
-		RETINSTR(mov,pc,lr)
+		mov	pc, lr
+ENDPROC(strchr)

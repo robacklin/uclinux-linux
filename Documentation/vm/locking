@@ -1,4 +1,4 @@
-Started Oct 1999 by Kanoj Sarcar <kanoj@sgi.com>
+Started Oct 1999 by Kanoj Sarcar <kanojsarcar@yahoo.com>
 
 The intent of this file is to have an uptodate, running commentary 
 from different people about how locking and synchronization is done 
@@ -66,10 +66,9 @@ in some cases it is not really needed. Eg, vm_start is modified by
 expand_stack(), it is hard to come up with a destructive scenario without 
 having the vmlist protection in this case.
 
-The page_table_lock nests with the inode i_shared_lock and the kmem cache
-c_spinlock spinlocks. This is okay, since code that holds i_shared_lock 
-never asks for memory, and the kmem code asks for pages after dropping
-c_spinlock. The page_table_lock also nests with pagecache_lock and 
+The page_table_lock nests with the inode i_mmap_mutex and the kmem cache
+c_spinlock spinlocks.  This is okay, since the kmem code asks for pages after
+dropping c_spinlock.  The page_table_lock also nests with pagecache_lock and
 pagemap_lru_lock spinlocks, and no code asks for memory with these locks
 held.
 
@@ -77,19 +76,25 @@ The page_table_lock is grabbed while holding the kernel_lock spinning monitor.
 
 The page_table_lock is a spin lock.
 
-swap_list_lock/swap_device_lock
--------------------------------
+Note: PTL can also be used to guarantee that no new clones using the
+mm start up ... this is a loose form of stability on mm_users. For
+example, it is used in copy_mm to protect against a racing tlb_gather_mmu
+single address space optimization, so that the zap_page_range (from
+truncate) does not lose sending ipi's to cloned threads that might
+be spawned underneath it and go to user mode to drag in pte's into tlbs.
+
+swap_lock
+--------------
 The swap devices are chained in priority order from the "swap_list" header. 
 The "swap_list" is used for the round-robin swaphandle allocation strategy.
 The #free swaphandles is maintained in "nr_swap_pages". These two together
-are protected by the swap_list_lock. 
+are protected by the swap_lock.
 
-The swap_device_lock, which is per swap device, protects the reference 
-counts on the corresponding swaphandles, maintained in the "swap_map"
-array, and the "highest_bit" and "lowest_bit" fields.
+The swap_lock also protects all the device reference counts on the
+corresponding swaphandles, maintained in the "swap_map" array, and the
+"highest_bit" and "lowest_bit" fields.
 
-Both of these are spinlocks, and are never acquired from intr level. The
-locking hierarchy is swap_list_lock -> swap_device_lock.
+The swap_lock is a spinlock, and is never acquired from intr level.
 
 To prevent races between swap space deletion or async readahead swapins
 deciding whether a swap handle is being used, ie worthy of being read in

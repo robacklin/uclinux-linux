@@ -11,25 +11,42 @@
  */
 
 #include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/spr-regs.h>
 
 ###############################################################################
 #
-# declare the main trap and vector tables
+# Declare the main trap and vector tables
 #
-# - the first instruction in each slot is a branch to the appropriate
-#   kernel-mode handler routine
+# There are six tables:
 #
-# - the second instruction in each slot is a branch to the debug-mode hardware
-#   single-step bypass handler - this is called from break.S to deal with the
-#   CPU stepping in to exception handlers (particular where external interrupts
-#   are concerned)
+# (1) The trap table for debug mode
+# (2) The trap table for kernel mode
+# (3) The trap table for user mode
 #
-# - the linker script places the user mode and kernel mode trap tables on to
-#   the same 8Kb page, so that break.S can be more efficient when performing
-#   single-step bypass management
+#     The CPU jumps to an appropriate slot in the appropriate table to perform
+#     exception processing. We have three different tables for the three
+#     different CPU modes because there is no hardware differentiation between
+#     stack pointers for these three modes, and so we have to invent one when
+#     crossing mode boundaries.
+#
+# (4) The exception handler vector table
+#
+#     The user and kernel trap tables use the same prologue for normal
+#     exception processing. The prologue then jumps to the handler in this
+#     table, as indexed by the exception ID from the TBR.
+#
+# (5) The fixup table for kernel-trap single-step
+# (6) The fixup table for user-trap single-step
+#
+#     Due to the way single-stepping works on this CPU (single-step is not
+#     disabled when crossing exception boundaries, only when in debug mode),
+#     we have to catch the single-step event in break.S and jump to the fixup
+#     routine pointed to by this table.
+#
+# The linker script places the user mode and kernel mode trap tables on to
+# the same 8Kb page, so that break.S can be more efficient when performing
+# single-step bypass management
 #
 ###############################################################################
 
@@ -69,7 +86,7 @@ __break_usertrap_fixup_table:
 	.globl		__break_kerneltrap_fixup_table
 __break_kerneltrap_fixup_table:
 
-	# handler declaration for a sofware or program interrupt
+	# handler declaration for a software or program interrupt
 .macro VECTOR_SOFTPROG tbr_tt, vec
 	.section .trap.user
 	.org		\tbr_tt
@@ -98,6 +115,8 @@ __break_kerneltrap_fixup_table:
 	.long		__break_step_uspace_external_interrupt
 	.section .trap.kernel
 	.org		\tbr_tt
+	# deal with virtual interrupt disablement
+	beq		icc2,#0,__entry_kernel_external_interrupt_virtually_disabled
 	bra		__entry_kernel_external_interrupt
 	.section .trap.fixup.kernel
 	.org		\tbr_tt >> 2
@@ -126,10 +145,10 @@ __break_kerneltrap_fixup_table:
 	.long		\vec
 .endm
 
-	# handler declaration for an MMU only sofware or program interrupt
+	# handler declaration for an MMU only software or program interrupt
 .macro VECTOR_SP_MMU tbr_tt, vec
-#ifndef CONFIG_UCLINUX
-	VECTOR_SOFTPROG	\tbr_tt, \vec
+#ifdef CONFIG_MMU
+ 	VECTOR_SOFTPROG	\tbr_tt, \vec
 #else
 	VECTOR_NMI	\tbr_tt, 0
 #endif
@@ -155,7 +174,7 @@ __break_kerneltrap_fixup_table:
 	VECTOR_SOFTPROG	TBR_TT_DATA_STR_ERROR,	__entry_data_store_error
 	VECTOR_SOFTPROG	TBR_TT_DIVISION_EXCEP,	__entry_division_exception
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.section .trap.user
 	.org		TBR_TT_INSTR_TLB_MISS
 	.globl		__trap_user_insn_tlb_miss
@@ -209,7 +228,7 @@ __trap_fixup_kernel_insn_tlb_miss:
 	.globl		__trap_fixup_kernel_data_tlb_miss
 __trap_fixup_kernel_data_tlb_miss:
 	.long		__break_kernel_data_tlb_miss
-	
+
 	.section .trap.vector
 	.org		TBR_TT_INSTR_TLB_MISS >> 2
 	.long		__entry_insn_mmu_fault
@@ -241,24 +260,51 @@ __trap_fixup_kernel_data_tlb_miss:
 	.org		TBR_TT_TRAP0
 	.rept		127
 	bra		__entry_uspace_softprog_interrupt
-	bra		__break_step_uspace_softprog_interrupt
-	.long		0,0
+	.long		0,0,0
 	.endr
 	.org		TBR_TT_BREAK
 	bra		__entry_break
 	.long		0,0,0
 
+	.section	.trap.fixup.user
+	.org		TBR_TT_TRAP0 >> 2
+	.rept		127
+	.long		__break_step_uspace_softprog_interrupt
+	.endr
+	.org		TBR_TT_BREAK >> 2
+	.long		0
+
 	# miscellaneous kernel mode entry points
 	.section	.trap.kernel
 	.org		TBR_TT_TRAP0
-	.rept		127
 	bra		__entry_kernel_softprog_interrupt
-	bra		__break_step_kernel_softprog_interrupt
-	.long		0,0
+	.org		TBR_TT_TRAP1
+	bra		__entry_kernel_softprog_interrupt
+
+	# trap #2 in kernel - reenable interrupts
+	.org		TBR_TT_TRAP2
+	bra		__entry_kernel_external_interrupt_virtual_reenable
+
+	# miscellaneous kernel traps
+	.org		TBR_TT_TRAP3
+	.rept		124
+	bra		__entry_kernel_softprog_interrupt
+	.long		0,0,0
 	.endr
 	.org		TBR_TT_BREAK
 	bra		__entry_break
 	.long		0,0,0
+
+	.section	.trap.fixup.kernel
+	.org		TBR_TT_TRAP0 >> 2
+	.long		__break_step_kernel_softprog_interrupt
+	.long		__break_step_kernel_softprog_interrupt
+	.long		__break_step_kernel_external_interrupt_virtual_reenable
+	.rept		124
+	.long		__break_step_kernel_softprog_interrupt
+	.endr
+	.org		TBR_TT_BREAK >> 2
+	.long		0
 
 	# miscellaneous debug mode entry points
 	.section	.trap.break
@@ -270,8 +316,14 @@ __trap_fixup_kernel_data_tlb_miss:
 	.section	.trap.vector
 	.org		TBR_TT_TRAP0 >> 2
 	.long		system_call
-	.rept		126
+	.rept		119
 	.long		__entry_unsupported_trap
 	.endr
+
+	# userspace atomic op emulation, traps 120-126
+	.rept		7
+	.long		__entry_atomic_op
+	.endr
+	
 	.org		TBR_TT_BREAK >> 2
 	.long		__entry_debug_exception

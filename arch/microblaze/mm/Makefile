@@ -1,20 +1,8 @@
 #
-# Makefile for the linux microblaze specific parts of the memory manager
+# Makefile
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-USE_STANDARD_AS_RULE := true
+obj-y := consistent.o init.o
 
-O_TARGET	:= mm.o
-
-obj-y		:= init.o consistent.o memory.o
-obj-m		:=
-obj-n		:=
-obj-		:=
-export-objs	:= 
-
-include $(TOPDIR)/Rules.make
+obj-$(CONFIG_MMU) += pgtable.o mmu_context.o fault.o
+obj-$(CONFIG_HIGHMEM) += highmem.o

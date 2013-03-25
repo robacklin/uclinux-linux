@@ -14,16 +14,16 @@
 #include <linux/sched.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/bitops.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_polaris.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -34,65 +34,47 @@
 /* Note mask bit is true for ENABLED irqs.  */
 static unsigned long cached_irq_mask;
 
-/* Bus 0, Device 0.  Nothing else matters, since we invoke the
-   POLARIS routines directly.  */
-static struct pci_dev rx164_system;
-
 static inline void
 rx164_update_irq_hw(unsigned long mask)
 {
-	unsigned int temp;
-	polaris_write_config_dword(&rx164_system, 0x74, mask);
-	polaris_read_config_dword(&rx164_system, 0x74, &temp);
+	volatile unsigned int *irq_mask;
+
+	irq_mask = (void *)(POLARIS_DENSE_CONFIG_BASE + 0x74);
+	*irq_mask = mask;
+	mb();
+	*irq_mask;
 }
 
 static inline void
-rx164_enable_irq(unsigned int irq)
+rx164_enable_irq(struct irq_data *d)
 {
-	rx164_update_irq_hw(cached_irq_mask |= 1UL << (irq - 16));
+	rx164_update_irq_hw(cached_irq_mask |= 1UL << (d->irq - 16));
 }
 
 static void
-rx164_disable_irq(unsigned int irq)
+rx164_disable_irq(struct irq_data *d)
 {
-	rx164_update_irq_hw(cached_irq_mask &= ~(1UL << (irq - 16)));
+	rx164_update_irq_hw(cached_irq_mask &= ~(1UL << (d->irq - 16)));
 }
 
-static unsigned int
-rx164_startup_irq(unsigned int irq)
-{
-	rx164_enable_irq(irq);
-	return 0;
-}
-
-static void
-rx164_end_irq(unsigned int irq)
-{
-	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
-		rx164_enable_irq(irq);
-}
-
-static struct hw_interrupt_type rx164_irq_type = {
-	typename:	"RX164",
-	startup:	rx164_startup_irq,
-	shutdown:	rx164_disable_irq,
-	enable:		rx164_enable_irq,
-	disable:	rx164_disable_irq,
-	ack:		rx164_disable_irq,
-	end:		rx164_end_irq,
+static struct irq_chip rx164_irq_type = {
+	.name		= "RX164",
+	.irq_unmask	= rx164_enable_irq,
+	.irq_mask	= rx164_disable_irq,
+	.irq_mask_ack	= rx164_disable_irq,
 };
 
 static void 
-rx164_device_interrupt(unsigned long vector, struct pt_regs *regs)
+rx164_device_interrupt(unsigned long vector)
 {
-	unsigned int temp;
 	unsigned long pld;
+	volatile unsigned int *dirr;
 	long i;
 
 	/* Read the interrupt summary register.  On Polaris, this is
 	   the DIRR register in PCI config space (offset 0x84).  */
-	polaris_read_config_dword(&rx164_system, 0x84, &temp);
-	pld = temp;
+	dirr = (void *)(POLARIS_DENSE_CONFIG_BASE + 0x84);
+	pld = *dirr;
 
 	/*
 	 * Now for every possible bit set, work through them and call
@@ -102,9 +84,9 @@ rx164_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		i = ffz(~pld);
 		pld &= pld - 1; /* clear least bit set */
 		if (i == 20) {
-			isa_no_iack_sc_device_interrupt(vector, regs);
+			isa_no_iack_sc_device_interrupt(vector);
 		} else {
-			handle_irq(16+i, regs);
+			handle_irq(16+i);
 		}
 	}
 }
@@ -116,8 +98,8 @@ rx164_init_irq(void)
 
 	rx164_update_irq_hw(0);
 	for (i = 16; i < 40; ++i) {
-		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
-		irq_desc[i].handler = &rx164_irq_type;
+		irq_set_chip_and_handler(i, &rx164_irq_type, handle_level_irq);
+		irq_set_status_flags(i, IRQ_LEVEL);
 	}
 
 	init_i8259a_irqs();
@@ -161,7 +143,7 @@ rx164_init_irq(void)
  */
 
 static int __init
-rx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+rx164_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 #if 0
 	static char irq_tab_pass1[6][5] __initdata = {
@@ -197,25 +179,24 @@ rx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
  */
 
 struct alpha_machine_vector rx164_mv __initmv = {
-	vector_name:		"RX164",
+	.vector_name		= "RX164",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_POLARIS_IO,
-	DO_POLARIS_BUS,
-	machine_check:		polaris_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= polaris_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
 
-	nr_irqs:		40,
-	device_interrupt:	rx164_device_interrupt,
+	.nr_irqs		= 40,
+	.device_interrupt	= rx164_device_interrupt,
 
-	init_arch:		polaris_init_arch,
-	init_irq:		rx164_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		NULL,
-	pci_map_irq:		rx164_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= polaris_init_arch,
+	.init_irq		= rx164_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= NULL,
+	.pci_map_irq		= rx164_map_irq,
+	.pci_swizzle		= common_swizzle,
 };
 ALIAS_MV(rx164)

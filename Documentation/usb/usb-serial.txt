@@ -13,7 +13,6 @@ CONFIGURATION
   Currently the driver can handle up to 256 different serial interfaces at
   one time. 
 
-  If you are not using devfs:
     The major number that the driver uses is 188 so to use the driver,
     create the following nodes:
 	mknod /dev/ttyUSB0 c 188 0
@@ -26,10 +25,6 @@ CONFIGURATION
 	mknod /dev/ttyUSB254 c 188 254
 	mknod /dev/ttyUSB255 c 188 255
 
-  If you are using devfs:
-    The devices supported by this driver will show up as
-    /dev/usb/tts/{0,1,...}
-
   When the device is connected and recognized by the driver, the driver
   will print to the system log, which node(s) the device has been bound
   to.
@@ -41,22 +36,18 @@ SPECIFIC DEVICES SUPPORTED
 ConnectTech WhiteHEAT 4 port converter
 
   ConnectTech has been very forthcoming with information about their
-  device, including providing a unit to test with. This driver will end up
-  being fully supported.
+  device, including providing a unit to test with.
 
-  Current status:
-    The device's firmware is downloaded on connection, the new firmware 
-    runs properly and all four ports are successfully recognized and connected.
-    Data can be sent and received through the device on all ports.
-    Hardware flow control needs to be implemented.
+  The driver is officially supported by Connect Tech Inc.
+  http://www.connecttech.com
 
-  For any questions or problems with this driver, please contact Greg
-  Kroah-Hartman at greg@kroah.com
+  For any questions or problems with this driver, please contact
+  Connect Tech's Support Department at support@connecttech.com
 
 
-HandSpring Visor, Palm USB, and Clié USB driver
+HandSpring Visor, Palm USB, and CliÃ© USB driver
 
-  This driver works with all HandSpring USB, Palm USB, and Sony Clié USB
+  This driver works with all HandSpring USB, Palm USB, and Sony CliÃ© USB
   devices.
 
   Only when the device tries to connect to the host, will the device show
@@ -78,7 +69,7 @@ HandSpring Visor, Palm USB, and Clié USB driver
   the port to use for the HotSync transfer. The "Generic" port can be used
   for other device communication, such as a PPP link.
 
-  For some Sony Clié devices, /dev/ttyUSB0 must be used to talk to the
+  For some Sony CliÃ© devices, /dev/ttyUSB0 must be used to talk to the
   device.  This is true for all OS version 3.5 devices, and most devices
   that have had a flash upgrade to a newer version of the OS.  See the
   kernel system log for information on which is the correct port to use.
@@ -92,7 +83,7 @@ HandSpring Visor, Palm USB, and Clié USB driver
   parameters.  e.g. modprobe visor vendor=0x54c product=0x66
   
   There is a webpage and mailing lists for this portion of the driver at:
-  http://usbvisor.sourceforge.net/
+  http://sourceforge.net/projects/usbvisor/
 
   For any questions or problems with this driver, please contact Greg
   Kroah-Hartman at greg@kroah.com
@@ -184,7 +175,7 @@ Keyspan USA-series Serial Adapters
   
   Current status:
     The USA-18X, USA-28X, USA-19, USA-19W and USA-49W are supported and
-    have been pretty throughly tested at various baud rates with 8-N-1
+    have been pretty thoroughly tested at various baud rates with 8-N-1
     character settings.  Other character lengths and parity setups are
     presently untested.
 
@@ -193,7 +184,7 @@ Keyspan USA-series Serial Adapters
     functionality.
   
   More information is available at:
-        http://misc.nu/hugh/keyspan.html
+        http://www.carnationsoftware.com/carnation/Keyspan.html
    
   For any questions or problems with this driver, please contact Hugh
   Blemings at hugh@misc.nu
@@ -201,18 +192,75 @@ Keyspan USA-series Serial Adapters
 
 FTDI Single Port Serial Driver
 
-  This is a single port DB-25 serial adapter. More information about this
-  device and the Linux driver can be found at:
-	http://reality.sgi.com/bryder_wellington/ftdi_sio/
+  This is a single port DB-25 serial adapter.
 
-  For any questions or problems with this driver, please contact Bill Ryder
-  at bryder@sgi.com
+  Devices supported include:
+                -TripNav TN-200 USB GPS
+                -Navis Engineering Bureau CH-4711 USB GPS
+
+  For any questions or problems with this driver, please contact Bill Ryder.
 
 
 ZyXEL omni.net lcd plus ISDN TA
 
-  This is an ISDN TA. Please report both successes and troubles to the
-  author at omninet@kroah.com
+  This is an ISDN TA. Please report both successes and troubles to
+  azummo@towertech.it
+
+
+Cypress M8 CY4601 Family Serial Driver
+
+  This driver was in most part developed by Neil "koyama" Whelchel.  It
+  has been improved since that previous form to support dynamic serial
+  line settings and improved line handling.  The driver is for the most
+  part stable and has been tested on an smp machine. (dual p2)
+
+    Chipsets supported under CY4601 family:
+	
+		CY7C63723, CY7C63742, CY7C63743, CY7C64013
+
+    Devices supported:
+
+		-DeLorme's USB Earthmate GPS (SiRF Star II lp arch)
+		-Cypress HID->COM RS232 adapter
+	
+		Note: Cypress Semiconductor claims no affiliation with the
+			hid->com device.
+
+	Most devices using chipsets under the CY4601 family should
+     work with the driver.  As long as they stay true to the CY4601
+     usbserial specification.
+
+    Technical notes:
+
+        The Earthmate starts out at 4800 8N1 by default... the driver will
+	upon start init to this setting.  usbserial core provides the rest
+	of the termios settings, along with some custom termios so that the
+	output is in proper format and parsable.
+	
+	The device can be put into sirf mode by issuing NMEA command:
+		$PSRF100,<protocol>,<baud>,<databits>,<stopbits>,<parity>*CHECKSUM
+		$PSRF100,0,9600,8,1,0*0C
+
+		It should then be sufficient to change the port termios to match this
+		to begin communicating.
+
+	As far as I can tell it supports pretty much every sirf command as
+	documented online available with firmware 2.31, with some unknown
+	message ids.
+
+	The hid->com adapter can run at a maximum baud of 115200bps.  Please note
+	that the device has trouble or is incapable of raising line voltage properly.
+	It will be fine with null modem links, as long as you do not try to link two
+	together without hacking the adapter to set the line high.
+
+	The driver is smp safe.  Performance with the driver is rather low when using
+	it for transferring files.  This is being worked on, but I would be willing to
+	accept patches.  An urb queue or packet buffer would likely fit the bill here.
+
+	If you have any questions, problems, patches, feature requests, etc. you can
+	contact me here via email:
+					dignome@gmail.com
+		(your problems/patches can alternately be submitted to usb-devel)
 
 
 Digi AccelePort Driver
@@ -225,7 +273,7 @@ Digi AccelePort Driver
   work under SMP with the uhci driver.
 
   The driver is generally working, though we still have a few more ioctls
-  to implement and final testing and debugging to do.  The paralled port
+  to implement and final testing and debugging to do.  The parallel port
   on the USB 2 is supported as a serial to parallel converter; in other
   words, it appears as another USB serial port on Linux, even though
   physically it is really a parallel port.  The Digi Acceleport USB 8
@@ -250,7 +298,7 @@ Belkin USB Serial Adapter F5U103
       Parity       N,E,O,M,S
       Handshake    None, Software (XON/XOFF), Hardware (CTSRTS,CTSDTR)*
       Break        Set and clear
-      Line contrl  Input/Output query and control **
+      Line control Input/Output query and control **
 
       *  Hardware input flow control is only enabled for firmware
          levels above 2.06.  Read source code comments describing Belkin
@@ -262,7 +310,7 @@ Belkin USB Serial Adapter F5U103
          automatic hardware flow control.
 
   TO DO List:
-    -- Add true modem contol line query capability.  Currently tracks the
+    -- Add true modem control line query capability.  Currently tracks the
        states reported by the interrupt and the states requested.
     -- Add error reporting back to application for UART error conditions.
     -- Add support for flush ioctls.
@@ -291,7 +339,7 @@ MCT USB Single Port Serial Adapter U232
   This driver is for the MCT USB-RS232 Converter (25 pin, Model No.
   U232-P25) from Magic Control Technology Corp. (there is also a 9 pin
   Model No. U232-P9). More information about this device can be found at
-  the manufacture's web-site: http://www.mct.com.tw.
+  the manufacturer's web-site: http://www.mct.com.tw.
 
   The driver is generally working, though it still needs some more testing.
   It is derived from the Belkin USB Serial Adapter F5U103 driver and its
@@ -347,10 +395,11 @@ REINER SCT cyberJack pinpad/e-com USB chipcard reader
 
 Prolific PL2303 Driver
 
-  This driver support any device that has the PL2303 chip from Prolific
-  in it.  This includes a number of single port USB to serial
-  converters and USB GPS devices.  Devices from Aten (the UC-232) and
-  IO-Data work with this driver.
+  This driver supports any device that has the PL2303 chip from Prolific
+  in it.  This includes a number of single port USB to serial converters,
+  more than 70% of USB GPS devices (in 2010), and some USB UPSes. Devices
+  from Aten (the UC-232) and IO-Data work with this driver, as does
+  the DCU-11 mobile-phone cable.
 
   For any questions or problems with this driver, please contact Greg
   Kroah-Hartman at greg@kroah.com
@@ -375,12 +424,38 @@ Options supported:
   debug			- extra verbose debugging info
   			  (default: 0; nonzero enables)
   use_lowlatency	- use low_latency flag to speed up tty layer
-			  when reading from from the device.
+			  when reading from the device.
 			  (default: 0; nonzero enables)
 
   See http://www.uuhaus.de/linux/palmconnect.html for up-to-date
   information on this driver.
 
+Winchiphead CH341 Driver
+
+  This driver is for the Winchiphead CH341 USB-RS232 Converter. This chip
+  also implements an IEEE 1284 parallel port, I2C and SPI, but that is not
+  supported by the driver. The protocol was analyzed from the behaviour
+  of the Windows driver, no datasheet is available at present.
+  The manufacturer's website: http://www.winchiphead.com/.
+  For any questions or problems with this driver, please contact
+  frank@kingswood-consulting.co.uk.
+
+Moschip MCS7720, MCS7715 driver
+
+  These chips are present in devices sold by various manufacturers, such as Syba
+  and Cables Unlimited.  There may be others.  The 7720 provides two serial
+  ports, and the 7715 provides one serial and one standard PC parallel port.
+  Support for the 7715's parallel port is enabled by a separate option, which
+  will not appear unless parallel port support is first enabled at the top-level
+  of the Device Drivers config menu.  Currently only compatibility mode is
+  supported on the parallel port (no ECP/EPP).
+
+  TODO:
+    - Implement ECP/EPP modes for the parallel port.
+    - Baud rates higher than 115200 are currently broken.
+    - Devices with a single serial port based on the Moschip MCS7703 may work
+      with this driver with a simple addition to the usb_device_id table.  I
+      don't have one of these devices, so I can't say for sure.
 
 Generic Serial driver
 

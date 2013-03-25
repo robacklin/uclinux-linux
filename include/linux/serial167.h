@@ -37,23 +37,17 @@ struct cyclades_port {
 	int			ignore_status_mask;
 	int			close_delay;
 	int			IER; 	/* Interrupt Enable Register */
-	int			event;
 	unsigned long		last_active;
 	int			count;	/* # of fd on device */
 	int                     x_char; /* to be pushed out ASAP */
 	int                     x_break;
 	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
 	unsigned char 		*xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
 	int			xmit_cnt;
         int                     default_threshold;
         int                     default_timeout;
-	struct tq_struct	tqueue;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
 	wait_queue_head_t	open_wait;
 	wait_queue_head_t	close_wait;
         struct cyclades_monitor mon;
@@ -70,18 +64,6 @@ struct cyclades_port {
 #define CYSETTIMEOUT            0x435907
 #define CYGETDEFTIMEOUT         0x435908
 #define CYSETDEFTIMEOUT         0x435909
-
-/*
- * Events are used to schedule things to happen at timer-interrupt
- * time, instead of at cy interrupt time.
- */
-#define Cy_EVENT_READ_PROCESS	0
-#define Cy_EVENT_WRITE_WAKEUP	1
-#define Cy_EVENT_HANGUP		2
-#define Cy_EVENT_BREAK		3
-#define Cy_EVENT_OPEN_WAKEUP	4
-
-
 
 #define CyMaxChipsPerCard 1
 

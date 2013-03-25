@@ -21,7 +21,6 @@
  * published by the Free Software Foundation.
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -37,10 +36,11 @@
 #include <linux/vmalloc.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/hardirq.h>
+#include <linux/gfp.h>
 
 #include <asm/pgalloc.h>
 #include <asm/io.h>
-#include <asm/hardirq.h>
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
 #include <asm/mmu.h>
@@ -49,23 +49,24 @@
 
 static int map_page(unsigned long va, unsigned long pa, pgprot_t prot)
 {
-	pmd_t *pd;
-	pte_t *pg;
+	pgd_t *pge;
+	pud_t *pue;
+	pmd_t *pme;
+	pte_t *pte;
 	int err = -ENOMEM;
 
-	spin_lock(&init_mm.page_table_lock);
-
 	/* Use upper 10 bits of VA to index the first level map */
-	pd = pmd_offset(pgd_offset_k(va), va);
+	pge = pgd_offset_k(va);
+	pue = pud_offset(pge, va);
+	pme = pmd_offset(pue, va);
 
 	/* Use middle 10 bits of VA to index the second-level map */
-	pg = pte_alloc(&init_mm, pd, va);
-	if (pg != 0) {
+	pte = pte_alloc_kernel(pme, va);
+	if (pte != 0) {
 		err = 0;
-		set_pte(pg, mk_pte_phys(pa & PAGE_MASK, prot));
+		set_pte(pte, mk_pte_phys(pa & PAGE_MASK, prot));
 	}
 
-	spin_unlock(&init_mm.page_table_lock);
 	return err;
 }
 
@@ -77,7 +78,7 @@ static int map_page(unsigned long va, unsigned long pa, pgprot_t prot)
  * portions of the kernel with single large page TLB entries, and
  * still get unique uncached pages for consistent DMA.
  */
-void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
+void *consistent_alloc(gfp_t gfp, size_t size, dma_addr_t *dma_handle)
 {
 	struct vm_struct *area;
 	unsigned long page, va, pa;
@@ -114,9 +115,7 @@ void *consistent_alloc(int gfp, size_t size, dma_addr_t *dma_handle)
 	 */
 	if (order > 0) {
 		struct page *rpage = virt_to_page(page);
-
-		for (i = 1; i < (1 << order); i++)
-			set_page_count(rpage + i, 1);
+		split_page(rpage, order);
 	}
 
 	err = 0;

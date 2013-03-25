@@ -4,15 +4,15 @@
  * Author       Frode Isaksen
  * Copyright    2001 by Frode Isaksen      <fisaksen@bewan.com>
  *              2001 by Kai Germaschewski  <kai.germaschewski@gmx.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 #include <linux/init.h>
+#include <linux/gfp.h>
 #include <linux/usb.h>
-#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include "st5481.h"
 
@@ -32,22 +32,22 @@ static char *strL1State[] =
 
 static char *strL1Event[] =
 {
-	"EV_IND_DP",  
-	"EV_IND_1",   
-	"EV_IND_2",   
-	"EV_IND_3",   
-	"EV_IND_RSY", 
-	"EV_IND_5",   
-	"EV_IND_6",   
-	"EV_IND_7",   
-	"EV_IND_AP",  
-	"EV_IND_9",   
-	"EV_IND_10",  
-	"EV_IND_11",  
+	"EV_IND_DP",
+	"EV_IND_1",
+	"EV_IND_2",
+	"EV_IND_3",
+	"EV_IND_RSY",
+	"EV_IND_5",
+	"EV_IND_6",
+	"EV_IND_7",
+	"EV_IND_AP",
+	"EV_IND_9",
+	"EV_IND_10",
+	"EV_IND_11",
 	"EV_IND_AI8",
 	"EV_IND_AI10",
 	"EV_IND_AIL",
-	"EV_IND_DI",  
+	"EV_IND_DI",
 	"EV_PH_ACTIVATE_REQ",
 	"EV_PH_DEACTIVATE_REQ",
 	"EV_TIMER3",
@@ -67,7 +67,7 @@ l1_go_f3(struct FsmInst *fi, int event, void *arg)
 
 	if (fi->state == ST_L1_F7)
 		ph_disconnect(adapter);
-	
+
 	FsmChangeState(fi, ST_L1_F3);
 	D_L1L2(adapter, PH_DEACTIVATE | INDICATION, NULL);
 }
@@ -162,18 +162,19 @@ static struct FsmNode L1FnList[] __initdata =
 	{ST_L1_F8, EV_TIMER3,            l1_timer3},
 	{ST_L1_F8, EV_IND_DP,            l1_go_f3},
 	{ST_L1_F8, EV_IND_AP,            l1_go_f6},
-	{ST_L1_F8, EV_IND_AI8,           l1_go_f7},
-	{ST_L1_F8, EV_IND_AI10,          l1_go_f7},
+	{ST_L1_F8, EV_IND_AI8,           l1_go_f8},
+	{ST_L1_F8, EV_IND_AI10,          l1_go_f8},
 	{ST_L1_F8, EV_IND_RSY,           l1_ignore},
 };
 
-static void l1m_debug(struct FsmInst *fi, char *fmt, ...)
+static __printf(2, 3)
+	void l1m_debug(struct FsmInst *fi, char *fmt, ...)
 {
 	va_list args;
 	char buf[256];
-	
+
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	DBG(8, "%s", buf);
 	va_end(args);
 }
@@ -190,54 +191,54 @@ static void l1m_debug(struct FsmInst *fi, char *fmt, ...)
 
   L1 FRAME    D_OUT_STATE           USB                  D CHANNEL
   --------    -----------           ---                  ---------
- 
-              FIXME
 
- -> [xx..xx]  SHORT_INIT            -> [7Exx..xxC1C27EFF]
-              SHORT_WAIT_DEN        <> OUT_D_COUNTER=16 
-                                                 
-              END_OF_SHORT          <- DEN_EVENT         -> 7Exx
-                                                          xxxx 
-                                                          xxxx
-							  xxxx 
-							  xxxx
-							  xxxx
-							  C1C1 
-							  7EFF 
-              WAIT_FOR_RESET_IDLE   <- D_UNDERRUN        <- (8ms)                        
-              IDLE                  <> Reset pipe
+  FIXME
 
-              
+  -> [xx..xx]  SHORT_INIT            -> [7Exx..xxC1C27EFF]
+  SHORT_WAIT_DEN        <> OUT_D_COUNTER=16
+
+  END_OF_SHORT          <- DEN_EVENT         -> 7Exx
+  xxxx
+  xxxx
+  xxxx
+  xxxx
+  xxxx
+  C1C1
+  7EFF
+  WAIT_FOR_RESET_IDLE   <- D_UNDERRUN        <- (8ms)
+  IDLE                  <> Reset pipe
+
+
 
   Transmit long frame (>= 16 bytes of encoded data):
 
   L1 FRAME    D_OUT_STATE           USB                  D CHANNEL
   --------    -----------           ---                  ---------
 
- -> [xx...xx] IDLE
-              WAIT_FOR_STOP         <> OUT_D_COUNTER=0
-              WAIT_FOR_RESET        <> Reset pipe
-	      STOP
-	      INIT_LONG_FRAME       -> [7Exx..xx]
-              WAIT_DEN              <> OUT_D_COUNTER=16 
-              OUT_NORMAL            <- DEN_EVENT       -> 7Exx
-              END_OF_FRAME_BUSY     -> [xxxx]             xxxx 
-              END_OF_FRAME_NOT_BUSY -> [xxxx]             xxxx
-				    -> [xxxx]		  xxxx 
-				    -> [C1C2]		  xxxx
-				    -> [7EFF]		  xxxx
-							  xxxx 
-							  xxxx 
-                                                          ....
-							  xxxx
-							  C1C2
-							  7EFF
-	                 	    <- D_UNDERRUN      <- (> 8ms)                        
-              WAIT_FOR_STOP         <> OUT_D_COUNTER=0
-              WAIT_FOR_RESET        <> Reset pipe
-	      STOP
+  -> [xx...xx] IDLE
+  WAIT_FOR_STOP         <> OUT_D_COUNTER=0
+  WAIT_FOR_RESET        <> Reset pipe
+  STOP
+  INIT_LONG_FRAME       -> [7Exx..xx]
+  WAIT_DEN              <> OUT_D_COUNTER=16
+  OUT_NORMAL            <- DEN_EVENT       -> 7Exx
+  END_OF_FRAME_BUSY     -> [xxxx]             xxxx
+  END_OF_FRAME_NOT_BUSY -> [xxxx]             xxxx
+  -> [xxxx]		  xxxx
+  -> [C1C2]		  xxxx
+  -> [7EFF]		  xxxx
+  xxxx
+  xxxx
+  ....
+  xxxx
+  C1C2
+  7EFF
+  <- D_UNDERRUN      <- (> 8ms)
+  WAIT_FOR_STOP         <> OUT_D_COUNTER=0
+  WAIT_FOR_RESET        <> Reset pipe
+  STOP
 
-*/          
+*/
 
 static struct Fsm dout_fsm;
 
@@ -253,7 +254,7 @@ static char *strDoutState[] =
 	"ST_DOUT_NORMAL",
 
 	"ST_DOUT_WAIT_FOR_UNDERRUN",
-        "ST_DOUT_WAIT_FOR_NOT_BUSY",
+	"ST_DOUT_WAIT_FOR_NOT_BUSY",
 	"ST_DOUT_WAIT_FOR_STOP",
 	"ST_DOUT_WAIT_FOR_RESET",
 };
@@ -269,13 +270,14 @@ static char *strDoutEvent[] =
 	"EV_DOUT_UNDERRUN",
 };
 
-static void dout_debug(struct FsmInst *fi, char *fmt, ...)
+static __printf(2, 3)
+	void dout_debug(struct FsmInst *fi, char *fmt, ...)
 {
 	va_list args;
 	char buf[256];
-	
+
 	va_start(args, fmt);
-	vsprintf(buf, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	DBG(0x2, "%s", buf);
 	va_end(args);
 }
@@ -297,7 +299,7 @@ static void usb_d_out(struct st5481_adapter *adapter, int buf_nr)
 	unsigned int num_packets, packet_offset;
 	int len, buf_size, bytes_sent;
 	struct sk_buff *skb;
-	struct iso_packet_descriptor *desc;
+	struct usb_iso_packet_descriptor *desc;
 
 	if (d_out->fsm.state != ST_DOUT_NORMAL)
 		return;
@@ -311,19 +313,19 @@ static void usb_d_out(struct st5481_adapter *adapter, int buf_nr)
 	skb = d_out->tx_skb;
 
 	buf_size = NUM_ISO_PACKETS_D * SIZE_ISO_PACKETS_D_OUT;
-	
+
 	if (skb) {
 		len = isdnhdlc_encode(&d_out->hdlc_state,
 				      skb->data, skb->len, &bytes_sent,
 				      urb->transfer_buffer, buf_size);
-		skb_pull(skb,bytes_sent);
+		skb_pull(skb, bytes_sent);
 	} else {
 		// Send flags or idle
 		len = isdnhdlc_encode(&d_out->hdlc_state,
 				      NULL, 0, &bytes_sent,
 				      urb->transfer_buffer, buf_size);
 	}
-	
+
 	if (len < buf_size) {
 		FsmChangeState(&d_out->fsm, ST_DOUT_WAIT_FOR_UNDERRUN);
 	}
@@ -352,15 +354,15 @@ static void usb_d_out(struct st5481_adapter *adapter, int buf_nr)
 	urb->dev = adapter->usb_dev;
 	// Need to transmit the next buffer 2ms after the DEN_EVENT
 	urb->transfer_flags = 0;
-	urb->start_frame = usb_get_current_frame_number(adapter->usb_dev)+2;
+	urb->start_frame = usb_get_current_frame_number(adapter->usb_dev) + 2;
 
-	DBG_ISO_PACKET(0x20,urb);
+	DBG_ISO_PACKET(0x20, urb);
 
-	if (usb_submit_urb(urb) < 0) {
+	if (usb_submit_urb(urb, GFP_KERNEL) < 0) {
 		// There is another URB queued up
-		urb->transfer_flags = USB_ISO_ASAP;
-		SUBMIT_URB(urb);
-	}	
+		urb->transfer_flags = URB_ISO_ASAP;
+		SUBMIT_URB(urb, GFP_KERNEL);
+	}
 }
 
 static void fifo_reseted(void *context)
@@ -374,24 +376,28 @@ static void usb_d_out_complete(struct urb *urb)
 {
 	struct st5481_adapter *adapter = urb->context;
 	struct st5481_d_out *d_out = &adapter->d_out;
-	int buf_nr;
-	
+	long buf_nr;
+
 	DBG(2, "");
 
 	buf_nr = get_buf_nr(d_out->urb, urb);
 	test_and_clear_bit(buf_nr, &d_out->busy);
 
-	if (urb->status < 0) {
-		if (urb->status != USB_ST_URB_KILLED) {
-			WARN("urb status %d",urb->status);
+	if (unlikely(urb->status < 0)) {
+		switch (urb->status) {
+		case -ENOENT:
+		case -ESHUTDOWN:
+		case -ECONNRESET:
+			DBG(1, "urb killed status %d", urb->status);
+			break;
+		default:
+			WARNING("urb status %d", urb->status);
 			if (d_out->busy == 0) {
 				st5481_usb_pipe_reset(adapter, EP_D_OUT | USB_DIR_OUT, fifo_reseted, adapter);
 			}
-			return;
-		} else {
-			DBG(1,"urb killed"); 
-			return; // Give up
+			break;
 		}
+		return; // Give up
 	}
 
 	FsmEvent(&adapter->d_out.fsm, EV_DOUT_COMPLETE, (void *) buf_nr);
@@ -411,12 +417,12 @@ static void dout_start_xmit(struct FsmInst *fsm, int event, void *arg)
 
 	skb = d_out->tx_skb;
 
-	DBG(2,"len=%d",skb->len);
+	DBG(2, "len=%d", skb->len);
 
-	isdnhdlc_out_init(&d_out->hdlc_state, 1, 0);
+	isdnhdlc_out_init(&d_out->hdlc_state, HDLC_DCHANNEL | HDLC_BITREVERSE);
 
 	if (test_and_set_bit(buf_nr, &d_out->busy)) {
-		WARN("ep %d urb %d busy %#lx", EP_D_OUT, buf_nr, d_out->busy);
+		WARNING("ep %d urb %d busy %#lx", EP_D_OUT, buf_nr, d_out->busy);
 		return;
 	}
 	urb = d_out->urb[buf_nr];
@@ -427,7 +433,7 @@ static void dout_start_xmit(struct FsmInst *fsm, int event, void *arg)
 			      urb->transfer_buffer, 16);
 	skb_pull(skb, bytes_sent);
 
-	if(len < 16)
+	if (len < 16)
 		FsmChangeState(&d_out->fsm, ST_DOUT_SHORT_INIT);
 	else
 		FsmChangeState(&d_out->fsm, ST_DOUT_LONG_INIT);
@@ -447,10 +453,10 @@ static void dout_start_xmit(struct FsmInst *fsm, int event, void *arg)
 
 	// Prepare the URB
 	urb->dev = adapter->usb_dev;
-	urb->transfer_flags = USB_ISO_ASAP;
+	urb->transfer_flags = URB_ISO_ASAP;
 
-	DBG_ISO_PACKET(0x20,urb);
-	SUBMIT_URB(urb);
+	DBG_ISO_PACKET(0x20, urb);
+	SUBMIT_URB(urb, GFP_KERNEL);
 }
 
 static void dout_short_fifo(struct FsmInst *fsm, int event, void *arg)
@@ -474,7 +480,7 @@ static void dout_long_enable_fifo(struct FsmInst *fsm, int event, void *arg)
 {
 	struct st5481_adapter *adapter = fsm->userdata;
 	struct st5481_d_out *d_out = &adapter->d_out;
-    
+
 	st5481_usb_device_ctrl_msg(adapter, OUT_D_COUNTER, 16, NULL, NULL);
 	FsmChangeState(&d_out->fsm, ST_DOUT_LONG_WAIT_DEN);
 }
@@ -542,7 +548,7 @@ static void dout_reseted(struct FsmInst *fsm, int event, void *arg)
 static void dout_complete(struct FsmInst *fsm, int event, void *arg)
 {
 	struct st5481_adapter *adapter = fsm->userdata;
-	int buf_nr = (int) arg;
+	long buf_nr = (long) arg;
 
 	usb_d_out(adapter, buf_nr);
 }
@@ -592,14 +598,12 @@ void st5481_d_l2l1(struct hisax_if *hisax_d_if, int pr, void *arg)
 		break;
 	case PH_DATA | REQUEST:
 		DBG(2, "PH_DATA REQUEST len %d", skb->len);
-		if (adapter->d_out.tx_skb)
-			BUG();
-
+		BUG_ON(adapter->d_out.tx_skb);
 		adapter->d_out.tx_skb = skb;
 		FsmEvent(&adapter->d_out.fsm, EV_DOUT_START_XMIT, NULL);
 		break;
 	default:
-		WARN("pr %#x\n", pr);
+		WARNING("pr %#x\n", pr);
 		break;
 	}
 }
@@ -615,15 +619,15 @@ static void ph_connect(struct st5481_adapter *adapter)
 	struct st5481_d_out *d_out = &adapter->d_out;
 	struct st5481_in *d_in = &adapter->d_in;
 
-	DBG(8,"");
-		
+	DBG(8, "");
+
 	FsmChangeState(&d_out->fsm, ST_DOUT_NONE);
 
 	//	st5481_usb_device_ctrl_msg(adapter, FFMSK_D, OUT_UNDERRUN, NULL, NULL);
 	st5481_usb_device_ctrl_msg(adapter, FFMSK_D, 0xfc, NULL, NULL);
 	st5481_in_mode(d_in, L1_MODE_HDLC);
 
-#if LOOPBACK
+#ifdef LOOPBACK
 	// Turn loopback on (data sent on B and D looped back)
 	st5481_usb_device_ctrl_msg(cs, LBB, 0x04, NULL, NULL);
 #endif
@@ -640,7 +644,7 @@ static void ph_connect(struct st5481_adapter *adapter)
  */
 static void ph_disconnect(struct st5481_adapter *adapter)
 {
-	DBG(8,"");
+	DBG(8, "");
 
 	st5481_in_mode(&adapter->d_in, L1_MODE_NULL);
 
@@ -649,25 +653,30 @@ static void ph_disconnect(struct st5481_adapter *adapter)
 	st5481_usb_device_ctrl_msg(adapter, GPIO_OUT, adapter->leds, NULL, NULL);
 }
 
-static int __devinit st5481_setup_d_out(struct st5481_adapter *adapter)
+static int st5481_setup_d_out(struct st5481_adapter *adapter)
 {
 	struct usb_device *dev = adapter->usb_dev;
-	struct usb_interface_descriptor *altsetting;
-	struct usb_endpoint_descriptor *endpoint;
+	struct usb_interface *intf;
+	struct usb_host_interface *altsetting = NULL;
+	struct usb_host_endpoint *endpoint;
 	struct st5481_d_out *d_out = &adapter->d_out;
 
-	DBG(2,"");
+	DBG(2, "");
 
-	altsetting = &(dev->config->interface[0].altsetting[3]);
+	intf = usb_ifnum_to_if(dev, 0);
+	if (intf)
+		altsetting = usb_altnum_to_altsetting(intf, 3);
+	if (!altsetting)
+		return -ENXIO;
 
 	// Allocate URBs and buffers for the D channel out
 	endpoint = &altsetting->endpoint[EP_D_OUT-1];
 
-	DBG(2,"endpoint address=%02x,packet size=%d",
-	    endpoint->bEndpointAddress,endpoint->wMaxPacketSize);
+	DBG(2, "endpoint address=%02x,packet size=%d",
+	    endpoint->desc.bEndpointAddress, le16_to_cpu(endpoint->desc.wMaxPacketSize));
 
-	return st5481_setup_isocpipes(d_out->urb, dev, 
-				      usb_sndisocpipe(dev, endpoint->bEndpointAddress),
+	return st5481_setup_isocpipes(d_out->urb, dev,
+				      usb_sndisocpipe(dev, endpoint->desc.bEndpointAddress),
 				      NUM_ISO_PACKETS_D, SIZE_ISO_PACKETS_D_OUT,
 				      NUM_ISO_PACKETS_D * SIZE_ISO_PACKETS_D_OUT,
 				      usb_d_out_complete, adapter);
@@ -677,16 +686,16 @@ static void st5481_release_d_out(struct st5481_adapter *adapter)
 {
 	struct st5481_d_out *d_out = &adapter->d_out;
 
-	DBG(2,"");
+	DBG(2, "");
 
 	st5481_release_isocpipes(d_out->urb);
 }
 
-int __devinit st5481_setup_d(struct st5481_adapter *adapter)
+int st5481_setup_d(struct st5481_adapter *adapter)
 {
 	int retval;
 
-	DBG(2,"");
+	DBG(2, "");
 
 	retval = st5481_setup_d_out(adapter);
 	if (retval)
@@ -704,28 +713,28 @@ int __devinit st5481_setup_d(struct st5481_adapter *adapter)
 
 	adapter->l1m.fsm = &l1fsm;
 	adapter->l1m.state = ST_L1_F3;
-	adapter->l1m.debug = 1;
+	adapter->l1m.debug = st5481_debug & 0x100;
 	adapter->l1m.userdata = adapter;
 	adapter->l1m.printdebug = l1m_debug;
 	FsmInitTimer(&adapter->l1m, &adapter->timer);
 
 	adapter->d_out.fsm.fsm = &dout_fsm;
 	adapter->d_out.fsm.state = ST_DOUT_NONE;
-	adapter->d_out.fsm.debug = 1;
+	adapter->d_out.fsm.debug = st5481_debug & 0x100;
 	adapter->d_out.fsm.userdata = adapter;
 	adapter->d_out.fsm.printdebug = dout_debug;
 
 	return 0;
 
- err_d_out:
+err_d_out:
 	st5481_release_d_out(adapter);
- err:
+err:
 	return retval;
 }
 
 void st5481_release_d(struct st5481_adapter *adapter)
 {
-	DBG(2,"");
+	DBG(2, "");
 
 	st5481_release_in(&adapter->d_in);
 	st5481_release_d_out(adapter);
@@ -757,9 +766,9 @@ int __init st5481_d_init(void)
 
 	return 0;
 
- err_l1:
+err_l1:
 	FsmFree(&l1fsm);
- err:
+err:
 	return retval;
 }
 

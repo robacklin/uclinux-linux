@@ -34,6 +34,7 @@
 #include <linux/serial.h>
 #include <linux/termios.h>
 #include <linux/timer.h>
+#include <linux/tty.h>		/* struct tty_struct */
 
 #include <net/irda/irias_object.h>
 #include <net/irda/ircomm_core.h>
@@ -50,6 +51,11 @@
 #define IRCOMM_TTY_HDR_UNINITIALISED	16
 /* Same for payload size. See qos.c for the smallest max data size */
 #define IRCOMM_TTY_DATA_UNINITIALISED	(64 - IRCOMM_TTY_HDR_UNINITIALISED)
+
+/* Those are really defined in include/linux/serial.h - Jean II */
+#define ASYNC_B_INITIALIZED	31	/* Serial port was initialized */
+#define ASYNC_B_NORMAL_ACTIVE	29	/* Normal device is active */
+#define ASYNC_B_CLOSING		27	/* Serial port is closing */
 
 /*
  * IrCOMM TTY driver state
@@ -74,7 +80,7 @@ struct ircomm_tty_cb {
 	LOCAL_FLOW flow;          /* IrTTP flow status */
 
 	int line;
-	__u32 flags;
+	unsigned long flags;
 
 	__u8 dlsap_sel;
 	__u8 slsap_sel;
@@ -88,36 +94,39 @@ struct ircomm_tty_cb {
 
 	struct iriap_cb *iriap; /* Instance used for querying remote IAS */
 	struct ias_object* obj;
-	int skey;
-	int ckey;
-
-	struct termios	  normal_termios;
-	struct termios	  callout_termios;
+	void *skey;
+	void *ckey;
 
 	wait_queue_head_t open_wait;
 	wait_queue_head_t close_wait;
 	struct timer_list watchdog_timer;
-	struct tq_struct  tqueue;
+	struct work_struct  tqueue;
 
         unsigned short    close_delay;
         unsigned short    closing_wait; /* time to wait before closing */
 
-	long session;           /* Session of opening process */
-	long pgrp;		/* pgrp of opening process */
 	int  open_count;
 	int  blocked_open;	/* # of blocked opens */
+
+	/* Protect concurent access to :
+	 *	o self->open_count
+	 *	o self->ctrl_skb
+	 *	o self->tx_skb
+	 * Maybe other things may gain to be protected as well...
+	 * Jean II */
+	spinlock_t spinlock;
 };
 
 void ircomm_tty_start(struct tty_struct *tty);
-void ircomm_tty_stop(struct tty_struct *tty);
 void ircomm_tty_check_modem_status(struct ircomm_tty_cb *self);
 
-extern void ircomm_tty_change_speed(struct ircomm_tty_cb *self);
-extern int ircomm_tty_ioctl(struct tty_struct *tty, struct file *file, 
+extern int ircomm_tty_tiocmget(struct tty_struct *tty);
+extern int ircomm_tty_tiocmset(struct tty_struct *tty,
+			       unsigned int set, unsigned int clear);
+extern int ircomm_tty_ioctl(struct tty_struct *tty, 
 			    unsigned int cmd, unsigned long arg);
 extern void ircomm_tty_set_termios(struct tty_struct *tty, 
-				   struct termios *old_termios);
-extern hashbin_t *ircomm_tty;
+				   struct ktermios *old_termios);
 
 #endif
 

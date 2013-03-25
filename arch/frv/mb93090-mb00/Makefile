@@ -1,17 +1,15 @@
 #
-# Makefile for the linux kernel.
+# Makefile for the MB93090-MB00 motherboard stuff
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-O_TARGET := motherboard.o
+ifeq "$(CONFIG_PCI)" "y"
+obj-y := pci-frv.o pci-irq.o pci-vdk.o
 
-obj-$(CONFIG_PCI) := pci-frv.o pci-dma.o pci-irq.o pci-vdk.o
+ifeq "$(CONFIG_MMU)" "y"
+obj-y += pci-dma.o
+else
+obj-y += pci-dma-nommu.o
+endif
+endif
 
-export-objs :=
-
-include $(TOPDIR)/Rules.make
-
+obj-$(CONFIG_MTD) += flash.o

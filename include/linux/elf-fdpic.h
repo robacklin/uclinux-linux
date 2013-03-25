@@ -52,15 +52,19 @@ struct elf_fdpic_params {
 #define ELF_FDPIC_FLAG_CONSTDISP	0x00000002	/* PT_LOADs require constant
 							 * displacement */
 #define ELF_FDPIC_FLAG_CONTIGUOUS	0x00000003	/* PT_LOADs should be contiguous */
+#define ELF_FDPIC_FLAG_EXEC_STACK	0x00000010	/* T if stack to be executable */
+#define ELF_FDPIC_FLAG_NOEXEC_STACK	0x00000020	/* T if stack not to be executable */
 #define ELF_FDPIC_FLAG_EXECUTABLE	0x00000040	/* T if this object is the executable */
 #define ELF_FDPIC_FLAG_PRESENT		0x80000000	/* T if this object is present */
 };
 
-#ifndef NO_MM
+#ifdef __KERNEL__
+#ifdef CONFIG_MMU
 extern void elf_fdpic_arch_lay_out_mm(struct elf_fdpic_params *exec_params,
 				      struct elf_fdpic_params *interp_params,
 				      unsigned long *start_stack,
 				      unsigned long *start_brk);
 #endif
+#endif /* __KERNEL__ */
 
 #endif /* _LINUX_ELF_FDPIC_H */

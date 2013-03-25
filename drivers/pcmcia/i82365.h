@@ -44,18 +44,6 @@
 #define I365_GENCTL	0x16	/* Card detect and general control */
 #define I365_GBLCTL	0x1E	/* Global control register */
 
-/* MB93493 registers */
-#define I365_MODECTL1	0x1f	/* Mode control 1 register */
-#define I365_MEMCMDW0	0x17	/* Memory 0 Command Width */
-#define I365_MEMCMDW1	0x26	/* Memory 1 Command Width */
-#define I365_MEMCMDW2	0x27	/* Memory 2 Command Width */
-#define I365_MEMCMDW3	0x2e	/* Memory 3 Command Width */
-#define I365_MODECTL2	0x2f	/* Mode control 2 register */
-#define I365_IOSETUP	0x3d	/* I/O 0,1 Setup register */
-#define I365_IOCMDW0	0x3e	/* I/O 0 Command Width & Hold register */
-#define I365_IOCMDW1	0x3f	/* I/O 1 Command Width & Hold register */
-
-
 /* Offsets for I/O and memory window registers */
 #define I365_IO(map)	(0x08+((map)<<2))
 #define I365_MEM(map)	(0x10+((map)<<3))
@@ -89,8 +77,8 @@
 #define I365_VPP2_5V	0x04	/* Vpp2 = 5.0v */
 #define I365_VPP2_12V	0x08	/* Vpp2 = 12.0v */
 #define I365_VPP1_MASK	0x03	/* Mask for turning off Vpp1 */
-#define I365_VPP1_5V	0x01	/* Vpp2 = 5.0v */
-#define I365_VPP1_12V	0x02	/* Vpp2 = 12.0v */
+#define I365_VPP1_5V	0x01	/* Vpp1 = 5.0v */
+#define I365_VPP1_12V	0x02	/* Vpp1 = 12.0v */
 
 /* Flags for I365_INTCTL */
 #define I365_RING_ENA	0x80
@@ -107,6 +95,7 @@
 #define I365_CSC_DETECT	0x08
 #define I365_CSC_ANY	0x0F
 #define I365_CSC_GPI	0x10
+#define I365_CSC_IRQ_MASK	0xF0
 
 /* Flags for I365_ADDRWIN */
 #define I365_ENA_IO(map)	(0x40 << (map))

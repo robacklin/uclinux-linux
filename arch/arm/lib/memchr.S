@@ -22,4 +22,5 @@ ENTRY(memchr)
 	bne	1b
 	sub	r0, r0, #1
 2:	movne	r0, #0
-	RETINSTR(mov,pc,lr)
+	mov	pc, lr
+ENDPROC(memchr)

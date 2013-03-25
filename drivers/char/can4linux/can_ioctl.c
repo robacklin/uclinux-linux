@@ -11,14 +11,25 @@
  * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_ioctl.c,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: can_ioctl.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -40,7 +51,7 @@
 * \file can_ioctl.c
 * \author Heinz-Jürgen Oertel, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
 *
 */
@@ -166,10 +177,10 @@ int retval = -EIO;
   switch(cmd){
 
         case COMMAND:
-          if( !access_ok(VERIFY_READ, (void *)arg, sizeof(Command_par_t))) {
+	  if( ! access_ok(VERIFY_READ, (void *)arg, sizeof(Command_par_t))) {
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *)arg, sizeof(Command_par_t))) {
+	  if( ! access_ok(VERIFY_WRITE, (void *)arg, sizeof(Command_par_t))) {
 	     DBGout(); return(retval); 
 	  }
 	  argp = (void *) kmalloc( sizeof(Command_par_t) +1 , GFP_KERNEL );
@@ -183,10 +194,10 @@ int retval = -EIO;
 	  kfree(argp);
 	  break;
       case CONFIG:
-	  if( !access_ok(VERIFY_READ, (void *) arg, sizeof(Config_par_t))) {
+	  if( ! access_ok(VERIFY_READ, (void *) arg, sizeof(Config_par_t))) {
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *) arg, sizeof(Config_par_t))) {
+	  if( ! access_ok(VERIFY_WRITE, (void *) arg, sizeof(Config_par_t))) {
 	     DBGout(); return(retval); 
 	  }
 	  argp = (void *) kmalloc( sizeof(Config_par_t) +1 ,GFP_KERNEL);
@@ -202,10 +213,10 @@ int retval = -EIO;
 	  kfree(argp);
 	  break;
       case SEND:
-	  if( !access_ok(VERIFY_READ, (void *) arg, sizeof(Send_par_t))) {
+	  if( ! access_ok(VERIFY_READ, (void *) arg, sizeof(Send_par_t))) {
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *) arg, sizeof(Send_par_t))) {
+	  if( ! access_ok(VERIFY_WRITE, (void *) arg, sizeof(Send_par_t))) {
 	     DBGout(); return(retval); 
 	  }
 	  argp = (void *)kmalloc( sizeof(Send_par_t) +1 ,GFP_KERNEL );
@@ -219,10 +230,10 @@ int retval = -EIO;
 	  kfree(argp);
 	  break;
       case RECEIVE:
-	  if( !access_ok(VERIFY_READ, (void *) arg, sizeof(Receive_par_t))) {
+	  if( ! access_ok(VERIFY_READ, (void *) arg, sizeof(Receive_par_t))) {
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *) arg, sizeof(Receive_par_t))) {
+	  if( ! access_ok(VERIFY_WRITE, (void *) arg, sizeof(Receive_par_t))) {
 	     DBGout(); return(retval); 
 	  }
 	  argp = (void *)kmalloc( sizeof(Receive_par_t) +1 ,GFP_KERNEL );
@@ -236,11 +247,11 @@ int retval = -EIO;
 	  kfree(argp);
 	  break;
       case STATUS:
-	  if( !access_ok(VERIFY_READ, (void *) arg,
+	  if( ! access_ok(VERIFY_READ, (void *) arg,
 	  				sizeof(CanStatusPar_t))) {
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *) arg,
+	  if( ! access_ok(VERIFY_WRITE, (void *) arg,
 	  			sizeof(CanStatusPar_t))) {
 	     DBGout(); return(retval); 
 	  }
@@ -254,11 +265,11 @@ int retval = -EIO;
 
 #ifdef CAN_RTR_CONFIG
       case CONFIGURERTR:
-	  if( !access_ok(VERIFY_READ, (void *) arg,
+	  if( ! access_ok(VERIFY_READ, (void *) arg,
 	  			sizeof(ConfigureRTR_par_t))){
 	     DBGout(); return(retval); 
 	  }
-	  if( !access_ok(VERIFY_WRITE, (void *) arg,
+	  if( ! access_ok(VERIFY_WRITE, (void *) arg,
 	  			sizeof(ConfigureRTR_par_t))){
 	     DBGout(); return(retval); 
 	  }
@@ -323,7 +334,7 @@ int can_Send(struct inode *inode, canmsg_t *Tx)
 unsigned int minor = MINOR(inode->i_rdev);	
 canmsg_t tx;
 
-    if( !access_ok(VERIFY_READ,Tx,sizeof(canmsg_t)) ) {
+    if( ! access_ok(VERIFY_READ,Tx,sizeof(canmsg_t)) ) {
 	    return -EINVAL;
     }
     __lddk_copy_from_user((canmsg_t *) &tx, (canmsg_t *) Tx,sizeof(canmsg_t));
@@ -344,8 +355,8 @@ int len;
     len = CAN_GetMessage(minor,&rx);
 
     if( len > 0 ){
-       /* printk("\nrx[ ] got id 0x%x len %d adr00x%lx\n",rx.id,rx.length,Rx); */
-       if( !access_ok(VERIFY_WRITE,Rx,sizeof(canmsg_t) ) ) {
+       /* printk("\nrx[ ] got id 0x%x len %d adr00x%lx\n",rx.id,rx.length,Rx);*/
+       if( ! access_ok(VERIFY_WRITE,Rx,sizeof(canmsg_t) ) ) {
 	    return -EINVAL;
        }
        __lddk_copy_to_user((canmsg_t *) Rx, (canmsg_t *) &rx,
@@ -402,9 +413,11 @@ unsigned int minor = MINOR(inode->i_rdev);
 	   Can_FilterMessage( minor, (int) val1, 0);
 	   break;
 #endif
+#if defined(CONFIG_M528x)
       case CONF_LISTEN_ONLY_MODE:
 	   CAN_SetListenOnlyMode( minor, (int) val1);
 	   break;
+#endif
       case CONF_SELF_RECEPTION:
       	   selfreception = (int)val1;
 	   break;

@@ -1,5 +1,5 @@
 /*
- * linux/fs/nls_koi8-ru.c
+ * linux/fs/nls/nls_koi8-ru.c
  *
  * Charset koi8-ru translation based on charset koi8-u.
  * The Unicode to charset table has only exact mappings.
@@ -52,12 +52,10 @@ static int char2uni(const unsigned char *rawstring, int boundlen,
 }
 
 static struct nls_table table = {
-	"koi8-ru",
-	uni2char,
-	char2uni,
-	NULL,
-	NULL,
-	THIS_MODULE,
+	.charset	= "koi8-ru",
+	.uni2char	= uni2char,
+	.char2uni	= char2uni,
+	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_koi8_ru(void)
@@ -81,21 +79,5 @@ static void __exit exit_nls_koi8_ru(void)
 
 module_init(init_nls_koi8_ru)
 module_exit(exit_nls_koi8_ru)
-MODULE_LICENSE("Dual BSD/GPL");
 
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 8
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -8
- * c-argdecl-indent: 8
- * c-label-offset: -8
- * c-continued-statement-offset: 8
- * c-continued-brace-offset: 0
- * End:
- */
+MODULE_LICENSE("Dual BSD/GPL");

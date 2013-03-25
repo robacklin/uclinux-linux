@@ -1,166 +1,105 @@
 #
 # ia64/Makefile
 #
+# This file is included by the global makefile so that you can add your own
+# architecture-specific flags and dependencies.
+#
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998-2001 by David Mosberger-Tang <davidm@hpl.hp.com>
+# Copyright (C) 1998-2004 by David Mosberger-Tang <davidm@hpl.hp.com>
 #
 
+KBUILD_DEFCONFIG := generic_defconfig
+
 NM := $(CROSS_COMPILE)nm -B
-AWK := awk
+READELF := $(CROSS_COMPILE)readelf
 
 export AWK
 
-LINKFLAGS = -static -T arch/$(ARCH)/vmlinux.lds
-AFLAGS_KERNEL := -mconstant-gp
-EXTRA	=
+CHECKFLAGS	+= -m64 -D__ia64=1 -D__ia64__=1 -D_LP64 -D__LP64__
 
-CFLAGS := $(CFLAGS) -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f12-f15,f32-f127 \
-	  -falign-functions=32
-# -ffunction-sections
-CFLAGS_KERNEL := -mconstant-gp
+OBJCOPYFLAGS	:= --strip-all
+LDFLAGS_vmlinux	:= -static
+KBUILD_LDFLAGS_MODULE += -T $(srctree)/arch/ia64/module.lds
+KBUILD_AFLAGS_KERNEL := -mconstant-gp
+EXTRA		:=
 
-GCC_VERSION=$(shell $(CC) -v 2>&1 | fgrep 'gcc version' | cut -f3 -d' ' | cut -f1 -d'.')
+cflags-y	:= -pipe $(EXTRA) -ffixed-r13 -mfixed-range=f12-f15,f32-f127 \
+		   -falign-functions=32 -frename-registers -fno-optimize-sibling-calls
+KBUILD_CFLAGS_KERNEL := -mconstant-gp
 
-CHECK_GAS_FOR_HINT=arch/ia64/scripts/check_gas_for_hint.o
-MAKE_GAS_HINT_TEST=arch/ia64/scripts/make_gas_hint_test
+GAS_STATUS	= $(shell $(srctree)/arch/ia64/scripts/check-gas "$(CC)" "$(OBJDUMP)")
+KBUILD_CPPFLAGS += $(shell $(srctree)/arch/ia64/scripts/toolchain-flags "$(CC)" "$(OBJDUMP)" "$(READELF)")
 
-ifneq (, $(shell ls $(CHECK_GAS_FOR_HINT)))
-$(shell rm $(CHECK_GAS_FOR_HINT))
+ifeq ($(GAS_STATUS),buggy)
+$(error Sorry, you need a newer version of the assember, one that is built from	\
+	a source-tree that post-dates 18-Dec-2002.  You can find a pre-compiled	\
+	static binary of such an assembler at:					\
+										\
+		ftp://ftp.hpl.hp.com/pub/linux-ia64/gas-030124.tar.gz)
 endif
 
-CHECK_GAS_CMD:=($(CC) $(MAKE_GAS_HINT_TEST).c -o $(MAKE_GAS_HINT_TEST) && $(MAKE_GAS_HINT_TEST) | $(CC) -c -o $(CHECK_GAS_FOR_HINT) -x assembler -; rm -f $(MAKE_GAS_HINT_TEST))>&/dev/null
-$(shell $(CHECK_GAS_CMD))
-ifneq (, $(shell ls $(CHECK_GAS_FOR_HINT)))
-#Newer version of binutil is detected and "hint" instruction is in the kernel
-$(warning Warning: Found binutils that supports hint instruction)
-FLAGS := $(AFLAGS) -DGAS_HAS_HINT_INSN
-CFLAGS := $(CFLAGS) -DGAS_HAS_HINT_INSN
-else
-$(warning Warning: Please use binutil version 2.14.90.0.4.1 or higher to get the support of hint instruction in kernel.) 
-endif
+KBUILD_CFLAGS += $(cflags-y)
+head-y := arch/ia64/kernel/head.o arch/ia64/kernel/init_task.o
 
-ifneq ($(GCC_VERSION),2)
-	CFLAGS += -frename-registers --param max-inline-insns=5000
-endif
+libs-y				+= arch/ia64/lib/
+core-y				+= arch/ia64/kernel/ arch/ia64/mm/
+core-$(CONFIG_IA64_DIG) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_DIG_VTD) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_GENERIC) 	+= arch/ia64/dig/
+core-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/dig/
+core-$(CONFIG_IA64_HP_ZX1_SWIOTLB) += arch/ia64/dig/
+core-$(CONFIG_IA64_XEN_GUEST)	+= arch/ia64/dig/
+core-$(CONFIG_IA64_SGI_SN2)	+= arch/ia64/sn/
+core-$(CONFIG_IA64_SGI_UV)	+= arch/ia64/uv/
+core-$(CONFIG_KVM) 		+= arch/ia64/kvm/
+core-$(CONFIG_XEN)		+= arch/ia64/xen/
 
-ifeq ($(CONFIG_ITANIUM_BSTEP_SPECIFIC),y)
-	CFLAGS += -mb-step
-endif
+drivers-$(CONFIG_PCI)		+= arch/ia64/pci/
+drivers-$(CONFIG_IA64_HP_SIM)	+= arch/ia64/hp/sim/
+drivers-$(CONFIG_IA64_HP_ZX1)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/
+drivers-$(CONFIG_IA64_HP_ZX1_SWIOTLB) += arch/ia64/hp/common/ arch/ia64/hp/zx1/
+drivers-$(CONFIG_IA64_GENERIC)	+= arch/ia64/hp/common/ arch/ia64/hp/zx1/ arch/ia64/hp/sim/ arch/ia64/sn/ arch/ia64/uv/
+drivers-$(CONFIG_OPROFILE)	+= arch/ia64/oprofile/
 
-ifdef CONFIG_IA64_GENERIC
-	CORE_FILES      :=      arch/$(ARCH)/hp/hp.o			\
-				arch/$(ARCH)/dig/dig.a			\
-				$(CORE_FILES)
-	SUBDIRS		:=	arch/$(ARCH)/hp		\
-				arch/$(ARCH)/dig	\
-				$(SUBDIRS)
+boot := arch/ia64/hp/sim/boot
 
-else # !GENERIC
+PHONY += boot compressed check
 
-ifdef CONFIG_IA64_HP_SIM
-        SUBDIRS         :=      arch/$(ARCH)/hp		\
-                                arch/$(ARCH)/drivers	\
-                                $(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/hp/hp.o	\
-                                $(CORE_FILES)
-        DRIVERS         +=      arch/$(ARCH)/drivers/drivers.o
-endif
+all: compressed unwcheck
 
-ifdef CONFIG_IA64_HP_ZX1
-        SUBDIRS         :=      arch/$(ARCH)/hp				\
-				arch/$(ARCH)/dig			\
-                                $(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/hp/hp.o			\
-				arch/$(ARCH)/dig/dig.a			\
-                                $(CORE_FILES)
-endif
+compressed: vmlinux.gz
 
-ifdef CONFIG_IA64_SGI_SN
-	CFLAGS		+= -DBRINGUP
-        SUBDIRS         :=      arch/$(ARCH)/sn/kernel	\
-				arch/$(ARCH)/sn/io	\
-				arch/$(ARCH)/sn/fakeprom	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/sn/kernel/sn.o	\
-				arch/$(ARCH)/sn/io/sgiio.o	\
-				$(CORE_FILES)
-endif
+vmlinuz: vmlinux.gz
 
-ifdef CONFIG_IA64_SOFTSDV
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
-endif
+vmlinux.gz: vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-ifdef CONFIG_IA64_DIG
-        SUBDIRS         :=      arch/$(ARCH)/dig	\
-				$(SUBDIRS)
-        CORE_FILES      :=      arch/$(ARCH)/dig/dig.a	\
-				$(CORE_FILES)
-endif
-
-endif # !GENERIC
-
-ifdef CONFIG_IA32_SUPPORT
-	SUBDIRS		:=	arch/$(ARCH)/ia32 $(SUBDIRS)
-	CORE_FILES	:=	arch/$(ARCH)/ia32/ia32.o $(CORE_FILES)
-endif
-
-HEAD := arch/$(ARCH)/kernel/head.o arch/ia64/kernel/init_task.o
-
-SUBDIRS := arch/$(ARCH)/tools arch/$(ARCH)/kernel arch/$(ARCH)/mm arch/$(ARCH)/lib $(SUBDIRS)
-CORE_FILES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o $(CORE_FILES)
-
-LIBS := $(TOPDIR)/arch/$(ARCH)/lib/lib.a $(LIBS) \
-	$(TOPDIR)/arch/$(ARCH)/lib/lib.a
-
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
-
-vmlinux: arch/$(ARCH)/vmlinux.lds
-
-arch/$(ARCH)/vmlinux.lds: arch/$(ARCH)/vmlinux.lds.S FORCE
-	$(CPP) -D__ASSEMBLY__ -C -P -I$(HPATH) -I$(HPATH)/asm-$(ARCH) \
-		-traditional arch/$(ARCH)/vmlinux.lds.S > $@
-
-FORCE: ;
-
-compressed: vmlinux
-	$(OBJCOPY) --strip-all vmlinux vmlinux-tmp
-	gzip vmlinux-tmp
-	mv vmlinux-tmp.gz vmlinux.gz
-
-rawboot:
-	@$(MAKEBOOT) rawboot
-
-#
-# My boot writes directly to a specific disk partition, I doubt most
-# people will want to do that without changes..
-#
-msb my-special-boot:
-	@$(MAKEBOOT) msb
-
-bootimage:
-	@$(MAKEBOOT) bootimage
-
-srmboot:
-	@$(MAKEBOOT) srmboot
+unwcheck: vmlinux
+	-$(Q)READELF=$(READELF) python $(srctree)/arch/ia64/scripts/unwcheck.py $<
 
 archclean:
-	@$(MAKEBOOT) clean
+	$(Q)$(MAKE) $(clean)=$(boot)
 
-check: vmlinux
-	arch/ia64/scripts/unwcheck.sh vmlinux
+CLEAN_FILES += vmlinux.gz bootloader
 
-archmrproper:
-	rm -f arch/$(ARCH)/vmlinux.lds vmlinux-tmp vmlinux.gz
-	@$(MAKE) -C arch/$(ARCH)/tools mrproper
+boot:	lib/lib.a vmlinux
+	$(Q)$(MAKE) $(build)=$(boot) $@
 
-archdep:
-	@$(MAKEBOOT) dep
+install: vmlinux.gz
+	sh $(srctree)/arch/ia64/install.sh $(KERNELRELEASE) $< System.map "$(INSTALL_PATH)"
 
-bootpfile:
-	@$(MAKEBOOT) bootpfile
+define archhelp
+  echo '* compressed	- Build compressed kernel image'
+  echo '  install	- Install compressed kernel image'
+  echo '  boot		- Build vmlinux and bootloader for Ski simulator'
+  echo '* unwcheck	- Check vmlinux for invalid unwind info'
+endef
+
+archprepare: make_nr_irqs_h FORCE
+PHONY += make_nr_irqs_h FORCE
+
+make_nr_irqs_h: FORCE
+	$(Q)$(MAKE) $(build)=arch/ia64/kernel include/generated/nr-irqs.h

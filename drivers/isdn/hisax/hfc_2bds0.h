@@ -1,29 +1,29 @@
-/* $Id: hfc_2bds0.h,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+/* $Id: hfc_2bds0.h,v 1.6.2.2 2004/01/12 22:52:26 keil Exp $
  *
  * specific defines for CCD's HFC 2BDS0
  *
  * Author       Karsten Keil
  * Copyright    by Karsten Keil      <keil@isdn4linux.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define HFCD_CIRM  	0x18
+#define HFCD_CIRM	0x18
 #define HFCD_CTMT	0x19
-#define HFCD_INT_M1  	0x1A
-#define HFCD_INT_M2  	0x1B
-#define HFCD_INT_S1  	0x1E
-#define HFCD_STAT  	0x1C
-#define HFCD_STAT_DISB  0x1D
-#define HFCD_STATES  	0x30
-#define HFCD_SCTRL  	0x31
-#define HFCD_TEST  	0x32
-#define HFCD_SQ  	0x34
-#define HFCD_CLKDEL  	0x37
+#define HFCD_INT_M1	0x1A
+#define HFCD_INT_M2	0x1B
+#define HFCD_INT_S1	0x1E
+#define HFCD_STAT	0x1C
+#define HFCD_STAT_DISB	0x1D
+#define HFCD_STATES	0x30
+#define HFCD_SCTRL	0x31
+#define HFCD_TEST	0x32
+#define HFCD_SQ		0x34
+#define HFCD_CLKDEL	0x37
 #define HFCD_MST_MODE	0x2E
-#define HFCD_CONN  	0x2F
+#define HFCD_CONN	0x2F
 
 #define HFCD_FIFO	0x80
 #define HFCD_Z1		0x10
@@ -79,7 +79,7 @@
 #define HFCD_TRANSB1 0x01
 
 /* CIRM (Write) */
-#define HFCD_RESET  	0x08
+#define HFCD_RESET	0x08
 #define HFCD_MEM8K	0x10
 #define HFCD_INTA	0x01
 #define HFCD_INTB	0x02

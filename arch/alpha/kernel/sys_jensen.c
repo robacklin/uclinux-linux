@@ -15,7 +15,6 @@
 #include <linux/init.h>
 
 #include <asm/ptrace.h>
-#include <asm/system.h>
 
 #define __EXTERN_INLINE inline
 #include <asm/io.h>
@@ -26,6 +25,7 @@
 #include <asm/irq.h>
 #include <asm/mmu_context.h>
 #include <asm/pgtable.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -61,74 +61,39 @@
  * world.
  */
 
-static unsigned int
-jensen_local_startup(unsigned int irq)
+static void
+jensen_local_enable(struct irq_data *d)
 {
 	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_startup_irq(1);
-	else
-		/*
-		 * For all true local interrupts, set the flag that prevents
-		 * the IPL from being dropped during handler processing.
-		 */
-		if (irq_desc[irq].action)
-			irq_desc[irq].action->flags |= SA_INTERRUPT;
-	return 0;
+	if (d->irq == 7)
+		i8259a_enable_irq(d);
 }
 
 static void
-jensen_local_shutdown(unsigned int irq)
+jensen_local_disable(struct irq_data *d)
 {
 	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_disable_irq(1);
+	if (d->irq == 7)
+		i8259a_disable_irq(d);
 }
 
 static void
-jensen_local_enable(unsigned int irq)
+jensen_local_mask_ack(struct irq_data *d)
 {
 	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_enable_irq(1);
+	if (d->irq == 7)
+		i8259a_mask_and_ack_irq(d);
 }
 
-static void
-jensen_local_disable(unsigned int irq)
-{
-	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_disable_irq(1);
-}
-
-static void
-jensen_local_ack(unsigned int irq)
-{
-	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_mask_and_ack_irq(1);
-}
-
-static void
-jensen_local_end(unsigned int irq)
-{
-	/* the parport is really hw IRQ 1, silly Jensen.  */
-	if (irq == 7)
-		i8259a_end_irq(1);
-}
-
-static struct hw_interrupt_type jensen_local_irq_type = {
-	typename:	"LOCAL",
-	startup:	jensen_local_startup,
-	shutdown:	jensen_local_shutdown,
-	enable:		jensen_local_enable,
-	disable:	jensen_local_disable,
-	ack:		jensen_local_ack,
-	end:		jensen_local_end,
+static struct irq_chip jensen_local_irq_type = {
+	.name		= "LOCAL",
+	.irq_unmask	= jensen_local_enable,
+	.irq_mask	= jensen_local_disable,
+	.irq_mask_ack	= jensen_local_mask_ack,
 };
 
 static void 
-jensen_device_interrupt(unsigned long vector, struct pt_regs * regs)
+jensen_device_interrupt(unsigned long vector)
 {
 	int irq;
 
@@ -157,7 +122,7 @@ jensen_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	}
 
 	/* If there is no handler yet... */
-	if (irq_desc[irq].action == NULL) {
+	if (!irq_has_action(irq)) {
 	    /* If it is a local interrupt that cannot be masked... */
 	    if (vector >= 0x900)
 	    {
@@ -188,7 +153,7 @@ jensen_device_interrupt(unsigned long vector, struct pt_regs * regs)
           if (cc - last_msg > ((JENSEN_CYCLES_PER_SEC) * 3) ||
 	      irq != last_irq) {
                 printk(KERN_CRIT " irq %d count %d cc %u @ %lx\n",
-                       irq, count, cc-last_cc, regs->pc);
+                       irq, count, cc-last_cc, get_irq_regs()->pc);
                 count = 0;
                 last_msg = cc;
                 last_irq = irq;
@@ -197,7 +162,7 @@ jensen_device_interrupt(unsigned long vector, struct pt_regs * regs)
         }
 #endif
 
-	handle_irq(irq, regs);
+	handle_irq(irq);
 }
 
 static void __init
@@ -205,11 +170,11 @@ jensen_init_irq(void)
 {
 	init_i8259a_irqs();
 
-	irq_desc[1].handler = &jensen_local_irq_type;
-	irq_desc[4].handler = &jensen_local_irq_type;
-	irq_desc[3].handler = &jensen_local_irq_type;
-	irq_desc[7].handler = &jensen_local_irq_type;
-	irq_desc[9].handler = &jensen_local_irq_type;
+	irq_set_chip_and_handler(1, &jensen_local_irq_type, handle_level_irq);
+	irq_set_chip_and_handler(4, &jensen_local_irq_type, handle_level_irq);
+	irq_set_chip_and_handler(3, &jensen_local_irq_type, handle_level_irq);
+	irq_set_chip_and_handler(7, &jensen_local_irq_type, handle_level_irq);
+	irq_set_chip_and_handler(9, &jensen_local_irq_type, handle_level_irq);
 
 	common_init_isa_dma();
 }
@@ -218,6 +183,11 @@ static void __init
 jensen_init_arch(void)
 {
 	struct pci_controller *hose;
+#ifdef CONFIG_PCI
+	static struct pci_dev fake_isa_bridge = { .dma_mask = 0xffffffffUL, };
+
+	isa_bridge = &fake_isa_bridge;
+#endif
 
 	/* Create a hose so that we can report i/o base addresses to
 	   userland.  */
@@ -238,34 +208,32 @@ jensen_init_arch(void)
 }
 
 static void
-jensen_machine_check (u64 vector, u64 la, struct pt_regs *regs)
+jensen_machine_check(unsigned long vector, unsigned long la)
 {
 	printk(KERN_CRIT "Machine check\n");
 }
-
-#define jensen_pci_tbi	((void*)0)
-
 
 /*
  * The System Vector
  */
 
 struct alpha_machine_vector jensen_mv __initmv = {
-	vector_name:		"Jensen",
+	.vector_name		= "Jensen",
 	DO_EV4_MMU,
 	IO_LITE(JENSEN,jensen),
-	BUS(jensen),
-	machine_check:		jensen_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	rtc_port:		0x170,
+	.machine_check		= jensen_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.rtc_port		= 0x170,
+	.rtc_get_time		= common_get_rtc_time,
+	.rtc_set_time		= common_set_rtc_time,
 
-	nr_irqs:		16,
-	device_interrupt:	jensen_device_interrupt,
+	.nr_irqs		= 16,
+	.device_interrupt	= jensen_device_interrupt,
 
-	init_arch:		jensen_init_arch,
-	init_irq:		jensen_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		NULL,
-	kill_arch:		NULL,
+	.init_arch		= jensen_init_arch,
+	.init_irq		= jensen_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= NULL,
+	.kill_arch		= NULL,
 };
 ALIAS_MV(jensen)

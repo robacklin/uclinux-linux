@@ -1,6 +1,8 @@
 #ifndef _SCSI_GENERIC_H
 #define _SCSI_GENERIC_H
 
+#include <linux/compiler.h>
+
 /*
    History:
     Started: Aug 9 by Lawrence Foard (entropy@world.std.com), to allow user
@@ -9,47 +11,12 @@
 Original driver (sg.h):
 *       Copyright (C) 1992 Lawrence Foard
 Version 2 and 3 extensions to driver:
-*       Copyright (C) 1998 - 2003 Douglas Gilbert
+*       Copyright (C) 1998 - 2006 Douglas Gilbert
 
-    Version: 3.1.25 (20030529)
-    This version is for 2.4 series kernels.
+    Version: 3.5.34 (20060920)
+    This version is for 2.6 series kernels.
 
-    Changes since 3.1.24 (20020505)
-	- fix side effect introduced by last "off by one" fix
-    Changes since 3.1.23 (20020318)
-	- off by one fix for last scatter gather element
-	- zero buffer obtained for non-root users
-    Changes since 3.1.22 (20011208)
-	- change EACCES to EPERM when O_RDONLY is insufficient
-	- suppress newlines in host string ( /proc/scsi/sg/host_strs output)
-	- fix xfer direction, old interface, short reply_len [Travers Carter]
-    Changes since 3.1.21 (20011029)
-    	- add support for SG_FLAG_MMAP_IO [permit mmap() on sg devices]
-    	- update documentation pointers in this header
-    	- put KERNEL_VERSION macros around code that breaks early 2.4 series
-    	- fix use count for multiple queued requests on closed fd
-    	- switch back to alloc_kiovec()
-    Changes since 3.1.20 (20010814)
-	- use alloc_kiovec_sz() to speed dio [set num_buffer_heads==0]
-	- changes to cope with larger scatter gather element sizes
-	- clean up some printk()s
-	- add MODULE_LICENSE("GPL") [in a 3.1.20 subversion]
-	- fix race around generic_unplug_device() [in a 3.1.20 subversion]
-    Changes since 3.1.19 (20010623)
-	- add SG_GET_ACCESS_COUNT ioctl 
-	- make open() increment and close() decrement access_count
-	- only register first 256 devices, reject subsequent devices
-    Changes since 3.1.18 (20010505)
-	- fix bug that caused long wait when large buffer requested
-	- fix leak in error case of sg_new_read() [report: Eric Barton]
-	- add 'online' column to /proc/scsi/sg/devices
-    Changes since 3.1.17 (20000921)
-    	- add CAP_SYS_RAWIO capability for sensitive stuff
-    	- compile in dio stuff, procfs 'allow_dio' defaulted off (0)
-	- make premature close and detach more robust
-	- lun masked into commands <= SCSI_2
-	- poll() and async notification now yield POLL_HUP on detach
-	- various 3rd party tweaks tracking lk 2.4 internal changes
+    For a full changelog see http://www.torque.net/sg
 
 Map of SG verions to the Linux kernels in which they appear:
        ----------        ----------------------------------
@@ -57,6 +24,7 @@ Map of SG verions to the Linux kernels in which they appear:
        2.1.40            2.2.20
        3.0.x             optional version 3 sg driver for 2.2 series
        3.1.17++          2.4.0++
+       3.5.30++          2.6.0++
 
 Major new features in SG 3.x driver (cf SG 2.x drivers)
 	- SG_IO ioctl() combines function if write() and read()
@@ -67,14 +35,15 @@ Major new features in SG 3.x driver (cf SG 2.x drivers)
  data into kernel buffers and then use the CPU to copy the data into the 
  user space (vice versa for writes). That is called "indirect" IO due to 
  the double handling of data. There are two methods offered to remove the
- redundant copy: 1) direct IO which uses the kernel kiobuf mechanism and 
- 2) using the mmap() system call to map the reserve buffer (this driver has 
- one reserve buffer per fd) into the user space. Both have their advantages.
+ redundant copy: 1) direct IO and 2) using the mmap() system call to map
+ the reserve buffer (this driver has one reserve buffer per fd) into the
+ user space. Both have their advantages.
  In terms of absolute speed mmap() is faster. If speed is not a concern, 
  indirect IO should be fine. Read the documentation for more information.
 
- ** N.B. To use direct IO 'echo 1 > /proc/scsi/sg/allow_dio' may be
-         needed. That pseudo file's content is defaulted to 0. **
+ ** N.B. To use direct IO 'echo 1 > /proc/scsi/sg/allow_dio' or
+         'echo 1 > /sys/module/sg/parameters/allow_dio' is needed.
+         That attribute is 0 by default. **
  
  Historical note: this SCSI pass-through driver has been known as "sg" for 
  a decade. In broader kernel discussions "sg" is used to refer to scatter
@@ -88,28 +57,28 @@ Major new features in SG 3.x driver (cf SG 2.x drivers)
  	http://www.torque.net/sg/p/sg_v3_ho.html
  This is a rendering from DocBook source [change the extension to "sgml"
  or "xml"]. There are renderings in "ps", "pdf", "rtf" and "txt" (soon).
+ The SG_IO ioctl is now found in other parts kernel (e.g. the block layer).
+ For more information see http://www.torque.net/sg/sg_io.html
 
  The older, version 2 documents discuss the original sg interface in detail:
 	http://www.torque.net/sg/p/scsi-generic.txt
 	http://www.torque.net/sg/p/scsi-generic_long.txt
- A version of this document (potentially out of date) may also be found in
- the kernel source tree, probably at:
-        /usr/src/linux/Documentation/scsi-generic.txt .
+ Also available: <kernel_source>/Documentation/scsi/scsi-generic.txt
 
  Utility and test programs are available at the sg web site. They are 
- bundled as sg_utils (for the lk 2.2 series) and sg3_utils (for the
- lk 2.4 series).
-
- There is a HOWTO on the Linux SCSI subsystem in the lk 2.4 series at:
- 	http://www.linuxdoc.org/HOWTO/SCSI-2.4-HOWTO
+ packaged as sg3_utils (for the lk 2.4 and 2.6 series) and sg_utils
+ (for the lk 2.2 series).
 */
 
+#ifdef __KERNEL__
+extern int sg_big_buff; /* for sysctl */
+#endif
 
 /* New interface introduced in the 3.x SG drivers follows */
 
 typedef struct sg_iovec /* same structure as used by readv() Linux system */
 {                       /* call. It defines one scatter-gather element. */
-    void * iov_base;            /* Starting address  */
+    void __user *iov_base;      /* Starting address  */
     size_t iov_len;             /* Length in bytes  */
 } sg_iovec_t;
 
@@ -122,14 +91,14 @@ typedef struct sg_io_hdr
     unsigned char mx_sb_len;    /* [i] max length to write to sbp */
     unsigned short iovec_count; /* [i] 0 implies no scatter gather */
     unsigned int dxfer_len;     /* [i] byte count of data transfer */
-    void * dxferp;              /* [i], [*io] points to data transfer memory
+    void __user *dxferp;	/* [i], [*io] points to data transfer memory
 					      or scatter gather list */
-    unsigned char * cmdp;       /* [i], [*i] points to command to perform */
-    unsigned char * sbp;        /* [i], [*o] points to sense_buffer memory */
+    unsigned char __user *cmdp; /* [i], [*i] points to command to perform */
+    void __user *sbp;		/* [i], [*o] points to sense_buffer memory */
     unsigned int timeout;       /* [i] MAX_UINT->no timeout (unit: millisec) */
     unsigned int flags;         /* [i] 0 -> default, see SG_FLAG... */
     int pack_id;                /* [i->o] unused internally (normally) */
-    void * usr_ptr;             /* [i->o] unused internally */
+    void __user * usr_ptr;      /* [i->o] unused internally */
     unsigned char status;       /* [o] scsi status */
     unsigned char masked_status;/* [o] shifted, masked scsi status */
     unsigned char msg_status;   /* [o] messaging level data (optional) */
@@ -140,6 +109,8 @@ typedef struct sg_io_hdr
     unsigned int duration;      /* [o] time taken by cmd (unit: millisec) */
     unsigned int info;          /* [o] auxiliary information */
 } sg_io_hdr_t;  /* 64 bytes long (on i386) */
+
+#define SG_INTERFACE_ID_ORIG 'S'
 
 /* Use negative values to flag difference from original sg_header structure */
 #define SG_DXFER_NONE (-1)      /* e.g. a SCSI Test Unit Ready command */
@@ -153,7 +124,7 @@ typedef struct sg_io_hdr
 
 /* following flag values can be "or"-ed together */
 #define SG_FLAG_DIRECT_IO 1     /* default is indirect IO */
-#define SG_FLAG_LUN_INHIBIT 2   /* default is overwrite lun in SCSI */
+#define SG_FLAG_UNUSED_LUN_INHIBIT 2   /* default is overwrite lun in SCSI */
 				/* command block (when <= SCSI_2) */
 #define SG_FLAG_MMAP_IO 4       /* request memory mapped IO */
 #define SG_FLAG_NO_DXFER 0x10000 /* no transfer of kernel buffers to/from */
@@ -187,7 +158,7 @@ typedef struct sg_req_info { /* used by SG_GET_REQUEST_TABLE ioctl() */
     char sg_io_owned;   /* 0 -> complete with read(), 1 -> owned by SG_IO */
     char problem;       /* 0 -> no problem detected, 1 -> error to report */
     int pack_id;        /* pack_id associated with request */
-    void * usr_ptr;     /* user provided pointer (in new interface) */
+    void __user *usr_ptr;     /* user provided pointer (in new interface) */
     unsigned int duration; /* millisecs elapsed since written (req_state==1)
 			      or request duration (req_state==2) */
     int unused;
@@ -238,6 +209,7 @@ typedef struct sg_req_info { /* used by SG_GET_REQUEST_TABLE ioctl() */
 #define		SG_SCSI_RESET_DEVICE	1
 #define		SG_SCSI_RESET_BUS	2
 #define		SG_SCSI_RESET_HOST	3
+#define		SG_SCSI_RESET_TARGET	4
 
 /* synchronous SCSI command ioctl, (only in version 3 interface) */
 #define SG_IO 0x2285   /* similar effect as write() followed by read() */
@@ -252,15 +224,14 @@ typedef struct sg_req_info { /* used by SG_GET_REQUEST_TABLE ioctl() */
 #define SG_GET_ACCESS_COUNT 0x2289  
 
 
-#define SG_SCATTER_SZ (8 * 4096)  /* PAGE_SIZE not available to user */
+#define SG_SCATTER_SZ (8 * 4096)
 /* Largest size (in bytes) a single scatter-gather list element can have.
-   The value must be a power of 2 and <= (PAGE_SIZE * 32) [131072 bytes on
-   i386]. The minimum value is PAGE_SIZE. If scatter-gather not supported
-   by adapter then this value is the largest data block that can be
-   read/written by a single scsi command. The user can find the value of
-   PAGE_SIZE by calling getpagesize() defined in unistd.h . */
+   The value used by the driver is 'max(SG_SCATTER_SZ, PAGE_SIZE)'.
+   This value should be a power of 2 (and may be rounded up internally).
+   If scatter-gather is not supported by adapter then this value is the
+   largest data block that can be read/written by a single scsi command. */
 
-#define SG_DEFAULT_RETRIES 1
+#define SG_DEFAULT_RETRIES 0
 
 /* Defaults, commented if they differ from original sg driver */
 #define SG_DEF_FORCE_LOW_DMA 0  /* was 1 -> memory below 16MB on i386 */
@@ -327,7 +298,12 @@ struct sg_header
 
 
 /* Defaults, commented if they differ from original sg driver */
-#define SG_DEFAULT_TIMEOUT (60*HZ) /* HZ == 'jiffies in 1 second' */
+#ifdef __KERNEL__
+#define SG_DEFAULT_TIMEOUT_USER	(60*USER_HZ) /* HZ == 'jiffies in 1 second' */
+#else
+#define SG_DEFAULT_TIMEOUT	(60*HZ)	     /* HZ == 'jiffies in 1 second' */
+#endif
+
 #define SG_DEF_COMMAND_Q 0     /* command queuing is always on when
 				  the new interface is used */
 #define SG_DEF_UNDERRUN_FLAG 0

@@ -11,6 +11,7 @@
 
 #include <linux/linkage.h>
 #include <linux/sched.h>
+#include <linux/errno.h>
 #include <asm/ptrace.h>
 
 #define CCR_MASK  0x6f
@@ -21,7 +22,7 @@
    specially (see get_reg/put_reg below). */
 static const int h8300_register_offset[] = {
 	PT_REG(er1), PT_REG(er2), PT_REG(er3), PT_REG(er4),
-	PT_REG(er5), SW_REG(er6), PT_REG(er0), PT_REG(orig_er0),
+	PT_REG(er5), PT_REG(er6), PT_REG(er0), PT_REG(orig_er0),
 	PT_REG(ccr), PT_REG(pc),  0,           PT_REG(exr)
 };
 
@@ -33,10 +34,9 @@ long h8300_get_reg(struct task_struct *task, int regno)
 		return task->thread.usp + sizeof(long)*2 + 2;
 	case PT_CCR:
 	case PT_EXR:
-		return *(unsigned short *)(task->thread.esp0 + h8300_register_offset[regno]);
+	    return *(unsigned short *)(task->thread.esp0 + h8300_register_offset[regno]);
 	default:
-		printk("get_reg %d=%08x\n",regno,*(unsigned long *)(task->thread.esp0 + h8300_register_offset[regno]));
-		return *(unsigned long *)(task->thread.esp0 + h8300_register_offset[regno]);
+	    return *(unsigned long *)(task->thread.esp0 + h8300_register_offset[regno]);
 	}
 }
 
@@ -65,13 +65,13 @@ int h8300_put_reg(struct task_struct *task, int regno, unsigned long data)
 }
 
 /* disable singlestep */
-void h8300_disable_trace(struct task_struct *child)
+void user_disable_single_step(struct task_struct *child)
 {
 	*(unsigned short *)(child->thread.esp0 + h8300_register_offset[PT_EXR]) &= ~EXR_TRACE;
 }
 
 /* enable singlestep */
-void h8300_enable_trace(struct task_struct *child)
+void user_enable_single_step(struct task_struct *child)
 {
 	*(unsigned short *)(child->thread.esp0 + h8300_register_offset[PT_EXR]) |= EXR_TRACE;
 }

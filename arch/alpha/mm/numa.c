@@ -6,21 +6,20 @@
  *  Copyright (C) 2001 Andrea Arcangeli <andrea@suse.de> SuSE
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/bootmem.h>
 #include <linux/swap.h>
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
-#endif
+#include <linux/initrd.h>
+#include <linux/pfn.h>
+#include <linux/module.h>
 
 #include <asm/hwrpb.h>
 #include <asm/pgalloc.h>
 
-plat_pg_data_t *plat_node_data[MAX_NUMNODES];
-bootmem_data_t plat_node_bdata[MAX_NUMNODES];
+pg_data_t node_data[MAX_NUMNODES];
+EXPORT_SYMBOL(node_data);
 
 #undef DEBUG_DISCONTIG
 #ifdef DEBUG_DISCONTIG
@@ -29,12 +28,9 @@ bootmem_data_t plat_node_bdata[MAX_NUMNODES];
 #define DBGDCONT(args...)
 #endif
 
-#define PFN_UP(x)       (((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)     ((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)     ((x) << PAGE_SHIFT)
-#define for_each_mem_cluster(memdesc, cluster, i)		\
-	for ((cluster) = (memdesc)->cluster, (i) = 0;		\
-	     (i) < (memdesc)->numclusters; (i)++, (cluster)++)
+#define for_each_mem_cluster(memdesc, _cluster, i)		\
+	for ((_cluster) = (memdesc)->cluster, (i) = 0;		\
+	     (i) < (memdesc)->numclusters; (i)++, (_cluster)++)
 
 static void __init show_mem_layout(void)
 {
@@ -66,12 +62,12 @@ setup_memory_node(int nid, void *kernel_end)
 	unsigned long node_pfn_start, node_pfn_end;
 	unsigned long node_min_pfn, node_max_pfn;
 	int i;
-	unsigned long node_datasz = PFN_UP(sizeof(plat_pg_data_t));
+	unsigned long node_datasz = PFN_UP(sizeof(pg_data_t));
 	int show_init = 0;
 
 	/* Find the bounds of current node */
-	node_pfn_start = (NODE_MEM_START(nid)) >> PAGE_SHIFT;
-	node_pfn_end = node_pfn_start + (NODE_MEM_SIZE(nid) >> PAGE_SHIFT);
+	node_pfn_start = (node_mem_start(nid)) >> PAGE_SHIFT;
+	node_pfn_end = node_pfn_start + (node_mem_size(nid) >> PAGE_SHIFT);
 	
 	/* Find free clusters, and init and free the bootmem accordingly.  */
 	memdesc = (struct memdesc_struct *)
@@ -95,7 +91,7 @@ setup_memory_node(int nid, void *kernel_end)
 
 		if (!show_init) {
 			show_init = 1;
-			printk("Initialing bootmem allocator on Node ID %d\n", nid);
+			printk("Initializing bootmem allocator on Node ID %d\n", nid);
 		}
 		printk(" memcluster %2d, usage %1lx, start %8lu, end %8lu\n",
 		       i, cluster->usage, cluster->start_pfn,
@@ -118,7 +114,7 @@ setup_memory_node(int nid, void *kernel_end)
 			msg_shown = 1;
 			printk("setup: forcing memory size to %ldK (from %ldK).\n",
 			       mem_size_limit << (PAGE_SHIFT - 10),
-			       node_max_pfn   << (PAGE_SHIFT - 10));
+			       node_max_pfn    << (PAGE_SHIFT - 10));
 		}
 		node_max_pfn = mem_size_limit;
 	}
@@ -130,24 +126,26 @@ setup_memory_node(int nid, void *kernel_end)
 	if (node_min_pfn < min_low_pfn)
 		min_low_pfn = node_min_pfn;
 	if (node_max_pfn > max_low_pfn)
-		max_low_pfn = node_max_pfn;
+		max_pfn = max_low_pfn = node_max_pfn;
 
 	num_physpages += node_max_pfn - node_min_pfn;
 
+#if 0 /* we'll try this one again in a little while */
 	/* Cute trick to make sure our local node data is on local memory */
-	PLAT_NODE_DATA(nid) = (plat_pg_data_t *)(__va(node_min_pfn << PAGE_SHIFT));
-	/* Quasi-mark the plat_pg_data_t as in-use */
+	node_data[nid] = (pg_data_t *)(__va(node_min_pfn << PAGE_SHIFT));
+#endif
+	/* Quasi-mark the pg_data_t as in-use */
 	node_min_pfn += node_datasz;
 	if (node_min_pfn >= node_max_pfn) {
-		printk(" not enough mem to reserve PLAT_NODE_DATA");
+		printk(" not enough mem to reserve NODE_DATA");
 		return;
 	}
-	NODE_DATA(nid)->bdata = &plat_node_bdata[nid];
+	NODE_DATA(nid)->bdata = &bootmem_node_data[nid];
 
 	printk(" Detected node memory:   start %8lu, end %8lu\n",
 	       node_min_pfn, node_max_pfn);
 
-	DBGDCONT(" DISCONTIG: plat_node_data[%d]   is at 0x%p\n", nid, PLAT_NODE_DATA(nid));
+	DBGDCONT(" DISCONTIG: node_data[%d]   is at 0x%p\n", nid, NODE_DATA(nid));
 	DBGDCONT(" DISCONTIG: NODE_DATA(%d)->bdata is at 0x%p\n", nid, NODE_DATA(nid)->bdata);
 
 	/* Find the bounds of kernel memory.  */
@@ -158,8 +156,10 @@ setup_memory_node(int nid, void *kernel_end)
 	if (!nid && (node_max_pfn < end_kernel_pfn || node_min_pfn > start_kernel_pfn))
 		panic("kernel loaded out of ram");
 
-	/* Zone start phys-addr must be 2^(MAX_ORDER-1) aligned */
-	node_min_pfn = (node_min_pfn + ((1UL << (MAX_ORDER-1))-1)) & ~((1UL << (MAX_ORDER-1))-1);
+	/* Zone start phys-addr must be 2^(MAX_ORDER-1) aligned.
+	   Note that we round this down, not up - node memory
+	   has much larger alignment than 8Mb, so it's safe. */
+	node_min_pfn &= ~((1UL << (MAX_ORDER-1))-1);
 
 	/* We need to know how many physically contiguous pages
 	   we'll need for the bootmap.  */
@@ -197,7 +197,7 @@ setup_memory_node(int nid, void *kernel_end)
 	}
 
 	if (bootmap_start == -1)
-		panic("couldn't find a contigous place for the bootmap");
+		panic("couldn't find a contiguous place for the bootmap");
 
 	/* Allocate the bootmap and mark the whole MM as reserved.  */
 	bootmap_size = init_bootmem_node(NODE_DATA(nid), bootmap_start,
@@ -241,10 +241,11 @@ setup_memory_node(int nid, void *kernel_end)
 	}
 
 	/* Reserve the bootmap memory.  */
-	reserve_bootmem_node(NODE_DATA(nid), PFN_PHYS(bootmap_start), bootmap_size);
+	reserve_bootmem_node(NODE_DATA(nid), PFN_PHYS(bootmap_start),
+			bootmap_size, BOOTMEM_DEFAULT);
 	printk(" reserving pages %ld:%ld\n", bootmap_start, bootmap_start+PFN_UP(bootmap_size));
 
-	numnodes++;
+	node_set_online(nid);
 }
 
 void __init
@@ -254,7 +255,7 @@ setup_memory(void *kernel_end)
 
 	show_mem_layout();
 
-	numnodes = 0;
+	nodes_clear(node_online_map);
 
 	min_low_pfn = ~0UL;
 	max_low_pfn = 0UL;
@@ -277,9 +278,10 @@ setup_memory(void *kernel_end)
 				       initrd_end,
 				       phys_to_virt(PFN_PHYS(max_low_pfn)));
 		} else {
-			reserve_bootmem_node(NODE_DATA(KVADDR_TO_NID(initrd_start)),
+			nid = kvaddr_to_nid(initrd_start);
+			reserve_bootmem_node(NODE_DATA(nid),
 					     virt_to_phys((void *)initrd_start),
-					     INITRD_SIZE);
+					     INITRD_SIZE, BOOTMEM_DEFAULT);
 		}
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
@@ -300,10 +302,10 @@ void __init paging_init(void)
 	 */
 	dma_local_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
 
-	for (nid = 0; nid < numnodes; nid++) {
-		unsigned long start_pfn = plat_node_bdata[nid].node_boot_start >> PAGE_SHIFT;
-		unsigned long end_pfn = plat_node_bdata[nid].node_low_pfn;
-		unsigned long lmax_mapnr;
+	for_each_online_node(nid) {
+		bootmem_data_t *bdata = &bootmem_node_data[nid];
+		unsigned long start_pfn = bdata->node_min_pfn;
+		unsigned long end_pfn = bdata->node_low_pfn;
 
 		if (dma_local_pfn >= end_pfn - start_pfn)
 			zones_size[ZONE_DMA] = end_pfn - start_pfn;
@@ -311,63 +313,13 @@ void __init paging_init(void)
 			zones_size[ZONE_DMA] = dma_local_pfn;
 			zones_size[ZONE_NORMAL] = (end_pfn - start_pfn) - dma_local_pfn;
 		}
-		free_area_init_node(nid, NODE_DATA(nid), NULL, zones_size, start_pfn<<PAGE_SHIFT, NULL);
-		lmax_mapnr = PLAT_NODE_DATA_STARTNR(nid) + PLAT_NODE_DATA_SIZE(nid);
-		if (lmax_mapnr > max_mapnr) {
-			max_mapnr = lmax_mapnr;
-			DBGDCONT("Grow max_mapnr to %ld\n", max_mapnr);
-		}
+		node_set_state(nid, N_NORMAL_MEMORY);
+		free_area_init_node(nid, zones_size, start_pfn, NULL);
 	}
 
 	/* Initialize the kernel's ZERO_PGE. */
 	memset((void *)ZERO_PGE, 0, PAGE_SIZE);
 }
-
-#define printkdot()					\
-do {							\
-	if (!(i++ % ((100UL*1024*1024)>>PAGE_SHIFT)))	\
-		printk(".");				\
-} while(0)
-
-#define clobber(p, size) memset(page_address(p), 0xaa, (size))
-
-void __init mem_stress(void)
-{
-	LIST_HEAD(x);
-	LIST_HEAD(xx);
-	struct page * p;
-	unsigned long i = 0;
-
-	printk("starting memstress");
-	while ((p = alloc_pages(GFP_ATOMIC, 1))) {
-		clobber(p, PAGE_SIZE*2);
-		list_add(&p->list, &x);
-		printkdot();
-	}
-	while ((p = alloc_page(GFP_ATOMIC))) {
-		clobber(p, PAGE_SIZE);
-		list_add(&p->list, &xx);
-		printkdot();
-	}
-	while (!list_empty(&x)) {
-		p = list_entry(x.next, struct page, list);
-		clobber(p, PAGE_SIZE*2);
-		list_del(x.next);
-		__free_pages(p, 1);
-		printkdot();
-	}
-	while (!list_empty(&xx)) {
-		p = list_entry(xx.next, struct page, list);
-		clobber(p, PAGE_SIZE);
-		list_del(xx.next);
-		__free_pages(p, 0);
-		printkdot();
-	}
-	printk("I'm still alive duh!\n");
-}
-
-#undef printkdot
-#undef clobber
 
 void __init mem_init(void)
 {
@@ -375,23 +327,20 @@ void __init mem_init(void)
 	extern int page_is_ram(unsigned long) __init;
 	extern char _text, _etext, _data, _edata;
 	extern char __init_begin, __init_end;
-	extern unsigned long totalram_pages;
 	unsigned long nid, i;
-	mem_map_t * lmem_map;
-
-	high_memory = (void *) __va(max_mapnr <<PAGE_SHIFT);
+	high_memory = (void *) __va(max_low_pfn << PAGE_SHIFT);
 
 	reservedpages = 0;
-	for (nid = 0; nid < numnodes; nid++) {
+	for_each_online_node(nid) {
 		/*
 		 * This will free up the bootmem, ie, slot 0 memory
 		 */
 		totalram_pages += free_all_bootmem_node(NODE_DATA(nid));
 
-		lmem_map = NODE_MEM_MAP(nid);
-		pfn = NODE_DATA(nid)->node_start_paddr >> PAGE_SHIFT;
-		for (i = 0; i < PLAT_NODE_DATA_SIZE(nid); i++, pfn++)
-			if (page_is_ram(pfn) && PageReserved(lmem_map+i))
+		pfn = NODE_DATA(nid)->node_start_pfn;
+		for (i = 0; i < node_spanned_pages(nid); i++, pfn++)
+			if (page_is_ram(pfn) &&
+			    PageReserved(nid_page_nr(nid, i)))
 				reservedpages++;
 	}
 
@@ -401,7 +350,7 @@ void __init mem_init(void)
 
 	printk("Memory: %luk/%luk available (%luk kernel code, %luk reserved, "
 	       "%luk data, %luk init)\n",
-	       (unsigned long)nr_free_pages() << (PAGE_SHIFT-10),
+	       nr_free_pages() << (PAGE_SHIFT-10),
 	       num_physpages << (PAGE_SHIFT-10),
 	       codesize >> 10,
 	       reservedpages << (PAGE_SHIFT-10),
@@ -410,38 +359,4 @@ void __init mem_init(void)
 #if 0
 	mem_stress();
 #endif
-}
-
-void
-show_mem(void)
-{
-	long i,free = 0,total = 0,reserved = 0;
-	long shared = 0, cached = 0;
-	int nid;
-
-	printk("\nMem-info:\n");
-	show_free_areas();
-	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-	for (nid = 0; nid < numnodes; nid++) {
-		mem_map_t * lmem_map = NODE_MEM_MAP(nid);
-		i = PLAT_NODE_DATA_SIZE(nid);
-		while (i-- > 0) {
-			total++;
-			if (PageReserved(lmem_map+i))
-				reserved++;
-			else if (PageSwapCache(lmem_map+i))
-				cached++;
-			else if (!page_count(lmem_map+i))
-				free++;
-			else
-				shared += atomic_read(&lmem_map[i].count) - 1;
-		}
-	}
-	printk("%ld pages of RAM\n",total);
-	printk("%ld free pages\n",free);
-	printk("%ld reserved pages\n",reserved);
-	printk("%ld pages shared\n",shared);
-	printk("%ld pages swap cached\n",cached);
-	printk("%ld pages in page table cache\n",pgtable_cache_size);
-	show_buffers();
 }

@@ -50,9 +50,11 @@
 #define _LINUX_MWAVEDD_H
 #include "3780i.h"
 #include "tp3780i.h"
+#include "smapi.h"
 #include "mwavepub.h"
 #include <linux/ioctl.h>
 #include <asm/uaccess.h>
+#include <linux/wait.h>
 
 extern int mwave_debug;
 extern int mwave_3780i_irq;
@@ -126,11 +128,7 @@ typedef struct _MWAVE_IPC {
 	BOOLEAN bIsEnabled;
 	BOOLEAN bIsHere;
 	/* entry spin lock */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,0)
 	wait_queue_head_t ipc_wait_queue;
-#else
-	struct wait_queue *ipc_wait_queue;
-#endif
 } MWAVE_IPC;
 
 typedef struct _MWAVE_DEVICE_DATA {
@@ -143,9 +141,12 @@ typedef struct _MWAVE_DEVICE_DATA {
 	BOOLEAN bDSPReset;
 	MWAVE_IPC IPCs[16];
 	BOOLEAN bMwaveDevRegistered;
-	BOOLEAN bProcEntryCreated;
 	short sLine;
+	int nr_registered_attrs;
+	int device_registered;
 
 } MWAVE_DEVICE_DATA, *pMWAVE_DEVICE_DATA;
+
+extern MWAVE_DEVICE_DATA mwave_s_mdd;
 
 #endif

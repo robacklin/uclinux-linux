@@ -11,361 +11,245 @@
  *
  *
  * Changes:
+ *              Steve Whitehouse <steve@chygwyn.com>
+ *              Updated for Thomas Graf's generic rules
  *
  */
-#include <linux/config.h>
-#include <linux/string.h>
 #include <linux/net.h>
-#include <linux/socket.h>
-#include <linux/sockios.h>
 #include <linux/init.h>
-#include <linux/skbuff.h>
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
-#include <linux/proc_fs.h>
 #include <linux/netdevice.h>
-#include <linux/timer.h>
 #include <linux/spinlock.h>
-#include <asm/atomic.h>
-#include <asm/uaccess.h>
+#include <linux/list.h>
+#include <linux/rcupdate.h>
+#include <linux/export.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
+#include <net/flow.h>
+#include <net/fib_rules.h>
 #include <net/dn.h>
 #include <net/dn_fib.h>
 #include <net/dn_neigh.h>
 #include <net/dn_dev.h>
+#include <net/dn_route.h>
+
+static struct fib_rules_ops *dn_fib_rules_ops;
 
 struct dn_fib_rule
 {
-	struct dn_fib_rule	*r_next;
-	atomic_t		r_clntref;
-	u32			r_preference;
-	unsigned char		r_table;
-	unsigned char		r_action;
-	unsigned char		r_dst_len;
-	unsigned char		r_src_len;
-	dn_address		r_src;
-	dn_address		r_srcmask;
-	dn_address		r_dst;
-	dn_address		r_dstmask;
-	u8			r_flags;
-#ifdef CONFIG_DECNET_ROUTE_FWMARK
-	u32			r_fwmark;
-#endif
-	int			r_ifindex;
-	char			r_ifname[IFNAMSIZ];
-	int			r_dead;
+	struct fib_rule		common;
+	unsigned char		dst_len;
+	unsigned char		src_len;
+	__le16			src;
+	__le16			srcmask;
+	__le16			dst;
+	__le16			dstmask;
+	__le16			srcmap;
+	u8			flags;
 };
 
-static struct dn_fib_rule default_rule = {
-	r_clntref:		ATOMIC_INIT(2),
-	r_preference:		0x7fff,
-	r_table:		DN_DEFAULT_TABLE,
-	r_action:		RTN_UNICAST
-};
 
-static struct dn_fib_rule *dn_fib_rules = &default_rule;
-static rwlock_t dn_fib_rules_lock = RW_LOCK_UNLOCKED;
-
-
-int dn_fib_rtm_delrule(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
+int dn_fib_lookup(struct flowidn *flp, struct dn_fib_res *res)
 {
-	struct rtattr **rta = arg;
-	struct rtmsg *rtm = NLMSG_DATA(nlh);
-	struct dn_fib_rule *r, **rp;
-	int err = -ESRCH;
+	struct fib_lookup_arg arg = {
+		.result = res,
+	};
+	int err;
 
-	for(rp=&dn_fib_rules; (r=*rp) != NULL; rp = &r->r_next) {
-		if ((!rta[RTA_SRC-1] || memcmp(RTA_DATA(rta[RTA_SRC-1]), &r->r_src, 2) == 0) &&
-			rtm->rtm_src_len == r->r_src_len &&
-			rtm->rtm_dst_len == r->r_dst_len &&
-			(!rta[RTA_DST-1] || memcmp(RTA_DATA(rta[RTA_DST-1]), &r->r_dst, 2) == 0) &&
-#ifdef CONFIG_DECNET_ROUTE_FWMARK
-			(!rta[RTA_PROTOINFO-1] || memcmp(RTA_DATA(rta[RTA_PROTOINFO-1]), &r->r_fwmark, 4) == 0) &&
-#endif
-			(!rtm->rtm_type || rtm->rtm_type == r->r_action) &&
-			(!rta[RTA_PRIORITY-1] || memcmp(RTA_DATA(rta[RTA_PRIORITY-1]), &r->r_preference, 4) == 0) &&
-			(!rta[RTA_IIF-1] || strcmp(RTA_DATA(rta[RTA_IIF-1]), r->r_ifname) == 0) &&
-			(!rtm->rtm_table || (r && rtm->rtm_table == r->r_table))) {
-
-			err = -EPERM;
-			if (r == &default_rule)
-				break;
-
-			write_lock_bh(&dn_fib_rules_lock);
-			*rp = r->r_next;
-			r->r_dead = 1;
-			write_unlock_bh(&dn_fib_rules_lock);
-			dn_fib_rule_put(r);
-			err = 0;
-			break;
-		}
-	}
+	err = fib_rules_lookup(dn_fib_rules_ops,
+			       flowidn_to_flowi(flp), 0, &arg);
+	res->r = arg.rule;
 
 	return err;
 }
 
-void dn_fib_rule_put(struct dn_fib_rule *r)
+static int dn_fib_rule_action(struct fib_rule *rule, struct flowi *flp,
+			      int flags, struct fib_lookup_arg *arg)
 {
-	if (atomic_dec_and_test(&r->r_clntref)) {
-		if (r->r_dead)
-			kfree(r);
-		else
-			printk(KERN_DEBUG "Attempt to free alive dn_fib_rule\n");
+	struct flowidn *fld = &flp->u.dn;
+	int err = -EAGAIN;
+	struct dn_fib_table *tbl;
+
+	switch(rule->action) {
+	case FR_ACT_TO_TBL:
+		break;
+
+	case FR_ACT_UNREACHABLE:
+		err = -ENETUNREACH;
+		goto errout;
+
+	case FR_ACT_PROHIBIT:
+		err = -EACCES;
+		goto errout;
+
+	case FR_ACT_BLACKHOLE:
+	default:
+		err = -EINVAL;
+		goto errout;
 	}
+
+	tbl = dn_fib_get_table(rule->table, 0);
+	if (tbl == NULL)
+		goto errout;
+
+	err = tbl->lookup(tbl, fld, (struct dn_fib_res *)arg->result);
+	if (err > 0)
+		err = -EAGAIN;
+errout:
+	return err;
 }
 
-
-int dn_fib_rtm_newrule(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
-{
-	struct rtattr **rta = arg;
-	struct rtmsg *rtm = NLMSG_DATA(nlh);
-	struct dn_fib_rule *r, *new_r, **rp;
-	unsigned char table_id;
-
-	if (rtm->rtm_src_len > 16 || rtm->rtm_dst_len > 16)
-		return -EINVAL;
-
-	if (rta[RTA_IIF-1] && RTA_PAYLOAD(rta[RTA_IIF-1]) > IFNAMSIZ)
-		return -EINVAL;
-
-	if (rtm->rtm_type == RTN_NAT)
-		return -EINVAL;
-
-	table_id = rtm->rtm_table;
-	if (table_id == RT_TABLE_UNSPEC) {
-		struct dn_fib_table *tb;
-		if (rtm->rtm_type == RTN_UNICAST) {
-			if ((tb = dn_fib_empty_table()) == NULL)
-				return -ENOBUFS;
-			table_id = tb->n;
-		}
-	}
-
-	new_r = kmalloc(sizeof(*new_r), GFP_KERNEL);
-	if (!new_r)
-		return -ENOMEM;
-	memset(new_r, 0, sizeof(*new_r));
-	if (rta[RTA_SRC-1])
-		memcpy(&new_r->r_src, RTA_DATA(rta[RTA_SRC-1]), 2);
-	if (rta[RTA_DST-1])
-		memcpy(&new_r->r_dst, RTA_DATA(rta[RTA_DST-1]), 2);
-	new_r->r_src_len = rtm->rtm_src_len;
-	new_r->r_dst_len = rtm->rtm_dst_len;
-	new_r->r_srcmask = dnet_make_mask(rtm->rtm_src_len);
-	new_r->r_dstmask = dnet_make_mask(rtm->rtm_dst_len);
-#ifdef CONFIG_DECNET_ROUTE_FWMARK
-	if (rta[RTA_PROTOINFO-1])
-		memcpy(&new_r->r_fwmark, RTA_DATA(rta[RTA_PROTOINFO-1]), 4);
-#endif
-	new_r->r_action = rtm->rtm_type;
-	new_r->r_flags = rtm->rtm_flags;
-	if (rta[RTA_PRIORITY-1])
-		memcpy(&new_r->r_preference, RTA_DATA(rta[RTA_PRIORITY-1]), 4);
-	new_r->r_table = table_id;
-	if (rta[RTA_IIF-1]) {
-		struct net_device *dev;
-		memcpy(new_r->r_ifname, RTA_DATA(rta[RTA_IIF-1]), IFNAMSIZ);
-		new_r->r_ifname[IFNAMSIZ-1] = 0;
-		new_r->r_ifindex = -1;
-		dev = __dev_get_by_name(new_r->r_ifname);
-		if (dev)
-			new_r->r_ifindex = dev->ifindex;
-	}
-
-	rp = &dn_fib_rules;
-	if (!new_r->r_preference) {
-		r = dn_fib_rules;
-		if (r && (r = r->r_next) != NULL) {
-			rp = &dn_fib_rules->r_next;
-			if (r->r_preference)
-				new_r->r_preference = r->r_preference - 1;
-		}
-	}
-
-	while((r=*rp) != NULL) {
-		if (r->r_preference > new_r->r_preference)
-			break;
-		rp = &r->r_next;
-	}
-
-	new_r->r_next = r;
-	atomic_inc(&new_r->r_clntref);
-	write_lock_bh(&dn_fib_rules_lock);
-	*rp = new_r;
-	write_unlock_bh(&dn_fib_rules_lock);
-	return 0;
-}
-
-
-int dn_fib_lookup(struct dn_fib_key *key, struct dn_fib_res *res)
-{
-	struct dn_fib_rule *r, *policy;
-	struct dn_fib_table *tb;
-	dn_address saddr = key->src;
-	dn_address daddr = key->dst;
-	int err;
-
-	read_lock(&dn_fib_rules_lock);
-	for(r = dn_fib_rules; r; r = r->r_next) {
-		if (((saddr^r->r_src) & r->r_srcmask) ||
-		    ((daddr^r->r_dst) & r->r_dstmask) ||
-#ifdef CONFIG_DECNET_ROUTE_FWMARK
-		    (r->r_fwmark && r->r_fwmark != key->fwmark) ||
-#endif
-		    (r->r_ifindex && r->r_ifindex != key->iif))
-			continue;
-
-		switch(r->r_action) {
-			case RTN_UNICAST:
-				policy = r;
-				break;
-			case RTN_UNREACHABLE:
-				read_unlock(&dn_fib_rules_lock);
-				return -ENETUNREACH;
-			default:
-			case RTN_BLACKHOLE:
-				read_unlock(&dn_fib_rules_lock);
-				return -EINVAL;
-			case RTN_PROHIBIT:
-				read_unlock(&dn_fib_rules_lock);
-				return -EACCES;
-		}
-
-		if ((tb = dn_fib_get_table(r->r_table, 0)) == NULL)
-			continue;
-		err = tb->lookup(tb, key, res);
-		if (err == 0) {
-			res->r = policy;
-			if (policy)
-				atomic_inc(&policy->r_clntref);
-			read_unlock(&dn_fib_rules_lock);
-			return 0;
-		}
-		if (err < 0 && err != -EAGAIN) {
-			read_unlock(&dn_fib_rules_lock);
-			return err;
-		}
-	}
-
-	read_unlock(&dn_fib_rules_lock);
-	return -ESRCH;
-}
-
-static void dn_fib_rules_detach(struct net_device *dev)
-{
-	struct dn_fib_rule *r;
-
-	for(r = dn_fib_rules; r; r = r->r_next) {
-		if (r->r_ifindex == dev->ifindex) {
-			write_lock_bh(&dn_fib_rules_lock);
-			r->r_ifindex = -1;
-			write_unlock_bh(&dn_fib_rules_lock);
-		}
-	}
-}
-
-static void dn_fib_rules_attach(struct net_device *dev)
-{
-	struct dn_fib_rule *r;
-
-	for(r = dn_fib_rules; r; r = r->r_next) {
-		if (r->r_ifindex == -1 && strcmp(dev->name, r->r_ifname) == 0) {
-			write_lock_bh(&dn_fib_rules_lock);
-			r->r_ifindex = dev->ifindex;
-			write_unlock_bh(&dn_fib_rules_lock);
-		}
-	}
-}
-
-static int dn_fib_rules_event(struct notifier_block *this, unsigned long event, void *ptr)
-{
-	struct net_device *dev = ptr;
-
-	switch(event) {
-		case NETDEV_UNREGISTER:
-			dn_fib_rules_detach(dev);
-			dn_fib_sync_down(0, dev, 1);
-		case NETDEV_REGISTER:
-			dn_fib_rules_attach(dev);
-			dn_fib_sync_up(dev);
-	}
-
-	return NOTIFY_DONE;
-}
-
-
-static struct notifier_block dn_fib_rules_notifier = {
-	notifier_call:		dn_fib_rules_event,
+static const struct nla_policy dn_fib_rule_policy[FRA_MAX+1] = {
+	FRA_GENERIC_POLICY,
 };
 
-static int dn_fib_fill_rule(struct sk_buff *skb, struct dn_fib_rule *r, struct netlink_callback *cb)
+static int dn_fib_rule_match(struct fib_rule *rule, struct flowi *fl, int flags)
 {
-	struct rtmsg *rtm;
-	struct nlmsghdr *nlh;
-	unsigned char *b = skb->tail;
+	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
+	struct flowidn *fld = &fl->u.dn;
+	__le16 daddr = fld->daddr;
+	__le16 saddr = fld->saddr;
 
+	if (((saddr ^ r->src) & r->srcmask) ||
+	    ((daddr ^ r->dst) & r->dstmask))
+		return 0;
 
-	nlh = NLMSG_PUT(skb, NETLINK_CREDS(cb->skb)->pid, cb->nlh->nlmsg_seq, RTM_NEWRULE, sizeof(*rtm));
-	rtm = NLMSG_DATA(nlh);
-	rtm->rtm_family = AF_DECnet;
-	rtm->rtm_dst_len = r->r_dst_len;
-	rtm->rtm_src_len = r->r_src_len;
-	rtm->rtm_tos = 0;
-#ifdef CONFIG_DECNET_ROUTE_FWMARK
-	if (r->r_fwmark)
-		RTA_PUT(skb, RTA_PROTOINFO, 4, &r->r_fwmark);
-#endif
-	rtm->rtm_table = r->r_table;
-	rtm->rtm_protocol = 0;
-	rtm->rtm_scope = 0;
-	rtm->rtm_type = r->r_action;
-	rtm->rtm_flags = r->r_flags;
-
-	if (r->r_dst_len)
-		RTA_PUT(skb, RTA_DST, 2, &r->r_dst);
-	if (r->r_src_len)
-		RTA_PUT(skb, RTA_SRC, 2, &r->r_src);
-	if (r->r_ifname[0])
-		RTA_PUT(skb, RTA_IIF, IFNAMSIZ, &r->r_ifname);
-	if (r->r_preference)
-		RTA_PUT(skb, RTA_PRIORITY, 4, &r->r_preference);
-	nlh->nlmsg_len = skb->tail - b;
-	return skb->len;
-
-nlmsg_failure:
-rtattr_failure:
-	skb_trim(skb, b - skb->data);
-	return -1;
+	return 1;
 }
 
-int dn_fib_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
+static int dn_fib_rule_configure(struct fib_rule *rule, struct sk_buff *skb,
+				 struct fib_rule_hdr *frh,
+				 struct nlattr **tb)
 {
-	int idx;
-	int s_idx = cb->args[0];
-	struct dn_fib_rule *r;
+	int err = -EINVAL;
+	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
 
-	read_lock(&dn_fib_rules_lock);
-	for(r = dn_fib_rules, idx = 0; r; r = r->r_next, idx++) {
-		if (idx < s_idx)
-			continue;
-		if (dn_fib_fill_rule(skb, r, cb) < 0)
-			break;
+	if (frh->tos)
+		goto  errout;
+
+	if (rule->table == RT_TABLE_UNSPEC) {
+		if (rule->action == FR_ACT_TO_TBL) {
+			struct dn_fib_table *table;
+
+			table = dn_fib_empty_table();
+			if (table == NULL) {
+				err = -ENOBUFS;
+				goto errout;
+			}
+
+			rule->table = table->n;
+		}
 	}
-	read_unlock(&dn_fib_rules_lock);
-	cb->args[0] = idx;
 
-	return skb->len;
+	if (frh->src_len)
+		r->src = nla_get_le16(tb[FRA_SRC]);
+
+	if (frh->dst_len)
+		r->dst = nla_get_le16(tb[FRA_DST]);
+
+	r->src_len = frh->src_len;
+	r->srcmask = dnet_make_mask(r->src_len);
+	r->dst_len = frh->dst_len;
+	r->dstmask = dnet_make_mask(r->dst_len);
+	err = 0;
+errout:
+	return err;
 }
+
+static int dn_fib_rule_compare(struct fib_rule *rule, struct fib_rule_hdr *frh,
+			       struct nlattr **tb)
+{
+	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
+
+	if (frh->src_len && (r->src_len != frh->src_len))
+		return 0;
+
+	if (frh->dst_len && (r->dst_len != frh->dst_len))
+		return 0;
+
+	if (frh->src_len && (r->src != nla_get_le16(tb[FRA_SRC])))
+		return 0;
+
+	if (frh->dst_len && (r->dst != nla_get_le16(tb[FRA_DST])))
+		return 0;
+
+	return 1;
+}
+
+unsigned dnet_addr_type(__le16 addr)
+{
+	struct flowidn fld = { .daddr = addr };
+	struct dn_fib_res res;
+	unsigned ret = RTN_UNICAST;
+	struct dn_fib_table *tb = dn_fib_get_table(RT_TABLE_LOCAL, 0);
+
+	res.r = NULL;
+
+	if (tb) {
+		if (!tb->lookup(tb, &fld, &res)) {
+			ret = res.type;
+			dn_fib_res_put(&res);
+		}
+	}
+	return ret;
+}
+
+static int dn_fib_rule_fill(struct fib_rule *rule, struct sk_buff *skb,
+			    struct fib_rule_hdr *frh)
+{
+	struct dn_fib_rule *r = (struct dn_fib_rule *)rule;
+
+	frh->dst_len = r->dst_len;
+	frh->src_len = r->src_len;
+	frh->tos = 0;
+
+	if (r->dst_len)
+		NLA_PUT_LE16(skb, FRA_DST, r->dst);
+	if (r->src_len)
+		NLA_PUT_LE16(skb, FRA_SRC, r->src);
+
+	return 0;
+
+nla_put_failure:
+	return -ENOBUFS;
+}
+
+static void dn_fib_rule_flush_cache(struct fib_rules_ops *ops)
+{
+	dn_rt_cache_flush(-1);
+}
+
+static const struct fib_rules_ops __net_initdata dn_fib_rules_ops_template = {
+	.family		= AF_DECnet,
+	.rule_size	= sizeof(struct dn_fib_rule),
+	.addr_size	= sizeof(u16),
+	.action		= dn_fib_rule_action,
+	.match		= dn_fib_rule_match,
+	.configure	= dn_fib_rule_configure,
+	.compare	= dn_fib_rule_compare,
+	.fill		= dn_fib_rule_fill,
+	.default_pref	= fib_default_rule_pref,
+	.flush_cache	= dn_fib_rule_flush_cache,
+	.nlgroup	= RTNLGRP_DECnet_RULE,
+	.policy		= dn_fib_rule_policy,
+	.owner		= THIS_MODULE,
+	.fro_net	= &init_net,
+};
 
 void __init dn_fib_rules_init(void)
 {
-	register_netdevice_notifier(&dn_fib_rules_notifier);
+	dn_fib_rules_ops =
+		fib_rules_register(&dn_fib_rules_ops_template, &init_net);
+	BUG_ON(IS_ERR(dn_fib_rules_ops));
+	BUG_ON(fib_default_rule_add(dn_fib_rules_ops, 0x7fff,
+			            RT_TABLE_MAIN, 0));
 }
 
 void __exit dn_fib_rules_cleanup(void)
 {
-	unregister_netdevice_notifier(&dn_fib_rules_notifier);
+	fib_rules_unregister(dn_fib_rules_ops);
+	rcu_barrier();
 }
 
 

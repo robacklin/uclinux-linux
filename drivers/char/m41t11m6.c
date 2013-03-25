@@ -8,7 +8,6 @@
 
 /*****************************************************************************/
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/miscdevice.h>
 #include <linux/init.h>
@@ -19,9 +18,9 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/rtc.h>
-#include <asm/hardware.h>
+#include <linux/bcd.h>
+#include <mach/hardware.h>
 #include <asm/uaccess.h>
-#include <asm/semaphore.h>
 
 /*****************************************************************************/
 
@@ -92,18 +91,27 @@ static inline void gpio_line_get(int line, int *val)
 }
 
 /*****************************************************************************/
-#elif defined(CONFIG_MACH_CM41xx) || defined(CONFIG_MACH_CM4008)
+#elif defined(CONFIG_MACH_CM41xx) || defined(CONFIG_MACH_CM4008) || \
+      defined(CONFIG_MACH_IM42xx) || defined(CONFIG_MACH_IM4004)
 /*****************************************************************************/
 
 #include <asm/io.h>
+#include <mach/regs-gpio.h>
 
 /*
- *	GPIO lines 6, 7 and 8 are used for the RTC.
+ *	GPIO lines 6, 7 and 8 are used for the RTC (except IM4004).
  */
+#ifdef CONFIG_MACH_IM4004
+#define SDAT	5		/* SDA transmit */
+#define SDAR	6		/* SDA receiver */
+#define SCL	7		/* SCL - clock */
+#define SDA	SDAR
+#else
 #define	SDAT	6		/* SDA transmit */
 #define	SDAR	7		/* SDA receiver */
 #define	SCL	8		/* SCL - clock */
 #define	SDA	SDAR
+#endif
 
 #define IN	0
 #define OUT	1
@@ -112,8 +120,8 @@ static inline void gpio_line_get(int line, int *val)
 #define	SDAR_B	(1 << SDAR)
 #define	SCL_B	(1 << SCL)
 
-static volatile unsigned int *gpdatap = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_DATA);
-static volatile unsigned int *gpmodep = (volatile unsigned int *) (IO_ADDRESS(KS8695_IO_BASE) + KS8695_GPIO_MODE);
+static volatile unsigned int *gpdatap = (volatile unsigned int *) (KS8695_GPIO_VA + KS8695_IOPD);
+static volatile unsigned int *gpmodep = (volatile unsigned int *) (KS8695_GPIO_VA + KS8695_IOPM);
 
 static inline void gpio_line_config(int line, int dir)
 {
@@ -153,13 +161,13 @@ static inline void gpio_line_get(int line, int *val)
 /*****************************************************************************/
 
 /*
- *	The IIC lines to the M41T11M6 are GPIO lines from the IXP425.
+ *	The IIC lines to the M41T11M6 are GPIO lines from the IXP4xx.
  *	The clock line is on GPIO12, and the data line on GPIO11.
  */
-#define	SDA	IXP425_GPIO_PIN_11
-#define	SCL	IXP425_GPIO_PIN_12
-#define	IN	IXP425_GPIO_IN
-#define	OUT	IXP425_GPIO_OUT
+#define	SDA	11
+#define	SCL	12
+#define	IN	IXP4XX_GPIO_IN
+#define	OUT	IXP4XX_GPIO_OUT
 
 /*****************************************************************************/
 #endif
@@ -234,7 +242,8 @@ unsigned int m41t11m6_recvbits(void)
 }
 
 /*****************************************************************************/
-DECLARE_MUTEX(m41t11m6_sem);
+
+DEFINE_SEMAPHORE(m41t11m6_sem);
 
 /* 
  *	The read byte sequenece is actually a write sequence followed
@@ -318,7 +327,7 @@ void m41t11m6_setup(void)
 {
 	down(&m41t11m6_sem);
 
-	/* Initially set the IIC lines to be outputs from the IXP425 */
+	/* Initially set the IIC lines to be outputs from the IXP4xx */
 	gpio_line_config(SCL, OUT);
 	gpio_line_config(SDA, OUT);
 
@@ -331,20 +340,7 @@ void m41t11m6_setup(void)
 
 /*****************************************************************************/
 
-int bcd2bin(int val)
-{
-	return ((((val & 0xf0) >> 4) * 10) + (val & 0xf));
-}
-
-int bin2bcd(int val)
-{
-	val &= 0xff;
-	return (((val / 10) << 4) + (val % 10));
-}
-
-/*****************************************************************************/
-
-static ssize_t m41t11m6_read(struct file *fp, char *buf, size_t count, loff_t *ptr)
+static ssize_t m41t11m6_read(struct file *fp, char __user *buf, size_t count, loff_t *ptr)
 {
 	int total;
 
@@ -367,7 +363,7 @@ static ssize_t m41t11m6_read(struct file *fp, char *buf, size_t count, loff_t *p
 
 /*****************************************************************************/
 
-static ssize_t m41t11m6_write(struct file *fp, const char *buf, size_t count, loff_t *ptr)
+static ssize_t m41t11m6_write(struct file *fp, const char __user *buf, size_t count, loff_t *ptr)
 {
 	int total;
 	char val;
@@ -421,6 +417,8 @@ static void m41t11m6_validatetime(struct rtc_time *rtime)
 
 static void m41t11m6_readtime(struct rtc_time *rtime)
 {
+	unsigned char bs;
+
 	memset(rtime, 0, sizeof(*rtime));
 	rtime->tm_year = bcd2bin(m41t11m6_readbyte(M41T11M6_YEAR)) +
 		((m41t11m6_readbyte(M41T11M6_HOUR) & 0x40) ? 100 : 0);
@@ -429,7 +427,14 @@ static void m41t11m6_readtime(struct rtc_time *rtime)
 	rtime->tm_wday = bcd2bin(m41t11m6_readbyte(M41T11M6_WDAY) & 0x7) - 1;
 	rtime->tm_hour = bcd2bin(m41t11m6_readbyte(M41T11M6_HOUR) & 0x3f);
 	rtime->tm_min = bcd2bin(m41t11m6_readbyte(M41T11M6_MIN) & 0x7f);
-	rtime->tm_sec = bcd2bin(m41t11m6_readbyte(M41T11M6_SEC) & 0x7f);
+	bs = m41t11m6_readbyte(M41T11M6_SEC);
+	rtime->tm_sec = bcd2bin(bs & 0x7f);
+#if 0
+	if (bs & 0x80) {
+		printk("M41T11M6: clock not running? restarting...\n");
+		m41t11m6_writebyte(M41T11M6_SEC, (bs & 0x7f));
+	}
+#endif
 }
 
 /*****************************************************************************/
@@ -449,7 +454,7 @@ static void m41t11m6_settime(struct rtc_time *rtime)
 
 /*****************************************************************************/
 
-static int m41t11m6_ioctl(struct inode *inode, struct file *file, unsigned cmd, unsigned long arg)
+static long m41t11m6_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
 	struct rtc_time rtime;
 
@@ -462,16 +467,16 @@ static int m41t11m6_ioctl(struct inode *inode, struct file *file, unsigned cmd, 
 	case RTC_RD_TIME:
 		m41t11m6_readtime(&rtime);
 		m41t11m6_validatetime(&rtime);
-		if (copy_to_user((void *) arg, &rtime, sizeof(rtime)))
+		if (copy_to_user((void __user *) arg, &rtime, sizeof(rtime)))
 			return -EFAULT;
 		break;
 
 	case RTC_SET_TIME:
 		if (!capable(CAP_SYS_TIME))
 			return -EACCES;
-		m41t11m6_validatetime(&rtime);
-		if (copy_from_user(&rtime, (void *) arg, sizeof(rtime)))
+		if (copy_from_user(&rtime, (void __user *) arg, sizeof(rtime)))
 			return -EFAULT;
+		m41t11m6_validatetime(&rtime);
 		m41t11m6_settime(&rtime);
 		break;
 
@@ -489,10 +494,10 @@ static int m41t11m6_ioctl(struct inode *inode, struct file *file, unsigned cmd, 
  */
 static struct file_operations m41t11m6_fops =
 {
-	.owner = THIS_MODULE, 
-	.read =  m41t11m6_read,
-	.write = m41t11m6_write,
-	.ioctl = m41t11m6_ioctl,
+	.owner		= THIS_MODULE, 
+	.read		= m41t11m6_read,
+	.write		= m41t11m6_write,
+	.unlocked_ioctl	= m41t11m6_ioctl,
 };
 
 static struct miscdevice m41t11m6_dev =

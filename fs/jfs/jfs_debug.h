@@ -1,6 +1,6 @@
 /*
- *   Copyright (c) International Business Machines Corp., 2000-2002
- *   Portions Copyright (c) Christoph Hellwig, 2001-2002
+ *   Copyright (C) International Business Machines Corp., 2000-2002
+ *   Portions Copyright (C) Christoph Hellwig, 2001-2002
  *
  *   This program is free software;  you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -31,16 +31,14 @@
  * CONFIG_JFS_DEBUG or CONFIG_JFS_STATISTICS is defined
  */
 #if defined(CONFIG_PROC_FS) && (defined(CONFIG_JFS_DEBUG) || defined(CONFIG_JFS_STATISTICS))
-	#define PROC_FS_JFS
+#define PROC_FS_JFS
+extern void jfs_proc_init(void);
+extern void jfs_proc_clean(void);
 #endif
 
 /*
  *	assert with traditional printf/panic
  */
-#ifdef CONFIG_KERNEL_ASSERTS
-/* kgdb stuff */
-#define assert(p) KERNEL_ASSERT(#p, p)
-#else
 #define assert(p) do {	\
 	if (!(p)) {	\
 		printk(KERN_CRIT "BUG at %s:%d assert(%s)\n",	\
@@ -48,7 +46,6 @@
 		BUG();	\
 	}		\
 } while (0)
-#endif
 
 /*
  *	debug ON
@@ -65,8 +62,7 @@
 
 extern int jfsloglevel;
 
-/* dump memory contents */
-extern void dump_mem(char *label, void *data, int length);
+extern const struct file_operations jfs_txanchor_proc_fops;
 
 /* information message: e.g., configuration, major event */
 #define jfs_info(fmt, arg...) do {			\
@@ -97,7 +93,6 @@ extern void dump_mem(char *label, void *data, int length);
  *	---------
  */
 #else				/* CONFIG_JFS_DEBUG */
-#define dump_mem(label,data,length) do {} while (0)
 #define ASSERT(p) do {} while (0)
 #define jfs_info(fmt, arg...) do {} while (0)
 #define jfs_debug(fmt, arg...) do {} while (0)
@@ -110,6 +105,11 @@ extern void dump_mem(char *label, void *data, int length);
  *	----------
  */
 #ifdef	CONFIG_JFS_STATISTICS
+extern const struct file_operations jfs_lmstats_proc_fops;
+extern const struct file_operations jfs_txstats_proc_fops;
+extern const struct file_operations jfs_mpstat_proc_fops;
+extern const struct file_operations jfs_xtstat_proc_fops;
+
 #define	INCREMENT(x)		((x)++)
 #define	DECREMENT(x)		((x)--)
 #define	HIGHWATERMARK(x,y)	((x) = max((x), (y)))

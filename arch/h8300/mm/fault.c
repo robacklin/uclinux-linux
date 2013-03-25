@@ -1,7 +1,7 @@
 /*
  *  linux/arch/h8300/mm/fault.c
  *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@uClinux.org>,
+ *  Copyright (C) 1998  D. Jeff Dionne <jeff@lineo.ca>,
  *  Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
  *
  *  Based on:
@@ -17,10 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 
-#include <asm/system.h>
 #include <asm/pgtable.h>
-
-extern void die_if_kernel(char *, struct pt_regs *, long);
 
 /*
  * This routine handles page faults.  It determines the problem, and
@@ -50,7 +47,8 @@ asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
 	} else
 		printk(KERN_ALERT "Unable to handle kernel access");
 	printk(" at virtual address %08lx\n",address);
-	die_if_kernel("Oops", regs, error_code);
+	if (!user_mode(regs))
+		die("Oops", regs, error_code);
 	do_exit(SIGKILL);
 
 	return 1;

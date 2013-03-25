@@ -1,109 +1,98 @@
 /* NETMAP - static NAT mapping of IP network addresses (1:1).
-   The mapping can be applied to source (POSTROUTING),
-   destination (PREROUTING), or both (with separate rules).
+ * The mapping can be applied to source (POSTROUTING),
+ * destination (PREROUTING), or both (with separate rules).
+ */
 
-   Author: Svenning Soerensen <svenning@post5.tele.dk>
-*/
-
-#include <linux/config.h>
+/* (C) 2000-2001 Svenning Soerensen <svenning@post5.tele.dk>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 #include <linux/ip.h>
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_ipv4.h>
-#include <linux/netfilter_ipv4/ip_nat_rule.h>
+#include <linux/netfilter/x_tables.h>
+#include <net/netfilter/nf_nat_rule.h>
 
-#define MODULENAME "NETMAP"
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Svenning Soerensen <svenning@post5.tele.dk>");
-MODULE_DESCRIPTION("iptables 1:1 NAT mapping of IP networks target");
+MODULE_DESCRIPTION("Xtables: 1:1 NAT mapping of IPv4 subnets");
 
-#if 0
-#define DEBUGP printk
-#else
-#define DEBUGP(format, args...)
-#endif
-
-static int
-check(const char *tablename,
-      const struct ipt_entry *e,
-      void *targinfo,
-      unsigned int targinfosize,
-      unsigned int hook_mask)
+static int netmap_tg_check(const struct xt_tgchk_param *par)
 {
-	const struct ip_nat_multi_range *mr = targinfo;
+	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
 
-	if (strcmp(tablename, "nat") != 0) {
-		DEBUGP(MODULENAME":check: bad table `%s'.\n", tablename);
-		return 0;
-	}
-	if (targinfosize != IPT_ALIGN(sizeof(*mr))) {
-		DEBUGP(MODULENAME":check: size %u.\n", targinfosize);
-		return 0;
-	}
-	if (hook_mask & ~((1 << NF_IP_PRE_ROUTING) | (1 << NF_IP_POST_ROUTING))) {
-		DEBUGP(MODULENAME":check: bad hooks %x.\n", hook_mask);
-		return 0;
-	}
-	if (!(mr->range[0].flags & IP_NAT_RANGE_MAP_IPS)) {
-		DEBUGP(MODULENAME":check: bad MAP_IPS.\n");
-		return 0;
+	if (!(mr->range[0].flags & NF_NAT_RANGE_MAP_IPS)) {
+		pr_debug("bad MAP_IPS.\n");
+		return -EINVAL;
 	}
 	if (mr->rangesize != 1) {
-		DEBUGP(MODULENAME":check: bad rangesize %u.\n", mr->rangesize);
-		return 0;
+		pr_debug("bad rangesize %u.\n", mr->rangesize);
+		return -EINVAL;
 	}
-	return 1;
+	return 0;
 }
 
 static unsigned int
-target(struct sk_buff **pskb,
-       unsigned int hooknum,
-       const struct net_device *in,
-       const struct net_device *out,
-       const void *targinfo,
-       void *userinfo)
+netmap_tg(struct sk_buff *skb, const struct xt_action_param *par)
 {
-	struct ip_conntrack *ct;
+	struct nf_conn *ct;
 	enum ip_conntrack_info ctinfo;
-	u_int32_t new_ip, netmask;
-	const struct ip_nat_multi_range *mr = targinfo;
-	struct ip_nat_multi_range newrange;
+	__be32 new_ip, netmask;
+	const struct nf_nat_ipv4_multi_range_compat *mr = par->targinfo;
+	struct nf_nat_ipv4_range newrange;
 
-	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
-		     || hooknum == NF_IP_POST_ROUTING);
-	ct = ip_conntrack_get(*pskb, &ctinfo);
+	NF_CT_ASSERT(par->hooknum == NF_INET_PRE_ROUTING ||
+		     par->hooknum == NF_INET_POST_ROUTING ||
+		     par->hooknum == NF_INET_LOCAL_OUT ||
+		     par->hooknum == NF_INET_LOCAL_IN);
+	ct = nf_ct_get(skb, &ctinfo);
 
 	netmask = ~(mr->range[0].min_ip ^ mr->range[0].max_ip);
 
-	if (hooknum == NF_IP_PRE_ROUTING)
-		new_ip = (*pskb)->nh.iph->daddr & ~netmask;
+	if (par->hooknum == NF_INET_PRE_ROUTING ||
+	    par->hooknum == NF_INET_LOCAL_OUT)
+		new_ip = ip_hdr(skb)->daddr & ~netmask;
 	else
-		new_ip = (*pskb)->nh.iph->saddr & ~netmask;
+		new_ip = ip_hdr(skb)->saddr & ~netmask;
 	new_ip |= mr->range[0].min_ip & netmask;
 
-	newrange = ((struct ip_nat_multi_range)
-	{ 1, { { mr->range[0].flags | IP_NAT_RANGE_MAP_IPS,
-		 new_ip, new_ip,
-		 mr->range[0].min, mr->range[0].max } } });
+	newrange = ((struct nf_nat_ipv4_range)
+		{ mr->range[0].flags | NF_NAT_RANGE_MAP_IPS,
+		  new_ip, new_ip,
+		  mr->range[0].min, mr->range[0].max });
 
 	/* Hand modified range to generic setup. */
-	return ip_nat_setup_info(ct, &newrange, hooknum);
+	return nf_nat_setup_info(ct, &newrange, HOOK2MANIP(par->hooknum));
 }
 
-static struct ipt_target target_module
-= { { NULL, NULL }, MODULENAME, target, check, NULL,
-    THIS_MODULE };
+static struct xt_target netmap_tg_reg __read_mostly = {
+	.name 		= "NETMAP",
+	.family		= NFPROTO_IPV4,
+	.target 	= netmap_tg,
+	.targetsize	= sizeof(struct nf_nat_ipv4_multi_range_compat),
+	.table		= "nat",
+	.hooks		= (1 << NF_INET_PRE_ROUTING) |
+			  (1 << NF_INET_POST_ROUTING) |
+			  (1 << NF_INET_LOCAL_OUT) |
+			  (1 << NF_INET_LOCAL_IN),
+	.checkentry 	= netmap_tg_check,
+	.me 		= THIS_MODULE
+};
 
-static int __init init(void)
+static int __init netmap_tg_init(void)
 {
-	return ipt_register_target(&target_module);
+	return xt_register_target(&netmap_tg_reg);
 }
 
-static void __exit fini(void)
+static void __exit netmap_tg_exit(void)
 {
-	ipt_unregister_target(&target_module);
+	xt_unregister_target(&netmap_tg_reg);
 }
 
-module_init(init);
-module_exit(fini);
+module_init(netmap_tg_init);
+module_exit(netmap_tg_exit);

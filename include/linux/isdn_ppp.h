@@ -1,13 +1,17 @@
-/*
+/* Linux ISDN subsystem, sync PPP, interface to ipppd
+ *
+ * Copyright 1994-1999  by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1995,96    Thinking Objects Software GmbH Wuerzburg
+ * Copyright 1995,96    by Michael Hipp (Michael.Hipp@student.uni-tuebingen.de)
+ * Copyright 2000-2002  by Kai Germaschewski (kai@germaschewski.name)
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-
 #ifndef _LINUX_ISDN_PPP_H
 #define _LINUX_ISDN_PPP_H
-
 
 #define CALLTYPE_INCOMING 0x1
 #define CALLTYPE_OUTGOING 0x2
@@ -63,7 +67,6 @@ struct isdn_ppp_comp_data {
 #ifdef __KERNEL__
 
 
-#include <linux/config.h>
 
 #ifdef CONFIG_IPPP_FILTER
 #include <linux/filter.h>
@@ -111,6 +114,7 @@ struct isdn_ppp_resetparams {
  */
 struct isdn_ppp_compressor {
   struct isdn_ppp_compressor *next, *prev;
+  struct module *owner;
   int num; /* CCP compression protocol number */
   
   void *(*alloc) (struct isdn_ppp_comp_data *);
@@ -206,6 +210,7 @@ struct ippp_ccp_reset {
 struct ippp_struct {
   struct ippp_struct *next_link;
   int state;
+  spinlock_t buflock;
   struct ippp_buf_queue rq[NUM_RCV_BUFFS]; /* packet queue for isdn_ppp_read() */
   struct ippp_buf_queue *first;  /* pointer to (current) first packet */
   struct ippp_buf_queue *last;   /* pointer to (current) last used packet in queue */
@@ -227,8 +232,9 @@ struct ippp_struct {
   struct slcompress *slcomp;
 #endif
 #ifdef CONFIG_IPPP_FILTER
-  struct sock_fprog pass_filter;	/* filter for packets to pass */
-  struct sock_fprog active_filter;	/* filter for pkts to reset idle */
+  struct sock_filter *pass_filter;	/* filter for packets to pass */
+  struct sock_filter *active_filter;	/* filter for pkts to reset idle */
+  unsigned pass_len, active_len;
 #endif
   unsigned long debug;
   struct isdn_ppp_compressor *compressor,*decompressor;

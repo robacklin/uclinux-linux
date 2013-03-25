@@ -16,7 +16,7 @@
  *    along with this program; if not, write to the Free Software
  *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *    Questions/Comments/Bugfixes to arrays@compaq.com
+ *    Questions/Comments/Bugfixes to iss_storagedev@hp.com
  *
  *    If you want to make changes, improve or add functionality to this
  *    driver, you'll probably need the Compaq Array Controller Interface
@@ -95,7 +95,7 @@ static unsigned long smart4_completed(ctlr_info_t *h)
  /*
  *  This hardware returns interrupt pending at a different place and 
  *  it does not tell us if the fifo is empty, we will have check  
- *  that by getting a 0 back from the comamnd_completed call. 
+ *  that by getting a 0 back from the command_completed call. 
  */
 static unsigned long smart4_intr_pending(ctlr_info_t *h)
 {
@@ -156,27 +156,27 @@ static struct access_method smart2_access = {
  */
 static void smart2e_submit_command(ctlr_info_t *h, cmdlist_t *c)
 {
-	outl(c->busaddr, h->io_mem_addr+ COMMAND_FIFO);
+	outl(c->busaddr, h->io_mem_addr + COMMAND_FIFO);
 }
 
 static void smart2e_intr_mask(ctlr_info_t *h, unsigned long val)
 {
-	outl(val, h->io_mem_addr+ INTR_MASK);
+	outl(val, h->io_mem_addr + INTR_MASK);
 }
 
 static unsigned long smart2e_fifo_full(ctlr_info_t *h)
 {
-	return inl(h->io_mem_addr+ COMMAND_FIFO);
+	return inl(h->io_mem_addr + COMMAND_FIFO);
 }
 
 static unsigned long smart2e_completed(ctlr_info_t *h)
 {
-	return inl(h->io_mem_addr+ COMMAND_COMPLETE_FIFO);
+	return inl(h->io_mem_addr + COMMAND_COMPLETE_FIFO);
 }
 
 static unsigned long smart2e_intr_pending(ctlr_info_t *h)
 {
-	return inl(h->io_mem_addr+ INTR_PENDING);
+	return inl(h->io_mem_addr + INTR_PENDING);
 }
 
 static struct access_method smart2e_access = {
@@ -252,6 +252,9 @@ static unsigned long smart1_completed(ctlr_info_t *h)
 
 		outb(CHANNEL_CLEAR, h->io_mem_addr + SMART1_LOCAL_DOORBELL);
 
+		/*
+		 * this is x86 (actually compaq x86) only, so it's ok
+		 */
 		if (cmd) ((cmdlist_t*)bus_to_virt(cmd))->req.hdr.rcode = status;
 	} else {
 		cmd = 0;

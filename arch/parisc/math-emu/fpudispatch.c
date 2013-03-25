@@ -16,13 +16,13 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  * BEGIN_DESC
  *
  *  File:
- *	@(#)	pa/fp/fpudispatch.c		$Revision: $
+ *	@(#)	pa/fp/fpudispatch.c		$Revision: 1.1 $
  *
  *  Purpose:
  *	<<please update with a synopsis of the functionality provided by this file>>
@@ -50,7 +50,8 @@
 #define FPUDEBUG 0
 
 #include "float.h"
-#include "types.h"
+#include <linux/bug.h>
+#include <linux/kernel.h>
 #include <asm/processor.h>
 /* #include <sys/debug.h> */
 /* #include <machine/sys/mdep_private.h> */

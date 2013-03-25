@@ -9,17 +9,28 @@
  *
  * 
  * Copyright (c) 2001 port GmbH Halle/Saale
- * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
+ * (c) 2001 Heinz-Jrgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_write.c,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: can_write.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -41,13 +52,14 @@
 
 /**
 * \file can_write.c
-* \author Heinz-Jürgen Oertel, port GmbH
+* \author Heinz-Jrgen Oertel, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
 */
 
 #include "can_defs.h"
+#include <linux/delay.h>
 
 /* \fn size_t can_write( __LDDK_WRITE_PARAM) */
 /***************************************************************************/
@@ -108,7 +120,7 @@ int written = 0;
     /* printk("w[%d/%d]", minor, TxFifo->active); */
     addr = (canmsg_t *)buffer;
 
-    if(!access_ok(VERIFY_READ, (canmsg_t *)addr, count * sizeof(canmsg_t))) { 
+    if(! access_ok(VERIFY_READ, (canmsg_t *)addr, count * sizeof(canmsg_t))) { 
 	    DBGout();return -EINVAL;
     }
     while( written < count ) {
@@ -131,7 +143,7 @@ int written = 0;
 	    TxFifo->head = ++(TxFifo->head) % MAX_BUFSIZE;
             written++;
 	/* leave critical section */
-	restore_flags(flags);
+	local_irq_restore(flags);
 
         if( !TxFifo->active) {
   	    CAN_SendMessage( minor, &(TxFifo->data[TxFifo->tail]));  /* Send, no wait */

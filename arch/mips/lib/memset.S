@@ -3,11 +3,21 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1998 by Ralf Baechle
+ * Copyright (C) 1998, 1999, 2000 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
+ * Copyright (C) 2007  Maciej W. Rozycki
  */
 #include <asm/asm.h>
-#include <asm/offset.h>
+#include <asm/asm-offsets.h>
 #include <asm/regdef.h>
+
+#if LONGSIZE == 4
+#define LONG_S_L swl
+#define LONG_S_R swr
+#else
+#define LONG_S_L sdl
+#define LONG_S_R sdr
+#endif
 
 #define EX(insn,reg,addr,handler)			\
 9:	insn	reg, addr;				\
@@ -15,23 +25,26 @@
 	PTR	9b, handler; 				\
 	.previous
 
-#define F_FILL64(dst, offset, val, fixup)		\
-	EX(sw, val, (offset + 0x00)(dst), fixup);	\
-	EX(sw, val, (offset + 0x04)(dst), fixup);	\
-	EX(sw, val, (offset + 0x08)(dst), fixup);	\
-	EX(sw, val, (offset + 0x0c)(dst), fixup);	\
-	EX(sw, val, (offset + 0x10)(dst), fixup);	\
-	EX(sw, val, (offset + 0x14)(dst), fixup);	\
-	EX(sw, val, (offset + 0x18)(dst), fixup);	\
-	EX(sw, val, (offset + 0x1c)(dst), fixup);	\
-	EX(sw, val, (offset + 0x20)(dst), fixup);	\
-	EX(sw, val, (offset + 0x24)(dst), fixup);	\
-	EX(sw, val, (offset + 0x28)(dst), fixup);	\
-	EX(sw, val, (offset + 0x2c)(dst), fixup);	\
-	EX(sw, val, (offset + 0x30)(dst), fixup);	\
-	EX(sw, val, (offset + 0x34)(dst), fixup);	\
-	EX(sw, val, (offset + 0x38)(dst), fixup);	\
-	EX(sw, val, (offset + 0x3c)(dst), fixup)
+	.macro	f_fill64 dst, offset, val, fixup
+	EX(LONG_S, \val, (\offset +  0 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  1 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  2 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  3 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  4 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  5 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  6 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  7 * LONGSIZE)(\dst), \fixup)
+#if LONGSIZE == 4
+	EX(LONG_S, \val, (\offset +  8 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset +  9 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 10 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 11 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 12 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 13 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 14 * LONGSIZE)(\dst), \fixup)
+	EX(LONG_S, \val, (\offset + 15 * LONGSIZE)(\dst), \fixup)
+#endif
+	.endm
 
 /*
  * memset(void *s, int c, size_t n)
@@ -43,129 +56,125 @@
 	.set	noreorder
 	.align	5
 LEAF(memset)
-	beqz	a1, 1f
-	 move	v0, a0				/* result */
+	beqz		a1, 1f
+	 move		v0, a0			/* result */
 
-	andi	a1, 0xff			/* spread fillword */
-	sll	t1, a1, 8
-	or	a1, t1
-	sll	t1, a1, 16
-	or	a1, t1
+	andi		a1, 0xff		/* spread fillword */
+	LONG_SLL		t1, a1, 8
+	or		a1, t1
+	LONG_SLL		t1, a1, 16
+#if LONGSIZE == 8
+	or		a1, t1
+	LONG_SLL		t1, a1, 32
+#endif
+	or		a1, t1
 1:
 
-EXPORT(__bzero)
-	sltiu	t0, a2, 4			/* very small region? */
-	bnez	t0, small_memset
-	 andi	t0, a0, 3			/* aligned? */
+FEXPORT(__bzero)
+	sltiu		t0, a2, LONGSIZE	/* very small region? */
+	bnez		t0, .Lsmall_memset
+	 andi		t0, a0, LONGMASK	/* aligned? */
 
-	beqz	t0, 1f
-	 subu	t0, 4				/* alignment in bytes */
+#ifndef CONFIG_CPU_DADDI_WORKAROUNDS
+	beqz		t0, 1f
+	 PTR_SUBU	t0, LONGSIZE		/* alignment in bytes */
+#else
+	.set		noat
+	li		AT, LONGSIZE
+	beqz		t0, 1f
+	 PTR_SUBU	t0, AT			/* alignment in bytes */
+	.set		at
+#endif
 
-#if defined(CONFIG_RTL865X)
-
-align_word:  /* fill bytewise */
-	EX(sb, a1, 0(a0), first_fixup)
-	addiu	a0, 1
-	subu	a2, 1
-	andi	t0, a0, 3	
-	bnez 	t0, align_word
-	 nop
-
-#else /* CONFIG_RTL865X */
-
+	R10KCBARRIER(0(ra))
 #ifdef __MIPSEB__
-	EX(swl, a1, (a0), first_fixup)		/* make word aligned */
+	EX(LONG_S_L, a1, (a0), .Lfirst_fixup)	/* make word/dword aligned */
 #endif
 #ifdef __MIPSEL__
-	EX(swr, a1, (a0), first_fixup)		/* make word aligned */
+	EX(LONG_S_R, a1, (a0), .Lfirst_fixup)	/* make word/dword aligned */
 #endif
-	subu	a0, t0				/* word align ptr */
-	addu	a2, t0				/* correct size */
+	PTR_SUBU	a0, t0			/* long align ptr */
+	PTR_ADDU	a2, t0			/* correct size */
 
-#endif /* CONFIG_RTL865X */
+1:	ori		t1, a2, 0x3f		/* # of full blocks */
+	xori		t1, 0x3f
+	beqz		t1, .Lmemset_partial	/* no block to fill */
+	 andi		t0, a2, 0x40-LONGSIZE
 
-1:	ori	t1, a2, 0x3f			/* # of full blocks */
-	xori	t1, 0x3f
-	beqz	t1, memset_partial		/* no block to fill */
-	 andi	t0, a2, 0x3c
+	PTR_ADDU	t1, a0			/* end address */
+	.set		reorder
+1:	PTR_ADDIU	a0, 64
+	R10KCBARRIER(0(ra))
+	f_fill64 a0, -64, a1, .Lfwd_fixup
+	bne		t1, a0, 1b
+	.set		noreorder
 
-	addu	t1, a0				/* end address */
-	.set	reorder
-1:	addiu	a0, 64
-	F_FILL64(a0, -64, a1, fwd_fixup)
-	bne	t1, a0, 1b
-	.set	noreorder
+.Lmemset_partial:
+	R10KCBARRIER(0(ra))
+	PTR_LA		t1, 2f			/* where to start */
+#if LONGSIZE == 4
+	PTR_SUBU	t1, t0
+#else
+	.set		noat
+	LONG_SRL		AT, t0, 1
+	PTR_SUBU	t1, AT
+	.set		at
+#endif
+	jr		t1
+	 PTR_ADDU	a0, t0			/* dest ptr */
 
-memset_partial:
-	PTR_LA	t1, 2f				/* where to start */
-	subu	t1, t0
-	jr	t1
-	 addu	a0, t0				/* dest ptr */
+	.set		push
+	.set		noreorder
+	.set		nomacro
+	f_fill64 a0, -64, a1, .Lpartial_fixup	/* ... but first do longs ... */
+2:	.set		pop
+	andi		a2, LONGMASK		/* At most one long to go */
 
-	.set	push
-	.set	noreorder
-	.set	nomacro
-	F_FILL64(a0, -64, a1, partial_fixup)	/* ... but first do wrds ... */
-2:	.set	pop
-	andi	a2, 3				/* 0 <= n <= 3 to go */
-
-#if defined(CONFIG_RTL865X)
-
-	beqz	a2, 1f
-	 nop
-byte_write:  /* fill bytewise */
-	EX(sb, a1, 0(a0), last_fixup)
-	addiu	a0, 1
-	subu	a2, 1
-	bnez	a2, byte_write 
-	 nop
-
-#else /* CONFIG_RTL865X */
-
-	beqz	a2, 1f
-	 addu	a0, a2				/* What's left */
+	beqz		a2, 1f
+	 PTR_ADDU	a0, a2			/* What's left */
+	R10KCBARRIER(0(ra))
 #ifdef __MIPSEB__
-	EX(swr, a1, -1(a0), last_fixup)
+	EX(LONG_S_R, a1, -1(a0), .Llast_fixup)
 #endif
 #ifdef __MIPSEL__
-	EX(swl, a1, -1(a0), last_fixup)
+	EX(LONG_S_L, a1, -1(a0), .Llast_fixup)
 #endif
+1:	jr		ra
+	 move		a2, zero
 
-#endif /* CONFIG_RTL865X */
+.Lsmall_memset:
+	beqz		a2, 2f
+	 PTR_ADDU	t1, a0, a2
 
-1:	jr	ra
-	 move	a2, zero
+1:	PTR_ADDIU	a0, 1			/* fill bytewise */
+	R10KCBARRIER(0(ra))
+	bne		t1, a0, 1b
+	 sb		a1, -1(a0)
 
-small_memset:
-	beqz	a2, 2f
-	 addu	t1, a0, a2
-
-1:	addiu	a0, 1				/* fill bytewise */
-	bne	t1, a0, 1b
-	 sb	a1, -1(a0)
-
-2:	jr	ra				/* done */
-	 move	a2, zero
+2:	jr		ra			/* done */
+	 move		a2, zero
 	END(memset)
 
-first_fixup:
+.Lfirst_fixup:
 	jr	ra
 	 nop
 
-fwd_fixup:
-	lw	t0, THREAD_BUADDR($28)
-	andi	a2, 0x3f
-	addu	a2, t1
-	jr	ra
-	 subu	a2, t0
+.Lfwd_fixup:
+	PTR_L		t0, TI_TASK($28)
+	andi		a2, 0x3f
+	LONG_L		t0, THREAD_BUADDR(t0)
+	LONG_ADDU	a2, t1
+	jr		ra
+	 LONG_SUBU	a2, t0
 
-partial_fixup:
-	lw	t0, THREAD_BUADDR($28)
-	andi	a2, 3
-	addu	a2, t1
-	jr	ra
-	 subu	a2, t0
+.Lpartial_fixup:
+	PTR_L		t0, TI_TASK($28)
+	andi		a2, LONGMASK
+	LONG_L		t0, THREAD_BUADDR(t0)
+	LONG_ADDU	a2, t1
+	jr		ra
+	 LONG_SUBU	a2, t0
 
-last_fixup:
-	jr	ra
-	 andi	v1, a2, 3
+.Llast_fixup:
+	jr		ra
+	 andi		v1, a2, LONGMASK

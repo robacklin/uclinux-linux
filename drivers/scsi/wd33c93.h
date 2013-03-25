@@ -22,6 +22,7 @@
 #ifndef WD33C93_H
 #define WD33C93_H
 
+
 #define PROC_INTERFACE     /* add code for /proc/scsi/wd33c93/xxx interface */
 #ifdef  PROC_INTERFACE
 #define PROC_STATISTICS    /* add code for keeping various real time stats */
@@ -154,6 +155,9 @@
 #define WD33C93_FS_12_15 OWNID_FS_12
 #define WD33C93_FS_16_20 OWNID_FS_16
 
+   /* pass input-clock explicitly. accepted mhz values are 8-10,12-20 */
+#define WD33C93_FS_MHZ(mhz) (mhz)
+
    /* Control register */
 #define CTRL_HSP     0x01
 #define CTRL_HA      0x02
@@ -186,14 +190,19 @@
 
    /* This is what the 3393 chip looks like to us */
 typedef struct {
+#ifdef CONFIG_WD33C93_PIO
+   unsigned int   SASR;
+   unsigned int   SCMD;
+#else
    volatile unsigned char  *SASR;
    volatile unsigned char  *SCMD;
+#endif
 } wd33c93_regs;
 
 
-typedef int (*dma_setup_t) (Scsi_Cmnd *SCpnt, int dir_in);
-typedef void (*dma_stop_t) (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
-             int status);
+typedef int (*dma_setup_t) (struct scsi_cmnd *SCpnt, int dir_in);
+typedef void (*dma_stop_t) (struct Scsi_Host *instance,
+		struct scsi_cmnd *SCpnt, int status);
 
 
 #define ILLEGAL_STATUS_BYTE   0xff
@@ -217,6 +226,7 @@ struct sx_period {
 struct WD33C93_hostdata {
     struct Scsi_Host *next;
     wd33c93_regs     regs;
+    spinlock_t       lock;
     uchar            clock_freq;
     uchar            chip;             /* what kind of wd33c93? */
     uchar            microcode;        /* microcode rev */
@@ -228,10 +238,10 @@ struct WD33C93_hostdata {
     uchar            *dma_bounce_buffer;
     unsigned int     dma_bounce_len;
     volatile uchar   busy[8];          /* index = target, bit = lun */
-    volatile Scsi_Cmnd *input_Q;       /* commands waiting to be started */
-    volatile Scsi_Cmnd *selecting;     /* trying to select this command */
-    volatile Scsi_Cmnd *connected;     /* currently connected command */
-    volatile Scsi_Cmnd *disconnected_Q;/* commands waiting for reconnect */
+    volatile struct scsi_cmnd *input_Q;       /* commands waiting to be started */
+    volatile struct scsi_cmnd *selecting;     /* trying to select this command */
+    volatile struct scsi_cmnd *connected;     /* currently connected command */
+    volatile struct scsi_cmnd *disconnected_Q;/* commands waiting for reconnect */
     uchar            state;            /* what we are currently doing */
     uchar            dma;              /* current state of DMA (on/off) */
     uchar            level2;           /* extent to which Level-2 commands are used */
@@ -246,6 +256,9 @@ struct WD33C93_hostdata {
     uchar            sync_stat[8];     /* status of sync negotiation per target */
     uchar            no_sync;          /* bitmask: don't do sync on these targets */
     uchar            no_dma;           /* set this flag to disable DMA */
+    uchar            dma_mode;         /* DMA Burst Mode or Single Byte DMA */
+    uchar            fast;             /* set this flag to enable Fast SCSI */
+    struct sx_period sx_table[9];      /* transfer periods for actual DTC-setting */
 #ifdef PROC_INTERFACE
     uchar            proc;             /* bitmask: what's in proc output */
 #ifdef PROC_STATISTICS
@@ -329,11 +342,10 @@ struct WD33C93_hostdata {
 
 void wd33c93_init (struct Scsi_Host *instance, const wd33c93_regs regs,
          dma_setup_t setup, dma_stop_t stop, int clock_freq);
-int wd33c93_abort (Scsi_Cmnd *cmd);
-int wd33c93_queuecommand (Scsi_Cmnd *cmd, void (*done)(Scsi_Cmnd *));
+int wd33c93_abort (struct scsi_cmnd *cmd);
+int wd33c93_queuecommand (struct Scsi_Host *h, struct scsi_cmnd *cmd);
 void wd33c93_intr (struct Scsi_Host *instance);
-int wd33c93_proc_info(char *, char **, off_t, int, int, int);
-int wd33c93_reset (Scsi_Cmnd *, unsigned int);
-void wd33c93_release(void);
+int wd33c93_proc_info(struct Scsi_Host *, char *, char **, off_t, int, int);
+int wd33c93_host_reset (struct scsi_cmnd *);
 
 #endif /* WD33C93_H */

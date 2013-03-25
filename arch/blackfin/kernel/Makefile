@@ -1,38 +1,43 @@
 #
-# Makefile for the linux kernel.
+# arch/blackfin/kernel/Makefile
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-all: kernel.o
+extra-y := init_task.o vmlinux.lds
 
-O_TARGET := kernel.o
-obj-y := process.o traps.o ptrace.o \
-	  sys_frio.o time.o semaphore.o
-obj-y += setup.o frio_ksyms.o
+obj-y := \
+	entry.o process.o bfin_ksyms.o ptrace.o setup.o signal.o \
+	sys_bfin.o traps.o irqchip.o dma-mapping.o flat.o \
+	fixed_code.o reboot.o bfin_gpio.o bfin_dma.o \
+	exception.o dumpstack.o
 
-#Removed by Chang Junxiao 07 01
-#ifdef CONFIG_PCI
-#obj-y += bios32.o
-#endif
+ifeq ($(CONFIG_GENERIC_CLOCKEVENTS),y)
+    obj-y += time-ts.o
+else
+    obj-y += time.o
+endif
 
-obj-$(CONFIG_KGDB)      += nisa-stub.o
+obj-$(CONFIG_DYNAMIC_FTRACE)         += ftrace.o
+obj-$(CONFIG_FUNCTION_TRACER)        += ftrace-entry.o
+obj-$(CONFIG_FUNCTION_GRAPH_TRACER)  += ftrace.o
+CFLAGS_REMOVE_ftrace.o = -pg
 
-head.o: head.S frio_defs.h
+obj-$(CONFIG_HAVE_PWM)               += pwm.o
+obj-$(CONFIG_IPIPE)                  += ipipe.o
+obj-$(CONFIG_BFIN_GPTIMERS)          += gptimers.o
+obj-$(CONFIG_CPLB_INFO)              += cplbinfo.o
+obj-$(CONFIG_MODULES)                += module.o
+obj-$(CONFIG_KGDB)                   += kgdb.o
+obj-$(CONFIG_KGDB_TESTS)             += kgdb_test.o
+obj-$(CONFIG_NMI_WATCHDOG)           += nmi.o
+obj-$(CONFIG_EARLY_PRINTK)           += early_printk.o
+obj-$(CONFIG_EARLY_PRINTK)           += shadow_console.o
+obj-$(CONFIG_STACKTRACE)             += stacktrace.o
+obj-$(CONFIG_DEBUG_VERBOSE)          += trace.o
+obj-$(CONFIG_BFIN_PSEUDODBG_INSNS)   += pseudodbg.o
+obj-$(CONFIG_PERF_EVENTS)            += perf_event.o
 
-entry.o: entry.S frio_defs.h
+# the kgdb test puts code into L2 and without linker
+# relaxation, we need to force long calls to/from it
+CFLAGS_kgdb_test.o := -mlong-calls
 
-frio_defs.h: frio_defs.c frio_defs.head
-	rm -f frio_defs.d
-	SUNPRO_DEPENDENCIES="frio_defs.d frio_defs.h" \
-	$(CC) $(filter-out -MD,$(CFLAGS)) -S frio_defs.c
-	cp frio_defs.head frio_defs.h
-	grep '^#define' frio_defs.s >> frio_defs.h
-	rm frio_defs.s
--include frio_defs.d
-
-include $(TOPDIR)/Rules.make
-
+obj-$(CONFIG_DEBUG_MMRS)             += debug-mmrs.o

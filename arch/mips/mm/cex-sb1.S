@@ -15,7 +15,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
  */
-#include <linux/config.h>
 #include <linux/init.h>
 
 #include <asm/asm.h>
@@ -23,7 +22,6 @@
 #include <asm/mipsregs.h>
 #include <asm/stackframe.h>
 #include <asm/cacheops.h>
-#include <asm/processor.h>
 #include <asm/sibyte/board.h>
 
 #define C0_ERRCTL     $26             /* CP0: Error info */
@@ -35,8 +33,6 @@
 	 * CVS revision 1.8.  Only the 'unrecoverable' case
 	 * is changed.
 	 */
-
-        __INIT
 
 	.set	mips64
 	.set	noreorder
@@ -53,6 +49,8 @@
 	 * (0x170-0x17f) are used to preserve k0, k1, and ra.
 	 */
 
+	__CPUINIT
+
 LEAF(except_vec2_sb1)
 	/*
 	 * If this error is recoverable, we need to exit the handler
@@ -66,6 +64,10 @@ LEAF(except_vec2_sb1)
 	sd	k0,0x170($0)
 	sd	k1,0x178($0)
 
+#ifdef CONFIG_SB1_CEX_ALWAYS_FATAL
+	j	handle_vec2_sb1
+	 nop
+#else
 	/*
 	 * M_ERRCTL_RECOVERABLE is bit 31, which makes it easy to tell
 	 * if we can fast-path out of here for a h/w-recovered error.
@@ -77,10 +79,10 @@ LEAF(except_vec2_sb1)
 recovered_dcache:
 	/*
 	 * Unlock CacheErr-D (which in turn unlocks CacheErr-DPA).
-	 * Ought to log the occurence of this recovered dcache error.
+	 * Ought to log the occurrence of this recovered dcache error.
 	 */
 	b	recovered
-	 .word   0x4080d801		# mtc0  zero, $27, 1
+	 mtc0	$0,C0_CERR_D
 
 attempt_recovery:
 	/*
@@ -136,6 +138,7 @@ unrecoverable:
 	/* Unrecoverable Icache or Dcache error; log it and/or fail */
 	j	handle_vec2_sb1
 	 nop
+#endif
 
 END(except_vec2_sb1)
 
@@ -162,7 +165,7 @@ END(except_vec2_sb1)
 	/* Get a valid Kseg0 stack pointer.  Any task's stack pointer
 	 * will do, although if we ever want to resume execution we
 	 * better not have corrupted any state. */
-	GET_SAVED_SP
+	get_saved_sp
 	move	sp, k1
 
 2:

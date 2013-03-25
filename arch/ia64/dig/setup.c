@@ -8,32 +8,21 @@
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
  */
-#include <linux/config.h>
 
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
 #include <linux/string.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/console.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
+#include <linux/root_dev.h>
 
 #include <asm/io.h>
 #include <asm/machvec.h>
-#include <asm/system.h>
-
-/*
- * This is here so we can use the CMOS detection in ide-probe.c to
- * determine what drives are present.  In theory, we don't need this
- * as the auto-detection could be done via ide-probe.c:do_probe() but
- * in practice that would be much slower, which is painful when
- * running in the simulator.  Note that passing zeroes in DRIVE_INFO
- * is sufficient (the IDE driver will autodetect the drive geometry).
- */
-char drive_info[4*16];
-extern int pcat_compat;
+#include <asm/setup.h>
 
 void __init
 dig_setup (char **cmdline_p)
@@ -45,7 +34,7 @@ dig_setup (char **cmdline_p)
 	 * is physical disk 1 partition 1 and the Linux root disk is
 	 * physical disk 1 partition 2.
 	 */
-	ROOT_DEV = to_kdev_t(0x0802);		/* default to second partition on first drive */
+	ROOT_DEV = Root_SDA2;		/* default to second partition on first drive */
 
 #ifdef CONFIG_SMP
 	init_smp_config();
@@ -78,9 +67,4 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_mode = 3;	/* XXX fake */
 	screen_info.orig_video_isVGA = 1;	/* XXX fake */
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
-}
-
-void __init
-dig_irq_init (void)
-{
 }

@@ -1,29 +1,28 @@
-/* $Id: flash.c,v 1.24 2001/10/08 22:19:51 davem Exp $
- * flash.c: Allow mmap access to the OBP Flash, for OBP updates.
+/* flash.c: Allow mmap access to the OBP Flash, for OBP updates.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
-#include <linux/slab.h>
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
-#include <linux/smp_lock.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
+#include <linux/mm.h>
+#include <linux/of.h>
+#include <linux/of_device.h>
 
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
-#include <asm/sbus.h>
-#include <asm/ebus.h>
+#include <asm/upa.h>
 
-static spinlock_t flash_lock = SPIN_LOCK_UNLOCKED;
+static DEFINE_MUTEX(flash_mutex);
+static DEFINE_SPINLOCK(flash_lock);
 static struct {
 	unsigned long read_base;	/* Physical read address */
 	unsigned long write_base;	/* Physical write address */
@@ -65,16 +64,14 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 
 	if ((vma->vm_pgoff << PAGE_SHIFT) > size)
 		return -ENXIO;
-	addr += (vma->vm_pgoff << PAGE_SHIFT);
+	addr = vma->vm_pgoff + (addr >> PAGE_SHIFT);
 
 	if (vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT)) > size)
 		size = vma->vm_end - (vma->vm_start + (vma->vm_pgoff << PAGE_SHIFT));
 
-	pgprot_val(vma->vm_page_prot) &= ~(_PAGE_CACHE);
-	pgprot_val(vma->vm_page_prot) |= _PAGE_E;
-	vma->vm_flags |= (VM_SHM | VM_LOCKED);
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
-	if (remap_page_range(vma->vm_start, addr, size, vma->vm_page_prot))
+	if (io_remap_pfn_range(vma, vma->vm_start, addr, size, vma->vm_page_prot))
 		return -EAGAIN;
 		
 	return 0;
@@ -83,6 +80,7 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 static long long
 flash_llseek(struct file *file, long long offset, int origin)
 {
+	mutex_lock(&flash_mutex);
 	switch (origin) {
 		case 0:
 			file->f_pos = offset;
@@ -96,44 +94,44 @@ flash_llseek(struct file *file, long long offset, int origin)
 			file->f_pos = flash.read_size;
 			break;
 		default:
+			mutex_unlock(&flash_mutex);
 			return -EINVAL;
 	}
+	mutex_unlock(&flash_mutex);
 	return file->f_pos;
 }
 
 static ssize_t
-flash_read(struct file * file, char * buf,
+flash_read(struct file * file, char __user * buf,
 	   size_t count, loff_t *ppos)
 {
 	loff_t p = *ppos;
 	int i;
-	
-	if (p > flash.read_size)
-		return 0;
-
-	if (p < 0)
-		return -EINVAL;
 
 	if (count > flash.read_size - p)
 		count = flash.read_size - p;
 
 	for (i = 0; i < count; i++) {
-		u8 data = readb(flash.read_base + p + i);
+		u8 data = upa_readb(flash.read_base + p + i);
 		if (put_user(data, buf))
 			return -EFAULT;
 		buf++;
 	}
 
-	*ppos = p + count;
+	*ppos += count;
 	return count;
 }
 
 static int
 flash_open(struct inode *inode, struct file *file)
 {
-	if (test_and_set_bit(0, (void *)&flash.busy) != 0)
+	mutex_lock(&flash_mutex);
+	if (test_and_set_bit(0, (void *)&flash.busy) != 0) {
+		mutex_unlock(&flash_mutex);
 		return -EBUSY;
+	}
 
+	mutex_unlock(&flash_mutex);
 	return 0;
 }
 
@@ -147,113 +145,76 @@ flash_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static struct file_operations flash_fops = {
+static const struct file_operations flash_fops = {
 	/* no write to the Flash, use mmap
 	 * and play flash dependent tricks.
 	 */
-	owner:		THIS_MODULE,
-	llseek:		flash_llseek,
-	read:		flash_read,
-	mmap:		flash_mmap,
-	open:		flash_open,
-	release:	flash_release,
+	.owner =	THIS_MODULE,
+	.llseek =	flash_llseek,
+	.read =		flash_read,
+	.mmap =		flash_mmap,
+	.open =		flash_open,
+	.release =	flash_release,
 };
 
 static struct miscdevice flash_dev = { FLASH_MINOR, "flash", &flash_fops };
 
-EXPORT_NO_SYMBOLS;
-
-static int __init flash_init(void)
+static int __devinit flash_probe(struct platform_device *op)
 {
-	struct sbus_bus *sbus;
-	struct sbus_dev *sdev = 0;
-#ifdef CONFIG_PCI
-	struct linux_ebus *ebus;
-	struct linux_ebus_device *edev = 0;
-	struct linux_prom_registers regs[2];
-	int len, nregs;
-#endif
-	int err;
+	struct device_node *dp = op->dev.of_node;
+	struct device_node *parent;
 
-	for_all_sbusdev(sdev, sbus) {
-		if (!strcmp(sdev->prom_name, "flashprom")) {
-			if (sdev->reg_addrs[0].phys_addr == sdev->reg_addrs[1].phys_addr) {
-				flash.read_base = ((unsigned long)sdev->reg_addrs[0].phys_addr) |
-					(((unsigned long)sdev->reg_addrs[0].which_io)<<32UL);
-				flash.read_size = sdev->reg_addrs[0].reg_size;
-				flash.write_base = flash.read_base;
-				flash.write_size = flash.read_size;
-			} else {
-				flash.read_base = ((unsigned long)sdev->reg_addrs[0].phys_addr) |
-					(((unsigned long)sdev->reg_addrs[0].which_io)<<32UL);
-				flash.read_size = sdev->reg_addrs[0].reg_size;
-				flash.write_base = ((unsigned long)sdev->reg_addrs[1].phys_addr) |
-					(((unsigned long)sdev->reg_addrs[1].which_io)<<32UL);
-				flash.write_size = sdev->reg_addrs[1].reg_size;
-			}
-			flash.busy = 0;
-			break;
-		}
-	}
-	if (!sdev) {
-#ifdef CONFIG_PCI
-		for_each_ebus(ebus) {
-			for_each_ebusdev(edev, ebus) {
-				if (!strcmp(edev->prom_name, "flashprom"))
-					goto ebus_done;
-			}
-		}
-	ebus_done:
-		if (!edev)
-			return -ENODEV;
+	parent = dp->parent;
 
-		len = prom_getproperty(edev->prom_node, "reg", (void *)regs, sizeof(regs));
-		if ((len % sizeof(regs[0])) != 0) {
-			printk("flash: Strange reg property size %d\n", len);
-			return -ENODEV;
-		}
-
-		nregs = len / sizeof(regs[0]);
-
-		flash.read_base = edev->resource[0].start;
-		flash.read_size = regs[0].reg_size;
-
-		if (nregs == 1) {
-			flash.write_base = edev->resource[0].start;
-			flash.write_size = regs[0].reg_size;
-		} else if (nregs == 2) {
-			flash.write_base = edev->resource[1].start;
-			flash.write_size = regs[1].reg_size;
-		} else {
-			printk("flash: Strange number of regs %d\n", nregs);
-			return -ENODEV;
-		}
-
-		flash.busy = 0;
-
-#else
+	if (strcmp(parent->name, "sbus") &&
+	    strcmp(parent->name, "sbi") &&
+	    strcmp(parent->name, "ebus"))
 		return -ENODEV;
-#endif
-	}
 
-	printk("OBP Flash: RD %lx[%lx] WR %lx[%lx]\n",
+	flash.read_base = op->resource[0].start;
+	flash.read_size = resource_size(&op->resource[0]);
+	if (op->resource[1].flags) {
+		flash.write_base = op->resource[1].start;
+		flash.write_size = resource_size(&op->resource[1]);
+	} else {
+		flash.write_base = op->resource[0].start;
+		flash.write_size = resource_size(&op->resource[0]);
+	}
+	flash.busy = 0;
+
+	printk(KERN_INFO "%s: OBP Flash, RD %lx[%lx] WR %lx[%lx]\n",
+	       op->dev.of_node->full_name,
 	       flash.read_base, flash.read_size,
 	       flash.write_base, flash.write_size);
 
-	err = misc_register(&flash_dev);
-	if (err) {
-		printk(KERN_ERR "flash: unable to get misc minor\n");
-		return err;
-	}
+	return misc_register(&flash_dev);
+}
+
+static int __devexit flash_remove(struct platform_device *op)
+{
+	misc_deregister(&flash_dev);
 
 	return 0;
 }
 
-static void __exit flash_cleanup(void)
-{
-	misc_deregister(&flash_dev);
-}
+static const struct of_device_id flash_match[] = {
+	{
+		.name = "flashprom",
+	},
+	{},
+};
+MODULE_DEVICE_TABLE(of, flash_match);
 
-module_init(flash_init);
-module_exit(flash_cleanup);
+static struct platform_driver flash_driver = {
+	.driver = {
+		.name = "flash",
+		.owner = THIS_MODULE,
+		.of_match_table = flash_match,
+	},
+	.probe		= flash_probe,
+	.remove		= __devexit_p(flash_remove),
+};
+
+module_platform_driver(flash_driver);
+
 MODULE_LICENSE("GPL");

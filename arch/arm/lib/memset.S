@@ -25,7 +25,7 @@
 	add	r2, r2, r3		@ 1 (r2 = r2 - (4 - r3))
 /*
  * The pointer is now aligned and the length is adjusted.  Try doing the
- * memzero again.
+ * memset again.
  */
 
 ENTRY(memset)
@@ -39,6 +39,9 @@ ENTRY(memset)
 	mov	r3, r1
 	cmp	r2, #16
 	blt	4f
+
+#if ! CALGN(1)+0
+
 /*
  * We need an extra register for this loop - save the return address and
  * use the LR
@@ -53,7 +56,7 @@ ENTRY(memset)
 	stmgeia	r0!, {r1, r3, ip, lr}
 	stmgeia	r0!, {r1, r3, ip, lr}
 	bgt	2b
-	LOADREGS(eqfd, sp!, {pc})	@ Now <64 bytes to go.
+	ldmeqfd	sp!, {pc}		@ Now <64 bytes to go.
 /*
  * No need to correct the count; we're only testing bits from now on
  */
@@ -63,6 +66,49 @@ ENTRY(memset)
 	tst	r2, #16
 	stmneia	r0!, {r1, r3, ip, lr}
 	ldr	lr, [sp], #4
+
+#else
+
+/*
+ * This version aligns the destination pointer in order to write
+ * whole cache lines at once.
+ */
+
+	stmfd	sp!, {r4-r7, lr}
+	mov	r4, r1
+	mov	r5, r1
+	mov	r6, r1
+	mov	r7, r1
+	mov	ip, r1
+	mov	lr, r1
+
+	cmp	r2, #96
+	tstgt	r0, #31
+	ble	3f
+
+	and	ip, r0, #31
+	rsb	ip, ip, #32
+	sub	r2, r2, ip
+	movs	ip, ip, lsl #(32 - 4)
+	stmcsia	r0!, {r4, r5, r6, r7}
+	stmmiia	r0!, {r4, r5}
+	tst	ip, #(1 << 30)
+	mov	ip, r1
+	strne	r1, [r0], #4
+
+3:	subs	r2, r2, #64
+	stmgeia	r0!, {r1, r3-r7, ip, lr}
+	stmgeia	r0!, {r1, r3-r7, ip, lr}
+	bgt	3b
+	ldmeqfd	sp!, {r4-r7, pc}
+
+	tst	r2, #32
+	stmneia	r0!, {r1, r3-r7, ip, lr}
+	tst	r2, #16
+	stmneia	r0!, {r4-r7}
+	ldmfd	sp!, {r4-r7, lr}
+
+#endif
 
 4:	tst	r2, #8
 	stmneia	r0!, {r1, r3}
@@ -77,4 +123,5 @@ ENTRY(memset)
 	strneb	r1, [r0], #1
 	tst	r2, #1
 	strneb	r1, [r0], #1
-	RETINSTR(mov,pc,lr)
+	mov	pc, lr
+ENDPROC(memset)

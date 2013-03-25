@@ -1,7 +1,7 @@
 /*
  *  linux/drivers/video/cyber2000fb.c
  *
- *  Copyright (C) 1998-2000 Russell King
+ *  Copyright (C) 1998-2002 Russell King
  *
  *  MIPS and 50xx clock support
  *  Copyright (C) 2001 Bradley D. LaRonde <brad@ltc.com>
@@ -13,62 +13,59 @@
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
  *
- * Intergraphics CyberPro 2000, 2010 and 5000 frame buffer device
+ * Integraphics CyberPro 2000, 2010 and 5000 frame buffer device
  *
  * Based on cyberfb.c.
  *
- * Note that we now use the new fbcon fix, var and cmap scheme.  We do still
- * have to check which console is the currently displayed one however, since
- * especially for the colourmap stuff.  Once fbcon has been fully migrated,
- * we can kill the last 5 references to cfb->currcon.
+ * Note that we now use the new fbcon fix, var and cmap scheme.  We do
+ * still have to check which console is the currently displayed one
+ * however, especially for the colourmap stuff.
  *
- * We also use the new hotplug PCI subsystem.  I'm not sure if there are any
- * such cards, but I'm erring on the side of caution.  We don't want to go
- * pop just because someone does have one.
+ * We also use the new hotplug PCI subsystem.  I'm not sure if there
+ * are any such cards, but I'm erring on the side of caution.  We don't
+ * want to go pop just because someone does have one.
  *
- * Note that this doesn't work fully in the case of multiple CyberPro cards
- * with grabbers.  We currently can only attach to the first CyberPro card
- * found.
+ * Note that this doesn't work fully in the case of multiple CyberPro
+ * cards with grabbers.  We currently can only attach to the first
+ * CyberPro card found.
+ *
+ * When we're in truecolour mode, we power down the LUT RAM as a power
+ * saving feature.  Also, when we enter any of the powersaving modes
+ * (except soft blanking) we power down the RAMDACs.  This saves about
+ * 1W, which is roughly 8% of the power consumption of a NetWinder
+ * (which, incidentally, is about the same saving as a 2.5in hard disk
+ * entering standby mode.)
  */
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/mm.h>
-#include <linux/tty.h>
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/fb.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/io.h>
+#include <linux/i2c.h>
+#include <linux/i2c-algo-bit.h>
 
-#include <asm/io.h>
-#include <asm/irq.h>
 #include <asm/pgtable.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
 
-#include <video/fbcon.h>
-#include <video/fbcon-cfb8.h>
-#include <video/fbcon-cfb16.h>
-#include <video/fbcon-cfb24.h>
-#include <video/fbcon-cfb32.h>
-
-/*
- * Define this if you don't want RGB565, but RGB555 for 16bpp displays.
- */
-/*#define CFB16_IS_CFB15*/
+#ifdef __arm__
+#include <asm/mach-types.h>
+#endif
 
 #include "cyber2000fb.h"
 
 struct cfb_info {
 	struct fb_info		fb;
 	struct display_switch	*dispsw;
-	struct pci_dev		*dev;
-	unsigned char 		*region;
-	unsigned char		*regs;
-	signed int		currcon;
+	struct display		*display;
+	unsigned char		__iomem *region;
+	unsigned char		__iomem *regs;
+	u_int			id;
+	u_int			irq;
 	int			func_use_count;
 	u_long			ref_ps;
 
@@ -85,21 +82,40 @@ struct cfb_info {
 	u_char			mem_ctl2;
 	u_char			mclk_mult;
 	u_char			mclk_div;
+	/*
+	 * RAMDAC control register is both of these or'ed together
+	 */
+	u_char			ramdac_ctrl;
+	u_char			ramdac_powerdown;
+
+	u32			pseudo_palette[16];
+
+	spinlock_t		reg_b0_lock;
+
+#ifdef CONFIG_FB_CYBER2000_DDC
+	bool			ddc_registered;
+	struct i2c_adapter	ddc_adapter;
+	struct i2c_algo_bit_data	ddc_algo;
+#endif
+
+#ifdef CONFIG_FB_CYBER2000_I2C
+	struct i2c_adapter	i2c_adapter;
+	struct i2c_algo_bit_data i2c_algo;
+#endif
 };
 
-static char default_font_storage[40];
 static char *default_font = "Acorn8x8";
-MODULE_PARM(default_font, "s");
+module_param(default_font, charp, 0);
 MODULE_PARM_DESC(default_font, "Default font name");
 
 /*
  * Our access methods.
  */
-#define cyber2000fb_writel(val,reg,cfb)	writel(val, (cfb)->regs + (reg))
-#define cyber2000fb_writew(val,reg,cfb)	writew(val, (cfb)->regs + (reg))
-#define cyber2000fb_writeb(val,reg,cfb)	writeb(val, (cfb)->regs + (reg))
+#define cyber2000fb_writel(val, reg, cfb)	writel(val, (cfb)->regs + (reg))
+#define cyber2000fb_writew(val, reg, cfb)	writew(val, (cfb)->regs + (reg))
+#define cyber2000fb_writeb(val, reg, cfb)	writeb(val, (cfb)->regs + (reg))
 
-#define cyber2000fb_readb(reg,cfb)	readb((cfb)->regs + (reg))
+#define cyber2000fb_readb(reg, cfb)		readb((cfb)->regs + (reg))
 
 static inline void
 cyber2000_crtcw(unsigned int reg, unsigned int val, struct cfb_info *cfb)
@@ -140,286 +156,263 @@ cyber2000_seqw(unsigned int reg, unsigned int val, struct cfb_info *cfb)
 /*
  * Hardware Cyber2000 Acceleration
  */
-static void cyber2000_accel_wait(struct cfb_info *cfb)
+static void
+cyber2000fb_fillrect(struct fb_info *info, const struct fb_fillrect *rect)
 {
-	int count = 100000;
+	struct cfb_info *cfb = (struct cfb_info *)info;
+	unsigned long dst, col;
 
-	while (cyber2000fb_readb(CO_REG_CONTROL, cfb) & 0x80) {
-		if (!count--) {
-			debug_printf("accel_wait timed out\n");
-			cyber2000fb_writeb(0, CO_REG_CONTROL, cfb);
-			return;
-		}
-		udelay(1);
+	if (!(cfb->fb.var.accel_flags & FB_ACCELF_TEXT)) {
+		cfb_fillrect(info, rect);
+		return;
 	}
-}
 
-static void cyber2000_accel_setup(struct display *p)
-{
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
+	cyber2000fb_writeb(0, CO_REG_CONTROL, cfb);
+	cyber2000fb_writew(rect->width - 1, CO_REG_PIXWIDTH, cfb);
+	cyber2000fb_writew(rect->height - 1, CO_REG_PIXHEIGHT, cfb);
 
-	cfb->dispsw->setup(p);
+	col = rect->color;
+	if (cfb->fb.var.bits_per_pixel > 8)
+		col = ((u32 *)cfb->fb.pseudo_palette)[col];
+	cyber2000fb_writel(col, CO_REG_FGCOLOUR, cfb);
+
+	dst = rect->dx + rect->dy * cfb->fb.var.xres_virtual;
+	if (cfb->fb.var.bits_per_pixel == 24) {
+		cyber2000fb_writeb(dst, CO_REG_X_PHASE, cfb);
+		dst *= 3;
+	}
+
+	cyber2000fb_writel(dst, CO_REG_DEST_PTR, cfb);
+	cyber2000fb_writeb(CO_FG_MIX_SRC, CO_REG_FGMIX, cfb);
+	cyber2000fb_writew(CO_CMD_L_PATTERN_FGCOL, CO_REG_CMD_L, cfb);
+	cyber2000fb_writew(CO_CMD_H_BLITTER, CO_REG_CMD_H, cfb);
 }
 
 static void
-cyber2000_accel_bmove(struct display *p, int sy, int sx, int dy, int dx,
-		      int height, int width)
+cyber2000fb_copyarea(struct fb_info *info, const struct fb_copyarea *region)
 {
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
-	struct fb_var_screeninfo *var = &p->fb_info->var;
-	u_long src, dst;
-	u_int fh, fw;
-	int cmd = CO_CMD_L_PATTERN_FGCOL;
+	struct cfb_info *cfb = (struct cfb_info *)info;
+	unsigned int cmd = CO_CMD_L_PATTERN_FGCOL;
+	unsigned long src, dst;
 
-	fw    = fontwidth(p);
-	sx    *= fw;
-	dx    *= fw;
-	width *= fw;
-	width -= 1;
+	if (!(cfb->fb.var.accel_flags & FB_ACCELF_TEXT)) {
+		cfb_copyarea(info, region);
+		return;
+	}
 
-	if (sx < dx) {
-		sx += width;
-		dx += width;
+	cyber2000fb_writeb(0, CO_REG_CONTROL, cfb);
+	cyber2000fb_writew(region->width - 1, CO_REG_PIXWIDTH, cfb);
+	cyber2000fb_writew(region->height - 1, CO_REG_PIXHEIGHT, cfb);
+
+	src = region->sx + region->sy * cfb->fb.var.xres_virtual;
+	dst = region->dx + region->dy * cfb->fb.var.xres_virtual;
+
+	if (region->sx < region->dx) {
+		src += region->width - 1;
+		dst += region->width - 1;
 		cmd |= CO_CMD_L_INC_LEFT;
 	}
 
-	fh     = fontheight(p);
-	sy     *= fh;
-	dy     *= fh;
-	height *= fh;
-	height -= 1;
-
-	if (sy < dy) {
-		sy += height;
-		dy += height;
+	if (region->sy < region->dy) {
+		src += (region->height - 1) * cfb->fb.var.xres_virtual;
+		dst += (region->height - 1) * cfb->fb.var.xres_virtual;
 		cmd |= CO_CMD_L_INC_UP;
 	}
 
-	src    = sx + sy * var->xres_virtual;
-	dst    = dx + dy * var->xres_virtual;
-
-	cyber2000_accel_wait(cfb);
-	cyber2000fb_writeb(0x00,  CO_REG_CONTROL, cfb);
-	cyber2000fb_writeb(0x03,  CO_REG_FORE_MIX, cfb);
-	cyber2000fb_writew(width, CO_REG_WIDTH, cfb);
-
-	if (var->bits_per_pixel != 24) {
-		cyber2000fb_writel(dst, CO_REG_DEST_PTR, cfb);
-		cyber2000fb_writel(src, CO_REG_SRC_PTR, cfb);
-	} else {
-		cyber2000fb_writel(dst * 3, CO_REG_DEST_PTR, cfb);
-		cyber2000fb_writeb(dst,     CO_REG_X_PHASE, cfb);
-		cyber2000fb_writel(src * 3, CO_REG_SRC_PTR, cfb);
-	}
-
-	cyber2000fb_writew(height, CO_REG_HEIGHT, cfb);
-	cyber2000fb_writew(cmd,    CO_REG_CMD_L, cfb);
-	cyber2000fb_writew(0x2800, CO_REG_CMD_H, cfb);
-}
-
-static void
-cyber2000_accel_clear(struct vc_data *conp, struct display *p, int sy, int sx,
-		      int height, int width)
-{
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
-	struct fb_var_screeninfo *var = &p->fb_info->var;
-	u_long dst;
-	u_int fw, fh;
-	u32 bgx = attr_bgcol_ec(p, conp);
-
-	fw = fontwidth(p);
-	fh = fontheight(p);
-
-	dst    = sx * fw + sy * var->xres_virtual * fh;
-	width  = width * fw - 1;
-	height = height * fh - 1;
-
-	cyber2000_accel_wait(cfb);
-	cyber2000fb_writeb(0x00,   CO_REG_CONTROL,  cfb);
-	cyber2000fb_writeb(0x03,   CO_REG_FORE_MIX, cfb);
-	cyber2000fb_writew(width,  CO_REG_WIDTH,    cfb);
-	cyber2000fb_writew(height, CO_REG_HEIGHT,   cfb);
-
-	switch (var->bits_per_pixel) {
-	case 15:
-	case 16:
-		bgx = ((u16 *)p->dispsw_data)[bgx];
-	case 8:
-		cyber2000fb_writel(dst, CO_REG_DEST_PTR, cfb);
-		break;
-
-	case 24:
-		cyber2000fb_writel(dst * 3, CO_REG_DEST_PTR, cfb);
+	if (cfb->fb.var.bits_per_pixel == 24) {
 		cyber2000fb_writeb(dst, CO_REG_X_PHASE, cfb);
-		bgx = ((u32 *)p->dispsw_data)[bgx];
-		break;
-
-	case 32:
-		bgx = ((u32 *)p->dispsw_data)[bgx];
-		cyber2000fb_writel(dst, CO_REG_DEST_PTR, cfb);
-		break;
+		src *= 3;
+		dst *= 3;
 	}
-
-	cyber2000fb_writel(bgx, CO_REG_FOREGROUND, cfb);
-	cyber2000fb_writew(CO_CMD_L_PATTERN_FGCOL, CO_REG_CMD_L, cfb);
-	cyber2000fb_writew(0x0800, CO_REG_CMD_H, cfb);
+	cyber2000fb_writel(src, CO_REG_SRC1_PTR, cfb);
+	cyber2000fb_writel(dst, CO_REG_DEST_PTR, cfb);
+	cyber2000fb_writew(CO_FG_MIX_SRC, CO_REG_FGMIX, cfb);
+	cyber2000fb_writew(cmd, CO_REG_CMD_L, cfb);
+	cyber2000fb_writew(CO_CMD_H_FGSRCMAP | CO_CMD_H_BLITTER,
+			   CO_REG_CMD_H, cfb);
 }
 
 static void
-cyber2000_accel_putc(struct vc_data *conp, struct display *p, int c,
-		     int yy, int xx)
+cyber2000fb_imageblit(struct fb_info *info, const struct fb_image *image)
 {
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
-
-	cyber2000_accel_wait(cfb);
-	cfb->dispsw->putc(conp, p, c, yy, xx);
+	cfb_imageblit(info, image);
+	return;
 }
 
-static void
-cyber2000_accel_putcs(struct vc_data *conp, struct display *p,
-		      const unsigned short *s, int count, int yy, int xx)
+static int cyber2000fb_sync(struct fb_info *info)
 {
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
+	struct cfb_info *cfb = (struct cfb_info *)info;
+	int count = 100000;
 
-	cyber2000_accel_wait(cfb);
-	cfb->dispsw->putcs(conp, p, s, count, yy, xx);
+	if (!(cfb->fb.var.accel_flags & FB_ACCELF_TEXT))
+		return 0;
+
+	while (cyber2000fb_readb(CO_REG_CONTROL, cfb) & CO_CTRL_BUSY) {
+		if (!count--) {
+			debug_printf("accel_wait timed out\n");
+			cyber2000fb_writeb(0, CO_REG_CONTROL, cfb);
+			break;
+		}
+		udelay(1);
+	}
+	return 0;
 }
 
-static void cyber2000_accel_revc(struct display *p, int xx, int yy)
+/*
+ * ===========================================================================
+ */
+
+static inline u32 convert_bitfield(u_int val, struct fb_bitfield *bf)
 {
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
+	u_int mask = (1 << bf->length) - 1;
 
-	cyber2000_accel_wait(cfb);
-	cfb->dispsw->revc(p, xx, yy);
+	return (val >> (16 - bf->length) & mask) << bf->offset;
 }
-
-static void
-cyber2000_accel_clear_margins(struct vc_data *conp, struct display *p,
-			      int bottom_only)
-{
-	struct cfb_info *cfb = (struct cfb_info *)p->fb_info;
-
-	cfb->dispsw->clear_margins(conp, p, bottom_only);
-}
-
-static struct display_switch fbcon_cyber_accel = {
-	setup:		cyber2000_accel_setup,
-	bmove:		cyber2000_accel_bmove,
-	clear:		cyber2000_accel_clear,
-	putc:		cyber2000_accel_putc,
-	putcs:		cyber2000_accel_putcs,
-	revc:		cyber2000_accel_revc,
-	clear_margins:	cyber2000_accel_clear_margins,
-	fontwidthmask:	FONTWIDTH(8)|FONTWIDTH(16)
-};
 
 /*
  *    Set a single color register. Return != 0 for invalid regno.
  */
 static int
-cyber2000_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-		    u_int transp, struct fb_info *info)
+cyber2000fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+		      u_int transp, struct fb_info *info)
 {
 	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct fb_var_screeninfo *var = &cfb->fb.var;
+	u32 pseudo_val;
+	int ret = 1;
 
-	u_int alpha = transp ^ 0xFFFF;
-
-	if (regno >= NR_PALETTE)
-		return 1;
-
-	red   >>= 8;
-	green >>= 8;
-	blue  >>= 8;
-	alpha >>= 8;
-
-	cfb->palette[regno].red   = red;
-	cfb->palette[regno].green = green;
-	cfb->palette[regno].blue  = blue;
-
-	switch (cfb->fb.var.bits_per_pixel) {
-#ifdef FBCON_HAS_CFB8
-	case 8:
-		cyber2000fb_writeb(regno, 0x3c8, cfb);
-		cyber2000fb_writeb(red,   0x3c9, cfb);
-		cyber2000fb_writeb(green, 0x3c9, cfb);
-		cyber2000fb_writeb(blue,  0x3c9, cfb);
-		break;
-#endif
-
-#ifdef FBCON_HAS_CFB16
-	case 16:
-#ifndef CFB16_IS_CFB15
-		if (regno < 64) {
-			/* write green */
-			cyber2000fb_writeb(regno << 2, 0x3c8, cfb);
-			cyber2000fb_writeb(cfb->palette[regno >> 1].red, 0x3c9, cfb);
-			cyber2000fb_writeb(green, 0x3c9, cfb);
-			cyber2000fb_writeb(cfb->palette[regno >> 1].blue, 0x3c9, cfb);
-		}
-
-		if (regno < 32) {
-			/* write red,blue */
-			cyber2000fb_writeb(regno << 3, 0x3c8, cfb);
-			cyber2000fb_writeb(red, 0x3c9, cfb);
-			cyber2000fb_writeb(cfb->palette[regno << 1].green, 0x3c9, cfb);
-			cyber2000fb_writeb(blue, 0x3c9, cfb);
-		}
-
-		if (regno < 16)
-			((u16 *)cfb->fb.pseudo_palette)[regno] =
-				((red   << 8) & 0xf800) |
-				((green << 3) & 0x07e0) |
-				((blue  >> 3));
-		break;
-#endif
-
-	case 15:
-		if (regno < 32) {
-			cyber2000fb_writeb(regno << 3, 0x3c8, cfb);
-			cyber2000fb_writeb(red, 0x3c9, cfb);
-			cyber2000fb_writeb(green, 0x3c9, cfb);
-			cyber2000fb_writeb(blue, 0x3c9, cfb);
-		}
-		if (regno < 16)
-			((u16 *)cfb->fb.pseudo_palette)[regno] =
-				((red   << 7) & 0x7c00) |
-				((green << 2) & 0x03e0) |
-				((blue  >> 3));
-		break;
-
-#endif
-
-#ifdef FBCON_HAS_CFB24
-	case 24:
-		cyber2000fb_writeb(regno, 0x3c8, cfb);
-		cyber2000fb_writeb(red,   0x3c9, cfb);
-		cyber2000fb_writeb(green, 0x3c9, cfb);
-		cyber2000fb_writeb(blue,  0x3c9, cfb);
-
-		if (regno < 16)
-			((u32 *)cfb->fb.pseudo_palette)[regno] =
-				(red << 16) | (green << 8) | blue;
-		break;
-#endif
-
-#ifdef FBCON_HAS_CFB32
-	case 32:
-		cyber2000fb_writeb(regno, 0x3c8, cfb);
-		cyber2000fb_writeb(red,   0x3c9, cfb);
-		cyber2000fb_writeb(green, 0x3c9, cfb);
-		cyber2000fb_writeb(blue,  0x3c9, cfb);
-
-		if (regno < 16)
-			((u32 *)cfb->fb.pseudo_palette)[regno] =
-				(alpha << 24) | (red << 16) | (green << 8) | blue;
-		break;
-#endif
-
+	switch (cfb->fb.fix.visual) {
 	default:
 		return 1;
+
+	/*
+	 * Pseudocolour:
+	 *	   8     8
+	 * pixel --/--+--/-->  red lut  --> red dac
+	 *	      |  8
+	 *	      +--/--> green lut --> green dac
+	 *	      |  8
+	 *	      +--/-->  blue lut --> blue dac
+	 */
+	case FB_VISUAL_PSEUDOCOLOR:
+		if (regno >= NR_PALETTE)
+			return 1;
+
+		red >>= 8;
+		green >>= 8;
+		blue >>= 8;
+
+		cfb->palette[regno].red = red;
+		cfb->palette[regno].green = green;
+		cfb->palette[regno].blue = blue;
+
+		cyber2000fb_writeb(regno, 0x3c8, cfb);
+		cyber2000fb_writeb(red, 0x3c9, cfb);
+		cyber2000fb_writeb(green, 0x3c9, cfb);
+		cyber2000fb_writeb(blue, 0x3c9, cfb);
+		return 0;
+
+	/*
+	 * Direct colour:
+	 *	   n     rl
+	 * pixel --/--+--/-->  red lut  --> red dac
+	 *	      |  gl
+	 *	      +--/--> green lut --> green dac
+	 *	      |  bl
+	 *	      +--/-->  blue lut --> blue dac
+	 * n = bpp, rl = red length, gl = green length, bl = blue length
+	 */
+	case FB_VISUAL_DIRECTCOLOR:
+		red >>= 8;
+		green >>= 8;
+		blue >>= 8;
+
+		if (var->green.length == 6 && regno < 64) {
+			cfb->palette[regno << 2].green = green;
+
+			/*
+			 * The 6 bits of the green component are applied
+			 * to the high 6 bits of the LUT.
+			 */
+			cyber2000fb_writeb(regno << 2, 0x3c8, cfb);
+			cyber2000fb_writeb(cfb->palette[regno >> 1].red,
+					   0x3c9, cfb);
+			cyber2000fb_writeb(green, 0x3c9, cfb);
+			cyber2000fb_writeb(cfb->palette[regno >> 1].blue,
+					   0x3c9, cfb);
+
+			green = cfb->palette[regno << 3].green;
+
+			ret = 0;
+		}
+
+		if (var->green.length >= 5 && regno < 32) {
+			cfb->palette[regno << 3].red = red;
+			cfb->palette[regno << 3].green = green;
+			cfb->palette[regno << 3].blue = blue;
+
+			/*
+			 * The 5 bits of each colour component are
+			 * applied to the high 5 bits of the LUT.
+			 */
+			cyber2000fb_writeb(regno << 3, 0x3c8, cfb);
+			cyber2000fb_writeb(red, 0x3c9, cfb);
+			cyber2000fb_writeb(green, 0x3c9, cfb);
+			cyber2000fb_writeb(blue, 0x3c9, cfb);
+			ret = 0;
+		}
+
+		if (var->green.length == 4 && regno < 16) {
+			cfb->palette[regno << 4].red = red;
+			cfb->palette[regno << 4].green = green;
+			cfb->palette[regno << 4].blue = blue;
+
+			/*
+			 * The 5 bits of each colour component are
+			 * applied to the high 5 bits of the LUT.
+			 */
+			cyber2000fb_writeb(regno << 4, 0x3c8, cfb);
+			cyber2000fb_writeb(red, 0x3c9, cfb);
+			cyber2000fb_writeb(green, 0x3c9, cfb);
+			cyber2000fb_writeb(blue, 0x3c9, cfb);
+			ret = 0;
+		}
+
+		/*
+		 * Since this is only used for the first 16 colours, we
+		 * don't have to care about overflowing for regno >= 32
+		 */
+		pseudo_val = regno << var->red.offset |
+			     regno << var->green.offset |
+			     regno << var->blue.offset;
+		break;
+
+	/*
+	 * True colour:
+	 *	   n     rl
+	 * pixel --/--+--/--> red dac
+	 *	      |  gl
+	 *	      +--/--> green dac
+	 *	      |  bl
+	 *	      +--/--> blue dac
+	 * n = bpp, rl = red length, gl = green length, bl = blue length
+	 */
+	case FB_VISUAL_TRUECOLOR:
+		pseudo_val = convert_bitfield(transp ^ 0xffff, &var->transp);
+		pseudo_val |= convert_bitfield(red, &var->red);
+		pseudo_val |= convert_bitfield(green, &var->green);
+		pseudo_val |= convert_bitfield(blue, &var->blue);
+		ret = 0;
+		break;
 	}
 
-	return 0;
+	/*
+	 * Now set our pseudo palette for the CFB16/24/32 drivers.
+	 */
+	if (regno < 16)
+		((u32 *)cfb->fb.pseudo_palette)[regno] = pseudo_val;
+
+	return ret;
 }
 
 struct par_info {
@@ -428,8 +421,8 @@ struct par_info {
 	 */
 	u_char	clock_mult;
 	u_char	clock_div;
-	u_char	visualid;
-	u_char	pixformat;
+	u_char	extseqmisc;
+	u_char	co_pixfmt;
 	u_char	crtc_ofl;
 	u_char	crtc[19];
 	u_int	width;
@@ -439,8 +432,7 @@ struct par_info {
 	/*
 	 * Other
 	 */
-	u_char	palette_ctrl;
-	u_int	vmode;
+	u_char	ramdac;
 };
 
 static const u_char crtc_idx[] = {
@@ -448,6 +440,20 @@ static const u_char crtc_idx[] = {
 	0x08, 0x09,
 	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18
 };
+
+static void cyber2000fb_write_ramdac_ctrl(struct cfb_info *cfb)
+{
+	unsigned int i;
+	unsigned int val = cfb->ramdac_ctrl | cfb->ramdac_powerdown;
+
+	cyber2000fb_writeb(0x56, 0x3ce, cfb);
+	i = cyber2000fb_readb(0x3cf, cfb);
+	cyber2000fb_writeb(i | 4, 0x3cf, cfb);
+	cyber2000fb_writeb(val, 0x3c6, cfb);
+	cyber2000fb_writeb(i, 0x3cf, cfb);
+	/* prevent card lock-up observed on x86 with CyberPro 2000 */
+	cyber2000fb_readb(0x3cf, cfb);
+}
 
 static void cyber2000fb_set_timing(struct cfb_info *cfb, struct par_info *hw)
 {
@@ -480,7 +486,7 @@ static void cyber2000fb_set_timing(struct cfb_info *cfb, struct par_info *hw)
 	for (i = 0x0a; i < 0x10; i++)
 		cyber2000_crtcw(i, 0, cfb);
 
-	cyber2000_grphw(0x11, hw->crtc_ofl, cfb);
+	cyber2000_grphw(EXT_CRT_VRTOFL, hw->crtc_ofl, cfb);
 	cyber2000_grphw(0x00, 0x00, cfb);
 	cyber2000_grphw(0x01, 0x00, cfb);
 	cyber2000_grphw(0x02, 0x00, cfb);
@@ -501,30 +507,19 @@ static void cyber2000fb_set_timing(struct cfb_info *cfb, struct par_info *hw)
 	cyber2000_attrw(0x13, 0x00, cfb);
 	cyber2000_attrw(0x14, 0x00, cfb);
 
-	/* woody: set the interlaced bit... */
-	/* FIXME: what about doublescan? */
-	cyber2000fb_writeb(0x11, 0x3ce, cfb);
-	i = cyber2000fb_readb(0x3cf, cfb);
-	if (hw->vmode == FB_VMODE_INTERLACED)
-		i |= 0x20;
-	else
-		i &= ~0x20;
-	cyber2000fb_writeb(i, 0x3cf, cfb);
-
 	/* PLL registers */
-	cyber2000_grphw(DCLK_MULT, hw->clock_mult, cfb);
-	cyber2000_grphw(DCLK_DIV,  hw->clock_div, cfb);
-	cyber2000_grphw(MCLK_MULT, cfb->mclk_mult, cfb);
-	cyber2000_grphw(MCLK_DIV,  cfb->mclk_div, cfb);
+	spin_lock(&cfb->reg_b0_lock);
+	cyber2000_grphw(EXT_DCLK_MULT, hw->clock_mult, cfb);
+	cyber2000_grphw(EXT_DCLK_DIV, hw->clock_div, cfb);
+	cyber2000_grphw(EXT_MCLK_MULT, cfb->mclk_mult, cfb);
+	cyber2000_grphw(EXT_MCLK_DIV, cfb->mclk_div, cfb);
 	cyber2000_grphw(0x90, 0x01, cfb);
 	cyber2000_grphw(0xb9, 0x80, cfb);
 	cyber2000_grphw(0xb9, 0x00, cfb);
+	spin_unlock(&cfb->reg_b0_lock);
 
-	cyber2000fb_writeb(0x56, 0x3ce, cfb);
-	i = cyber2000fb_readb(0x3cf, cfb);
-	cyber2000fb_writeb(i | 4, 0x3cf, cfb);
-	cyber2000fb_writeb(hw->palette_ctrl, 0x3c6, cfb);
-	cyber2000fb_writeb(i,    0x3cf, cfb);
+	cfb->ramdac_ctrl = hw->ramdac;
+	cyber2000fb_write_ramdac_ctrl(cfb);
 
 	cyber2000fb_writeb(0x20, 0x3c0, cfb);
 	cyber2000fb_writeb(0xff, 0x3c6, cfb);
@@ -532,31 +527,28 @@ static void cyber2000fb_set_timing(struct cfb_info *cfb, struct par_info *hw)
 	cyber2000_grphw(0x14, hw->fetch, cfb);
 	cyber2000_grphw(0x15, ((hw->fetch >> 8) & 0x03) |
 			      ((hw->pitch >> 4) & 0x30), cfb);
-	cyber2000_grphw(0x77, hw->visualid, cfb);
-
-	/* make sure we stay in linear mode */
-	cyber2000_grphw(0x33, 0x0d, cfb);
+	cyber2000_grphw(EXT_SEQ_MISC, hw->extseqmisc, cfb);
 
 	/*
 	 * Set up accelerator registers
 	 */
-	cyber2000fb_writew(hw->width,     CO_REG_SRC_WIDTH,  cfb);
-	cyber2000fb_writew(hw->width,     CO_REG_DEST_WIDTH, cfb);
-	cyber2000fb_writeb(hw->pixformat, CO_REG_PIX_FORMAT, cfb);
+	cyber2000fb_writew(hw->width, CO_REG_SRC_WIDTH, cfb);
+	cyber2000fb_writew(hw->width, CO_REG_DEST_WIDTH, cfb);
+	cyber2000fb_writeb(hw->co_pixfmt, CO_REG_PIXFMT, cfb);
 }
 
 static inline int
 cyber2000fb_update_start(struct cfb_info *cfb, struct fb_var_screeninfo *var)
 {
-	u_int base;
+	u_int base = var->yoffset * var->xres_virtual + var->xoffset;
 
-	base = var->yoffset * var->xres_virtual + var->xoffset;
+	base *= var->bits_per_pixel;
 
-	/* have to be careful, because bits_per_pixel might be 15
-	   in this version of the driver -- dok@directfb.org 2002/06/13 */
-	base *= (var->bits_per_pixel + 7) >> 3;
-
-	base >>= 2;
+	/*
+	 * Convert to bytes and shift two extra bits because DAC
+	 * can only start on 4 byte aligned data.
+	 */
+	base >>= 5;
 
 	if (base >= 1 << 20)
 		return -EINVAL;
@@ -568,59 +560,21 @@ cyber2000fb_update_start(struct cfb_info *cfb, struct fb_var_screeninfo *var)
 	return 0;
 }
 
-/*
- * Set the Colormap
- */
-static int
-cyber2000fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-		     struct fb_info *info)
-{
-	struct cfb_info *cfb = (struct cfb_info *)info;
-	struct fb_cmap *dcmap = &fb_display[con].cmap;
-	int err = 0;
-
-	/* no colormap allocated? */
-	if (!dcmap->len) {
-		int size;
-
-		if (cfb->fb.var.bits_per_pixel == 16)
-			size = 32;
-		else
-			size = 256;
-
-		err = fb_alloc_cmap(dcmap, size, 0);
-	}
-
-	/*
-	 * we should be able to remove this test once fbcon has been
-	 * "improved" --rmk
-	 */
-	if (!err && con == cfb->currcon) {
-		err = fb_set_cmap(cmap, kspc, cyber2000_setcolreg, &cfb->fb);
-		dcmap = &cfb->fb.cmap;
-	}
-
-	if (!err)
-		fb_copy_cmap(cmap, dcmap, kspc ? 0 : 1);
-
-	return err;
-}
-
 static int
 cyber2000fb_decode_crtc(struct par_info *hw, struct cfb_info *cfb,
 			struct fb_var_screeninfo *var)
 {
 	u_int Htotal, Hblankend, Hsyncend;
 	u_int Vtotal, Vdispend, Vblankstart, Vblankend, Vsyncstart, Vsyncend;
-#define BIT(v,b1,m,b2) (((v >> b1) & m) << b2)
+#define ENCODE_BIT(v, b1, m, b2) ((((v) >> (b1)) & (m)) << (b2))
 
 	hw->crtc[13] = hw->pitch;
 	hw->crtc[17] = 0xe3;
 	hw->crtc[14] = 0;
 	hw->crtc[8]  = 0;
 
-	Htotal      = var->xres + var->right_margin +
-		      var->hsync_len + var->left_margin;
+	Htotal     = var->xres + var->right_margin +
+		     var->hsync_len + var->left_margin;
 
 	if (Htotal > 2080)
 		return -EINVAL;
@@ -630,15 +584,15 @@ cyber2000fb_decode_crtc(struct par_info *hw, struct cfb_info *cfb,
 	hw->crtc[2] = var->xres >> 3;
 	hw->crtc[4] = (var->xres + var->right_margin) >> 3;
 
-	Hblankend   = (Htotal - 4*8) >> 3;
+	Hblankend   = (Htotal - 4 * 8) >> 3;
 
-	hw->crtc[3] = BIT(Hblankend,  0, 0x1f,  0) |
-		      BIT(1,          0, 0x01,  7);
+	hw->crtc[3] = ENCODE_BIT(Hblankend,  0, 0x1f,  0) |
+		      ENCODE_BIT(1,          0, 0x01,  7);
 
 	Hsyncend    = (var->xres + var->right_margin + var->hsync_len) >> 3;
 
-	hw->crtc[5] = BIT(Hsyncend,   0, 0x1f,  0) |
-		      BIT(Hblankend,  5, 0x01,  7);
+	hw->crtc[5] = ENCODE_BIT(Hsyncend,   0, 0x1f,  0) |
+		      ENCODE_BIT(Hblankend,  5, 0x01,  7);
 
 	Vdispend    = var->yres - 1;
 	Vsyncstart  = var->yres + var->lower_margin;
@@ -653,35 +607,41 @@ cyber2000fb_decode_crtc(struct par_info *hw, struct cfb_info *cfb,
 	Vblankend   = Vtotal - 10;
 
 	hw->crtc[6]  = Vtotal;
-	hw->crtc[7]  = BIT(Vtotal,     8, 0x01,  0) |
-			BIT(Vdispend,   8, 0x01,  1) |
-			BIT(Vsyncstart, 8, 0x01,  2) |
-			BIT(Vblankstart,8, 0x01,  3) |
-			BIT(1,          0, 0x01,  4) |
-	        	BIT(Vtotal,     9, 0x01,  5) |
-			BIT(Vdispend,   9, 0x01,  6) |
-			BIT(Vsyncstart, 9, 0x01,  7);
-	hw->crtc[9]  = BIT(0,          0, 0x1f,  0) |
-		        BIT(Vblankstart,9, 0x01,  5) |
-			BIT(1,          0, 0x01,  6);
+	hw->crtc[7]  = ENCODE_BIT(Vtotal,     8, 0x01,  0) |
+			ENCODE_BIT(Vdispend,   8, 0x01,  1) |
+			ENCODE_BIT(Vsyncstart, 8, 0x01,  2) |
+			ENCODE_BIT(Vblankstart, 8, 0x01,  3) |
+			ENCODE_BIT(1,          0, 0x01,  4) |
+			ENCODE_BIT(Vtotal,     9, 0x01,  5) |
+			ENCODE_BIT(Vdispend,   9, 0x01,  6) |
+			ENCODE_BIT(Vsyncstart, 9, 0x01,  7);
+	hw->crtc[9]  = ENCODE_BIT(0,          0, 0x1f,  0) |
+			ENCODE_BIT(Vblankstart, 9, 0x01,  5) |
+			ENCODE_BIT(1,          0, 0x01,  6);
 	hw->crtc[10] = Vsyncstart;
-	hw->crtc[11] = BIT(Vsyncend,   0, 0x0f,  0) |
-		       BIT(1,          0, 0x01,  7);
+	hw->crtc[11] = ENCODE_BIT(Vsyncend,   0, 0x0f,  0) |
+		       ENCODE_BIT(1,          0, 0x01,  7);
 	hw->crtc[12] = Vdispend;
 	hw->crtc[15] = Vblankstart;
 	hw->crtc[16] = Vblankend;
 	hw->crtc[18] = 0xff;
 
-	/* overflow - graphics reg 0x11 */
-	/* 0=VTOTAL:10 1=VDEND:10 2=VRSTART:10 3=VBSTART:10
+	/*
+	 * overflow - graphics reg 0x11
+	 * 0=VTOTAL:10 1=VDEND:10 2=VRSTART:10 3=VBSTART:10
 	 * 4=LINECOMP:10 5-IVIDEO 6=FIXCNT
 	 */
 	hw->crtc_ofl =
-		BIT(Vtotal,     10, 0x01,  0) |
-		BIT(Vdispend,   10, 0x01,  1) |
-		BIT(Vsyncstart, 10, 0x01,  2) |
-		BIT(Vblankstart,10, 0x01,  3) |
-		1 << 4;
+		ENCODE_BIT(Vtotal, 10, 0x01, 0) |
+		ENCODE_BIT(Vdispend, 10, 0x01, 1) |
+		ENCODE_BIT(Vsyncstart, 10, 0x01, 2) |
+		ENCODE_BIT(Vblankstart, 10, 0x01, 3) |
+		EXT_CRT_VRTOFL_LINECOMP10;
+
+	/* woody: set the interlaced bit... */
+	/* FIXME: what about doublescan? */
+	if ((var->vmode & FB_VMODE_MASK) == FB_VMODE_INTERLACED)
+		hw->crtc_ofl |= EXT_CRT_VRTOFL_INTERLACE;
 
 	return 0;
 }
@@ -737,9 +697,9 @@ cyber2000fb_decode_clock(struct par_info *hw, struct cfb_info *cfb,
 	 *    pll_ps_calc = best_div1 / (ref_ps * best_mult)
 	 */
 	best_diff = 0x7fffffff;
-	best_mult = 32;
-	best_div1 = 255;
-	for (t_div1 = 32; t_div1 > 1; t_div1 -= 1) {
+	best_mult = 2;
+	best_div1 = 32;
+	for (t_div1 = 2; t_div1 < 32; t_div1 += 1) {
 		u_int rr, t_mult, t_pll_ps;
 		int diff;
 
@@ -787,85 +747,7 @@ cyber2000fb_decode_clock(struct par_info *hw, struct cfb_info *cfb,
 	vco = ref_ps * best_div1 / best_mult;
 	if ((ref_ps == 40690) && (vco < 5556))
 		/* Set VFSEL when VCO > 180MHz (5.556 ps). */
-		hw->clock_div |= DCLK_DIV_VFSEL;
-
-	return 0;
-}
-
-/*
- * Decode the info required for the hardware.
- * This involves the PLL parameters for the dot clock,
- * CRTC registers, and accelerator settings.
- */
-static int
-cyber2000fb_decode_var(struct fb_var_screeninfo *var, struct cfb_info *cfb,
-		       struct par_info *hw)
-{
-	int err;
-
-	hw->width = var->xres_virtual;
-	hw->palette_ctrl = 0x06;
-	hw->vmode = var->vmode;
-
-	switch (var->bits_per_pixel) {
-#ifdef FBCON_HAS_CFB8
-	case 8:	/* PSEUDOCOLOUR, 256 */
-		hw->pixformat		= PIXFORMAT_8BPP;
-		hw->visualid		= VISUALID_256;
-		hw->pitch		= hw->width >> 3;
-		break;
-#endif
-#ifdef FBCON_HAS_CFB16
-	case 16:/* DIRECTCOLOUR, 64k */
-#ifndef CFB16_IS_CFB15
-		hw->pixformat		= PIXFORMAT_16BPP;
-		hw->visualid		= VISUALID_64K;
-		hw->pitch		= hw->width >> 2;
-		hw->palette_ctrl	|= 0x10;
-		break;
-#endif
-	case 15:/* DIRECTCOLOUR, 32k */
-		hw->pixformat		= PIXFORMAT_16BPP;
-		hw->visualid		= VISUALID_32K;
-		hw->pitch		= hw->width >> 2;
-		hw->palette_ctrl	|= 0x10;
-		break;
-
-#endif
-#ifdef FBCON_HAS_CFB24
-	case 24:/* TRUECOLOUR, 16m */
-		hw->pixformat		= PIXFORMAT_24BPP;
-		hw->visualid		= VISUALID_16M;
-		hw->width		*= 3;
-		hw->pitch		= hw->width >> 3;
-		hw->palette_ctrl	|= 0x10;
-		break;
-#endif
-#ifdef FBCON_HAS_CFB32
-	case 32:/* TRUECOLOUR, 16m */
-		hw->pixformat		= PIXFORMAT_32BPP;
-		hw->visualid		= VISUALID_16M_32;
-		hw->pitch		= hw->width >> 1;
-		hw->palette_ctrl	|= 0x10;
-		break;
-#endif
-	default:
-		return -EINVAL;
-	}
-
-	err = cyber2000fb_decode_clock(hw, cfb, var);
-	if (err)
-		return err;
-
-	err = cyber2000fb_decode_crtc(hw, cfb, var);
-	if (err)
-		return err;
-
-	hw->width -= 1;
-	hw->fetch = hw->pitch;
-	if (!(cfb->mem_ctl2 & MEM_CTL2_64BIT))
-		hw->fetch <<= 1;
-	hw->fetch += 1;
+		hw->clock_div |= EXT_DCLK_DIV_VFSEL;
 
 	return 0;
 }
@@ -874,58 +756,21 @@ cyber2000fb_decode_var(struct fb_var_screeninfo *var, struct cfb_info *cfb,
  *    Set the User Defined Part of the Display
  */
 static int
-cyber2000fb_set_var(struct fb_var_screeninfo *var, int con,
-		    struct fb_info *info)
+cyber2000fb_check_var(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct cfb_info *cfb = (struct cfb_info *)info;
-	struct display *display;
 	struct par_info hw;
-	int err, chgvar = 0;
+	unsigned int mem;
+	int err;
 
-	/*
-	 * CONUPDATE and SMOOTH_XPAN are equal.  However,
-	 * SMOOTH_XPAN is only used internally by fbcon.
-	 */
-	if (var->vmode & FB_VMODE_CONUPDATE) {
-		var->vmode |= FB_VMODE_YWRAP;
-		var->xoffset = cfb->fb.var.xoffset;
-		var->yoffset = cfb->fb.var.yoffset;
-	}
-
-	err = cyber2000fb_decode_var(var, (struct cfb_info *)info, &hw);
-	if (err)
-		return err;
-
-	if (var->activate & FB_ACTIVATE_TEST)
-		return 0;
-
-	if ((var->activate & FB_ACTIVATE_MASK) != FB_ACTIVATE_NOW)
-		return -EINVAL;
-
-	if (cfb->fb.var.xres != var->xres)
-		chgvar = 1;
-	if (cfb->fb.var.yres != var->yres)
-		chgvar = 1;
-	if (cfb->fb.var.xres_virtual != var->xres_virtual)
-		chgvar = 1;
-	if (cfb->fb.var.yres_virtual != var->yres_virtual)
-		chgvar = 1;
-	if (cfb->fb.var.bits_per_pixel != var->bits_per_pixel)
-		chgvar = 1;
-
-	if (con < 0) {
-		display = cfb->fb.disp;
-		chgvar = 0;
-	} else {
-		display = fb_display + con;
-	}
-
+	var->transp.msb_right	= 0;
 	var->red.msb_right	= 0;
 	var->green.msb_right	= 0;
 	var->blue.msb_right	= 0;
+	var->transp.offset	= 0;
+	var->transp.length	= 0;
 
 	switch (var->bits_per_pixel) {
-#ifdef FBCON_HAS_CFB8
 	case 8:	/* PSEUDOCOLOUR, 256 */
 		var->red.offset		= 0;
 		var->red.length		= 8;
@@ -933,45 +778,42 @@ cyber2000fb_set_var(struct fb_var_screeninfo *var, int con,
 		var->green.length	= 8;
 		var->blue.offset	= 0;
 		var->blue.length	= 8;
-
-		cfb->fb.fix.visual	= FB_VISUAL_PSEUDOCOLOR;
-		cfb->dispsw		= &fbcon_cfb8;
-		display->dispsw_data	= NULL;
-		display->next_line	= var->xres_virtual;
 		break;
-#endif
-#ifdef FBCON_HAS_CFB16
-	case 16:/* DIRECTCOLOUR, 64k */
-#ifndef CFB16_IS_CFB15
-		var->red.offset		= 11;
-		var->red.length		= 5;
-		var->green.offset	= 5;
-		var->green.length	= 6;
-		var->blue.offset	= 0;
-		var->blue.length	= 5;
 
-		cfb->fb.fix.visual	= FB_VISUAL_DIRECTCOLOR;
-		cfb->dispsw		= &fbcon_cfb16;
-		display->dispsw_data	= cfb->fb.pseudo_palette;
-		display->next_line	= var->xres_virtual * 2;
-		break;
-#endif
-	case 15:/* DIRECTCOLOUR, 32k */
-		var->bits_per_pixel	= 15;
-		var->red.offset		= 10;
-		var->red.length		= 5;
-		var->green.offset	= 5;
-		var->green.length	= 5;
-		var->blue.offset	= 0;
-		var->blue.length	= 5;
+	case 16:/* DIRECTCOLOUR, 64k or 32k */
+		switch (var->green.length) {
+		case 6: /* RGB565, 64k */
+			var->red.offset		= 11;
+			var->red.length		= 5;
+			var->green.offset	= 5;
+			var->green.length	= 6;
+			var->blue.offset	= 0;
+			var->blue.length	= 5;
+			break;
 
-		cfb->fb.fix.visual	= FB_VISUAL_DIRECTCOLOR;
-		cfb->dispsw		= &fbcon_cfb16;
-		display->dispsw_data	= cfb->fb.pseudo_palette;
-		display->next_line	= var->xres_virtual * 2;
+		default:
+		case 5: /* RGB555, 32k */
+			var->red.offset		= 10;
+			var->red.length		= 5;
+			var->green.offset	= 5;
+			var->green.length	= 5;
+			var->blue.offset	= 0;
+			var->blue.length	= 5;
+			break;
+
+		case 4: /* RGB444, 4k + transparency? */
+			var->transp.offset	= 12;
+			var->transp.length	= 4;
+			var->red.offset		= 8;
+			var->red.length		= 4;
+			var->green.offset	= 4;
+			var->green.length	= 4;
+			var->blue.offset	= 0;
+			var->blue.length	= 4;
+			break;
+		}
 		break;
-#endif
-#ifdef FBCON_HAS_CFB24
+
 	case 24:/* TRUECOLOUR, 16m */
 		var->red.offset		= 16;
 		var->red.length		= 8;
@@ -979,14 +821,8 @@ cyber2000fb_set_var(struct fb_var_screeninfo *var, int con,
 		var->green.length	= 8;
 		var->blue.offset	= 0;
 		var->blue.length	= 8;
-
-		cfb->fb.fix.visual	= FB_VISUAL_TRUECOLOR;
-		cfb->dispsw		= &fbcon_cfb24;
-		display->dispsw_data	= cfb->fb.pseudo_palette;
-		display->next_line	= var->xres_virtual * 3;
 		break;
-#endif
-#ifdef FBCON_HAS_CFB32
+
 	case 32:/* TRUECOLOUR, 16m */
 		var->transp.offset	= 24;
 		var->transp.length	= 8;
@@ -996,90 +832,153 @@ cyber2000fb_set_var(struct fb_var_screeninfo *var, int con,
 		var->green.length	= 8;
 		var->blue.offset	= 0;
 		var->blue.length	= 8;
+		break;
 
-		cfb->fb.fix.visual	= FB_VISUAL_TRUECOLOR;
-		cfb->dispsw		= &fbcon_cfb32;
-		display->dispsw_data	= cfb->fb.pseudo_palette;
-		display->next_line	= var->xres_virtual * 4;
-		break;
-#endif
-	default:/* in theory this should never happen */
-		printk(KERN_WARNING "%s: no support for %dbpp\n",
-		       cfb->fb.fix.id, var->bits_per_pixel);
-		cfb->dispsw = &fbcon_dummy;
-		break;
+	default:
+		return -EINVAL;
 	}
 
-	if (var->accel_flags & FB_ACCELF_TEXT && cfb->dispsw != &fbcon_dummy)
-		display->dispsw = &fbcon_cyber_accel;
-	else
-		display->dispsw = cfb->dispsw;
+	mem = var->xres_virtual * var->yres_virtual * (var->bits_per_pixel / 8);
+	if (mem > cfb->fb.fix.smem_len)
+		var->yres_virtual = cfb->fb.fix.smem_len * 8 /
+				    (var->bits_per_pixel * var->xres_virtual);
 
-	cfb->fb.fix.line_length	= display->next_line;
+	if (var->yres > var->yres_virtual)
+		var->yres = var->yres_virtual;
+	if (var->xres > var->xres_virtual)
+		var->xres = var->xres_virtual;
 
-	display->screen_base	= cfb->fb.screen_base;
-	display->line_length	= cfb->fb.fix.line_length;
-	display->visual		= cfb->fb.fix.visual;
-	display->type		= cfb->fb.fix.type;
-	display->type_aux	= cfb->fb.fix.type_aux;
-	display->ypanstep	= cfb->fb.fix.ypanstep;
-	display->ywrapstep	= cfb->fb.fix.ywrapstep;
-	display->can_soft_blank = 1;
-	display->inverse	= 0;
+	err = cyber2000fb_decode_clock(&hw, cfb, var);
+	if (err)
+		return err;
 
-	cfb->fb.var = *var;
-	cfb->fb.var.activate &= ~FB_ACTIVATE_ALL;
-
-	/*
-	 * Update the old var.  The fbcon drivers still use this.
-	 * Once they are using cfb->fb.var, this can be dropped.
-	 *					--rmk
-	 */
-	display->var = cfb->fb.var;
-
-	/*
-	 * If we are setting all the virtual consoles, also set the
-	 * defaults used to create new consoles.
-	 */
-	if (var->activate & FB_ACTIVATE_ALL)
-		cfb->fb.disp->var = cfb->fb.var;
-
-	if (chgvar && info && cfb->fb.changevar)
-		cfb->fb.changevar(con);
-
-	cyber2000fb_update_start(cfb, var);
-	cyber2000fb_set_timing(cfb, &hw);
-	fb_set_cmap(&cfb->fb.cmap, 1, cyber2000_setcolreg, &cfb->fb);
+	err = cyber2000fb_decode_crtc(&hw, cfb, var);
+	if (err)
+		return err;
 
 	return 0;
 }
 
+static int cyber2000fb_set_par(struct fb_info *info)
+{
+	struct cfb_info *cfb = (struct cfb_info *)info;
+	struct fb_var_screeninfo *var = &cfb->fb.var;
+	struct par_info hw;
+	unsigned int mem;
+
+	hw.width = var->xres_virtual;
+	hw.ramdac = RAMDAC_VREFEN | RAMDAC_DAC8BIT;
+
+	switch (var->bits_per_pixel) {
+	case 8:
+		hw.co_pixfmt		= CO_PIXFMT_8BPP;
+		hw.pitch		= hw.width >> 3;
+		hw.extseqmisc		= EXT_SEQ_MISC_8;
+		break;
+
+	case 16:
+		hw.co_pixfmt		= CO_PIXFMT_16BPP;
+		hw.pitch		= hw.width >> 2;
+
+		switch (var->green.length) {
+		case 6: /* RGB565, 64k */
+			hw.extseqmisc	= EXT_SEQ_MISC_16_RGB565;
+			break;
+		case 5: /* RGB555, 32k */
+			hw.extseqmisc	= EXT_SEQ_MISC_16_RGB555;
+			break;
+		case 4: /* RGB444, 4k + transparency? */
+			hw.extseqmisc	= EXT_SEQ_MISC_16_RGB444;
+			break;
+		default:
+			BUG();
+		}
+		break;
+
+	case 24:/* TRUECOLOUR, 16m */
+		hw.co_pixfmt		= CO_PIXFMT_24BPP;
+		hw.width		*= 3;
+		hw.pitch		= hw.width >> 3;
+		hw.ramdac		|= (RAMDAC_BYPASS | RAMDAC_RAMPWRDN);
+		hw.extseqmisc		= EXT_SEQ_MISC_24_RGB888;
+		break;
+
+	case 32:/* TRUECOLOUR, 16m */
+		hw.co_pixfmt		= CO_PIXFMT_32BPP;
+		hw.pitch		= hw.width >> 1;
+		hw.ramdac		|= (RAMDAC_BYPASS | RAMDAC_RAMPWRDN);
+		hw.extseqmisc		= EXT_SEQ_MISC_32;
+		break;
+
+	default:
+		BUG();
+	}
+
+	/*
+	 * Sigh, this is absolutely disgusting, but caused by
+	 * the way the fbcon developers want to separate out
+	 * the "checking" and the "setting" of the video mode.
+	 *
+	 * If the mode is not suitable for the hardware here,
+	 * we can't prevent it being set by returning an error.
+	 *
+	 * In theory, since NetWinders contain just one VGA card,
+	 * we should never end up hitting this problem.
+	 */
+	BUG_ON(cyber2000fb_decode_clock(&hw, cfb, var) != 0);
+	BUG_ON(cyber2000fb_decode_crtc(&hw, cfb, var) != 0);
+
+	hw.width -= 1;
+	hw.fetch = hw.pitch;
+	if (!(cfb->mem_ctl2 & MEM_CTL2_64BIT))
+		hw.fetch <<= 1;
+	hw.fetch += 1;
+
+	cfb->fb.fix.line_length = var->xres_virtual * var->bits_per_pixel / 8;
+
+	/*
+	 * Same here - if the size of the video mode exceeds the
+	 * available RAM, we can't prevent this mode being set.
+	 *
+	 * In theory, since NetWinders contain just one VGA card,
+	 * we should never end up hitting this problem.
+	 */
+	mem = cfb->fb.fix.line_length * var->yres_virtual;
+	BUG_ON(mem > cfb->fb.fix.smem_len);
+
+	/*
+	 * 8bpp displays are always pseudo colour.  16bpp and above
+	 * are direct colour or true colour, depending on whether
+	 * the RAMDAC palettes are bypassed.  (Direct colour has
+	 * palettes, true colour does not.)
+	 */
+	if (var->bits_per_pixel == 8)
+		cfb->fb.fix.visual = FB_VISUAL_PSEUDOCOLOR;
+	else if (hw.ramdac & RAMDAC_BYPASS)
+		cfb->fb.fix.visual = FB_VISUAL_TRUECOLOR;
+	else
+		cfb->fb.fix.visual = FB_VISUAL_DIRECTCOLOR;
+
+	cyber2000fb_set_timing(cfb, &hw);
+	cyber2000fb_update_start(cfb, var);
+
+	return 0;
+}
 
 /*
  *    Pan or Wrap the Display
  */
 static int
-cyber2000fb_pan_display(struct fb_var_screeninfo *var, int con,
-			struct fb_info *info)
+cyber2000fb_pan_display(struct fb_var_screeninfo *var, struct fb_info *info)
 {
 	struct cfb_info *cfb = (struct cfb_info *)info;
-	u_int y_bottom;
-
-	y_bottom = var->yoffset;
-
-	if (!(var->vmode & FB_VMODE_YWRAP))
-		y_bottom += var->yres;
-
-	if (var->xoffset > (var->xres_virtual - var->xres))
-		return -EINVAL;
-	if (y_bottom > cfb->fb.var.yres_virtual)
-		return -EINVAL;
 
 	if (cyber2000fb_update_start(cfb, var))
 		return -EINVAL;
 
 	cfb->fb.var.xoffset = var->xoffset;
 	cfb->fb.var.yoffset = var->yoffset;
+
 	if (var->vmode & FB_VMODE_YWRAP) {
 		cfb->fb.var.vmode |= FB_VMODE_YWRAP;
 	} else {
@@ -1089,195 +988,138 @@ cyber2000fb_pan_display(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-
-/*
- *    Update the `var' structure (called by fbcon.c)
- *
- *    This call looks only at yoffset and the FB_VMODE_YWRAP flag in `var'.
- *    Since it's called by a kernel driver, no range checking is done.
- */
-static int cyber2000fb_updatevar(int con, struct fb_info *info)
-{
-	struct cfb_info *cfb = (struct cfb_info *)info;
-
-	return cyber2000fb_update_start(cfb, &fb_display[con].var);
-}
-
-static int cyber2000fb_switch(int con, struct fb_info *info)
-{
-	struct cfb_info *cfb = (struct cfb_info *)info;
-	struct display *disp;
-	struct fb_cmap *cmap;
-
-	if (cfb->currcon >= 0) {
-		disp = fb_display + cfb->currcon;
-
-		/*
-		 * Save the old colormap and video mode.
-		 */
-		disp->var = cfb->fb.var;
-		if (disp->cmap.len)
-			fb_copy_cmap(&cfb->fb.cmap, &disp->cmap, 0);
-	}
-
-	cfb->currcon = con;
-	disp = fb_display + con;
-
-	/*
-	 * Install the new colormap and change the video mode.  By default,
-	 * fbcon sets all the colormaps and video modes to the default
-	 * values at bootup.
-	 *
-	 * Really, we want to set the colourmap size depending on the
-	 * depth of the new video mode.  For now, we leave it at its
-	 * default 256 entry.
-	 */
-	if (disp->cmap.len)
-		cmap = &disp->cmap;
-	else
-		cmap = fb_default_cmap(1 << disp->var.bits_per_pixel);
-
-	fb_copy_cmap(cmap, &cfb->fb.cmap, 0);
-
-	cfb->fb.var = disp->var;
-	cfb->fb.var.activate = FB_ACTIVATE_NOW;
-
-	cyber2000fb_set_var(&cfb->fb.var, con, &cfb->fb);
-
-	return 0;
-}
-
 /*
  *    (Un)Blank the display.
+ *
+ *  Blank the screen if blank_mode != 0, else unblank. If
+ *  blank == NULL then the caller blanks by setting the CLUT
+ *  (Color Look Up Table) to all black. Return 0 if blanking
+ *  succeeded, != 0 if un-/blanking failed due to e.g. a
+ *  video mode which doesn't support it. Implements VESA
+ *  suspend and powerdown modes on hardware that supports
+ *  disabling hsync/vsync:
+ *    blank_mode == 2: suspend vsync
+ *    blank_mode == 3: suspend hsync
+ *    blank_mode == 4: powerdown
+ *
+ *  wms...Enable VESA DMPS compatible powerdown mode
+ *  run "setterm -powersave powerdown" to take advantage
  */
-static void cyber2000fb_blank(int blank, struct fb_info *info)
+static int cyber2000fb_blank(int blank, struct fb_info *info)
 {
 	struct cfb_info *cfb = (struct cfb_info *)info;
+	unsigned int sync = 0;
 	int i;
 
-	/*
-	 *  Blank the screen if blank_mode != 0, else unblank. If
-	 *  blank == NULL then the caller blanks by setting the CLUT
-	 *  (Color Look Up Table) to all black. Return 0 if blanking
-	 *  succeeded, != 0 if un-/blanking failed due to e.g. a
-	 *  video mode which doesn't support it. Implements VESA
-	 *  suspend and powerdown modes on hardware that supports
-	 *  disabling hsync/vsync:
-	 *    blank_mode == 2: suspend vsync
-	 *    blank_mode == 3: suspend hsync
-	 *    blank_mode == 4: powerdown
-	 *
-	 *  wms...Enable VESA DMPS compatible powerdown mode
-	 *  run "setterm -powersave powerdown" to take advantage
-	 */
-     
 	switch (blank) {
-	case 4:	/* powerdown - both sync lines down */
-    		cyber2000_grphw(0x16, 0x05, cfb);
-		break;	
-	case 3:	/* hsync off */
-    		cyber2000_grphw(0x16, 0x01, cfb);
-		break;	
-	case 2:	/* vsync off */
-    		cyber2000_grphw(0x16, 0x04, cfb);
-		break;	
-	case 1:	/* soft blank */
-		cyber2000_grphw(0x16, 0x00, cfb);
+	case FB_BLANK_POWERDOWN:	/* powerdown - both sync lines down */
+		sync = EXT_SYNC_CTL_VS_0 | EXT_SYNC_CTL_HS_0;
+		break;
+	case FB_BLANK_HSYNC_SUSPEND:	/* hsync off */
+		sync = EXT_SYNC_CTL_VS_NORMAL | EXT_SYNC_CTL_HS_0;
+		break;
+	case FB_BLANK_VSYNC_SUSPEND:	/* vsync off */
+		sync = EXT_SYNC_CTL_VS_0 | EXT_SYNC_CTL_HS_NORMAL;
+		break;
+	case FB_BLANK_NORMAL:		/* soft blank */
+	default:			/* unblank */
+		break;
+	}
+
+	cyber2000_grphw(EXT_SYNC_CTL, sync, cfb);
+
+	if (blank <= 1) {
+		/* turn on ramdacs */
+		cfb->ramdac_powerdown &= ~(RAMDAC_DACPWRDN | RAMDAC_BYPASS |
+					   RAMDAC_RAMPWRDN);
+		cyber2000fb_write_ramdac_ctrl(cfb);
+	}
+
+	/*
+	 * Soft blank/unblank the display.
+	 */
+	if (blank) {	/* soft blank */
 		for (i = 0; i < NR_PALETTE; i++) {
 			cyber2000fb_writeb(i, 0x3c8, cfb);
 			cyber2000fb_writeb(0, 0x3c9, cfb);
 			cyber2000fb_writeb(0, 0x3c9, cfb);
 			cyber2000fb_writeb(0, 0x3c9, cfb);
 		}
-		break;
-	default: /* unblank */
-		cyber2000_grphw(0x16, 0x00, cfb);
+	} else {	/* unblank */
 		for (i = 0; i < NR_PALETTE; i++) {
 			cyber2000fb_writeb(i, 0x3c8, cfb);
 			cyber2000fb_writeb(cfb->palette[i].red, 0x3c9, cfb);
 			cyber2000fb_writeb(cfb->palette[i].green, 0x3c9, cfb);
 			cyber2000fb_writeb(cfb->palette[i].blue, 0x3c9, cfb);
 		}
-		break;
 	}
-}
 
-/*
- * Get the currently displayed virtual consoles colormap.
- */
-static int
-gen_get_cmap(struct fb_cmap *cmap, int kspc, int con, struct fb_info *info)
-{
-	fb_copy_cmap(&info->cmap, cmap, kspc ? 0 : 2);
-	return 0;
-}
+	if (blank >= 2) {
+		/* turn off ramdacs */
+		cfb->ramdac_powerdown |= RAMDAC_DACPWRDN | RAMDAC_BYPASS |
+					 RAMDAC_RAMPWRDN;
+		cyber2000fb_write_ramdac_ctrl(cfb);
+	}
 
-/*
- * Get the currently displayed virtual consoles fixed part of the display.
- */
-static int
-gen_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
-{
-	*fix = info->fix;
-	return 0;
-}
-
-/*
- * Get the current user defined part of the display.
- */
-static int
-gen_get_var(struct fb_var_screeninfo *var, int con, struct fb_info *info)
-{
-	*var = info->var;
 	return 0;
 }
 
 static struct fb_ops cyber2000fb_ops = {
-	owner:		THIS_MODULE,
-	fb_set_var:	cyber2000fb_set_var,
-	fb_set_cmap:	cyber2000fb_set_cmap,
-	fb_pan_display:	cyber2000fb_pan_display,
-	fb_get_fix:	gen_get_fix,
-	fb_get_var:	gen_get_var,
-	fb_get_cmap:	gen_get_cmap,
+	.owner		= THIS_MODULE,
+	.fb_check_var	= cyber2000fb_check_var,
+	.fb_set_par	= cyber2000fb_set_par,
+	.fb_setcolreg	= cyber2000fb_setcolreg,
+	.fb_blank	= cyber2000fb_blank,
+	.fb_pan_display	= cyber2000fb_pan_display,
+	.fb_fillrect	= cyber2000fb_fillrect,
+	.fb_copyarea	= cyber2000fb_copyarea,
+	.fb_imageblit	= cyber2000fb_imageblit,
+	.fb_sync	= cyber2000fb_sync,
 };
-
-/*
- * Enable access to the extended registers
- */
-static void cyber2000fb_enable_extregs(struct cfb_info *cfb)
-{
-	cfb->func_use_count += 1;
-
-	if (cfb->func_use_count == 1) {
-		int old;
-
-		old = cyber2000_grphr(FUNC_CTL, cfb);
-		cyber2000_grphw(FUNC_CTL, old | FUNC_CTL_EXTREGENBL, cfb);
-	}
-}
-
-/*
- * Disable access to the extended registers
- */
-static void cyber2000fb_disable_extregs(struct cfb_info *cfb)
-{
-	if (cfb->func_use_count == 1) {
-		int old;
-
-		old = cyber2000_grphr(FUNC_CTL, cfb);
-		cyber2000_grphw(FUNC_CTL, old & ~FUNC_CTL_EXTREGENBL, cfb);
-	}
-
-	cfb->func_use_count -= 1;
-}
 
 /*
  * This is the only "static" reference to the internal data structures
  * of this driver.  It is here solely at the moment to support the other
  * CyberPro modules external to this driver.
  */
-static struct cfb_info		*int_cfb_info;
+static struct cfb_info *int_cfb_info;
+
+/*
+ * Enable access to the extended registers
+ */
+void cyber2000fb_enable_extregs(struct cfb_info *cfb)
+{
+	cfb->func_use_count += 1;
+
+	if (cfb->func_use_count == 1) {
+		int old;
+
+		old = cyber2000_grphr(EXT_FUNC_CTL, cfb);
+		old |= EXT_FUNC_CTL_EXTREGENBL;
+		cyber2000_grphw(EXT_FUNC_CTL, old, cfb);
+	}
+}
+EXPORT_SYMBOL(cyber2000fb_enable_extregs);
+
+/*
+ * Disable access to the extended registers
+ */
+void cyber2000fb_disable_extregs(struct cfb_info *cfb)
+{
+	if (cfb->func_use_count == 1) {
+		int old;
+
+		old = cyber2000_grphr(EXT_FUNC_CTL, cfb);
+		old &= ~EXT_FUNC_CTL_EXTREGENBL;
+		cyber2000_grphw(EXT_FUNC_CTL, old, cfb);
+	}
+
+	if (cfb->func_use_count == 0)
+		printk(KERN_ERR "disable_extregs: count = 0\n");
+	else
+		cfb->func_use_count -= 1;
+}
+EXPORT_SYMBOL(cyber2000fb_disable_extregs);
 
 /*
  * Attach a capture/tv driver to the core CyberX0X0 driver.
@@ -1285,214 +1127,305 @@ static struct cfb_info		*int_cfb_info;
 int cyber2000fb_attach(struct cyberpro_info *info, int idx)
 {
 	if (int_cfb_info != NULL) {
-		info->dev	      = int_cfb_info->dev;
+		info->dev	      = int_cfb_info->fb.device;
+#ifdef CONFIG_FB_CYBER2000_I2C
+		info->i2c	      = &int_cfb_info->i2c_adapter;
+#else
+		info->i2c	      = NULL;
+#endif
 		info->regs	      = int_cfb_info->regs;
+		info->irq             = int_cfb_info->irq;
 		info->fb	      = int_cfb_info->fb.screen_base;
 		info->fb_size	      = int_cfb_info->fb.fix.smem_len;
-		info->enable_extregs  = cyber2000fb_enable_extregs;
-		info->disable_extregs = cyber2000fb_disable_extregs;
-		info->info            = int_cfb_info;
+		info->info	      = int_cfb_info;
 
-		strncpy(info->dev_name, int_cfb_info->fb.fix.id, sizeof(info->dev_name));
-
-		MOD_INC_USE_COUNT;
+		strlcpy(info->dev_name, int_cfb_info->fb.fix.id,
+			sizeof(info->dev_name));
 	}
 
 	return int_cfb_info != NULL;
 }
+EXPORT_SYMBOL(cyber2000fb_attach);
 
 /*
  * Detach a capture/tv driver from the core CyberX0X0 driver.
  */
 void cyber2000fb_detach(int idx)
 {
-	MOD_DEC_USE_COUNT;
+}
+EXPORT_SYMBOL(cyber2000fb_detach);
+
+#ifdef CONFIG_FB_CYBER2000_DDC
+
+#define DDC_REG		0xb0
+#define DDC_SCL_OUT	(1 << 0)
+#define DDC_SDA_OUT	(1 << 4)
+#define DDC_SCL_IN	(1 << 2)
+#define DDC_SDA_IN	(1 << 6)
+
+static void cyber2000fb_enable_ddc(struct cfb_info *cfb)
+{
+	spin_lock(&cfb->reg_b0_lock);
+	cyber2000fb_writew(0x1bf, 0x3ce, cfb);
 }
 
-EXPORT_SYMBOL(cyber2000fb_attach);
-EXPORT_SYMBOL(cyber2000fb_detach);
+static void cyber2000fb_disable_ddc(struct cfb_info *cfb)
+{
+	cyber2000fb_writew(0x0bf, 0x3ce, cfb);
+	spin_unlock(&cfb->reg_b0_lock);
+}
+
+
+static void cyber2000fb_ddc_setscl(void *data, int val)
+{
+	struct cfb_info *cfb = data;
+	unsigned char reg;
+
+	cyber2000fb_enable_ddc(cfb);
+	reg = cyber2000_grphr(DDC_REG, cfb);
+	if (!val)	/* bit is inverted */
+		reg |= DDC_SCL_OUT;
+	else
+		reg &= ~DDC_SCL_OUT;
+	cyber2000_grphw(DDC_REG, reg, cfb);
+	cyber2000fb_disable_ddc(cfb);
+}
+
+static void cyber2000fb_ddc_setsda(void *data, int val)
+{
+	struct cfb_info *cfb = data;
+	unsigned char reg;
+
+	cyber2000fb_enable_ddc(cfb);
+	reg = cyber2000_grphr(DDC_REG, cfb);
+	if (!val)	/* bit is inverted */
+		reg |= DDC_SDA_OUT;
+	else
+		reg &= ~DDC_SDA_OUT;
+	cyber2000_grphw(DDC_REG, reg, cfb);
+	cyber2000fb_disable_ddc(cfb);
+}
+
+static int cyber2000fb_ddc_getscl(void *data)
+{
+	struct cfb_info *cfb = data;
+	int retval;
+
+	cyber2000fb_enable_ddc(cfb);
+	retval = !!(cyber2000_grphr(DDC_REG, cfb) & DDC_SCL_IN);
+	cyber2000fb_disable_ddc(cfb);
+
+	return retval;
+}
+
+static int cyber2000fb_ddc_getsda(void *data)
+{
+	struct cfb_info *cfb = data;
+	int retval;
+
+	cyber2000fb_enable_ddc(cfb);
+	retval = !!(cyber2000_grphr(DDC_REG, cfb) & DDC_SDA_IN);
+	cyber2000fb_disable_ddc(cfb);
+
+	return retval;
+}
+
+static int __devinit cyber2000fb_setup_ddc_bus(struct cfb_info *cfb)
+{
+	strlcpy(cfb->ddc_adapter.name, cfb->fb.fix.id,
+		sizeof(cfb->ddc_adapter.name));
+	cfb->ddc_adapter.owner		= THIS_MODULE;
+	cfb->ddc_adapter.class		= I2C_CLASS_DDC;
+	cfb->ddc_adapter.algo_data	= &cfb->ddc_algo;
+	cfb->ddc_adapter.dev.parent	= cfb->fb.device;
+	cfb->ddc_algo.setsda		= cyber2000fb_ddc_setsda;
+	cfb->ddc_algo.setscl		= cyber2000fb_ddc_setscl;
+	cfb->ddc_algo.getsda		= cyber2000fb_ddc_getsda;
+	cfb->ddc_algo.getscl		= cyber2000fb_ddc_getscl;
+	cfb->ddc_algo.udelay		= 10;
+	cfb->ddc_algo.timeout		= 20;
+	cfb->ddc_algo.data		= cfb;
+
+	i2c_set_adapdata(&cfb->ddc_adapter, cfb);
+
+	return i2c_bit_add_bus(&cfb->ddc_adapter);
+}
+#endif /* CONFIG_FB_CYBER2000_DDC */
+
+#ifdef CONFIG_FB_CYBER2000_I2C
+static void cyber2000fb_i2c_setsda(void *data, int state)
+{
+	struct cfb_info *cfb = data;
+	unsigned int latch2;
+
+	spin_lock(&cfb->reg_b0_lock);
+	latch2 = cyber2000_grphr(EXT_LATCH2, cfb);
+	latch2 &= EXT_LATCH2_I2C_CLKEN;
+	if (state)
+		latch2 |= EXT_LATCH2_I2C_DATEN;
+	cyber2000_grphw(EXT_LATCH2, latch2, cfb);
+	spin_unlock(&cfb->reg_b0_lock);
+}
+
+static void cyber2000fb_i2c_setscl(void *data, int state)
+{
+	struct cfb_info *cfb = data;
+	unsigned int latch2;
+
+	spin_lock(&cfb->reg_b0_lock);
+	latch2 = cyber2000_grphr(EXT_LATCH2, cfb);
+	latch2 &= EXT_LATCH2_I2C_DATEN;
+	if (state)
+		latch2 |= EXT_LATCH2_I2C_CLKEN;
+	cyber2000_grphw(EXT_LATCH2, latch2, cfb);
+	spin_unlock(&cfb->reg_b0_lock);
+}
+
+static int cyber2000fb_i2c_getsda(void *data)
+{
+	struct cfb_info *cfb = data;
+	int ret;
+
+	spin_lock(&cfb->reg_b0_lock);
+	ret = !!(cyber2000_grphr(EXT_LATCH2, cfb) & EXT_LATCH2_I2C_DAT);
+	spin_unlock(&cfb->reg_b0_lock);
+
+	return ret;
+}
+
+static int cyber2000fb_i2c_getscl(void *data)
+{
+	struct cfb_info *cfb = data;
+	int ret;
+
+	spin_lock(&cfb->reg_b0_lock);
+	ret = !!(cyber2000_grphr(EXT_LATCH2, cfb) & EXT_LATCH2_I2C_CLK);
+	spin_unlock(&cfb->reg_b0_lock);
+
+	return ret;
+}
+
+static int __devinit cyber2000fb_i2c_register(struct cfb_info *cfb)
+{
+	strlcpy(cfb->i2c_adapter.name, cfb->fb.fix.id,
+		sizeof(cfb->i2c_adapter.name));
+	cfb->i2c_adapter.owner = THIS_MODULE;
+	cfb->i2c_adapter.algo_data = &cfb->i2c_algo;
+	cfb->i2c_adapter.dev.parent = cfb->fb.device;
+	cfb->i2c_algo.setsda = cyber2000fb_i2c_setsda;
+	cfb->i2c_algo.setscl = cyber2000fb_i2c_setscl;
+	cfb->i2c_algo.getsda = cyber2000fb_i2c_getsda;
+	cfb->i2c_algo.getscl = cyber2000fb_i2c_getscl;
+	cfb->i2c_algo.udelay = 5;
+	cfb->i2c_algo.timeout = msecs_to_jiffies(100);
+	cfb->i2c_algo.data = cfb;
+
+	return i2c_bit_add_bus(&cfb->i2c_adapter);
+}
+
+static void cyber2000fb_i2c_unregister(struct cfb_info *cfb)
+{
+	i2c_del_adapter(&cfb->i2c_adapter);
+}
+#else
+#define cyber2000fb_i2c_register(cfb)	(0)
+#define cyber2000fb_i2c_unregister(cfb)	do { } while (0)
+#endif
 
 /*
  * These parameters give
  * 640x480, hsync 31.5kHz, vsync 60Hz
  */
 static struct fb_videomode __devinitdata cyber2000fb_default_mode = {
-	refresh:	60,
-	xres:		640,
-	yres:		480,
-	pixclock:	39722,
-	left_margin:	56,
-	right_margin:	16,
-	upper_margin:	34,
-	lower_margin:	9,
-	hsync_len:	88,
-	vsync_len:	2,
-	sync:		FB_SYNC_COMP_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
-	vmode:		FB_VMODE_NONINTERLACED
+	.refresh	= 60,
+	.xres		= 640,
+	.yres		= 480,
+	.pixclock	= 39722,
+	.left_margin	= 56,
+	.right_margin	= 16,
+	.upper_margin	= 34,
+	.lower_margin	= 9,
+	.hsync_len	= 88,
+	.vsync_len	= 2,
+	.sync		= FB_SYNC_COMP_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+	.vmode		= FB_VMODE_NONINTERLACED
 };
 
-static char igs_regs[] __devinitdata = {
-					0x12, 0x00,	0x13, 0x00,
-					0x16, 0x00,
-			0x31, 0x00,	0x32, 0x00,
-	0x50, 0x00,	0x51, 0x00,	0x52, 0x00,	0x53, 0x00,
-	0x54, 0x00,	0x55, 0x00,	0x56, 0x00,	0x57, 0x01,
-	0x58, 0x00,	0x59, 0x00,	0x5a, 0x00,
-	0x70, 0x0b,					0x73, 0x30,
-	0x74, 0x0b,	0x75, 0x17,	0x76, 0x00,	0x7a, 0xc8
+static char igs_regs[] = {
+	EXT_CRT_IRQ,		0,
+	EXT_CRT_TEST,		0,
+	EXT_SYNC_CTL,		0,
+	EXT_SEG_WRITE_PTR,	0,
+	EXT_SEG_READ_PTR,	0,
+	EXT_BIU_MISC,		EXT_BIU_MISC_LIN_ENABLE |
+				EXT_BIU_MISC_COP_ENABLE |
+				EXT_BIU_MISC_COP_BFC,
+	EXT_FUNC_CTL,		0,
+	CURS_H_START,		0,
+	CURS_H_START + 1,	0,
+	CURS_H_PRESET,		0,
+	CURS_V_START,		0,
+	CURS_V_START + 1,	0,
+	CURS_V_PRESET,		0,
+	CURS_CTL,		0,
+	EXT_ATTRIB_CTL,		EXT_ATTRIB_CTL_EXT,
+	EXT_OVERSCAN_RED,	0,
+	EXT_OVERSCAN_GREEN,	0,
+	EXT_OVERSCAN_BLUE,	0,
+
+	/* some of these are questionable when we have a BIOS */
+	EXT_MEM_CTL0,		EXT_MEM_CTL0_7CLK |
+				EXT_MEM_CTL0_RAS_1 |
+				EXT_MEM_CTL0_MULTCAS,
+	EXT_HIDDEN_CTL1,	0x30,
+	EXT_FIFO_CTL,		0x0b,
+	EXT_FIFO_CTL + 1,	0x17,
+	0x76,			0x00,
+	EXT_HIDDEN_CTL4,	0xc8
 };
 
 /*
- * We need to wake up the CyberPro, and make sure its in linear memory
- * mode.  Unfortunately, this is specific to the platform and card that
- * we are running on.
- *
- * On x86 and ARM, should we be initialising the CyberPro first via the
- * IO registers, and then the MMIO registers to catch all cases?  Can we
- * end up in the situation where the chip is in MMIO mode, but not awake
- * on an x86 system?
- *
- * Note that on the NetWinder, the firmware automatically detects the
- * type, width and size, and leaves this in extended registers 0x71 and
- * 0x72 for us.
+ * Initialise the CyberPro hardware.  On the CyberPro5XXXX,
+ * ensure that we're using the correct PLL (5XXX's may be
+ * programmed to use an additional set of PLLs.)
  */
-static inline void cyberpro_init_hw(struct cfb_info *cfb, int at_boot)
+static void cyberpro_init_hw(struct cfb_info *cfb)
 {
 	int i;
 
-	/*
-	 * Wake up the CyberPro.
-	 */
-#ifdef __sparc__
-#ifdef __sparc_v9__
-#error "You loose, consult DaveM."
-#else
-	/*
-	 * SPARC does not have an "outb" instruction, so we generate
-	 * I/O cycles storing into a reserved memory space at
-	 * physical address 0x3000000
-	 */
-	{
-		unsigned char *iop;
-
-		iop = ioremap(0x3000000, 0x5000);
-		if (iop == NULL) {
-			prom_printf("iga5000: cannot map I/O\n");
-			return -ENOMEM;
-		}
-
-		writeb(0x18, iop + 0x46e8);
-		writeb(0x01, iop + 0x102);
-		writeb(0x08, iop + 0x46e8);
-		writeb(0x33, iop + 0x3ce);
-		writeb(0x01, iop + 0x3cf);
-
-		iounmap((void *)iop);
-	}
-#endif
-
-	if (at_boot) {
-		/*
-		 * Use mclk from BIOS.  Only read this if we're
-		 * initialising this card for the first time.
-		 * FIXME: what about hotplug?
-		 */
-		cfb->mclk_mult = cyber2000_grphr(MCLK_MULT, cfb);
-		cfb->mclk_div  = cyber2000_grphr(MCLK_DIV, cfb);
-	}
-#endif
-#if defined(__i386__) || defined(__x86_64__) || defined(__mips__)
-	/*
-	 * x86 and MIPS are simple, we just do regular
-	 * outb's instead of cyber2000fb_writeb.
-	 */
-	outb(0x18, 0x46e8);
-	outb(0x01, 0x102);
-	outb(0x08, 0x46e8);
-	outb(0x33, 0x3ce);
-	outb(0x01, 0x3cf);
-
-	if (at_boot) {
-		/*
-		 * Use mclk from BIOS.  Only read this if we're
-		 * initialising this card for the first time.
-		 * FIXME: what about hotplug?
-		 */
-		cfb->mclk_mult = cyber2000_grphr(MCLK_MULT, cfb);
-		cfb->mclk_div  = cyber2000_grphr(MCLK_DIV, cfb);
-	}
-#endif
-#ifdef __arm__
-	cyber2000fb_writeb(0x18, 0x46e8, cfb);
-	cyber2000fb_writeb(0x01, 0x102, cfb);
-	cyber2000fb_writeb(0x08, 0x46e8, cfb);
-	cyber2000fb_writeb(0x33, 0x3ce, cfb);
-	cyber2000fb_writeb(0x01, 0x3cf, cfb);
-
-	/*
-	 * MCLK on the NetWinder and the Shark is fixed at 75MHz
-	 */
-	cfb->mclk_mult = 0xdb;
-	cfb->mclk_div  = 0x54;
-#endif
-
-	/*
-	 * Initialise the CyberPro
-	 */
 	for (i = 0; i < sizeof(igs_regs); i += 2)
-		cyber2000_grphw(igs_regs[i], igs_regs[i+1], cfb);
+		cyber2000_grphw(igs_regs[i], igs_regs[i + 1], cfb);
 
-	if (at_boot) {
-		/*
-		 * get the video RAM size and width from the VGA register.
-		 * This should have been already initialised by the BIOS,
-		 * but if it's garbage, claim default 1MB VRAM (woody)
-		 */
-		cfb->mem_ctl1 = cyber2000_grphr(MEM_CTL1, cfb);
-		cfb->mem_ctl2 = cyber2000_grphr(MEM_CTL2, cfb);
-	} else {
-		/*
-		 * Reprogram the MEM_CTL1 and MEM_CTL2 registers
-		 */
-		cyber2000_grphw(MEM_CTL1, cfb->mem_ctl1, cfb);
-		cyber2000_grphw(MEM_CTL2, cfb->mem_ctl2, cfb);
+	if (cfb->id == ID_CYBERPRO_5000) {
+		unsigned char val;
+		cyber2000fb_writeb(0xba, 0x3ce, cfb);
+		val = cyber2000fb_readb(0x3cf, cfb) & 0x80;
+		cyber2000fb_writeb(val, 0x3cf, cfb);
 	}
-
-	/*
-	 * Ensure thatwe are using the correct PLL.
-	 * (CyberPro 5000's may be programmed to use
-	 * an additional set of PLLs.
-	 */
-	cyber2000fb_writeb(0xba, 0x3ce, cfb);
-	cyber2000fb_writeb(cyber2000fb_readb(0x3cf, cfb) & 0x80, 0x3cf, cfb);
 }
 
-static struct cfb_info * __devinit
-cyberpro_alloc_fb_info(struct pci_dev *dev, const struct pci_device_id *id, char *name)
+static struct cfb_info __devinit *cyberpro_alloc_fb_info(unsigned int id,
+							 char *name)
 {
 	struct cfb_info *cfb;
 
-	cfb = kmalloc(sizeof(struct cfb_info) + sizeof(struct display) +
-		       sizeof(u32) * 16, GFP_KERNEL);
-
+	cfb = kzalloc(sizeof(struct cfb_info), GFP_KERNEL);
 	if (!cfb)
 		return NULL;
 
-	memset(cfb, 0, sizeof(struct cfb_info) + sizeof(struct display));
 
-	cfb->currcon		= -1;
-	cfb->dev		= dev;
+	cfb->id			= id;
 
-	if (id->driver_data == FB_ACCEL_IGS_CYBER5000)
-		cfb->ref_ps	= 40690; // 24.576 MHz
+	if (id == ID_CYBERPRO_5000)
+		cfb->ref_ps	= 40690; /* 24.576 MHz */
 	else
-		cfb->ref_ps	= 69842; // 14.31818 MHz (69841?)
+		cfb->ref_ps	= 69842; /* 14.31818 MHz (69841?) */
 
 	cfb->divisors[0]	= 1;
 	cfb->divisors[1]	= 2;
 	cfb->divisors[2]	= 4;
 
-	if (id->driver_data == FB_ACCEL_IGS_CYBER2000)
+	if (id == ID_CYBERPRO_2000)
 		cfb->divisors[3] = 8;
 	else
 		cfb->divisors[3] = 6;
@@ -1504,7 +1437,24 @@ cyberpro_alloc_fb_info(struct pci_dev *dev, const struct pci_device_id *id, char
 	cfb->fb.fix.xpanstep	= 0;
 	cfb->fb.fix.ypanstep	= 1;
 	cfb->fb.fix.ywrapstep	= 0;
-	cfb->fb.fix.accel	= id->driver_data;
+
+	switch (id) {
+	case ID_IGA_1682:
+		cfb->fb.fix.accel = 0;
+		break;
+
+	case ID_CYBERPRO_2000:
+		cfb->fb.fix.accel = FB_ACCEL_IGS_CYBER2000;
+		break;
+
+	case ID_CYBERPRO_2010:
+		cfb->fb.fix.accel = FB_ACCEL_IGS_CYBER2010;
+		break;
+
+	case ID_CYBERPRO_5000:
+		cfb->fb.fix.accel = FB_ACCEL_IGS_CYBER5000;
+		break;
+	}
 
 	cfb->fb.var.nonstd	= 0;
 	cfb->fb.var.activate	= FB_ACTIVATE_NOW;
@@ -1512,25 +1462,18 @@ cyberpro_alloc_fb_info(struct pci_dev *dev, const struct pci_device_id *id, char
 	cfb->fb.var.width	= -1;
 	cfb->fb.var.accel_flags	= FB_ACCELF_TEXT;
 
-	strcpy(cfb->fb.modename, cfb->fb.fix.id);
-	strcpy(cfb->fb.fontname, default_font);
-
 	cfb->fb.fbops		= &cyber2000fb_ops;
-	cfb->fb.changevar	= NULL;
-	cfb->fb.switch_con	= cyber2000fb_switch;
-	cfb->fb.updatevar	= cyber2000fb_updatevar;
-	cfb->fb.blank		= cyber2000fb_blank;
-	cfb->fb.flags		= FBINFO_FLAG_DEFAULT;
-	cfb->fb.disp		= (struct display *)(cfb + 1);
-	cfb->fb.pseudo_palette	= (void *)(cfb->fb.disp + 1);
+	cfb->fb.flags		= FBINFO_DEFAULT | FBINFO_HWACCEL_YPAN;
+	cfb->fb.pseudo_palette	= cfb->pseudo_palette;
+
+	spin_lock_init(&cfb->reg_b0_lock);
 
 	fb_alloc_cmap(&cfb->fb.cmap, NR_PALETTE, 0);
 
 	return cfb;
 }
 
-static void __devinit
-cyberpro_free_fb_info(struct cfb_info *cfb)
+static void cyberpro_free_fb_info(struct cfb_info *cfb)
 {
 	if (cfb) {
 		/*
@@ -1546,8 +1489,8 @@ cyberpro_free_fb_info(struct cfb_info *cfb)
  * Parse Cyber2000fb options.  Usage:
  *  video=cyber2000:font:fontname
  */
-int
-cyber2000fb_setup(char *options)
+#ifndef MODULE
+static int cyber2000fb_setup(char *options)
 {
 	char *opt;
 
@@ -1559,7 +1502,10 @@ cyber2000fb_setup(char *options)
 			continue;
 
 		if (strncmp(opt, "font:", 5) == 0) {
-			strncpy(default_font_storage, opt + 5, sizeof(default_font_storage));
+			static char default_font_storage[40];
+
+			strlcpy(default_font_storage, opt + 5,
+				sizeof(default_font_storage));
 			default_font = default_font_storage;
 			continue;
 		}
@@ -1568,59 +1514,63 @@ cyber2000fb_setup(char *options)
 	}
 	return 0;
 }
+#endif  /*  MODULE  */
 
-static int __devinit
-cyberpro_probe(struct pci_dev *dev, const struct pci_device_id *id)
+/*
+ * The CyberPro chips can be placed on many different bus types.
+ * This probe function is common to all bus types.  The bus-specific
+ * probe function is expected to have:
+ *  - enabled access to the linear memory region
+ *  - memory mapped access to the registers
+ *  - initialised mem_ctl1 and mem_ctl2 appropriately.
+ */
+static int __devinit cyberpro_common_probe(struct cfb_info *cfb)
 {
-	struct cfb_info *cfb;
-	u_int h_sync, v_sync;
 	u_long smem_size;
-	char name[16];
+	u_int h_sync, v_sync;
 	int err;
 
-	sprintf(name, "CyberPro%4X", id->device);
-
-	err = pci_enable_device(dev);
-	if (err)
-		return err;
-
-	err = pci_request_regions(dev, name);
-	if (err)
-		return err;
-
-	err = -ENOMEM;
-	cfb = cyberpro_alloc_fb_info(dev, id, name);
-	if (!cfb)
-		goto failed_release;
-
-	cfb->region = ioremap(pci_resource_start(dev, 0),
-			      pci_resource_len(dev, 0));
-	if (!cfb->region)
-		goto failed_ioremap;
-
-	cfb->regs = cfb->region + MMIO_OFFSET;
-
-	cyberpro_init_hw(cfb, 1);
-
-	switch (cfb->mem_ctl2 & MEM_CTL2_SIZE_MASK) {
-	case MEM_CTL2_SIZE_4MB:	smem_size = 0x00400000; break;
-	case MEM_CTL2_SIZE_2MB:	smem_size = 0x00200000; break;
-	default:		smem_size = 0x00100000; break;
-	}
+	cyberpro_init_hw(cfb);
 
 	/*
-	 * Hmm, we _need_ a portable way of finding the address for
-	 * the remap stuff, both for mmio and for smem.
+	 * Get the video RAM size and width from the VGA register.
+	 * This should have been already initialised by the BIOS,
+	 * but if it's garbage, claim default 1MB VRAM (woody)
 	 */
-	cfb->fb.fix.mmio_start = pci_resource_start(dev, 0) + MMIO_OFFSET;
-	cfb->fb.fix.smem_start = pci_resource_start(dev, 0);
-	cfb->fb.fix.mmio_len   = MMIO_SIZE;
+	cfb->mem_ctl1 = cyber2000_grphr(EXT_MEM_CTL1, cfb);
+	cfb->mem_ctl2 = cyber2000_grphr(EXT_MEM_CTL2, cfb);
+
+	/*
+	 * Determine the size of the memory.
+	 */
+	switch (cfb->mem_ctl2 & MEM_CTL2_SIZE_MASK) {
+	case MEM_CTL2_SIZE_4MB:
+		smem_size = 0x00400000;
+		break;
+	case MEM_CTL2_SIZE_2MB:
+		smem_size = 0x00200000;
+		break;
+	case MEM_CTL2_SIZE_1MB:
+		smem_size = 0x00100000;
+		break;
+	default:
+		smem_size = 0x00100000;
+		break;
+	}
+
 	cfb->fb.fix.smem_len   = smem_size;
+	cfb->fb.fix.mmio_len   = MMIO_SIZE;
 	cfb->fb.screen_base    = cfb->region;
 
+#ifdef CONFIG_FB_CYBER2000_DDC
+	if (cyber2000fb_setup_ddc_bus(cfb) == 0)
+		cfb->ddc_registered = true;
+#endif
+
+	err = -EINVAL;
 	if (!fb_find_mode(&cfb->fb.var, &cfb->fb, NULL, NULL, 0,
-	    		  &cyber2000fb_default_mode, 8)) {
-		printk("%s: no valid mode found\n", cfb->fb.fix.id);
+			  &cyber2000fb_default_mode, 8)) {
+		printk(KERN_ERR "%s: no valid mode found\n", cfb->fb.fix.id);
 		goto failed;
 	}
 
@@ -1630,7 +1580,7 @@ cyberpro_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (cfb->fb.var.yres_virtual < cfb->fb.var.yres)
 		cfb->fb.var.yres_virtual = cfb->fb.var.yres;
 
-	cyber2000fb_set_var(&cfb->fb.var, -1, &cfb->fb);
+/*	fb_set_var(&cfb->fb.var, -1, &cfb->fb); */
 
 	/*
 	 * Calculate the hsync and vsync frequencies.  Note that
@@ -1644,13 +1594,252 @@ cyberpro_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	v_sync = h_sync / (cfb->fb.var.yres + cfb->fb.var.upper_margin +
 		 cfb->fb.var.lower_margin + cfb->fb.var.vsync_len);
 
-	printk(KERN_INFO "%s: %dkB VRAM, using %dx%d, %d.%03dkHz, %dHz\n",
+	printk(KERN_INFO "%s: %dKiB VRAM, using %dx%d, %d.%03dkHz, %dHz\n",
 		cfb->fb.fix.id, cfb->fb.fix.smem_len >> 10,
 		cfb->fb.var.xres, cfb->fb.var.yres,
 		h_sync / 1000, h_sync % 1000, v_sync);
 
+	err = cyber2000fb_i2c_register(cfb);
+	if (err)
+		goto failed;
+
 	err = register_framebuffer(&cfb->fb);
-	if (err < 0)
+	if (err)
+		cyber2000fb_i2c_unregister(cfb);
+
+failed:
+#ifdef CONFIG_FB_CYBER2000_DDC
+	if (err && cfb->ddc_registered)
+		i2c_del_adapter(&cfb->ddc_adapter);
+#endif
+	return err;
+}
+
+static void __devexit cyberpro_common_remove(struct cfb_info *cfb)
+{
+	unregister_framebuffer(&cfb->fb);
+#ifdef CONFIG_FB_CYBER2000_DDC
+	if (cfb->ddc_registered)
+		i2c_del_adapter(&cfb->ddc_adapter);
+#endif
+	cyber2000fb_i2c_unregister(cfb);
+}
+
+static void cyberpro_common_resume(struct cfb_info *cfb)
+{
+	cyberpro_init_hw(cfb);
+
+	/*
+	 * Reprogram the MEM_CTL1 and MEM_CTL2 registers
+	 */
+	cyber2000_grphw(EXT_MEM_CTL1, cfb->mem_ctl1, cfb);
+	cyber2000_grphw(EXT_MEM_CTL2, cfb->mem_ctl2, cfb);
+
+	/*
+	 * Restore the old video mode and the palette.
+	 * We also need to tell fbcon to redraw the console.
+	 */
+	cyber2000fb_set_par(&cfb->fb);
+}
+
+#ifdef CONFIG_ARCH_SHARK
+
+#include <mach/framebuffer.h>
+
+static int __devinit cyberpro_vl_probe(void)
+{
+	struct cfb_info *cfb;
+	int err = -ENOMEM;
+
+	if (!request_mem_region(FB_START, FB_SIZE, "CyberPro2010"))
+		return err;
+
+	cfb = cyberpro_alloc_fb_info(ID_CYBERPRO_2010, "CyberPro2010");
+	if (!cfb)
+		goto failed_release;
+
+	cfb->irq = -1;
+	cfb->region = ioremap(FB_START, FB_SIZE);
+	if (!cfb->region)
+		goto failed_ioremap;
+
+	cfb->regs = cfb->region + MMIO_OFFSET;
+	cfb->fb.device = NULL;
+	cfb->fb.fix.mmio_start = FB_START + MMIO_OFFSET;
+	cfb->fb.fix.smem_start = FB_START;
+
+	/*
+	 * Bring up the hardware.  This is expected to enable access
+	 * to the linear memory region, and allow access to the memory
+	 * mapped registers.  Also, mem_ctl1 and mem_ctl2 must be
+	 * initialised.
+	 */
+	cyber2000fb_writeb(0x18, 0x46e8, cfb);
+	cyber2000fb_writeb(0x01, 0x102, cfb);
+	cyber2000fb_writeb(0x08, 0x46e8, cfb);
+	cyber2000fb_writeb(EXT_BIU_MISC, 0x3ce, cfb);
+	cyber2000fb_writeb(EXT_BIU_MISC_LIN_ENABLE, 0x3cf, cfb);
+
+	cfb->mclk_mult = 0xdb;
+	cfb->mclk_div  = 0x54;
+
+	err = cyberpro_common_probe(cfb);
+	if (err)
+		goto failed;
+
+	if (int_cfb_info == NULL)
+		int_cfb_info = cfb;
+
+	return 0;
+
+failed:
+	iounmap(cfb->region);
+failed_ioremap:
+	cyberpro_free_fb_info(cfb);
+failed_release:
+	release_mem_region(FB_START, FB_SIZE);
+
+	return err;
+}
+#endif /* CONFIG_ARCH_SHARK */
+
+/*
+ * PCI specific support.
+ */
+#ifdef CONFIG_PCI
+/*
+ * We need to wake up the CyberPro, and make sure its in linear memory
+ * mode.  Unfortunately, this is specific to the platform and card that
+ * we are running on.
+ *
+ * On x86 and ARM, should we be initialising the CyberPro first via the
+ * IO registers, and then the MMIO registers to catch all cases?  Can we
+ * end up in the situation where the chip is in MMIO mode, but not awake
+ * on an x86 system?
+ */
+static int cyberpro_pci_enable_mmio(struct cfb_info *cfb)
+{
+	unsigned char val;
+
+#if defined(__sparc_v9__)
+#error "You lose, consult DaveM."
+#elif defined(__sparc__)
+	/*
+	 * SPARC does not have an "outb" instruction, so we generate
+	 * I/O cycles storing into a reserved memory space at
+	 * physical address 0x3000000
+	 */
+	unsigned char __iomem *iop;
+
+	iop = ioremap(0x3000000, 0x5000);
+	if (iop == NULL) {
+		printk(KERN_ERR "iga5000: cannot map I/O\n");
+		return -ENOMEM;
+	}
+
+	writeb(0x18, iop + 0x46e8);
+	writeb(0x01, iop + 0x102);
+	writeb(0x08, iop + 0x46e8);
+	writeb(EXT_BIU_MISC, iop + 0x3ce);
+	writeb(EXT_BIU_MISC_LIN_ENABLE, iop + 0x3cf);
+
+	iounmap(iop);
+#else
+	/*
+	 * Most other machine types are "normal", so
+	 * we use the standard IO-based wakeup.
+	 */
+	outb(0x18, 0x46e8);
+	outb(0x01, 0x102);
+	outb(0x08, 0x46e8);
+	outb(EXT_BIU_MISC, 0x3ce);
+	outb(EXT_BIU_MISC_LIN_ENABLE, 0x3cf);
+#endif
+
+	/*
+	 * Allow the CyberPro to accept PCI burst accesses
+	 */
+	if (cfb->id == ID_CYBERPRO_2010) {
+		printk(KERN_INFO "%s: NOT enabling PCI bursts\n",
+		       cfb->fb.fix.id);
+	} else {
+		val = cyber2000_grphr(EXT_BUS_CTL, cfb);
+		if (!(val & EXT_BUS_CTL_PCIBURST_WRITE)) {
+			printk(KERN_INFO "%s: enabling PCI bursts\n",
+				cfb->fb.fix.id);
+
+			val |= EXT_BUS_CTL_PCIBURST_WRITE;
+
+			if (cfb->id == ID_CYBERPRO_5000)
+				val |= EXT_BUS_CTL_PCIBURST_READ;
+
+			cyber2000_grphw(EXT_BUS_CTL, val, cfb);
+		}
+	}
+
+	return 0;
+}
+
+static int __devinit
+cyberpro_pci_probe(struct pci_dev *dev, const struct pci_device_id *id)
+{
+	struct cfb_info *cfb;
+	char name[16];
+	int err;
+
+	sprintf(name, "CyberPro%4X", id->device);
+
+	err = pci_enable_device(dev);
+	if (err)
+		return err;
+
+	err = -ENOMEM;
+	cfb = cyberpro_alloc_fb_info(id->driver_data, name);
+	if (!cfb)
+		goto failed_release;
+
+	err = pci_request_regions(dev, cfb->fb.fix.id);
+	if (err)
+		goto failed_regions;
+
+	cfb->irq = dev->irq;
+	cfb->region = pci_ioremap_bar(dev, 0);
+	if (!cfb->region)
+		goto failed_ioremap;
+
+	cfb->regs = cfb->region + MMIO_OFFSET;
+	cfb->fb.device = &dev->dev;
+	cfb->fb.fix.mmio_start = pci_resource_start(dev, 0) + MMIO_OFFSET;
+	cfb->fb.fix.smem_start = pci_resource_start(dev, 0);
+
+	/*
+	 * Bring up the hardware.  This is expected to enable access
+	 * to the linear memory region, and allow access to the memory
+	 * mapped registers.  Also, mem_ctl1 and mem_ctl2 must be
+	 * initialised.
+	 */
+	err = cyberpro_pci_enable_mmio(cfb);
+	if (err)
+		goto failed;
+
+	/*
+	 * Use MCLK from BIOS. FIXME: what about hotplug?
+	 */
+	cfb->mclk_mult = cyber2000_grphr(EXT_MCLK_MULT, cfb);
+	cfb->mclk_div  = cyber2000_grphr(EXT_MCLK_DIV, cfb);
+
+#ifdef __arm__
+	/*
+	 * MCLK on the NetWinder and the Shark is fixed at 75MHz
+	 */
+	if (machine_is_netwinder()) {
+		cfb->mclk_mult = 0xdb;
+		cfb->mclk_div  = 0x54;
+	}
+#endif
+
+	err = cyberpro_common_probe(cfb);
+	if (err)
 		goto failed;
 
 	/*
@@ -1665,27 +1854,19 @@ cyberpro_probe(struct pci_dev *dev, const struct pci_device_id *id)
 failed:
 	iounmap(cfb->region);
 failed_ioremap:
+	pci_release_regions(dev);
+failed_regions:
 	cyberpro_free_fb_info(cfb);
 failed_release:
-	pci_release_regions(dev);
-
 	return err;
 }
 
-static void __devexit cyberpro_remove(struct pci_dev *dev)
+static void __devexit cyberpro_pci_remove(struct pci_dev *dev)
 {
 	struct cfb_info *cfb = pci_get_drvdata(dev);
 
 	if (cfb) {
-		/*
-		 * If unregister_framebuffer fails, then
-		 * we will be leaving hooks that could cause
-		 * oopsen laying around.
-		 */
-		if (unregister_framebuffer(&cfb->fb))
-			printk(KERN_WARNING "%s: danger Will Robinson, "
-				"danger danger!  Oopsen imminent!\n",
-				cfb->fb.fix.id);
+		cyberpro_common_remove(cfb);
 		iounmap(cfb->region);
 		cyberpro_free_fb_info(cfb);
 
@@ -1701,7 +1882,7 @@ static void __devexit cyberpro_remove(struct pci_dev *dev)
 	}
 }
 
-static int cyberpro_suspend(struct pci_dev *dev, u32 state)
+static int cyberpro_pci_suspend(struct pci_dev *dev, pm_message_t state)
 {
 	return 0;
 }
@@ -1709,64 +1890,86 @@ static int cyberpro_suspend(struct pci_dev *dev, u32 state)
 /*
  * Re-initialise the CyberPro hardware
  */
-static int cyberpro_resume(struct pci_dev *dev)
+static int cyberpro_pci_resume(struct pci_dev *dev)
 {
 	struct cfb_info *cfb = pci_get_drvdata(dev);
 
 	if (cfb) {
-		cyberpro_init_hw(cfb, 0);
-
-		/*
-		 * Restore the old video mode and the palette.
-		 * We also need to tell fbcon to redraw the console.
-		 */
-		cfb->fb.var.activate = FB_ACTIVATE_NOW;
-		cyber2000fb_set_var(&cfb->fb.var, -1, &cfb->fb);
+		cyberpro_pci_enable_mmio(cfb);
+		cyberpro_common_resume(cfb);
 	}
 
 	return 0;
 }
 
-static struct pci_device_id cyberpro_pci_table[] __devinitdata = {
+static struct pci_device_id cyberpro_pci_table[] = {
+/*	Not yet
+ *	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_1682,
+ *		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_IGA_1682 },
+ */
 	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_2000,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_IGS_CYBER2000 },
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_2000 },
 	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_2010,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_IGS_CYBER2010 },
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_2010 },
 	{ PCI_VENDOR_ID_INTERG, PCI_DEVICE_ID_INTERG_5000,
-		PCI_ANY_ID, PCI_ANY_ID, 0, 0, FB_ACCEL_IGS_CYBER5000 },
+		PCI_ANY_ID, PCI_ANY_ID, 0, 0, ID_CYBERPRO_5000 },
 	{ 0, }
 };
 
+MODULE_DEVICE_TABLE(pci, cyberpro_pci_table);
+
 static struct pci_driver cyberpro_driver = {
-	name:		"CyberPro",
-	probe:		cyberpro_probe,
-	remove:		__devexit_p(cyberpro_remove),
-	suspend:	cyberpro_suspend,
-	resume:		cyberpro_resume,
-	id_table:	cyberpro_pci_table
+	.name		= "CyberPro",
+	.probe		= cyberpro_pci_probe,
+	.remove		= __devexit_p(cyberpro_pci_remove),
+	.suspend	= cyberpro_pci_suspend,
+	.resume		= cyberpro_pci_resume,
+	.id_table	= cyberpro_pci_table
 };
+#endif
 
 /*
  * I don't think we can use the "module_init" stuff here because
  * the fbcon stuff may not be initialised yet.  Hence the #ifdef
  * around module_init.
+ *
+ * Tony: "module_init" is now required
  */
-int __init cyber2000fb_init(void)
+static int __init cyber2000fb_init(void)
 {
-	return pci_module_init(&cyberpro_driver);
-}
+	int ret = -1, err;
 
+#ifndef MODULE
+	char *option = NULL;
+
+	if (fb_get_options("cyber2000fb", &option))
+		return -ENODEV;
+	cyber2000fb_setup(option);
+#endif
+
+#ifdef CONFIG_ARCH_SHARK
+	err = cyberpro_vl_probe();
+	if (!err)
+		ret = 0;
+#endif
+#ifdef CONFIG_PCI
+	err = pci_register_driver(&cyberpro_driver);
+	if (!err)
+		ret = 0;
+#endif
+
+	return ret ? err : 0;
+}
+module_init(cyber2000fb_init);
+
+#ifndef CONFIG_ARCH_SHARK
 static void __exit cyberpro_exit(void)
 {
 	pci_unregister_driver(&cyberpro_driver);
 }
-
-#ifdef MODULE
-module_init(cyber2000fb_init);
-#endif
 module_exit(cyberpro_exit);
+#endif
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("CyberPro 2000, 2010 and 5000 framebuffer driver");
-MODULE_DEVICE_TABLE(pci,cyberpro_pci_table);
 MODULE_LICENSE("GPL");

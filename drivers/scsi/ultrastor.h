@@ -12,14 +12,14 @@
 
 #ifndef _ULTRASTOR_H
 #define _ULTRASTOR_H
-#include <linux/kdev_t.h>
 
-int ultrastor_detect(Scsi_Host_Template *);
-const char *ultrastor_info(struct Scsi_Host * shpnt);
-int ultrastor_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int ultrastor_abort(Scsi_Cmnd *);
-int ultrastor_reset(Scsi_Cmnd *, unsigned int);
-int ultrastor_biosparam(Disk *, kdev_t, int *);
+static int ultrastor_detect(struct scsi_host_template *);
+static const char *ultrastor_info(struct Scsi_Host *shpnt);
+static int ultrastor_queuecommand(struct Scsi_Host *, struct scsi_cmnd *);
+static int ultrastor_abort(struct scsi_cmnd *);
+static int ultrastor_host_reset(struct scsi_cmnd *);
+static int ultrastor_biosparam(struct scsi_device *, struct block_device *,
+				sector_t, int *);
 
 
 #define ULTRASTOR_14F_MAX_SG 16
@@ -29,21 +29,6 @@ int ultrastor_biosparam(Disk *, kdev_t, int *);
 #define ULTRASTOR_MAX_CMDS 16
 
 #define ULTRASTOR_24F_PORT 0xC80
-
-
-#define ULTRASTOR_14F {   name:              "UltraStor 14F/24F/34F", 	\
-			  detect:            ultrastor_detect, 		\
-			  info:              ultrastor_info, 		\
-			  queuecommand:      ultrastor_queuecommand,	\
-			  abort:             ultrastor_abort, 		\
-			  reset:             ultrastor_reset,		\
-			  bios_param:        ultrastor_biosparam, 	\
-			  can_queue:         ULTRASTOR_MAX_CMDS,	\
-			  this_id:           0, 			\
-			  sg_tablesize:      ULTRASTOR_14F_MAX_SG, 	\
-			  cmd_per_lun:       ULTRASTOR_MAX_CMDS_PER_LUN,\
-			  unchecked_isa_dma: 1, 			\
-			  use_clustering:    ENABLE_CLUSTERING }
 
 
 #ifdef ULTRASTOR_PRIVATE

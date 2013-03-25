@@ -1,31 +1,42 @@
-# $USAGI: Makefile,v 1.27 2003/11/12 05:12:01 yoshfuji Exp $
 #
 # Makefile for the Linux TCP/IP (INET6) layer.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
 
+obj-$(CONFIG_IPV6) += ipv6.o
 
-O_TARGET := ipv6.o
+ipv6-objs :=	af_inet6.o anycast.o ip6_output.o ip6_input.o addrconf.o \
+		addrlabel.o \
+		route.o ip6_fib.o ipv6_sockglue.o ndisc.o udp.o udplite.o \
+		raw.o protocol.o icmp.o mcast.o reassembly.o tcp_ipv6.o \
+		exthdrs.o datagram.o ip6_flowlabel.o inet6_connection_sock.o
 
-export-objs :=	ipv6_tunnel.o
+ipv6-$(CONFIG_SYSCTL) = sysctl_net_ipv6.o
+ipv6-$(CONFIG_IPV6_MROUTE) += ip6mr.o
 
-obj-y :=	af_inet6.o anycast.o ip6_output.o ip6_input.o addrconf.o sit.o \
-		route.o ip6_fib.o ipv6_sockglue.o ndisc.o udp.o raw.o \
-		protocol.o icmp.o mcast.o reassembly.o tcp_ipv6.o \
-		exthdrs.o sysctl_net_ipv6.o datagram.o proc.o \
-		ip6_flowlabel.o ipv6_syms.o utils.o
+ipv6-$(CONFIG_XFRM) += xfrm6_policy.o xfrm6_state.o xfrm6_input.o \
+	xfrm6_output.o
+ipv6-$(CONFIG_NETFILTER) += netfilter.o
+ipv6-$(CONFIG_IPV6_MULTIPLE_TABLES) += fib6_rules.o
+ipv6-$(CONFIG_PROC_FS) += proc.o
+ipv6-$(CONFIG_SYN_COOKIES) += syncookies.o
 
-export-objs := ipv6_syms.o
+ipv6-objs += $(ipv6-y)
 
-obj-$(CONFIG_IPV6_IPV6_TUNNEL) += ipv6_tunnel.o
+obj-$(CONFIG_INET6_AH) += ah6.o
+obj-$(CONFIG_INET6_ESP) += esp6.o
+obj-$(CONFIG_INET6_IPCOMP) += ipcomp6.o
+obj-$(CONFIG_INET6_XFRM_TUNNEL) += xfrm6_tunnel.o
+obj-$(CONFIG_INET6_TUNNEL) += tunnel6.o
+obj-$(CONFIG_INET6_XFRM_MODE_TRANSPORT) += xfrm6_mode_transport.o
+obj-$(CONFIG_INET6_XFRM_MODE_TUNNEL) += xfrm6_mode_tunnel.o
+obj-$(CONFIG_INET6_XFRM_MODE_ROUTEOPTIMIZATION) += xfrm6_mode_ro.o
+obj-$(CONFIG_INET6_XFRM_MODE_BEET) += xfrm6_mode_beet.o
+obj-$(CONFIG_IPV6_MIP6) += mip6.o
+obj-$(CONFIG_NETFILTER)	+= netfilter/
 
-ifneq ($(CONFIG_IPV6),y)
-ifneq ($(CONFIG_IPV6),)
-obj-m += $(O_TARGET)
-endif
-endif
+obj-$(CONFIG_IPV6_SIT) += sit.o
+obj-$(CONFIG_IPV6_TUNNEL) += ip6_tunnel.o
 
-include $(TOPDIR)/Rules.make
+obj-y += addrconf_core.o exthdrs_core.o
+
+obj-$(subst m,y,$(CONFIG_IPV6)) += inet6_hashtables.o

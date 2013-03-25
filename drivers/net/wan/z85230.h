@@ -2,13 +2,14 @@
  *	Description of Z8530 Z85C30 and Z85230 communications chips
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1998 Alan Cox <alan@redhat.com>
+ * Copyright (C) 1998 Alan Cox <alan@lxorguk.ukuu.org.uk>
  */
 
 #ifndef _Z8530_H
 #define _Z8530_H
 
 #include <linux/tty.h>
+#include <linux/interrupt.h>
 
 /* Conversion routines to/from brg time constants from/to bits
  * per second.
@@ -324,7 +325,6 @@ struct z8530_channel
 
 	void		*private;	/* For our owner */
 	struct net_device	*netdevice;	/* Network layer device */
-	struct net_device_stats stats;	/* Network layer statistics */
 
 	/*
 	 *	Async features
@@ -332,15 +332,11 @@ struct z8530_channel
 
 	struct tty_struct 	*tty;		/* Attached terminal */
 	int			line;		/* Minor number */
-	struct termios		normal_termios;	/* Terminal settings */
-	struct termios		callout_termios;
 	wait_queue_head_t	open_wait;	/* Tasks waiting to open */
 	wait_queue_head_t	close_wait;	/* and for close to end */
 	unsigned long		event;		/* Pending events */
 	int			fdcount;    	/* # of fd on device */
 	int			blocked_open;	/* # of blocked opens */
-	long			session; 	/* Session of opening process */
-	long			pgrp; 		/* pgrp of opening process */
 	int			x_char;		/* XON/XOF char */
 	unsigned char 		*xmit_buf;	/* Transmit pointer */
 	int			xmit_head;	/* Transmit ring */
@@ -369,13 +365,13 @@ struct z8530_channel
 	unsigned char		tx_active; /* character is being xmitted */
 	unsigned char		tx_stopped; /* output is suspended */
 
-	spinlock_t		*lock;	  /* Devicr lock */
-};	
+	spinlock_t		*lock;	  /* Device lock */
+};
 
 /*
  *	Each Z853x0 device.
- */	
- 
+ */
+
 struct z8530_dev
 {
 	char *name;	/* Device instance name */
@@ -399,7 +395,7 @@ struct z8530_dev
 extern u8 z8530_dead_port[];
 extern u8 z8530_hdlc_kilostream_85230[];
 extern u8 z8530_hdlc_kilostream[];
-extern void z8530_interrupt(int, void *, struct pt_regs *);
+extern irqreturn_t z8530_interrupt(int, void *);
 extern void z8530_describe(struct z8530_dev *, char *mapping, unsigned long io);
 extern int z8530_init(struct z8530_dev *);
 extern int z8530_shutdown(struct z8530_dev *);
@@ -410,8 +406,8 @@ extern int z8530_sync_dma_close(struct net_device *, struct z8530_channel *);
 extern int z8530_sync_txdma_open(struct net_device *, struct z8530_channel *);
 extern int z8530_sync_txdma_close(struct net_device *, struct z8530_channel *);
 extern int z8530_channel_load(struct z8530_channel *, u8 *);
-extern int z8530_queue_xmit(struct z8530_channel *c, struct sk_buff *skb);
-extern struct net_device_stats *z8530_get_stats(struct z8530_channel *c);
+extern netdev_tx_t z8530_queue_xmit(struct z8530_channel *c,
+					  struct sk_buff *skb);
 extern void z8530_null_rx(struct z8530_channel *c, struct sk_buff *skb);
 
 

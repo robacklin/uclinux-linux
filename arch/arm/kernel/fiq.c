@@ -35,39 +35,19 @@
  *	 - enables FIQ.
  *  6. Goto 3
  */
-#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/mm.h>
-#include <linux/mman.h>
+#include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/seq_file.h>
 
+#include <asm/cacheflush.h>
+#include <asm/cp15.h>
 #include <asm/fiq.h>
-#include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/pgalloc.h>
-#include <asm/system.h>
-#include <asm/uaccess.h>
-
-#define FIQ_VECTOR (vectors_base() + 0x1c)
+#include <asm/traps.h>
 
 static unsigned long no_fiq_insn;
-
-#ifdef CONFIG_CPU_32
-static inline void unprotect_page_0(void)
-{
-	modify_domain(DOMAIN_USER, DOMAIN_MANAGER);
-}
-
-static inline void protect_page_0(void)
-{
-	modify_domain(DOMAIN_USER, DOMAIN_CLIENT);
-}
-#else
-
-#define unprotect_page_0()
-#define protect_page_0()
-
-#endif
 
 /* Default reacquire function
  * - we always relinquish FIQ control
@@ -75,110 +55,38 @@ static inline void protect_page_0(void)
  */
 static int fiq_def_op(void *ref, int relinquish)
 {
-	if (!relinquish) {
-		unprotect_page_0();
-		*(unsigned long *)FIQ_VECTOR = no_fiq_insn;
-		protect_page_0();
-		flush_icache_range(FIQ_VECTOR, FIQ_VECTOR + 4);
-	}
+	if (!relinquish)
+		set_fiq_handler(&no_fiq_insn, sizeof(no_fiq_insn));
 
 	return 0;
 }
 
 static struct fiq_handler default_owner = {
 	.name	= "default",
-	.fiq_op	= fiq_def_op,
+	.fiq_op = fiq_def_op,
 };
 
 static struct fiq_handler *current_fiq = &default_owner;
 
-int get_fiq_list(char *buf)
+int show_fiq_list(struct seq_file *p, int prec)
 {
-	char *p = buf;
-
 	if (current_fiq != &default_owner)
-		p += sprintf(p, "FIQ:              %s\n",
-			     current_fiq->name);
+		seq_printf(p, "%*s:              %s\n", prec, "FIQ",
+			current_fiq->name);
 
-	return p - buf;
+	return 0;
 }
 
 void set_fiq_handler(void *start, unsigned int length)
 {
-	unprotect_page_0();
-
-	memcpy((void *)FIQ_VECTOR, start, length);
-
-	protect_page_0();
-	flush_icache_range(FIQ_VECTOR, FIQ_VECTOR + length);
-}
-
-/*
- * Taking an interrupt in FIQ mode is death, so both these functions
- * disable irqs for the duration. 
- */
-void set_fiq_regs(struct pt_regs *regs)
-{
-	register unsigned long tmp, tmp2;
-	__asm__ volatile (
-#ifdef CONFIG_CPU_26
-	"mov	%0, pc		\n\t"
-	"bic	%1, %0, #0x3	\n\t"
-	"orr	%1, %1, %3	\n\t"
-	"teqp	%1, #0		@ select FIQ mode	\n\t"
-	"mov	r0, r0		\n\t"
-	"ldmia	%2, {r8 - r14}	\n\t"
-	"teqp	%0, #0		@ return to SVC mode	\n\t"
-	"mov	r0, r0"
+#if defined(CONFIG_CPU_USE_DOMAINS)
+	memcpy((void *)0xffff001c, start, length);
+#else
+	memcpy(vectors_page + 0x1c, start, length);
 #endif
-#ifdef CONFIG_CPU_32
-	"mrs	%0, cpsr	\n\t"
-	"mov	%1, %3		\n\t"
-	"msr	cpsr_c, %1	@ select FIQ mode	\n\t"
-	"mov	r0, r0		\n\t"
-	"ldmia	%2, {r8 - r14}	\n\t"
-	"msr	cpsr_c, %0	@ return to SVC mode	\n\t"
-	"mov	r0, r0"
-#endif
-	: "=&r" (tmp), "=&r" (tmp2)
-	: "r" (&regs->ARM_r8), "I" (I_BIT | F_BIT | FIQ_MODE)
-	/* These registers aren't modified by the above code in a way
-	   visible to the compiler, but we mark them as clobbers anyway
-	   so that GCC won't put any of the input or output operands in
-	   them.  */
-	: "r8", "r9", "r10", "r11", "r12", "r13", "r14");
-}
-
-void get_fiq_regs(struct pt_regs *regs)
-{
-	register unsigned long tmp, tmp2;
-	__asm__ volatile (
-#ifdef CONFIG_CPU_26
-	"mov	%0, pc	\n\t"
-	"bic	%1, %0, #0x3	\n\t"
-	"orr	%1, %1, %3	\n\t"
-	"teqp	%1, #0		@ select FIQ mode	\n\t"
-	"mov	r0, r0		\n\t"
-	"stmia	%2, {r8 - r14}	\n\t"
-	"teqp	%0, #0		@ return to SVC mode	\n\t"
-	"mov	r0, r0"
-#endif
-#ifdef CONFIG_CPU_32
-	"mrs	%0, cpsr	\n\t"
-	"mov	%1, %3		\n\t"
-	"msr	cpsr_c, %1	@ select FIQ mode	\n\t"
-	"mov	r0, r0		\n\t"
-	"stmia	%2, {r8 - r14}	\n\t"
-	"msr	cpsr_c, %0	@ return to SVC mode	\n\t"
-	"mov	r0, r0"
-#endif
-	: "=&r" (tmp), "=&r" (tmp2)
-	: "r" (&regs->ARM_r8), "I" (I_BIT | F_BIT | FIQ_MODE)
-	/* These registers aren't modified by the above code in a way
-	   visible to the compiler, but we mark them as clobbers anyway
-	   so that GCC won't put any of the input or output operands in
-	   them.  */
-	: "r8", "r9", "r10", "r11", "r12", "r13", "r14");
+	flush_icache_range(0xffff001c, 0xffff001c + length);
+	if (!vectors_high())
+		flush_icache_range(0x1c, 0x1c + length);
 }
 
 int claim_fiq(struct fiq_handler *f)
@@ -205,9 +113,7 @@ void release_fiq(struct fiq_handler *f)
 	if (current_fiq != f) {
 		printk(KERN_ERR "%s FIQ trying to release %s FIQ\n",
 		       f->name, current_fiq->name);
-#ifdef CONFIG_DEBUG_ERRORS
-		__backtrace();
-#endif
+		dump_stack();
 		return;
 	}
 
@@ -227,8 +133,8 @@ void disable_fiq(int fiq)
 }
 
 EXPORT_SYMBOL(set_fiq_handler);
-EXPORT_SYMBOL(set_fiq_regs);
-EXPORT_SYMBOL(get_fiq_regs);
+EXPORT_SYMBOL(__set_fiq_regs);	/* defined in fiqasm.S */
+EXPORT_SYMBOL(__get_fiq_regs);	/* defined in fiqasm.S */
 EXPORT_SYMBOL(claim_fiq);
 EXPORT_SYMBOL(release_fiq);
 EXPORT_SYMBOL(enable_fiq);
@@ -236,6 +142,5 @@ EXPORT_SYMBOL(disable_fiq);
 
 void __init init_FIQ(void)
 {
-	no_fiq_insn = *(unsigned long *)FIQ_VECTOR;
-	set_fs(get_fs());
+	no_fiq_insn = *(unsigned long *)0xffff001c;
 }

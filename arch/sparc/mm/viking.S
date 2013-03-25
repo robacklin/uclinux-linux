@@ -1,4 +1,4 @@
-/* $Id: viking.S,v 1.18 2000/07/16 21:48:52 anton Exp $
+/*
  * viking.S: High speed Viking cache/mmu operations
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -6,15 +6,14 @@
  * Copyright (C) 1999  Pavel Semerad  (semerad@ss1000.ms.mff.cuni.cz)
  */
 
-#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
+#include <asm/asm-offsets.h>
 #include <asm/asi.h>
 #include <asm/mxcc.h>
 #include <asm/page.h>
 #include <asm/pgtsrmmu.h>
 #include <asm/viking.h>
-#include <asm/cprefix.h>
 #include <asm/btfixup.h>
 
 #ifdef CONFIG_SMP
@@ -108,11 +107,11 @@ viking_mxcc_flush_page:
 	 nop
 
 viking_flush_cache_page:
+viking_flush_cache_range:
 #ifndef CONFIG_SMP
 	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
 #endif
 viking_flush_cache_mm:
-viking_flush_cache_range:
 #ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g1
 	cmp	%g1, -1
@@ -150,6 +149,7 @@ viking_flush_tlb_mm:
 #endif
 
 viking_flush_tlb_range:
+	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
@@ -240,6 +240,7 @@ sun4dsmp_flush_tlb_range:
 	tst	%g5
 	bne	3f
 	 mov	SRMMU_CTX_REG, %g1
+	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
 	sethi	%hi(~((1 << SRMMU_PGDIR_SHIFT) - 1)), %o4

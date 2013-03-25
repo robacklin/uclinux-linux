@@ -1,10 +1,8 @@
 /* Driver for USB Mass Storage compliant devices
  * Debugging Functions Header File
  *
- * $Id: debug.h,v 1.6 2001/01/12 23:51:04 mdharm Exp $
- *
  * Current development and maintenance by:
- *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
  * Initial work by:
  *   (c) 1999 Michael Gee (michael@linuxspecific.com)
@@ -44,17 +42,12 @@
 #ifndef _DEBUG_H_
 #define _DEBUG_H_
 
-#include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/blk.h>
-#include <linux/cdrom.h>
-#include "scsi.h"
 
 #define USB_STORAGE "usb-storage: "
 
 #ifdef CONFIG_USB_STORAGE_DEBUG
-void usb_stor_show_command(Scsi_Cmnd *srb);
-void usb_stor_print_Scsi_Cmnd( Scsi_Cmnd* cmd );
+void usb_stor_show_command(struct scsi_cmnd *srb);
 void usb_stor_show_sense( unsigned char key,
 		unsigned char asc, unsigned char ascq );
 #define US_DEBUGP(x...) printk( KERN_DEBUG USB_STORAGE x )

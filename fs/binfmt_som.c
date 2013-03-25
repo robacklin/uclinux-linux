@@ -32,7 +32,6 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 
-#include <linux/config.h>
 
 #include <linux/elf.h>
 
@@ -44,7 +43,7 @@ static int load_som_library(struct file *);
  * don't even try.
  */
 #if 0
-static int som_core_dump(long signr, struct pt_regs * regs);
+static int som_core_dump(struct coredump_params *cprm);
 #else
 #define som_core_dump	NULL
 #endif
@@ -54,7 +53,11 @@ static int som_core_dump(long signr, struct pt_regs * regs);
 #define SOM_PAGEALIGN(_v) (((_v) + SOM_PAGESIZE - 1) & ~(SOM_PAGESIZE - 1))
 
 static struct linux_binfmt som_format = {
-	NULL, THIS_MODULE, load_som_binary, load_som_library, som_core_dump, SOM_PAGESIZE
+	.module		= THIS_MODULE,
+	.load_binary	= load_som_binary,
+	.load_shlib	= load_som_library,
+	.core_dump	= som_core_dump,
+	.min_coredump	= SOM_PAGESIZE
 };
 
 /*
@@ -144,10 +147,8 @@ static int map_som_binary(struct file *file,
 	code_size = SOM_PAGEALIGN(hpuxhdr->exec_tsize);
 	current->mm->start_code = code_start;
 	current->mm->end_code = code_start + code_size;
-	down_write(&current->mm->mmap_sem);
-	retval = do_mmap(file, code_start, code_size, prot,
+	retval = vm_mmap(file, code_start, code_size, prot,
 			flags, SOM_PAGESTART(hpuxhdr->exec_tfile));
-	up_write(&current->mm->mmap_sem);
 	if (retval < 0 && retval > -1024)
 		goto out;
 
@@ -155,20 +156,16 @@ static int map_som_binary(struct file *file,
 	data_size = SOM_PAGEALIGN(hpuxhdr->exec_dsize);
 	current->mm->start_data = data_start;
 	current->mm->end_data = bss_start = data_start + data_size;
-	down_write(&current->mm->mmap_sem);
-	retval = do_mmap(file, data_start, data_size,
+	retval = vm_mmap(file, data_start, data_size,
 			prot | PROT_WRITE, flags,
 			SOM_PAGESTART(hpuxhdr->exec_dfile));
-	up_write(&current->mm->mmap_sem);
 	if (retval < 0 && retval > -1024)
 		goto out;
 
 	som_brk = bss_start + SOM_PAGEALIGN(hpuxhdr->exec_bsize);
 	current->mm->start_brk = current->mm->brk = som_brk;
-	down_write(&current->mm->mmap_sem);
-	retval = do_mmap(NULL, bss_start, som_brk - bss_start,
+	retval = vm_mmap(NULL, bss_start, som_brk - bss_start,
 			prot | PROT_WRITE, MAP_FIXED | MAP_PRIVATE, 0);
-	up_write(&current->mm->mmap_sem);
 	if (retval > 0 || retval < -1024)
 		retval = 0;
 out:
@@ -182,10 +179,9 @@ out:
  * libraries.  There is no binary dependent code anywhere else.
  */
 
-static inline int
-do_load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+static int
+load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
-	int som_exec_fileno;
 	int retval;
 	unsigned int size;
 	unsigned long som_entry;
@@ -205,20 +201,17 @@ do_load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	size = som_ex->aux_header_size;
 	if (size > SOM_PAGESIZE)
 		goto out;
-	hpuxhdr = (struct som_exec_auxhdr *) kmalloc(size, GFP_KERNEL);
+	hpuxhdr = kmalloc(size, GFP_KERNEL);
 	if (!hpuxhdr)
 		goto out;
 
 	retval = kernel_read(bprm->file, som_ex->aux_header_location,
 			(char *) hpuxhdr, size);
-	if (retval < 0)
+	if (retval != size) {
+		if (retval >= 0)
+			retval = -EIO;
 		goto out_free;
-#error "Fix security hole before enabling me"
-	retval = get_unused_fd();
-	if (retval < 0)
-		goto out_free;
-	get_file(bprm->file);
-	fd_install(som_exec_fileno = retval, bprm->file);
+	}
 
 	/* Flush all traces of the currently running executable */
 	retval = flush_old_exec(bprm);
@@ -226,8 +219,8 @@ do_load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 		goto out_free;
 
 	/* OK, This is the point of no return */
-	current->flags &= ~PF_FORKNOEXEC;
 	current->personality = PER_HPUX;
+	setup_new_exec(bprm);
 
 	/* Set the task size for HP-UX processes such that
 	 * the gateway page is outside the address space.
@@ -249,13 +242,12 @@ do_load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	kfree(hpuxhdr);
 
 	set_binfmt(&som_format);
-	compute_creds(bprm);
-	setup_arg_pages(bprm, STACK_TOP);
+	install_exec_creds(bprm);
+	setup_arg_pages(bprm, STACK_TOP, EXSTACK_DEFAULT);
 
 	create_som_tables(bprm);
 
 	current->mm->start_stack = bprm->p;
-	current->mm->rss = 0;
 
 #if 0
 	printk("(start_brk) %08lx\n" , (unsigned long) current->mm->start_brk);
@@ -269,8 +261,6 @@ do_load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 	map_hpux_gateway_page(current,current->mm);
 
 	start_thread_som(regs, som_entry, bprm->p);
-	if (current->ptrace & PT_PTRACED)
-		send_sig(SIGTRAP, current, 0);
 	return 0;
 
 	/* error cleanup */
@@ -280,34 +270,11 @@ out:
 	return retval;
 }
 
-static int
-load_som_binary(struct linux_binprm * bprm, struct pt_regs * regs)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_som_binary(bprm, regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
-static inline int
-do_load_som_library(struct file *f)
+static int load_som_library(struct file *f)
 {
 /* No lib support in SOM yet.  gizza chance.. */
 	return -ENOEXEC;
 }
-
-static int load_som_library(struct file *f)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_som_library(f);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
 	/* Install the SOM loader.
 	 * N.B. We *rely* on the table being the right size with the
 	 * right number of free slots...
@@ -315,7 +282,8 @@ static int load_som_library(struct file *f)
 
 static int __init init_som_binfmt(void)
 {
-	return register_binfmt(&som_format);
+	register_binfmt(&som_format);
+	return 0;
 }
 
 static void __exit exit_som_binfmt(void)
@@ -324,6 +292,7 @@ static void __exit exit_som_binfmt(void)
 	unregister_binfmt(&som_format);
 }
 
-module_init(init_som_binfmt);
+core_initcall(init_som_binfmt);
 module_exit(exit_som_binfmt);
 
+MODULE_LICENSE("GPL");

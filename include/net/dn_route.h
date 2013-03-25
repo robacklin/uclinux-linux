@@ -15,10 +15,9 @@
     GNU General Public License for more details.
 *******************************************************************************/
 
-extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, int pri);
-extern int dn_route_output(struct dst_entry **pprt, dn_address dst, dn_address src, int flags);
+extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, gfp_t pri);
+extern int dn_route_output_sock(struct dst_entry **pprt, struct flowidn *, struct sock *sk, int flags);
 extern int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb);
-extern int dn_cache_getroute(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg);
 extern void dn_rt_cache_flush(int delay);
 
 /* Masks for flags field */
@@ -59,31 +58,37 @@ extern void dn_rt_cache_flush(int delay);
 #define DN_RT_INFO_BLKR 0x40 /* Blocking Requested            */
 
 /*
- * The key structure is what we used to look up the route.
+ * The fl structure is what we used to look up the route.
  * The rt_saddr & rt_daddr entries are the same as key.saddr & key.daddr
- * except for local input routes, where the rt_saddr = key.daddr and
- * rt_daddr = key.saddr to allow the route to be used for returning
+ * except for local input routes, where the rt_saddr = fl.fld_dst and
+ * rt_daddr = fl.fld_src to allow the route to be used for returning
  * packets to the originating host.
  */
 struct dn_route {
-	union {
-		struct dst_entry dst;
-		struct dn_route *rt_next;
-	} u;
-	struct {
-		unsigned short saddr;
-		unsigned short daddr;
-		int iif;
-		int oif;
-		u32 fwmark;
-	} key;
-	unsigned short rt_saddr;
-	unsigned short rt_daddr;
-	unsigned char rt_type;
-	unsigned char rt_scope;
-	unsigned char rt_protocol;
-	unsigned char rt_table;
+	struct dst_entry dst;
+
+	struct flowidn fld;
+
+	__le16 rt_saddr;
+	__le16 rt_daddr;
+	__le16 rt_gateway;
+	__le16 rt_local_src;	/* Source used for forwarding packets */
+	__le16 rt_src_map;
+	__le16 rt_dst_map;
+
+	unsigned rt_flags;
+	unsigned rt_type;
 };
+
+static inline bool dn_is_input_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif != 0;
+}
+
+static inline bool dn_is_output_route(struct dn_route *rt)
+{
+	return rt->fld.flowidn_iif == 0;
+}
 
 extern void dn_route_init(void);
 extern void dn_route_cleanup(void);
@@ -96,46 +101,17 @@ static inline void dn_rt_send(struct sk_buff *skb)
 	dev_queue_xmit(skb);
 }
 
-static inline void dn_rt_finish_output(struct sk_buff *skb, char *dst)
+static inline void dn_rt_finish_output(struct sk_buff *skb, char *dst, char *src)
 {
 	struct net_device *dev = skb->dev;
 
 	if ((dev->type != ARPHRD_ETHER) && (dev->type != ARPHRD_LOOPBACK))
 		dst = NULL;
 
-	if (!dev->hard_header || (dev->hard_header(skb, dev, ETH_P_DNA_RT,
-			dst, NULL, skb->len) >= 0))
+	if (dev_hard_header(skb, dev, ETH_P_DNA_RT, dst, src, skb->len) >= 0)
 		dn_rt_send(skb);
 	else
 		kfree_skb(skb);
-}
-
-static inline void dn_nsp_send(struct sk_buff *skb)
-{
-	struct sock *sk = skb->sk;
-	struct dn_scp *scp = &sk->protinfo.dn;
-	struct dst_entry *dst;
-
-	skb->h.raw = skb->data;
-	scp->stamp = jiffies;
-
-	if ((dst = sk->dst_cache) && !dst->obsolete) {
-try_again:
-		skb->dst = dst_clone(dst);
-		dst->output(skb);
-		return;
-	}
-
-	dst_release(xchg(&sk->dst_cache, NULL));
-
-	if (dn_route_output(&sk->dst_cache, dn_saddr2dn(&scp->peer), dn_saddr2dn(&scp->addr), 0) == 0) {
-		dst = sk->dst_cache;
-		goto try_again;
-	}
-
-	sk->err = EHOSTUNREACH;
-	if (!sk->dead)
-		sk->state_change(sk);
 }
 
 #endif /* _NET_DN_ROUTE_H */

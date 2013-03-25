@@ -2,18 +2,53 @@
  * This file contains the code that gets mapped at the upper end of each task's text
  * region.  For now, it contains the signal trampoline code only.
  *
- * Copyright (C) 1999-2002 Hewlett-Packard Co
+ * Copyright (C) 1999-2003 Hewlett-Packard Co
  * 	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
-#include <asm/asmmacro.h>
-#include <asm/offsets.h>
-#include <asm/sigcontext.h>
-#include <asm/system.h>
-#include <asm/unistd.h>
-#include <asm/page.h>
 
-	.section .text.gate,"ax"
+#include <asm/asmmacro.h>
+#include <asm/errno.h>
+#include <asm/asm-offsets.h>
+#include <asm/sigcontext.h>
+#include <asm/unistd.h>
+#include <asm/kregs.h>
+#include <asm/page.h>
+#include "paravirt_inst.h"
+
+/*
+ * We can't easily refer to symbols inside the kernel.  To avoid full runtime relocation,
+ * complications with the linker (which likes to create PLT stubs for branches
+ * to targets outside the shared object) and to avoid multi-phase kernel builds, we
+ * simply create minimalistic "patch lists" in special ELF sections.
+ */
+	.section ".data..patch.fsyscall_table", "a"
+	.previous
+#define LOAD_FSYSCALL_TABLE(reg)			\
+[1:]	movl reg=0;					\
+	.xdata4 ".data..patch.fsyscall_table", 1b-.
+
+	.section ".data..patch.brl_fsys_bubble_down", "a"
+	.previous
+#define BRL_COND_FSYS_BUBBLE_DOWN(pr)			\
+[1:](pr)brl.cond.sptk 0;				\
+	;;						\
+	.xdata4 ".data..patch.brl_fsys_bubble_down", 1b-.
+
+GLOBAL_ENTRY(__kernel_syscall_via_break)
+	.prologue
+	.altrp b6
+	.body
+	/*
+	 * Note: for (fast) syscall restart to work, the break instruction must be
+	 *	 the first one in the bundle addressed by syscall_via_break.
+	 */
+{ .mib
+	break 0x100000
+	nop.i 0
+	br.ret.sptk.many b6
+}
+END(__kernel_syscall_via_break)
 
 #	define ARG0_OFF		(16 + IA64_SIGFRAME_ARG0_OFFSET)
 #	define ARG1_OFF		(16 + IA64_SIGFRAME_ARG1_OFFSET)
@@ -64,7 +99,8 @@
 	 */
 
 #define SIGTRAMP_SAVES										\
-	.unwabi @svr4, 's';	/* mark this as a sigtramp handler (saves scratch regs) */	\
+	.unwabi 3, 's';		/* mark this as a sigtramp handler (saves scratch regs) */	\
+	.unwabi @svr4, 's'; /* backwards compatibility with old unwinders (remove in v2.7) */	\
 	.savesp ar.unat, UNAT_OFF+SIGCONTEXT_OFF;						\
 	.savesp ar.fpsr, FPSR_OFF+SIGCONTEXT_OFF;						\
 	.savesp pr, PR_OFF+SIGCONTEXT_OFF;     							\
@@ -72,7 +108,7 @@
 	.savesp ar.pfs, CFM_OFF+SIGCONTEXT_OFF;							\
 	.vframesp SP_OFF+SIGCONTEXT_OFF
 
-GLOBAL_ENTRY(ia64_sigtramp)
+GLOBAL_ENTRY(__kernel_sigtramp)
 	// describe the state that is active when we get here:
 	.prologue
 	SIGTRAMP_SAVES
@@ -127,7 +163,7 @@ back_from_setup_rbs:
 	br.call.sptk.many rp=b6			// call the signal handler
 .ret0:	adds base0=(BSP_OFF+SIGCONTEXT_OFF),sp
 	;;
-	ld8 r15=[base0],(CFM_OFF-BSP_OFF)	// fetch sc_ar_bsp and advance to CFM_OFF
+	ld8 r15=[base0]				// fetch sc_ar_bsp
 	mov r14=ar.bsp
 	;;
 	cmp.ne p1,p0=r14,r15			// do we need to restore the rbs?
@@ -258,4 +294,93 @@ restore_rbs:
 	mov ar.rsc=0xf				// (will be restored later on from sc_ar_rsc)
 	// invala not necessary as that will happen when returning to user-mode
 	br.cond.sptk back_from_restore_rbs
-END(ia64_sigtramp)
+END(__kernel_sigtramp)
+
+/*
+ * On entry:
+ *	r11 = saved ar.pfs
+ *	r15 = system call #
+ *	b0  = saved return address
+ *	b6  = return address
+ * On exit:
+ *	r11 = saved ar.pfs
+ *	r15 = system call #
+ *	b0  = saved return address
+ *	all other "scratch" registers:	undefined
+ *	all "preserved" registers:	same as on entry
+ */
+
+GLOBAL_ENTRY(__kernel_syscall_via_epc)
+	.prologue
+	.altrp b6
+	.body
+{
+	/*
+	 * Note: the kernel cannot assume that the first two instructions in this
+	 * bundle get executed.  The remaining code must be safe even if
+	 * they do not get executed.
+	 */
+	adds r17=-1024,r15			// A
+	mov r10=0				// A    default to successful syscall execution
+	epc					// B	causes split-issue
+}
+	;;
+	RSM_PSR_BE_I(r20, r22)			// M2 (5 cyc to srlz.d)
+	LOAD_FSYSCALL_TABLE(r14)		// X
+	;;
+	mov r16=IA64_KR(CURRENT)		// M2 (12 cyc)
+	shladd r18=r17,3,r14			// A
+	mov r19=NR_syscalls-1			// A
+	;;
+	lfetch [r18]				// M0|1
+	MOV_FROM_PSR(p0, r29, r8)		// M2 (12 cyc)
+	// If r17 is a NaT, p6 will be zero
+	cmp.geu p6,p7=r19,r17			// A    (sysnr > 0 && sysnr < 1024+NR_syscalls)?
+	;;
+	mov r21=ar.fpsr				// M2 (12 cyc)
+	tnat.nz p10,p9=r15			// I0
+	mov.i r26=ar.pfs			// I0 (would stall anyhow due to srlz.d...)
+	;;
+	srlz.d					// M0 (forces split-issue) ensure PSR.BE==0
+(p6)	ld8 r18=[r18]				// M0|1
+	nop.i 0
+	;;
+	nop.m 0
+(p6)	tbit.z.unc p8,p0=r18,0			// I0 (dual-issues with "mov b7=r18"!)
+	nop.i 0
+	;;
+	SSM_PSR_I(p8, p14, r25)
+(p6)	mov b7=r18				// I0
+(p8)	br.dptk.many b7				// B
+
+	mov r27=ar.rsc				// M2 (12 cyc)
+/*
+ * brl.cond doesn't work as intended because the linker would convert this branch
+ * into a branch to a PLT.  Perhaps there will be a way to avoid this with some
+ * future version of the linker.  In the meantime, we just use an indirect branch
+ * instead.
+ */
+#ifdef CONFIG_ITANIUM
+(p6)	add r14=-8,r14				// r14 <- addr of fsys_bubble_down entry
+	;;
+(p6)	ld8 r14=[r14]				// r14 <- fsys_bubble_down
+	;;
+(p6)	mov b7=r14
+(p6)	br.sptk.many b7
+#else
+	BRL_COND_FSYS_BUBBLE_DOWN(p6)
+#endif
+	SSM_PSR_I(p0, p14, r10)
+	mov r10=-1
+(p10)	mov r8=EINVAL
+(p9)	mov r8=ENOSYS
+	FSYS_RETURN
+
+#ifdef CONFIG_PARAVIRT
+	/*
+	 * padd to make the size of this symbol constant
+	 * independent of paravirtualization.
+	 */
+	.align PAGE_SIZE / 8
+#endif
+END(__kernel_syscall_via_epc)

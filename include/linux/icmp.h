@@ -17,6 +17,8 @@
 #ifndef _LINUX_ICMP_H
 #define	_LINUX_ICMP_H
 
+#include <linux/types.h>
+
 #define ICMP_ECHOREPLY		0	/* Echo Reply			*/
 #define ICMP_DEST_UNREACH	3	/* Destination Unreachable	*/
 #define ICMP_SOURCE_QUENCH	4	/* Source Quench		*/
@@ -66,19 +68,28 @@
 struct icmphdr {
   __u8		type;
   __u8		code;
-  __u16		checksum;
+  __sum16	checksum;
   union {
 	struct {
-		__u16	id;
-		__u16	sequence;
+		__be16	id;
+		__be16	sequence;
 	} echo;
-	__u32	gateway;
+	__be32	gateway;
 	struct {
-		__u16	__unused;
-		__u16	mtu;
+		__be16	__unused;
+		__be16	mtu;
 	} frag;
   } un;
 };
+
+#ifdef __KERNEL__
+#include <linux/skbuff.h>
+
+static inline struct icmphdr *icmp_hdr(const struct sk_buff *skb)
+{
+	return (struct icmphdr *)skb_transport_header(skb);
+}
+#endif
 
 /*
  *	constants for (set|get)sockopt

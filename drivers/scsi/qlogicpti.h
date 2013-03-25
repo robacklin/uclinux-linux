@@ -6,8 +6,6 @@
 #ifndef _QLOGICPTI_H
 #define _QLOGICPTI_H
 
-#include <linux/config.h>
-
 /* Qlogic/SBUS controller registers. */
 #define SBUS_CFG1	0x006UL
 #define SBUS_CTRL	0x008UL
@@ -45,19 +43,7 @@
  * determined for each queue request anew.
  */
 #define QLOGICPTI_REQ_QUEUE_LEN	255	/* must be power of two - 1 */
-#define QLOGICPTI_MAX_SG(ql)	(4 + ((ql) > 0) ? 7*((ql) - 1) : 0)
-
-#ifndef NULL
-#define NULL (0)
-#endif
-
-int qlogicpti_detect(Scsi_Host_Template *);
-int qlogicpti_release(struct Scsi_Host *);
-const char * qlogicpti_info(struct Scsi_Host *);
-int qlogicpti_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
-int qlogicpti_queuecommand_slow(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
-int qlogicpti_abort(Scsi_Cmnd *);
-int qlogicpti_reset(Scsi_Cmnd *, unsigned int);
+#define QLOGICPTI_MAX_SG(ql)	(4 + (((ql) > 0) ? 7*((ql) - 1) : 0))
 
 /* mailbox command complete status codes */
 #define MBOX_COMMAND_COMPLETE		0x4000
@@ -344,18 +330,19 @@ struct pti_queue_entry {
 	char __opaque[QUEUE_ENTRY_LEN];
 };
 
+struct scsi_cmnd;
+
 /* Software state for the driver. */
 struct qlogicpti {
 	/* These are the hot elements in the cache, so they come first. */
-	spinlock_t		  lock;			/* Driver mutex		      */
-	unsigned long             qregs;                /* Adapter registers          */
+	void __iomem             *qregs;                /* Adapter registers          */
 	struct pti_queue_entry   *res_cpu;              /* Ptr to RESPONSE bufs (CPU) */
 	struct pti_queue_entry   *req_cpu;              /* Ptr to REQUEST bufs (CPU)  */
 
 	u_int	                  req_in_ptr;		/* index of next request slot */
 	u_int	                  res_out_ptr;		/* index of next result slot  */
 	long	                  send_marker;		/* must we send a marker?     */
-	struct sbus_dev		 *sdev;
+	struct platform_device	 *op;
 	unsigned long		  __pad;
 
 	int                       cmd_count[MAX_TARGETS];
@@ -365,7 +352,7 @@ struct qlogicpti {
 	 * Ex000 sparc64 machines with >4GB of ram we just keep track of the
 	 * scsi command pointers here.  This is essentially what Matt Jacob does. -DaveM
 	 */
-	Scsi_Cmnd                *cmd_slots[QLOGICPTI_REQ_QUEUE_LEN + 1];
+	struct scsi_cmnd         *cmd_slots[QLOGICPTI_REQ_QUEUE_LEN + 1];
 
 	/* The rest of the elements are unimportant for performance. */
 	struct qlogicpti         *next;
@@ -383,7 +370,7 @@ struct qlogicpti {
 	struct	host_param        host_param;
 	struct	dev_param         dev_param[MAX_TARGETS];
 
-	unsigned long             sreg;
+	void __iomem              *sreg;
 #define SREG_TPOWER               0x80   /* State of termpwr           */
 #define SREG_FUSE                 0x40   /* State of on board fuse     */
 #define SREG_PDISAB               0x20   /* Disable state for power on */
@@ -393,8 +380,7 @@ struct qlogicpti {
 	unsigned char             swsreg;
 	unsigned int	
 		gotirq	:	1,	/* this instance got an irq */
-		is_pti	: 	1,	/* Non-zero if this is a PTI board. */
-		sbits	:	16;	/* syncmode known bits */
+		is_pti	: 	1;	/* Non-zero if this is a PTI board. */
 };
 
 /* How to twiddle them bits... */
@@ -513,39 +499,6 @@ struct qlogicpti {
 #define HCCTRL_EBENAB           0x0010      /* External breakpoint enable       */
 #define HCCTRL_B1ENAB           0x0008      /* Breakpoint 1 enable              */
 #define HCCTRL_B0ENAB           0x0004      /* Breakpoint 0 enable              */
-
-#ifdef CONFIG_SPARC64
-#define QLOGICPTI {						   \
-	detect:		qlogicpti_detect,			   \
-	release:	qlogicpti_release,			   \
-	info:		qlogicpti_info,				   \
-	queuecommand:	qlogicpti_queuecommand_slow,		   \
-	abort:		qlogicpti_abort,			   \
-	reset:		qlogicpti_reset,			   \
-	can_queue:	QLOGICPTI_REQ_QUEUE_LEN,		   \
-	this_id:	7,					   \
-	sg_tablesize:	QLOGICPTI_MAX_SG(QLOGICPTI_REQ_QUEUE_LEN), \
-	cmd_per_lun:	1,					   \
-	use_clustering:	ENABLE_CLUSTERING,			   \
-	use_new_eh_code: 0,					   \
-	highmem_io:	1					   \
-}
-#else
-/* Sparc32's iommu code cannot handle highmem pages yet. */
-#define QLOGICPTI {						   \
-	detect:		qlogicpti_detect,			   \
-	release:	qlogicpti_release,			   \
-	info:		qlogicpti_info,				   \
-	queuecommand:	qlogicpti_queuecommand_slow,		   \
-	abort:		qlogicpti_abort,			   \
-	reset:		qlogicpti_reset,			   \
-	can_queue:	QLOGICPTI_REQ_QUEUE_LEN,		   \
-	this_id:	7,					   \
-	sg_tablesize:	QLOGICPTI_MAX_SG(QLOGICPTI_REQ_QUEUE_LEN), \
-	cmd_per_lun:	1,					   \
-	use_clustering:	ENABLE_CLUSTERING,			   \
-}
-#endif
 
 /* For our interrupt engine. */
 #define for_each_qlogicpti(qp) \

@@ -1,6 +1,5 @@
 /*
- * Copyright (C) 2001 Broadcom Corporation
- * Copyright (C) 2004  Maciej W. Rozycki
+ * Copyright (C) 2001, 2002, 2003 Broadcom Corporation
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -19,163 +18,168 @@
 
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/smp.h>
 #include <linux/kernel_stat.h>
+#include <linux/sched.h>
 
 #include <asm/mmu_context.h>
-#include <asm/sibyte/64bit.h>
+#include <asm/io.h>
+#include <asm/fw/cfe/cfe_api.h>
 #include <asm/sibyte/sb1250.h>
 #include <asm/sibyte/sb1250_regs.h>
 #include <asm/sibyte/sb1250_int.h>
 
-extern void smp_call_function_interrupt(void);
+static void *mailbox_set_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU)
+};
+
+static void *mailbox_clear_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU)
+};
+
+static void *mailbox_regs[] = {
+	IOADDR(A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU),
+	IOADDR(A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU)
+};
+
+/*
+ * SMP init and finish on secondary CPUs
+ */
+void __cpuinit sb1250_smp_init(void)
+{
+	unsigned int imask = STATUSF_IP4 | STATUSF_IP3 | STATUSF_IP2 |
+		STATUSF_IP1 | STATUSF_IP0;
+
+	/* Set interrupt mask, but don't enable */
+	change_c0_status(ST0_IM, imask);
+}
 
 /*
  * These are routines for dealing with the sb1250 smp capabilities
  * independent of board/firmware
  */
 
-static u64 mailbox_set_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_SET_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_SET_CPU
-};
-
-static u64 mailbox_clear_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_CLR_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_CLR_CPU
-};
-
-static u64 mailbox_regs[] = {
-	KSEG1 + A_IMR_CPU0_BASE + R_IMR_MAILBOX_CPU,
-	KSEG1 + A_IMR_CPU1_BASE + R_IMR_MAILBOX_CPU
-};
-
-
 /*
  * Simple enough; everything is set up, so just poke the appropriate mailbox
  * register, and we should be set
  */
-void core_send_ipi(int cpu, unsigned int action)
+static void sb1250_send_ipi_single(int cpu, unsigned int action)
 {
-	out64((((u64)action)<< 48), mailbox_set_regs[cpu]);
+	__raw_writeq((((u64)action) << 48), mailbox_set_regs[cpu]);
 }
 
-
-void sb1250_smp_finish(void)
+static inline void sb1250_send_ipi_mask(const struct cpumask *mask,
+					unsigned int action)
 {
-	sb1250_time_init();
+	unsigned int i;
+
+	for_each_cpu(i, mask)
+		sb1250_send_ipi_single(i, action);
 }
-
-void sb1250_mailbox_interrupt(struct pt_regs *regs)
-{
-	int cpu = smp_processor_id();
-	unsigned int action;
-
-	kstat.irqs[cpu][K_INT_MBOX_0]++;
-	/* Load the mailbox register to figure out what we're supposed to do */
-	action = (in64(mailbox_regs[cpu]) >> 48) & 0xffff;
-
-	/* Clear the mailbox to clear the interrupt */
-	out64(((u64)action)<<48, mailbox_clear_regs[cpu]);
-
-	/*
-	 * Nothing to do for SMP_RESCHEDULE_YOURSELF; returning from the
-	 * interrupt will do the reschedule for us
-	 */
-
-	if (action & SMP_CALL_FUNCTION) {
-		smp_call_function_interrupt();
-	}
-}
-
-extern atomic_t cpus_booted;
-extern atomic_t smp_commenced;
 
 /*
- * Hook for doing final board-specific setup after the generic smp setup
- * is done
+ * Code to run on secondary just after probing the CPU
  */
-asmlinkage void start_secondary(void)
+static void __cpuinit sb1250_init_secondary(void)
 {
-	unsigned int cpu = smp_processor_id();
+	extern void sb1250_smp_init(void);
 
-	cpu_probe();
-	prom_init_secondary();
-	per_cpu_trap_init();
-
-	/*
-	 * XXX parity protection should be folded in here when it's converted
-	 * to an option instead of something based on .cputype
-	 */
-	pgd_current[cpu] = init_mm.pgd;
-	cpu_data[cpu].udelay_val = loops_per_jiffy;
-	prom_smp_finish();
-	printk("Slave cpu booted successfully\n");
-	CPUMASK_SETB(cpu_online_map, cpu);
-	atomic_inc(&cpus_booted);
-	while (!atomic_read(&smp_commenced));
-	cpu_idle();
+	sb1250_smp_init();
 }
 
-void __init smp_boot_cpus(void)
+/*
+ * Do any tidying up before marking online and running the idle
+ * loop
+ */
+static void __cpuinit sb1250_smp_finish(void)
 {
-	int i;
-	int cur_cpu = 0;
+	extern void sb1250_clockevent_init(void);
 
-	smp_num_cpus = prom_setup_smp();
-	init_new_context(current, &init_mm);
-	current->processor = 0;
-	cpu_data[0].udelay_val = loops_per_jiffy;
-	cpu_data[0].asid_cache = ASID_FIRST_VERSION;
-	CPUMASK_CLRALL(cpu_online_map);
-	CPUMASK_SETB(cpu_online_map, 0);
-	atomic_set(&cpus_booted, 1);  /* Master CPU is already booted... */
-	init_idle();
+	sb1250_clockevent_init();
+	local_irq_enable();
+}
+
+/*
+ * Final cleanup after all secondaries booted
+ */
+static void sb1250_cpus_done(void)
+{
+}
+
+/*
+ * Setup the PC, SP, and GP of a secondary processor and start it
+ * running!
+ */
+static void __cpuinit sb1250_boot_secondary(int cpu, struct task_struct *idle)
+{
+	int retval;
+
+	retval = cfe_cpu_start(cpu_logical_map(cpu), &smp_bootstrap,
+			       __KSTK_TOS(idle),
+			       (unsigned long)task_thread_info(idle), 0);
+	if (retval != 0)
+		printk("cfe_start_cpu(%i) returned %i\n" , cpu, retval);
+}
+
+/*
+ * Use CFE to find out how many CPUs are available, setting up
+ * cpu_possible_mask and the logical/physical mappings.
+ * XXXKW will the boot CPU ever not be physical 0?
+ *
+ * Common setup before any secondaries are started
+ */
+static void __init sb1250_smp_setup(void)
+{
+	int i, num;
+
+	init_cpu_possible(cpumask_of(0));
 	__cpu_number_map[0] = 0;
 	__cpu_logical_map[0] = 0;
-	/* smp_tune_scheduling();  XXX */
 
-	/*
-	 * This loop attempts to compensate for "holes" in the CPU
-	 * numbering.  It's overkill, but general.
-	 */
-	for (i = 1; i < smp_num_cpus && cur_cpu < NR_CPUS; i++) {
-		struct task_struct *p;
-		struct pt_regs regs;
-		printk("Starting CPU %d...\n", i);
-
-		/* Spawn a new process normally.  Grab a pointer to
-		   its task struct so we can mess with it */
-		do_fork(CLONE_VM|CLONE_PID, 0, &regs, 0);
-		p = init_task.prev_task;
-
-		/* Schedule the first task manually */
-		p->processor = i;
-		p->cpus_runnable = 1 << i; /* we schedule the first task manually */
-
-		init_tasks[i] = p;
-
-		del_from_runqueue(p);
-		unhash_process(p);
-
-		do {
-			int status;
-
-			/* Iterate until we find a CPU that comes up */
-			cur_cpu++;
-			status = prom_boot_secondary(cur_cpu,
-						    (unsigned long)p +
-						    KERNEL_STACK_SIZE - 32,
-						    (unsigned long)p);
-			if (status == 0) {
-				__cpu_number_map[cur_cpu] = i;
-				__cpu_logical_map[i] = cur_cpu;
-				break;
-			}
-		} while (cur_cpu < NR_CPUS);
+	for (i = 1, num = 0; i < NR_CPUS; i++) {
+		if (cfe_cpu_stop(i) == 0) {
+			set_cpu_possible(i, true);
+			__cpu_number_map[i] = ++num;
+			__cpu_logical_map[num] = i;
+		}
 	}
+	printk(KERN_INFO "Detected %i available secondary CPU(s)\n", num);
+}
 
-	/* Wait for everyone to come up */
-	while (atomic_read(&cpus_booted) != smp_num_cpus);
-	smp_threads_ready = 1;
+static void __init sb1250_prepare_cpus(unsigned int max_cpus)
+{
+}
+
+struct plat_smp_ops sb_smp_ops = {
+	.send_ipi_single	= sb1250_send_ipi_single,
+	.send_ipi_mask		= sb1250_send_ipi_mask,
+	.init_secondary		= sb1250_init_secondary,
+	.smp_finish		= sb1250_smp_finish,
+	.cpus_done		= sb1250_cpus_done,
+	.boot_secondary		= sb1250_boot_secondary,
+	.smp_setup		= sb1250_smp_setup,
+	.prepare_cpus		= sb1250_prepare_cpus,
+};
+
+void sb1250_mailbox_interrupt(void)
+{
+	int cpu = smp_processor_id();
+	int irq = K_INT_MBOX_0;
+	unsigned int action;
+
+	kstat_incr_irqs_this_cpu(irq, irq_to_desc(irq));
+	/* Load the mailbox register to figure out what we're supposed to do */
+	action = (____raw_readq(mailbox_regs[cpu]) >> 48) & 0xffff;
+
+	/* Clear the mailbox to clear the interrupt */
+	____raw_writeq(((u64)action) << 48, mailbox_clear_regs[cpu]);
+
+	if (action & SMP_RESCHEDULE_YOURSELF)
+		scheduler_ipi();
+
+	if (action & SMP_CALL_FUNCTION)
+		smp_call_function_interrupt();
 }

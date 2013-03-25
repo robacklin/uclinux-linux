@@ -9,7 +9,7 @@
   the Free Software Foundation; either version 2 of the License, or
   (at your option) any later version.
 
-  See http://misc.nu/hugh/keyspan.html for more information.
+  See http://blemings.org/hugh/keyspan.html for more information.
   
   Code in this driver inspired by and in a number of places taken
   from Brian Warner's original Keyspan-PDA driver.
@@ -35,18 +35,17 @@
 
 
 /* Function prototypes for Keyspan serial converter */
-static int  keyspan_open		(struct usb_serial_port *port,
-					 struct file *filp);
-static void keyspan_close		(struct usb_serial_port *port,
-					 struct file *filp);
+static int  keyspan_open		(struct tty_struct *tty,
+					 struct usb_serial_port *port);
+static void keyspan_close		(struct usb_serial_port *port);
+static void keyspan_dtr_rts		(struct usb_serial_port *port, int on);
 static int  keyspan_startup		(struct usb_serial *serial);
-static void keyspan_shutdown		(struct usb_serial *serial);
-static void keyspan_rx_throttle		(struct usb_serial_port *port);
-static void keyspan_rx_unthrottle	(struct usb_serial_port *port);
-static int  keyspan_write_room		(struct usb_serial_port *port);
+static void keyspan_disconnect		(struct usb_serial *serial);
+static void keyspan_release		(struct usb_serial *serial);
+static int  keyspan_write_room		(struct tty_struct *tty);
 
-static int  keyspan_write		(struct usb_serial_port *port,
-					 int from_user,
+static int  keyspan_write		(struct tty_struct *tty,
+					 struct usb_serial_port *port,
 					 const unsigned char *buf,
 					 int count);
 
@@ -54,15 +53,15 @@ static void keyspan_send_setup		(struct usb_serial_port *port,
 					 int reset_port);
 
 
-static int  keyspan_chars_in_buffer 	(struct usb_serial_port *port);
-static int  keyspan_ioctl		(struct usb_serial_port *port,
-					 struct file *file,
-					 unsigned int cmd,
-					 unsigned long arg);
-static void keyspan_set_termios		(struct usb_serial_port *port,
-					 struct termios *old);
-static void keyspan_break_ctl		(struct usb_serial_port *port,
+static void keyspan_set_termios		(struct tty_struct *tty,
+					 struct usb_serial_port *port,
+					 struct ktermios *old);
+static void keyspan_break_ctl		(struct tty_struct *tty,
 					 int break_state);
+static int  keyspan_tiocmget		(struct tty_struct *tty);
+static int  keyspan_tiocmset		(struct tty_struct *tty,
+					 unsigned int set,
+					 unsigned int clear);
 static int  keyspan_fake_startup	(struct usb_serial *serial);
 
 static int  keyspan_usa19_calc_baud	(u32 baud_rate, u32 baudclk, 
@@ -95,89 +94,9 @@ static int  keyspan_usa90_send_setup	(struct usb_serial *serial,
 					 struct usb_serial_port *port,
 					 int reset_port);
 
-/* Struct used for firmware - increased size of data section
-   to allow Keyspan's 'C' firmware struct to be used unmodified */
-struct ezusb_hex_record {
-	__u16 address;
-	__u8 data_size;
-	__u8 data[64];
-};
-
-/* Conditionally include firmware images, if they aren't
-   included create a null pointer instead.  Current 
-   firmware images aren't optimised to remove duplicate
-   addresses in the image itself. */
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA28
-	#include "keyspan_usa28_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa28_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA28X
-	#include "keyspan_usa28x_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa28x_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA28XA
-	#include "keyspan_usa28xa_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa28xa_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA28XB
-	#include "keyspan_usa28xb_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa28xb_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA19
-	#include "keyspan_usa19_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa19_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA19QI
-	#include "keyspan_usa19qi_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa19qi_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_MPR
-        #include "keyspan_mpr_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_mpr_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA19QW
-	#include "keyspan_usa19qw_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa19qw_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA18X
-	#include "keyspan_usa18x_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa18x_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA19W
-	#include "keyspan_usa19w_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa19w_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA49W
-	#include "keyspan_usa49w_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa49w_firmware = NULL;
-#endif
-
-#ifdef CONFIG_USB_SERIAL_KEYSPAN_USA49WLC
-        #include "keyspan_usa49wlc_fw.h"
-#else
-	static const struct ezusb_hex_record *keyspan_usa49wlc_firmware = NULL;
-#endif
+static int  keyspan_usa67_send_setup	(struct usb_serial *serial,
+					 struct usb_serial_port *port,
+					 int reset_port);
 
 /* Values used for baud rate calculation - device specific */
 #define	KEYSPAN_INVALID_BAUD_RATE		(-1)
@@ -214,7 +133,8 @@ struct ezusb_hex_record {
 
 /* Product IDs post-renumeration.  Note that the 28x and 28xb
    have the same id's post-renumeration but behave identically
-   so it's not an issue. */
+   so it's not an issue. As such, the 28xb is not listed in any
+   of the device tables. */
 #define	keyspan_usa18x_product_id		0x0112
 #define	keyspan_usa19_product_id		0x0107
 #define	keyspan_usa19qi_product_id		0x010c
@@ -226,15 +146,16 @@ struct ezusb_hex_record {
 #define	keyspan_usa28x_product_id		0x0110
 #define	keyspan_usa28xa_product_id		0x0115
 #define	keyspan_usa28xb_product_id		0x0110
+#define	keyspan_usa28xg_product_id		0x0135
 #define	keyspan_usa49w_product_id		0x010a
 #define	keyspan_usa49wlc_product_id		0x012a
-
+#define	keyspan_usa49wg_product_id		0x0131
 
 struct keyspan_device_details {
 	/* product ID value */
 	int	product_id;
 
-	enum	{msg_usa26, msg_usa28, msg_usa49, msg_usa90} msg_format;
+	enum	{msg_usa26, msg_usa28, msg_usa49, msg_usa90, msg_usa67} msg_format;
 
 		/* Number of physical ports */
 	int	num_ports;
@@ -261,6 +182,9 @@ struct keyspan_device_details {
 		/* Endpoint used for input status */
 	int	instat_endpoint;
 
+		/* Endpoint used for input data 49WG only */
+	int	indat_endpoint;
+
 		/* Endpoint used for global control functions */
 	int	glocont_endpoint;
 
@@ -274,198 +198,242 @@ struct keyspan_device_details {
    in Keyspan's documentation) */
 
 static const struct keyspan_device_details usa18x_device_details = {
-	product_id:		keyspan_usa18x_product_id,
-	msg_format:		msg_usa26,
-	num_ports:		1,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x85},
-	outcont_endpoints:	{0x05},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA18X_BAUDCLK,
+	.product_id		= keyspan_usa18x_product_id,
+	.msg_format		= msg_usa26,
+	.num_ports		= 1,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x85},
+	.outcont_endpoints	= {0x05},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA18X_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa19_device_details = {
-	product_id:		keyspan_usa19_product_id,
-	msg_format:		msg_usa28,
-	num_ports:		1,
-	indat_endp_flip:	1,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x83},
-	outcont_endpoints:	{0x03},
-	instat_endpoint:	0x84,
-	glocont_endpoint:	-1,
-	calculate_baud_rate:	keyspan_usa19_calc_baud,
-	baudclk:		KEYSPAN_USA19_BAUDCLK,
+	.product_id		= keyspan_usa19_product_id,
+	.msg_format		= msg_usa28,
+	.num_ports		= 1,
+	.indat_endp_flip	= 1,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x83},
+	.outcont_endpoints	= {0x03},
+	.instat_endpoint	= 0x84,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= -1,
+	.calculate_baud_rate	= keyspan_usa19_calc_baud,
+	.baudclk		= KEYSPAN_USA19_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa19qi_device_details = {
-	product_id:		keyspan_usa19qi_product_id,
-	msg_format:		msg_usa28,
-	num_ports:		1,
-	indat_endp_flip:	1,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x83},
-	outcont_endpoints:	{0x03},
-	instat_endpoint:	0x84,
-	glocont_endpoint:	-1,
-	calculate_baud_rate:	keyspan_usa28_calc_baud,
-	baudclk:		KEYSPAN_USA19_BAUDCLK,
+	.product_id		= keyspan_usa19qi_product_id,
+	.msg_format		= msg_usa28,
+	.num_ports		= 1,
+	.indat_endp_flip	= 1,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x83},
+	.outcont_endpoints	= {0x03},
+	.instat_endpoint	= 0x84,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= -1,
+	.calculate_baud_rate	= keyspan_usa28_calc_baud,
+	.baudclk		= KEYSPAN_USA19_BAUDCLK,
 };
 
 static const struct keyspan_device_details mpr_device_details = {
-	product_id:		keyspan_mpr_product_id,
-	msg_format:		msg_usa28,
-	num_ports:		1,
-	indat_endp_flip:	1,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x83},
-	outcont_endpoints:	{0x03},
-	instat_endpoint:	0x84,
-	glocont_endpoint:	-1,
-	calculate_baud_rate:	keyspan_usa28_calc_baud,
-	baudclk:		KEYSPAN_USA19_BAUDCLK,
+	.product_id		= keyspan_mpr_product_id,
+	.msg_format		= msg_usa28,
+	.num_ports		= 1,
+	.indat_endp_flip	= 1,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x83},
+	.outcont_endpoints	= {0x03},
+	.instat_endpoint	= 0x84,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= -1,
+	.calculate_baud_rate	= keyspan_usa28_calc_baud,
+	.baudclk		= KEYSPAN_USA19_BAUDCLK,
 };
 
-
 static const struct keyspan_device_details usa19qw_device_details = {
-	product_id:		keyspan_usa19qw_product_id,
-	msg_format:		msg_usa26,
-	num_ports:		1,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x85},
-	outcont_endpoints:	{0x05},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA19W_BAUDCLK,
+	.product_id		= keyspan_usa19qw_product_id,
+	.msg_format		= msg_usa26,
+	.num_ports		= 1,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x85},
+	.outcont_endpoints	= {0x05},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA19W_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa19w_device_details = {
-	product_id:		keyspan_usa19w_product_id,
-	msg_format:		msg_usa26,
-	num_ports:		1,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{0x85},
-	outcont_endpoints:	{0x05},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA19W_BAUDCLK,
+	.product_id		= keyspan_usa19w_product_id,
+	.msg_format		= msg_usa26,
+	.num_ports		= 1,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {0x85},
+	.outcont_endpoints	= {0x05},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA19W_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa19hs_device_details = {
-	product_id:		keyspan_usa19hs_product_id,
-	msg_format:		msg_usa90,
-	num_ports:		1,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	0,
-	indat_endpoints:	{0x81},
-	outdat_endpoints:	{0x01},
-	inack_endpoints:	{-1},
-	outcont_endpoints:	{0x02},
-	instat_endpoint:	0x82,
-	glocont_endpoint:	-1,
-	calculate_baud_rate:	keyspan_usa19hs_calc_baud,
-	baudclk:		KEYSPAN_USA19HS_BAUDCLK,
+	.product_id		= keyspan_usa19hs_product_id,
+	.msg_format		= msg_usa90,
+	.num_ports		= 1,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 0,
+	.indat_endpoints	= {0x81},
+	.outdat_endpoints	= {0x01},
+	.inack_endpoints	= {-1},
+	.outcont_endpoints	= {0x02},
+	.instat_endpoint	= 0x82,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= -1,
+	.calculate_baud_rate	= keyspan_usa19hs_calc_baud,
+	.baudclk		= KEYSPAN_USA19HS_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa28_device_details = {
-	product_id:		keyspan_usa28_product_id,
-	msg_format:		msg_usa28,
-	num_ports:		2,
-	indat_endp_flip:	1,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81, 0x83},
-	outdat_endpoints:	{0x01, 0x03},
-	inack_endpoints:	{0x85, 0x86},
-	outcont_endpoints:	{0x05, 0x06},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa28_calc_baud,
-	baudclk:		KEYSPAN_USA28_BAUDCLK,		
+	.product_id		= keyspan_usa28_product_id,
+	.msg_format		= msg_usa28,
+	.num_ports		= 2,
+	.indat_endp_flip	= 1,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81, 0x83},
+	.outdat_endpoints	= {0x01, 0x03},
+	.inack_endpoints	= {0x85, 0x86},
+	.outcont_endpoints	= {0x05, 0x06},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa28_calc_baud,
+	.baudclk		= KEYSPAN_USA28_BAUDCLK,		
 };
 
 static const struct keyspan_device_details usa28x_device_details = {
-	product_id:		keyspan_usa28x_product_id,
-	msg_format:		msg_usa26,
-	num_ports:		2,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81, 0x83},
-	outdat_endpoints:	{0x01, 0x03},
-	inack_endpoints:	{0x85, 0x86},
-	outcont_endpoints:	{0x05, 0x06},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA28X_BAUDCLK,
+	.product_id		= keyspan_usa28x_product_id,
+	.msg_format		= msg_usa26,
+	.num_ports		= 2,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81, 0x83},
+	.outdat_endpoints	= {0x01, 0x03},
+	.inack_endpoints	= {0x85, 0x86},
+	.outcont_endpoints	= {0x05, 0x06},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA28X_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa28xa_device_details = {
-	product_id:		keyspan_usa28xa_product_id,
-	msg_format:		msg_usa26,
-	num_ports:		2,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	1,
-	indat_endpoints:	{0x81, 0x83},
-	outdat_endpoints:	{0x01, 0x03},
-	inack_endpoints:	{0x85, 0x86},
-	outcont_endpoints:	{0x05, 0x06},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA28X_BAUDCLK,
+	.product_id		= keyspan_usa28xa_product_id,
+	.msg_format		= msg_usa26,
+	.num_ports		= 2,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 1,
+	.indat_endpoints	= {0x81, 0x83},
+	.outdat_endpoints	= {0x01, 0x03},
+	.inack_endpoints	= {0x85, 0x86},
+	.outcont_endpoints	= {0x05, 0x06},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA28X_BAUDCLK,
 };
 
+static const struct keyspan_device_details usa28xg_device_details = {
+	.product_id		= keyspan_usa28xg_product_id,
+	.msg_format		= msg_usa67,
+	.num_ports		= 2,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 0,
+	.indat_endpoints	= {0x84, 0x88},
+	.outdat_endpoints	= {0x02, 0x06},
+	.inack_endpoints	= {-1, -1},
+	.outcont_endpoints	= {-1, -1},
+	.instat_endpoint	= 0x81,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x01,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA28X_BAUDCLK,
+};
 /* We don't need a separate entry for the usa28xb as it appears as a 28x anyway */
 
 static const struct keyspan_device_details usa49w_device_details = {
-	product_id:		keyspan_usa49w_product_id,
-	msg_format:		msg_usa49,
-	num_ports:		4,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	0,
-	indat_endpoints:	{0x81, 0x82, 0x83, 0x84},
-	outdat_endpoints:	{0x01, 0x02, 0x03, 0x04},
-	inack_endpoints:	{-1, -1, -1, -1},
-	outcont_endpoints:	{-1, -1, -1, -1},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA49W_BAUDCLK,
+	.product_id		= keyspan_usa49w_product_id,
+	.msg_format		= msg_usa49,
+	.num_ports		= 4,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 0,
+	.indat_endpoints	= {0x81, 0x82, 0x83, 0x84},
+	.outdat_endpoints	= {0x01, 0x02, 0x03, 0x04},
+	.inack_endpoints	= {-1, -1, -1, -1},
+	.outcont_endpoints	= {-1, -1, -1, -1},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA49W_BAUDCLK,
 };
 
 static const struct keyspan_device_details usa49wlc_device_details = {
-	product_id:		keyspan_usa49wlc_product_id,
-	msg_format:		msg_usa49,
-	num_ports:		4,
-	indat_endp_flip:	0,
-	outdat_endp_flip:	0,
-	indat_endpoints:	{0x81, 0x82, 0x83, 0x84},
-	outdat_endpoints:	{0x01, 0x02, 0x03, 0x04},
-	inack_endpoints:	{-1, -1, -1, -1},
-	outcont_endpoints:	{-1, -1, -1, -1},
-	instat_endpoint:	0x87,
-	glocont_endpoint:	0x07,
-	calculate_baud_rate:	keyspan_usa19w_calc_baud,
-	baudclk:		KEYSPAN_USA19W_BAUDCLK,
+	.product_id		= keyspan_usa49wlc_product_id,
+	.msg_format		= msg_usa49,
+	.num_ports		= 4,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 0,
+	.indat_endpoints	= {0x81, 0x82, 0x83, 0x84},
+	.outdat_endpoints	= {0x01, 0x02, 0x03, 0x04},
+	.inack_endpoints	= {-1, -1, -1, -1},
+	.outcont_endpoints	= {-1, -1, -1, -1},
+	.instat_endpoint	= 0x87,
+	.indat_endpoint		= -1,
+	.glocont_endpoint	= 0x07,
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA19W_BAUDCLK,
+};
+
+static const struct keyspan_device_details usa49wg_device_details = {
+	.product_id		= keyspan_usa49wg_product_id,
+	.msg_format		= msg_usa49,
+	.num_ports		= 4,
+	.indat_endp_flip	= 0,
+	.outdat_endp_flip	= 0,
+	.indat_endpoints	= {-1, -1, -1, -1},		/* single 'global' data in EP */
+	.outdat_endpoints	= {0x01, 0x02, 0x04, 0x06},
+	.inack_endpoints	= {-1, -1, -1, -1},
+	.outcont_endpoints	= {-1, -1, -1, -1},
+	.instat_endpoint	= 0x81,
+	.indat_endpoint		= 0x88,
+	.glocont_endpoint	= 0x00,				/* uses control EP */
+	.calculate_baud_rate	= keyspan_usa19w_calc_baud,
+	.baudclk		= KEYSPAN_USA19W_BAUDCLK,
 };
 
 static const struct keyspan_device_details *keyspan_devices[] = {
@@ -479,13 +447,15 @@ static const struct keyspan_device_details *keyspan_devices[] = {
 	&usa28_device_details,
 	&usa28x_device_details,
 	&usa28xa_device_details,
+	&usa28xg_device_details,
 	/* 28xb not required as it renumerates as a 28x */
 	&usa49w_device_details,
 	&usa49wlc_device_details,
+	&usa49wg_device_details,
 	NULL,
 };
 
-static __devinitdata struct usb_device_id keyspan_ids_combined[] = {
+static const struct usb_device_id keyspan_ids_combined[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa18x_pre_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19_pre_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19w_pre_product_id) },
@@ -508,16 +478,24 @@ static __devinitdata struct usb_device_id keyspan_ids_combined[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28x_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xa_product_id) },
-	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xb_product_id) },
+	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xg_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49w_product_id)},
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49wlc_product_id)},
+	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49wg_product_id)},
 	{ } /* Terminating entry */
 };
 
 MODULE_DEVICE_TABLE(usb, keyspan_ids_combined);
 
+static struct usb_driver keyspan_driver = {
+	.name =		"keyspan",                
+	.probe =	usb_serial_probe,
+	.disconnect =	usb_serial_disconnect,
+	.id_table =	keyspan_ids_combined,
+};
+
 /* usb_device_id table for the pre-firmware download keyspan devices */
-static struct usb_device_id keyspan_pre_ids[] = {
+static const struct usb_device_id keyspan_pre_ids[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa18x_pre_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19_pre_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19qi_pre_product_id) },
@@ -533,7 +511,7 @@ static struct usb_device_id keyspan_pre_ids[] = {
 	{ } /* Terminating entry */
 };
 
-static struct usb_device_id keyspan_1port_ids[] = {
+static const struct usb_device_id keyspan_1port_ids[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa18x_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa19qi_product_id) },
@@ -544,96 +522,102 @@ static struct usb_device_id keyspan_1port_ids[] = {
 	{ } /* Terminating entry */
 };
 
-static struct usb_device_id keyspan_2port_ids[] = {
+static const struct usb_device_id keyspan_2port_ids[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28x_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xa_product_id) },
-	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xb_product_id) },
+	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa28xg_product_id) },
 	{ } /* Terminating entry */
 };
 
-static struct usb_device_id keyspan_4port_ids[] = {
+static const struct usb_device_id keyspan_4port_ids[] = {
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49w_product_id) },
 	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49wlc_product_id)},
+	{ USB_DEVICE(KEYSPAN_VENDOR_ID, keyspan_usa49wg_product_id)},
 	{ } /* Terminating entry */
 };
 
 /* Structs for the devices, pre and post renumeration. */
-static struct usb_serial_device_type keyspan_pre_device = {
-	owner:			THIS_MODULE,
-	name:			"Keyspan - (without firmware)",
-	id_table:		keyspan_pre_ids,
-	num_interrupt_in:	NUM_DONT_CARE,
-	num_bulk_in:		NUM_DONT_CARE,
-	num_bulk_out:		NUM_DONT_CARE,
-	num_ports:		1,
-	startup:		keyspan_fake_startup,
+static struct usb_serial_driver keyspan_pre_device = {
+	.driver = {
+		.owner		= THIS_MODULE,
+		.name		= "keyspan_no_firm",
+	},
+	.description		= "Keyspan - (without firmware)",
+	.id_table		= keyspan_pre_ids,
+	.num_ports		= 1,
+	.attach			= keyspan_fake_startup,
 };
 
-static struct usb_serial_device_type keyspan_1port_device = {
-	owner:			THIS_MODULE,
-	name:			"Keyspan 1 port adapter",
-	id_table:		keyspan_1port_ids,
-	num_interrupt_in:	NUM_DONT_CARE,
-	num_bulk_in:		NUM_DONT_CARE,
-	num_bulk_out:		NUM_DONT_CARE,
-	num_ports:		1,
-	open:			keyspan_open,
-	close:			keyspan_close,
-	write:			keyspan_write,
-	write_room:		keyspan_write_room,
-	chars_in_buffer:	keyspan_chars_in_buffer,
-	throttle:		keyspan_rx_throttle,
-	unthrottle:		keyspan_rx_unthrottle,
-	ioctl:			keyspan_ioctl,
-	set_termios:		keyspan_set_termios,
-	break_ctl:		keyspan_break_ctl,
-	startup:		keyspan_startup,
-	shutdown:		keyspan_shutdown,
+static struct usb_serial_driver keyspan_1port_device = {
+	.driver = {
+		.owner		= THIS_MODULE,
+		.name		= "keyspan_1",
+	},
+	.description		= "Keyspan 1 port adapter",
+	.id_table		= keyspan_1port_ids,
+	.num_ports		= 1,
+	.open			= keyspan_open,
+	.close			= keyspan_close,
+	.dtr_rts		= keyspan_dtr_rts,
+	.write			= keyspan_write,
+	.write_room		= keyspan_write_room,
+	.set_termios		= keyspan_set_termios,
+	.break_ctl		= keyspan_break_ctl,
+	.tiocmget		= keyspan_tiocmget,
+	.tiocmset		= keyspan_tiocmset,
+	.attach			= keyspan_startup,
+	.disconnect		= keyspan_disconnect,
+	.release		= keyspan_release,
 };
 
-static struct usb_serial_device_type keyspan_2port_device = {
-	owner:			THIS_MODULE,
-	name:			"Keyspan 2 port adapter",
-	id_table:		keyspan_2port_ids,
-	num_interrupt_in:	NUM_DONT_CARE,
-	num_bulk_in:		NUM_DONT_CARE,
-	num_bulk_out:		NUM_DONT_CARE,
-	num_ports:		2,
-	open:			keyspan_open,
-	close:			keyspan_close,
-	write:			keyspan_write,
-	write_room:		keyspan_write_room,
-	chars_in_buffer:	keyspan_chars_in_buffer,
-	throttle:		keyspan_rx_throttle,
-	unthrottle:		keyspan_rx_unthrottle,
-	ioctl:			keyspan_ioctl,
-	set_termios:		keyspan_set_termios,
-	break_ctl:		keyspan_break_ctl,
-	startup:		keyspan_startup,
-	shutdown:		keyspan_shutdown,
+static struct usb_serial_driver keyspan_2port_device = {
+	.driver = {
+		.owner		= THIS_MODULE,
+		.name		= "keyspan_2",
+	},
+	.description		= "Keyspan 2 port adapter",
+	.id_table		= keyspan_2port_ids,
+	.num_ports		= 2,
+	.open			= keyspan_open,
+	.close			= keyspan_close,
+	.dtr_rts		= keyspan_dtr_rts,
+	.write			= keyspan_write,
+	.write_room		= keyspan_write_room,
+	.set_termios		= keyspan_set_termios,
+	.break_ctl		= keyspan_break_ctl,
+	.tiocmget		= keyspan_tiocmget,
+	.tiocmset		= keyspan_tiocmset,
+	.attach			= keyspan_startup,
+	.disconnect		= keyspan_disconnect,
+	.release		= keyspan_release,
 };
 
-static struct usb_serial_device_type keyspan_4port_device = {
-	owner:			THIS_MODULE,
-	name:			"Keyspan 4 port adapter",
-	id_table:		keyspan_4port_ids,
-	num_interrupt_in:	NUM_DONT_CARE,
-	num_bulk_in:		5,
-	num_bulk_out:		5,
-	num_ports:		4,
-	open:			keyspan_open,
-	close:			keyspan_close,
-	write:			keyspan_write,
-	write_room:		keyspan_write_room,
-	chars_in_buffer:	keyspan_chars_in_buffer,
-	throttle:		keyspan_rx_throttle,
-	unthrottle:		keyspan_rx_unthrottle,
-	ioctl:			keyspan_ioctl,
-	set_termios:		keyspan_set_termios,
-	break_ctl:		keyspan_break_ctl,
-	startup:		keyspan_startup,
-	shutdown:		keyspan_shutdown,
+static struct usb_serial_driver keyspan_4port_device = {
+	.driver = {
+		.owner		= THIS_MODULE,
+		.name		= "keyspan_4",
+	},
+	.description		= "Keyspan 4 port adapter",
+	.id_table		= keyspan_4port_ids,
+	.num_ports		= 4,
+	.open			= keyspan_open,
+	.close			= keyspan_close,
+	.dtr_rts		= keyspan_dtr_rts,
+	.write			= keyspan_write,
+	.write_room		= keyspan_write_room,
+	.set_termios		= keyspan_set_termios,
+	.break_ctl		= keyspan_break_ctl,
+	.tiocmget		= keyspan_tiocmget,
+	.tiocmset		= keyspan_tiocmset,
+	.attach			= keyspan_startup,
+	.disconnect		= keyspan_disconnect,
+	.release		= keyspan_release,
+};
+
+static struct usb_serial_driver * const serial_drivers[] = {
+	&keyspan_pre_device, &keyspan_1port_device,
+	&keyspan_2port_device, &keyspan_4port_device, NULL
 };
 
 #endif

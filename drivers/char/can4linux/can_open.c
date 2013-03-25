@@ -9,17 +9,28 @@
  *
  * 
  * Copyright (c) 2001 port GmbH Halle/Saale
- * (c) 2001 Heinz-Jürgen Oertel (oe@port.de)
+ * (c) 2001 Heinz-Jrgen Oertel (oe@port.de)
  *          Claus Schroeter (clausi@chemie.fu-berlin.de)
  *------------------------------------------------------------------
- * $Header: /var/cvs/uClinux-2.4.x/drivers/char/can4linux/can_open.c,v 1.1 2003/07/18 00:11:46 gerg Exp $
- *
- *--------------------------------------------------------------------------
- *
  *
  * modification history
  * --------------------
- * $Log: can_open.c,v $
+ * Revision 1.1  2005/03/15 12:29:16  vvorobyov
+ * CAN support added 2.6 kernel.
+ *
+ * Revision 1.1.1.2  2003/08/29 01:04:37  davidm
+ * Import of uClinux-2.4.22-uc0
+ *
+ * Revision 1.2  2003/08/28 00:38:31  gerg
+ * I hope my patch doesn't come to late for the next uClinux distribution.
+ * The new patch is against the latest CVS uClinux-2.4.x/drivers/char. The
+ * FlexCAN driver is working but still needs some work. Phil Wilshire is
+ * supporting me and we expect to have a complete driver in some weeks.
+ *
+ * commit text: added support for ColdFire FlexCAN
+ *
+ * Patch submitted by Heinz-Juergen Oertel <oe@port.de>.
+ *
  * Revision 1.1  2003/07/18 00:11:46  gerg
  * I followed as much rules as possible (I hope) and generated a patch for the
  * uClinux distribution. It contains an additional driver, the CAN driver, first
@@ -39,16 +50,13 @@
 
 /**
 * \file can_open.c
-* \author Heinz-Jürgen Oertel, port GmbH
+* \author Heinz-Jrgen Oertel, port GmbH
 * $Revision: 1.1 $
-* $Date: 2003/07/18 00:11:46 $
+* $Date: 2009-01-27 04:27:11 $
 *
 *
 */
 
-
-/* header of standard C - libraries */
-/* #include <linux/module.h>			 */
 
 /* header of common types */
 
@@ -85,7 +93,7 @@ int Can_isopen[4] = { 0, 0, 0, 0};   /* device minor already opened */
 int Can_read_flag = 0;
 /* local defined variables
 ---------------------------------------------------------------------------*/
-/* static char _rcsid[] = "$Id: can_open.c,v 1.1 2003/07/18 00:11:46 gerg Exp $"; */
+/* static char _rcsid[] = "$Id: can_open.c,v 1.1 2009-01-27 04:27:11 gerg Exp $"; */
 
 
 /***************************************************************************/
@@ -111,7 +119,7 @@ int Can_read_flag = 0;
 * an hardware reset befor initializing the chip.
 *
 * \returns
-* open return the new file descriptor,
+* open return the new file descriptor,a0
 * or -1 if an error occurred (in which case, errno is set appropriately).
 *
 * \par ERRORS
@@ -172,7 +180,6 @@ int retval = 0;
 	CAN_ShowStat(minor);
 #endif	
 
-/* controller_available(curr + 0x400, 4); */
 	Can_WaitInit(minor);	/* initialize wait queue for select() */
 	Can_FifoInit(minor);
 #if CAN_USE_FILTER
@@ -195,8 +202,6 @@ int retval = 0;
         Can_read_flag = 1;
     }
 
-    MOD_INC_USE_COUNT;
     DBGout();
     return retval;
 }
-

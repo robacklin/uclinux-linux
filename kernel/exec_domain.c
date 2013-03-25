@@ -7,24 +7,27 @@
  * 2001-05-06	Complete rewrite,  Christoph Hellwig (hch@infradead.org)
  */
 
-#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/kmod.h>
 #include <linux/module.h>
 #include <linux/personality.h>
+#include <linux/proc_fs.h>
 #include <linux/sched.h>
+#include <linux/seq_file.h>
+#include <linux/syscalls.h>
 #include <linux/sysctl.h>
 #include <linux/types.h>
+#include <linux/fs_struct.h>
 
 
 static void default_handler(int, struct pt_regs *);
 
 static struct exec_domain *exec_domains = &default_exec_domain;
-static rwlock_t exec_domains_lock = RW_LOCK_UNLOCKED;
+static DEFINE_RWLOCK(exec_domains_lock);
 
 
-static u_long ident_map[32] = {
+static unsigned long ident_map[32] = {
 	0,	1,	2,	3,	4,	5,	6,	7,
 	8,	9,	10,	11,	12,	13,	14,	15,
 	16,	17,	18,	19,	20,	21,	22,	23,
@@ -32,72 +35,47 @@ static u_long ident_map[32] = {
 };
 
 struct exec_domain default_exec_domain = {
-	"Linux",		/* name */
-	default_handler,	/* lcall7 causes a seg fault. */
-	0, 0,			/* PER_LINUX personality. */
-	ident_map,		/* Identity map signals. */
-	ident_map,		/*  - both ways. */
+	.name		= "Linux",		/* name */
+	.handler	= default_handler,	/* lcall7 causes a seg fault. */
+	.pers_low	= 0, 			/* PER_LINUX personality. */
+	.pers_high	= 0,			/* PER_LINUX personality. */
+	.signal_map	= ident_map,		/* Identity map signals. */
+	.signal_invmap	= ident_map,		/*  - both ways. */
 };
 
 
 static void
 default_handler(int segment, struct pt_regs *regp)
 {
-	u_long			pers = 0;
+	set_personality(0);
 
-	/*
-	 * This may have been a static linked SVr4 binary, so we would
-	 * have the personality set incorrectly. Or it might have been
-	 * a Solaris/x86 binary. We can tell which because the former
-	 * uses lcall7, while the latter used lcall 0x27.
-	 * Try to find or load the appropriate personality, and fall back
-	 * to just forcing a SEGV.
-	 *
-	 * XXX: this is IA32-specific and should be moved to the MD-tree.
-	 */
-	switch (segment) {
-#ifdef __i386__
-	case 0x07:
-		pers = abi_defhandler_lcall7;
-		break;
-	case 0x27:
-		pers = PER_SOLARIS;
-		break;
-#endif
-	}
-	set_personality(pers);
-
-	if (current->exec_domain->handler != default_handler)
-		current->exec_domain->handler(segment, regp);
+	if (current_thread_info()->exec_domain->handler != default_handler)
+		current_thread_info()->exec_domain->handler(segment, regp);
 	else
 		send_sig(SIGSEGV, current, 1);
 }
 
 static struct exec_domain *
-lookup_exec_domain(u_long personality)
+lookup_exec_domain(unsigned int personality)
 {
-	struct exec_domain *	ep;
-	u_long			pers = personality(personality);
-		
+	unsigned int pers = personality(personality);
+	struct exec_domain *ep;
+
 	read_lock(&exec_domains_lock);
 	for (ep = exec_domains; ep; ep = ep->next) {
 		if (pers >= ep->pers_low && pers <= ep->pers_high)
-			if (try_inc_mod_count(ep->module))
+			if (try_module_get(ep->module))
 				goto out;
 	}
 
-#ifdef CONFIG_KMOD
+#ifdef CONFIG_MODULES
 	read_unlock(&exec_domains_lock);
-	{
-		char buffer[30];
-		sprintf(buffer, "personality-%ld", pers);
-		request_module(buffer);
-	}
+	request_module("personality-%d", pers);
 	read_lock(&exec_domains_lock);
 
 	for (ep = exec_domains; ep; ep = ep->next) {
 		if (pers >= ep->pers_low && pers <= ep->pers_high)
-			if (try_inc_mod_count(ep->module))
+			if (try_module_get(ep->module))
 				goto out;
 	}
 #endif
@@ -156,135 +134,62 @@ unregister:
 	return 0;
 }
 
-int
-__set_personality(u_long personality)
+int __set_personality(unsigned int personality)
 {
-	struct exec_domain	*ep, *oep;
+	struct exec_domain *oep = current_thread_info()->exec_domain;
 
-	ep = lookup_exec_domain(personality);
-	if (ep == current->exec_domain) {
-		current->personality = personality;
-		return 0;
-	}
-
-	if (atomic_read(&current->fs->count) != 1) {
-		struct fs_struct *fsp, *ofsp;
-
-		fsp = copy_fs_struct(current->fs);
-		if (fsp == NULL) {
-			put_exec_domain(ep);
-			return -ENOMEM;;
-		}
-
-		task_lock(current);
-		ofsp = current->fs;
-		current->fs = fsp;
-		task_unlock(current);
-
-		put_fs_struct(ofsp);
-	}
-
-	/*
-	 * At that point we are guaranteed to be the sole owner of
-	 * current->fs.
-	 */
-
+	current_thread_info()->exec_domain = lookup_exec_domain(personality);
 	current->personality = personality;
-	oep = current->exec_domain;
-	current->exec_domain = ep;
-	set_fs_altroot();
-
-	put_exec_domain(oep);
+	module_put(oep->module);
 
 	return 0;
 }
 
-int
-get_exec_domain_list(char *page)
+#ifdef CONFIG_PROC_FS
+static int execdomains_proc_show(struct seq_file *m, void *v)
 {
 	struct exec_domain	*ep;
-	int			len = 0;
 
 	read_lock(&exec_domains_lock);
-	for (ep = exec_domains; ep && len < PAGE_SIZE - 80; ep = ep->next)
-		len += sprintf(page + len, "%d-%d\t%-16s\t[%s]\n",
-			ep->pers_low, ep->pers_high, ep->name,
-			ep->module ? ep->module->name : "kernel");
+	for (ep = exec_domains; ep; ep = ep->next)
+		seq_printf(m, "%d-%d\t%-16s\t[%s]\n",
+			       ep->pers_low, ep->pers_high, ep->name,
+			       module_name(ep->module));
 	read_unlock(&exec_domains_lock);
-	return (len);
+	return 0;
 }
 
-asmlinkage long
-sys_personality(u_long personality)
+static int execdomains_proc_open(struct inode *inode, struct file *file)
 {
-	u_long old = current->personality;;
+	return single_open(file, execdomains_proc_show, NULL);
+}
 
-	if (personality != 0xffffffff) {
+static const struct file_operations execdomains_proc_fops = {
+	.open		= execdomains_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+
+static int __init proc_execdomains_init(void)
+{
+	proc_create("execdomains", 0, NULL, &execdomains_proc_fops);
+	return 0;
+}
+module_init(proc_execdomains_init);
+#endif
+
+SYSCALL_DEFINE1(personality, unsigned int, personality)
+{
+	unsigned int old = current->personality;
+
+	if (personality != 0xffffffff)
 		set_personality(personality);
-		if (current->personality != personality)
-			return -EINVAL;
-	}
 
-	return (long)old;
+	return old;
 }
 
 
 EXPORT_SYMBOL(register_exec_domain);
 EXPORT_SYMBOL(unregister_exec_domain);
 EXPORT_SYMBOL(__set_personality);
-
-/*
- * We have to have all sysctl handling for the Linux-ABI
- * in one place as the dynamic registration of sysctls is
- * horribly crufty in Linux <= 2.4.
- *
- * I hope the new sysctl schemes discussed for future versions
- * will obsolete this.
- *
- * 				--hch
- */
-
-u_long abi_defhandler_coff = PER_SCOSVR3;
-u_long abi_defhandler_elf = PER_LINUX;
-u_long abi_defhandler_lcall7 = PER_SVR4;
-u_long abi_defhandler_libcso = PER_SVR4;
-u_int abi_traceflg;
-int abi_fake_utsname;
-
-static struct ctl_table abi_table[] = {
-	{ABI_DEFHANDLER_COFF, "defhandler_coff", &abi_defhandler_coff,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_ELF, "defhandler_elf", &abi_defhandler_elf,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_LCALL7, "defhandler_lcall7", &abi_defhandler_lcall7,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_LIBCSO, "defhandler_libcso", &abi_defhandler_libcso,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_TRACE, "trace", &abi_traceflg,
-		sizeof(u_int), 0644, NULL, &proc_dointvec},
-	{ABI_FAKE_UTSNAME, "fake_utsname", &abi_fake_utsname,
-		sizeof(int), 0644, NULL, &proc_dointvec},
-	{0}
-};
-
-static struct ctl_table abi_root_table[] = {
-	{CTL_ABI, "abi", NULL, 0, 0555, abi_table},
-	{0}
-};
-
-static int __init
-abi_register_sysctl(void)
-{
-	register_sysctl_table(abi_root_table, 1);
-	return 0;
-}
-
-__initcall(abi_register_sysctl);
-
-
-EXPORT_SYMBOL(abi_defhandler_coff);
-EXPORT_SYMBOL(abi_defhandler_elf);
-EXPORT_SYMBOL(abi_defhandler_lcall7);
-EXPORT_SYMBOL(abi_defhandler_libcso);
-EXPORT_SYMBOL(abi_traceflg);
-EXPORT_SYMBOL(abi_fake_utsname);

@@ -21,11 +21,10 @@
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/io.h>
 
-#include <asm/hardware.h>
-#include <asm/io.h>
+#include <mach/hardware.h>
 #include <asm/leds.h>
-#include <asm/system.h>
 #include <asm/mach-types.h>
 
 #include <asm/hardware/clps7111.h>
@@ -64,4 +63,4 @@ static int __init leds_init(void)
 	return 0;
 }
 
-__initcall(leds_init);
+arch_initcall(leds_init);

@@ -52,11 +52,11 @@
  *	protection - since "write" code only needs to change the head, and
  *	interrupt code only needs to change the tail.
  */
-typedef struct {
+struct stlrq {
 	char	*buf;
 	char	*head;
 	char	*tail;
-} stlrq_t;
+};
 
 /*
  *	Port, panel and board structures to hold status info about each.
@@ -67,25 +67,22 @@ typedef struct {
  *	is associated with, this makes it (fairly) easy to get back to the
  *	board/panel info for a port.
  */
-typedef struct stlport {
+struct stlport {
 	unsigned long		magic;
-	int			portnr;
-	int			panelnr;
-	int			brdnr;
+	struct tty_port		port;
+	unsigned int		portnr;
+	unsigned int		panelnr;
+	unsigned int		brdnr;
 	int			ioaddr;
 	int			uartaddr;
-	int			pagenr;
-	long			istate;
-	int			flags;
+	unsigned int		pagenr;
+	unsigned long		istate;
 	int			baud_base;
 	int			custom_divisor;
 	int			close_delay;
 	int			closing_wait;
-	int			refcount;
 	int			openwaitcnt;
 	int			brklen;
-	long			session;
-	long			pgrp;
 	unsigned int		sigs;
 	unsigned int		rxignoremsk;
 	unsigned int		rxmarkmsk;
@@ -94,46 +91,35 @@ typedef struct stlport {
 	unsigned long		clk;
 	unsigned long		hwid;
 	void			*uartp;
-	struct tty_struct	*tty;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
-#else
-	wait_queue_head_t	open_wait;
-	wait_queue_head_t	close_wait;
-#endif
-	struct termios		normaltermios;
-	struct termios		callouttermios;
-	struct tq_struct	tqueue;
 	comstats_t		stats;
-	stlrq_t			tx;
-} stlport_t;
+	struct stlrq		tx;
+};
 
-typedef struct stlpanel {
+struct stlpanel {
 	unsigned long	magic;
-	int		panelnr;
-	int		brdnr;
-	int		pagenr;
-	int		nrports;
+	unsigned int	panelnr;
+	unsigned int	brdnr;
+	unsigned int	pagenr;
+	unsigned int	nrports;
 	int		iobase;
 	void		*uartp;
 	void		(*isr)(struct stlpanel *panelp, unsigned int iobase);
 	unsigned int	hwid;
 	unsigned int	ackmask;
-	stlport_t	*ports[STL_PORTSPERPANEL];
-} stlpanel_t;
+	struct stlport	*ports[STL_PORTSPERPANEL];
+};
 
-typedef struct stlbrd {
+struct stlbrd {
 	unsigned long	magic;
-	int		brdnr;
-	int		brdtype;
-	int		state;
-	int		nrpanels;
-	int		nrports;
-	int		nrbnks;
+	unsigned int	brdnr;
+	unsigned int	brdtype;
+	unsigned int	state;
+	unsigned int	nrpanels;
+	unsigned int	nrports;
+	unsigned int	nrbnks;
 	int		irq;
 	int		irqtype;
-	void		(*isr)(struct stlbrd *brdp);
+	int		(*isr)(struct stlbrd *brdp);
 	unsigned int	ioaddr1;
 	unsigned int	ioaddr2;
 	unsigned int	iosize1;
@@ -145,9 +131,9 @@ typedef struct stlbrd {
 	unsigned long	clk;
 	unsigned int	bnkpageaddr[STL_MAXBANKS];
 	unsigned int	bnkstataddr[STL_MAXBANKS];
-	stlpanel_t	*bnk2panel[STL_MAXBANKS];
-	stlpanel_t	*panels[STL_MAXPANELS];
-} stlbrd_t;
+	struct stlpanel	*bnk2panel[STL_MAXBANKS];
+	struct stlpanel	*panels[STL_MAXPANELS];
+};
 
 
 /*

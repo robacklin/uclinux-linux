@@ -9,11 +9,14 @@
 #include <linux/fcntl.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/fs.h>
+
 #include <asm/uaccess.h>
 #include <asm/sections.h>
 #include <asm/prom.h>
-#include <asm/ans-lcd.h>
 #include <asm/io.h>
+
+#include "ans-lcd.h"
 
 #define ANSLCD_ADDR		0xf301c000
 #define ANSLCD_CTRL_IX 0x00
@@ -21,11 +24,12 @@
 
 static unsigned long anslcd_short_delay = 80;
 static unsigned long anslcd_long_delay = 3280;
-static volatile unsigned char* anslcd_ptr;
+static volatile unsigned char __iomem *anslcd_ptr;
+static DEFINE_MUTEX(anslcd_mutex);
 
 #undef DEBUG
 
-static void __pmac
+static void
 anslcd_write_byte_ctrl ( unsigned char c )
 {
 #ifdef DEBUG
@@ -41,44 +45,50 @@ anslcd_write_byte_ctrl ( unsigned char c )
 	}
 }
 
-static void __pmac
+static void
 anslcd_write_byte_data ( unsigned char c )
 {
 	out_8(anslcd_ptr + ANSLCD_DATA_IX, c);
 	udelay(anslcd_short_delay);
 }
 
-static ssize_t __pmac
-anslcd_write( struct file * file, const char * buf, 
+static ssize_t
+anslcd_write( struct file * file, const char __user * buf, 
 				size_t count, loff_t *ppos )
 {
-	const char * p = buf;
+	const char __user *p = buf;
+	int i;
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "LCD: write\n");
 #endif
 
-	if ( verify_area(VERIFY_READ, buf, count) )
+	if (!access_ok(VERIFY_READ, buf, count))
 		return -EFAULT;
-	while (count--) {
+
+	mutex_lock(&anslcd_mutex);
+	for ( i = *ppos; count > 0; ++i, ++p, --count ) 
+	{
 		char c;
-		if (__get_user(c, p++))
-			return -EFAULT;
+		__get_user(c, p);
 		anslcd_write_byte_data( c );
 	}
-	*ppos = p - buf;
+	mutex_unlock(&anslcd_mutex);
+	*ppos = i;
 	return p - buf;
 }
 
-static int __pmac
-anslcd_ioctl( struct inode * inode, struct file * file,
-				unsigned int cmd, unsigned long arg )
+static long
+anslcd_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-	char ch, *temp;
+	char ch, __user *temp;
+	long ret = 0;
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "LCD: ioctl(%d,%d)\n",cmd,arg);
 #endif
+
+	mutex_lock(&anslcd_mutex);
 
 	switch ( cmd )
 	{
@@ -88,40 +98,46 @@ anslcd_ioctl( struct inode * inode, struct file * file,
 		anslcd_write_byte_ctrl ( 0x06 );
 		anslcd_write_byte_ctrl ( 0x01 );
 		anslcd_write_byte_ctrl ( 0x02 );
-		return 0;
+		break;
 	case ANSLCD_SENDCTRL:
-		temp = (char *) arg;
+		temp = (char __user *) arg;
 		__get_user(ch, temp);
 		for (; ch; temp++) { /* FIXME: This is ugly, but should work, as a \0 byte is not a valid command code */
 			anslcd_write_byte_ctrl ( ch );
 			__get_user(ch, temp);
 		}
-		return 0;
+		break;
 	case ANSLCD_SETSHORTDELAY:
 		if (!capable(CAP_SYS_ADMIN))
-			return -EACCES;
-		anslcd_short_delay=arg;
-		return 0;
+			ret =-EACCES;
+		else
+			anslcd_short_delay=arg;
+		break;
 	case ANSLCD_SETLONGDELAY:
 		if (!capable(CAP_SYS_ADMIN))
-			return -EACCES;
-		anslcd_long_delay=arg;
-		return 0;
+			ret = -EACCES;
+		else
+			anslcd_long_delay=arg;
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
 	}
+
+	mutex_unlock(&anslcd_mutex);
+	return ret;
 }
 
-static int __pmac
+static int
 anslcd_open( struct inode * inode, struct file * file )
 {
 	return 0;
 }
 
-struct file_operations anslcd_fops = {
-	write:	anslcd_write,
-	ioctl:	anslcd_ioctl,
-	open:	anslcd_open,
+const struct file_operations anslcd_fops = {
+	.write		= anslcd_write,
+	.unlocked_ioctl	= anslcd_ioctl,
+	.open		= anslcd_open,
+	.llseek		= default_llseek,
 };
 
 static struct miscdevice anslcd_dev = {
@@ -135,26 +151,34 @@ const char anslcd_logo[] =	"********************"  /* Line #1 */
 				"*    Welcome to    *"  /* Line #2 */
 				"********************"; /* Line #4 */
 
-int __init
+static int __init
 anslcd_init(void)
 {
 	int a;
+	int retval;
 	struct device_node* node;
 
-	node = find_devices("lcd");
-	if (!node || !node->parent)
+	node = of_find_node_by_name(NULL, "lcd");
+	if (!node || !node->parent || strcmp(node->parent->name, "gc")) {
+		of_node_put(node);
 		return -ENODEV;
-	if (strcmp(node->parent->name, "gc"))
-		return -ENODEV;
+	}
+	of_node_put(node);
 
-	anslcd_ptr = (volatile unsigned char*)ioremap(ANSLCD_ADDR, 0x20);
+	anslcd_ptr = ioremap(ANSLCD_ADDR, 0x20);
 	
-	misc_register(&anslcd_dev);
+	retval = misc_register(&anslcd_dev);
+	if(retval < 0){
+		printk(KERN_INFO "LCD: misc_register failed\n");
+		iounmap(anslcd_ptr);
+		return retval;
+	}
 
 #ifdef DEBUG
 	printk(KERN_DEBUG "LCD: init\n");
 #endif
 
+	mutex_lock(&anslcd_mutex);
 	anslcd_write_byte_ctrl ( 0x38 );
 	anslcd_write_byte_ctrl ( 0x0c );
 	anslcd_write_byte_ctrl ( 0x06 );
@@ -163,8 +187,16 @@ anslcd_init(void)
 	for(a=0;a<80;a++) {
 		anslcd_write_byte_data(anslcd_logo[a]);
 	}
+	mutex_unlock(&anslcd_mutex);
 	return 0;
 }
 
-__initcall(anslcd_init);
+static void __exit
+anslcd_exit(void)
+{
+	misc_deregister(&anslcd_dev);
+	iounmap(anslcd_ptr);
+}
 
+module_init(anslcd_init);
+module_exit(anslcd_exit);

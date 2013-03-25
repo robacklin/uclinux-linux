@@ -1,32 +1,8 @@
 #
 # Makefile for the kernel character device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
-#
 
-# Object file lists.
-
-obj-y		:=
-obj-m		:=
-obj-n		:=
-obj-		:=
-
-O_TARGET := radio.o
-
-# All of the (potential) objects that export symbols.
-# This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
-
-export-objs     := miropcm20-rds-core.o
-
-list-multi	:= miropcm20.o
-
-miropcm20-objs	:= miropcm20-rds-core.o miropcm20-radio.o
-
+obj-$(CONFIG_RADIO_ISA) += radio-isa.o
 obj-$(CONFIG_RADIO_AZTECH) += radio-aztech.o
 obj-$(CONFIG_RADIO_RTRACK2) += radio-rtrack2.o
 obj-$(CONFIG_RADIO_SF16FMI) += radio-sf16fmi.o
@@ -37,14 +13,20 @@ obj-$(CONFIG_RADIO_TERRATEC) += radio-terratec.o
 obj-$(CONFIG_RADIO_MAXIRADIO) += radio-maxiradio.o
 obj-$(CONFIG_RADIO_RTRACK) += radio-aimslab.o
 obj-$(CONFIG_RADIO_ZOLTRIX) += radio-zoltrix.o
-obj-$(CONFIG_RADIO_MIROPCM20) += miropcm20.o
-obj-$(CONFIG_RADIO_MIROPCM20_RDS) += miropcm20-rds.o
 obj-$(CONFIG_RADIO_GEMTEK) += radio-gemtek.o
-obj-$(CONFIG_RADIO_GEMTEK_PCI) += radio-gemtek-pci.o
 obj-$(CONFIG_RADIO_TRUST) += radio-trust.o
-obj-$(CONFIG_RADIO_MAESTRO) += radio-maestro.o
+obj-$(CONFIG_I2C_SI4713) += si4713-i2c.o
+obj-$(CONFIG_RADIO_SI4713) += radio-si4713.o
+obj-$(CONFIG_RADIO_MIROPCM20) += radio-miropcm20.o
+obj-$(CONFIG_USB_DSBR) += dsbr100.o
+obj-$(CONFIG_RADIO_SI470X) += si470x/
+obj-$(CONFIG_USB_MR800) += radio-mr800.o
+obj-$(CONFIG_USB_KEENE) += radio-keene.o
+obj-$(CONFIG_RADIO_TEA5764) += radio-tea5764.o
+obj-$(CONFIG_RADIO_SAA7706H) += saa7706h.o
+obj-$(CONFIG_RADIO_TEF6862) += tef6862.o
+obj-$(CONFIG_RADIO_TIMBERDALE) += radio-timb.o
+obj-$(CONFIG_RADIO_WL1273) += radio-wl1273.o
+obj-$(CONFIG_RADIO_WL128X) += wl128x/
 
-include $(TOPDIR)/Rules.make
-
-miropcm20.o: $(miropcm20-objs)
-	$(LD) -r -o $@ $(miropcm20-objs)
+ccflags-y += -Isound

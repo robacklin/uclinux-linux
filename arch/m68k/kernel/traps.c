@@ -18,179 +18,108 @@
  * Sets up all exception vectors
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/module.h>
-#include <linux/a.out.h>
 #include <linux/user.h>
 #include <linux/string.h>
 #include <linux/linkage.h>
 #include <linux/init.h>
+#include <linux/ptrace.h>
+#include <linux/kallsyms.h>
 
 #include <asm/setup.h>
 #include <asm/fpu.h>
-#include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/traps.h>
 #include <asm/pgalloc.h>
 #include <asm/machdep.h>
 #include <asm/siginfo.h>
 
-/* assembler routines */
-asmlinkage void system_call(void);
-asmlinkage void buserr(void);
-asmlinkage void trap(void);
-asmlinkage void inthandler(void);
-asmlinkage void nmihandler(void);
-#ifdef CONFIG_M68KFPU_EMU
-asmlinkage void fpu_emu(void);
-#endif
 
-e_vector vectors[256] = {
-	0, 0, buserr, trap, trap, trap, trap, trap,
-	trap, trap, trap, trap, trap, trap, trap, trap,
-	trap, trap, trap, trap, trap, trap, trap, trap,
-	inthandler, inthandler, inthandler, inthandler,
-	inthandler, inthandler, inthandler, inthandler,
-	/* TRAP #0-15 */
-	system_call, trap, trap, trap, trap, trap, trap, trap,
-	trap, trap, trap, trap, trap, trap, trap, trap,
-	0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+static const char *vec_names[] = {
+	[VEC_RESETSP]	= "RESET SP",
+	[VEC_RESETPC]	= "RESET PC",
+	[VEC_BUSERR]	= "BUS ERROR",
+	[VEC_ADDRERR]	= "ADDRESS ERROR",
+	[VEC_ILLEGAL]	= "ILLEGAL INSTRUCTION",
+	[VEC_ZERODIV]	= "ZERO DIVIDE",
+	[VEC_CHK]	= "CHK",
+	[VEC_TRAP]	= "TRAPcc",
+	[VEC_PRIV]	= "PRIVILEGE VIOLATION",
+	[VEC_TRACE]	= "TRACE",
+	[VEC_LINE10]	= "LINE 1010",
+	[VEC_LINE11]	= "LINE 1111",
+	[VEC_RESV12]	= "UNASSIGNED RESERVED 12",
+	[VEC_COPROC]	= "COPROCESSOR PROTOCOL VIOLATION",
+	[VEC_FORMAT]	= "FORMAT ERROR",
+	[VEC_UNINT]	= "UNINITIALIZED INTERRUPT",
+	[VEC_RESV16]	= "UNASSIGNED RESERVED 16",
+	[VEC_RESV17]	= "UNASSIGNED RESERVED 17",
+	[VEC_RESV18]	= "UNASSIGNED RESERVED 18",
+	[VEC_RESV19]	= "UNASSIGNED RESERVED 19",
+	[VEC_RESV20]	= "UNASSIGNED RESERVED 20",
+	[VEC_RESV21]	= "UNASSIGNED RESERVED 21",
+	[VEC_RESV22]	= "UNASSIGNED RESERVED 22",
+	[VEC_RESV23]	= "UNASSIGNED RESERVED 23",
+	[VEC_SPUR]	= "SPURIOUS INTERRUPT",
+	[VEC_INT1]	= "LEVEL 1 INT",
+	[VEC_INT2]	= "LEVEL 2 INT",
+	[VEC_INT3]	= "LEVEL 3 INT",
+	[VEC_INT4]	= "LEVEL 4 INT",
+	[VEC_INT5]	= "LEVEL 5 INT",
+	[VEC_INT6]	= "LEVEL 6 INT",
+	[VEC_INT7]	= "LEVEL 7 INT",
+	[VEC_SYS]	= "SYSCALL",
+	[VEC_TRAP1]	= "TRAP #1",
+	[VEC_TRAP2]	= "TRAP #2",
+	[VEC_TRAP3]	= "TRAP #3",
+	[VEC_TRAP4]	= "TRAP #4",
+	[VEC_TRAP5]	= "TRAP #5",
+	[VEC_TRAP6]	= "TRAP #6",
+	[VEC_TRAP7]	= "TRAP #7",
+	[VEC_TRAP8]	= "TRAP #8",
+	[VEC_TRAP9]	= "TRAP #9",
+	[VEC_TRAP10]	= "TRAP #10",
+	[VEC_TRAP11]	= "TRAP #11",
+	[VEC_TRAP12]	= "TRAP #12",
+	[VEC_TRAP13]	= "TRAP #13",
+	[VEC_TRAP14]	= "TRAP #14",
+	[VEC_TRAP15]	= "TRAP #15",
+	[VEC_FPBRUC]	= "FPCP BSUN",
+	[VEC_FPIR]	= "FPCP INEXACT",
+	[VEC_FPDIVZ]	= "FPCP DIV BY 0",
+	[VEC_FPUNDER]	= "FPCP UNDERFLOW",
+	[VEC_FPOE]	= "FPCP OPERAND ERROR",
+	[VEC_FPOVER]	= "FPCP OVERFLOW",
+	[VEC_FPNAN]	= "FPCP SNAN",
+	[VEC_FPUNSUP]	= "FPCP UNSUPPORTED OPERATION",
+	[VEC_MMUCFG]	= "MMU CONFIGURATION ERROR",
+	[VEC_MMUILL]	= "MMU ILLEGAL OPERATION ERROR",
+	[VEC_MMUACC]	= "MMU ACCESS LEVEL VIOLATION ERROR",
+	[VEC_RESV59]	= "UNASSIGNED RESERVED 59",
+	[VEC_UNIMPEA]	= "UNASSIGNED RESERVED 60",
+	[VEC_UNIMPII]	= "UNASSIGNED RESERVED 61",
+	[VEC_RESV62]	= "UNASSIGNED RESERVED 62",
+	[VEC_RESV63]	= "UNASSIGNED RESERVED 63",
 };
 
-/* nmi handler for the Amiga */
-asm(".text\n"
-    __ALIGN_STR "\n"
-    SYMBOL_NAME_STR(nmihandler) ": rte");
-
-/*
- * this must be called very early as the kernel might
- * use some instruction that are emulated on the 060
- */
-void __init base_trap_init(void)
-{
-	if(MACH_IS_SUN3X) {
-		extern e_vector *sun3x_prom_vbr;
-
-		__asm__ volatile ("movec %%vbr, %0" : "=r" ((void*)sun3x_prom_vbr));
-	}
-	
-	/* setup the exception vector table */
-	__asm__ volatile ("movec %0,%%vbr" : : "r" ((void*)vectors));
-
-	if (CPU_IS_060) {
-		/* set up ISP entry points */
-		asmlinkage void unimp_vec(void) asm ("_060_isp_unimp");
-
-		vectors[VEC_UNIMPII] = unimp_vec;
-	}
-}
-
-void __init trap_init (void)
-{
-	int i;
-
-	for (i = 48; i < 64; i++)
-		if (!vectors[i])
-			vectors[i] = trap;
-
-	for (i = 64; i < 256; i++)
-		vectors[i] = inthandler;
-
-#ifdef CONFIG_M68KFPU_EMU
-	if (FPU_IS_EMU)
-		vectors[VEC_LINE11] = fpu_emu;
-#endif
-
-	if (CPU_IS_040 && !FPU_IS_EMU) {
-		/* set up FPSP entry points */
-		asmlinkage void dz_vec(void) asm ("dz");
-		asmlinkage void inex_vec(void) asm ("inex");
-		asmlinkage void ovfl_vec(void) asm ("ovfl");
-		asmlinkage void unfl_vec(void) asm ("unfl");
-		asmlinkage void snan_vec(void) asm ("snan");
-		asmlinkage void operr_vec(void) asm ("operr");
-		asmlinkage void bsun_vec(void) asm ("bsun");
-		asmlinkage void fline_vec(void) asm ("fline");
-		asmlinkage void unsupp_vec(void) asm ("unsupp");
-
-		vectors[VEC_FPDIVZ] = dz_vec;
-		vectors[VEC_FPIR] = inex_vec;
-		vectors[VEC_FPOVER] = ovfl_vec;
-		vectors[VEC_FPUNDER] = unfl_vec;
-		vectors[VEC_FPNAN] = snan_vec;
-		vectors[VEC_FPOE] = operr_vec;
-		vectors[VEC_FPBRUC] = bsun_vec;
-		vectors[VEC_LINE11] = fline_vec;
-		vectors[VEC_FPUNSUP] = unsupp_vec;
-	}
-
-	if (CPU_IS_060 && !FPU_IS_EMU) {
-		/* set up IFPSP entry points */
-		asmlinkage void snan_vec(void) asm ("_060_fpsp_snan");
-		asmlinkage void operr_vec(void) asm ("_060_fpsp_operr");
-		asmlinkage void ovfl_vec(void) asm ("_060_fpsp_ovfl");
-		asmlinkage void unfl_vec(void) asm ("_060_fpsp_unfl");
-		asmlinkage void dz_vec(void) asm ("_060_fpsp_dz");
-		asmlinkage void inex_vec(void) asm ("_060_fpsp_inex");
-		asmlinkage void fline_vec(void) asm ("_060_fpsp_fline");
-		asmlinkage void unsupp_vec(void) asm ("_060_fpsp_unsupp");
-		asmlinkage void effadd_vec(void) asm ("_060_fpsp_effadd");
-
-		vectors[VEC_FPNAN] = snan_vec;
-		vectors[VEC_FPOE] = operr_vec;
-		vectors[VEC_FPOVER] = ovfl_vec;
-		vectors[VEC_FPUNDER] = unfl_vec;
-		vectors[VEC_FPDIVZ] = dz_vec;
-		vectors[VEC_FPIR] = inex_vec;
-		vectors[VEC_LINE11] = fline_vec;
-		vectors[VEC_FPUNSUP] = unsupp_vec;
-		vectors[VEC_UNIMPEA] = effadd_vec;
-	}
-
-        /* if running on an amiga, make the NMI interrupt do nothing */
-	if (MACH_IS_AMIGA) {
-		vectors[VEC_INT7] = nmihandler;
-	}
-}
-
-
-static char *vec_names[] = {
-	"RESET SP", "RESET PC", "BUS ERROR", "ADDRESS ERROR",
-	"ILLEGAL INSTRUCTION", "ZERO DIVIDE", "CHK", "TRAPcc",
-	"PRIVILEGE VIOLATION", "TRACE", "LINE 1010", "LINE 1111",
-	"UNASSIGNED RESERVED 12", "COPROCESSOR PROTOCOL VIOLATION",
-	"FORMAT ERROR", "UNINITIALIZED INTERRUPT",
-	"UNASSIGNED RESERVED 16", "UNASSIGNED RESERVED 17",
-	"UNASSIGNED RESERVED 18", "UNASSIGNED RESERVED 19",
-	"UNASSIGNED RESERVED 20", "UNASSIGNED RESERVED 21",
-	"UNASSIGNED RESERVED 22", "UNASSIGNED RESERVED 23",
-	"SPURIOUS INTERRUPT", "LEVEL 1 INT", "LEVEL 2 INT", "LEVEL 3 INT",
-	"LEVEL 4 INT", "LEVEL 5 INT", "LEVEL 6 INT", "LEVEL 7 INT",
-	"SYSCALL", "TRAP #1", "TRAP #2", "TRAP #3",
-	"TRAP #4", "TRAP #5", "TRAP #6", "TRAP #7",
-	"TRAP #8", "TRAP #9", "TRAP #10", "TRAP #11",
-	"TRAP #12", "TRAP #13", "TRAP #14", "TRAP #15",
-	"FPCP BSUN", "FPCP INEXACT", "FPCP DIV BY 0", "FPCP UNDERFLOW",
-	"FPCP OPERAND ERROR", "FPCP OVERFLOW", "FPCP SNAN",
-	"FPCP UNSUPPORTED OPERATION",
-	"MMU CONFIGURATION ERROR"
-	};
-
+static const char *space_names[] = {
+	[0]		= "Space 0",
+	[USER_DATA]	= "User Data",
+	[USER_PROGRAM]	= "User Program",
 #ifndef CONFIG_SUN3
-static char *space_names[] = {
-	"Space 0", "User Data", "User Program", "Space 3",
-	"Space 4", "Super Data", "Super Program", "CPU"
-	};
+	[3]		= "Space 3",
 #else
-static char *space_names[] = {
-	"Space 0", "User Data", "User Program", "Control",
-	"Space 4", "Super Data", "Super Program", "CPU"
-	};
+	[FC_CONTROL]	= "Control",
 #endif
+	[4]		= "Space 4",
+	[SUPER_DATA]	= "Super Data",
+	[SUPER_PROGRAM]	= "Super Program",
+	[CPU_SPACE]	= "CPU"
+};
 
 void die_if_kernel(char *,struct pt_regs *,int);
 asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
@@ -242,7 +171,8 @@ static inline void access_error060 (struct frame *fp)
 		 * fault during mem_read/mem_write in ifpsp060/os.S
 		 */
 		send_fault_sig(&fp->ptregs);
-	} else {
+	} else if (!(fslw & (MMU060_RE|MMU060_WE)) ||
+		   send_fault_sig(&fp->ptregs) > 0) {
 		printk("pc=%#lx, fa=%#lx\n", fp->ptregs.pc, fp->un.fmt4.effaddr);
 		printk( "68060 access error, fslw=%lx\n", fslw );
 		trap_c( fp );
@@ -259,13 +189,13 @@ static inline unsigned long probe040(int iswrite, unsigned long addr, int wbs)
 	set_fs(MAKE_MM_SEG(wbs));
 
 	if (iswrite)
-                asm volatile (".chip 68040; ptestw (%0); .chip 68k" : : "a" (addr));
+		asm volatile (".chip 68040; ptestw (%0); .chip 68k" : : "a" (addr));
 	else
-                asm volatile (".chip 68040; ptestr (%0); .chip 68k" : : "a" (addr));
+		asm volatile (".chip 68040; ptestr (%0); .chip 68k" : : "a" (addr));
 
-        asm volatile (".chip 68040; movec %%mmusr,%0; .chip 68k" : "=r" (mmusr));
+	asm volatile (".chip 68040; movec %%mmusr,%0; .chip 68k" : "=r" (mmusr));
 
-	set_fs(old_fs); 
+	set_fs(old_fs);
 
 	return mmusr;
 }
@@ -281,19 +211,19 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 
 	switch (wbs & WBSIZ_040) {
 	case BA_SIZE_BYTE:
-		res = put_user(wbd & 0xff, (char *)wba);
+		res = put_user(wbd & 0xff, (char __user *)wba);
 		break;
 	case BA_SIZE_WORD:
-		res = put_user(wbd & 0xffff, (short *)wba);
+		res = put_user(wbd & 0xffff, (short __user *)wba);
 		break;
 	case BA_SIZE_LONG:
-		res = put_user(wbd, (int *)wba);
+		res = put_user(wbd, (int __user *)wba);
 		break;
 	}
 
 	/* set_fs can not be moved, otherwise put_user() may oops */
-	set_fs(old_fs); 
-	
+	set_fs(old_fs);
+
 
 #ifdef DEBUG
 	printk("do_040writeback1, res=%d\n",res);
@@ -303,7 +233,7 @@ static inline int do_040writeback1(unsigned short wbs, unsigned long wba,
 }
 
 /* after an exception in a writeback the stack frame corresponding
- * to that exception is discarded, set a few bits in the old frame 
+ * to that exception is discarded, set a few bits in the old frame
  * to simulate what it should look like
  */
 static inline void fix_xframe040(struct frame *fp, unsigned long wba, unsigned short wbs)
@@ -328,7 +258,7 @@ static inline void do_040writebacks(struct frame *fp)
 				       fp->un.fmt7.wb2d);
 		if (res)
 			fix_xframe040(fp, fp->un.fmt7.wb2a, fp->un.fmt7.wb2s);
-		else 
+		else
 			fp->un.fmt7.wb2s = 0;
 	}
 
@@ -357,7 +287,7 @@ static inline void do_040writebacks(struct frame *fp)
  * called from sigreturn(), must ensure userspace code didn't
  * manipulate exception frame to circumvent protection, then complete
  * pending writebacks
- * we just clear TM2 to turn it into an userspace access
+ * we just clear TM2 to turn it into a userspace access
  */
 asmlinkage void berr_040cleanup(struct frame *fp)
 {
@@ -374,9 +304,9 @@ static inline void access_error040(struct frame *fp)
 
 #ifdef DEBUG
 	printk("ssw=%#x, fa=%#lx\n", ssw, fp->un.fmt7.faddr);
-        printk("wb1s=%#x, wb2s=%#x, wb3s=%#x\n", fp->un.fmt7.wb1s,  
+        printk("wb1s=%#x, wb2s=%#x, wb3s=%#x\n", fp->un.fmt7.wb1s,
 		fp->un.fmt7.wb2s, fp->un.fmt7.wb3s);
-	printk ("wb2a=%lx, wb3a=%lx, wb2d=%lx, wb3d=%lx\n", 
+	printk ("wb2a=%lx, wb3a=%lx, wb2d=%lx, wb3d=%lx\n",
 		fp->un.fmt7.wb2a, fp->un.fmt7.wb3a,
 		fp->un.fmt7.wb2d, fp->un.fmt7.wb3d);
 #endif
@@ -404,14 +334,14 @@ static inline void access_error040(struct frame *fp)
 			errorcode = 0;
 		}
 
-		/* despite what documentation seems to say, RMW 
+		/* despite what documentation seems to say, RMW
 		 * accesses have always both the LK and RW bits set */
 		if (!(ssw & RW_040) || (ssw & LK_040))
 			errorcode |= 2;
 
 		if (do_page_fault(&fp->ptregs, addr, errorcode)) {
 #ifdef DEBUG
-		        printk("do_page_fault() !=0 \n");
+			printk("do_page_fault() !=0\n");
 #endif
 			if (user_mode(&fp->ptregs)){
 				/* delay writebacks after signal delivery */
@@ -424,15 +354,26 @@ static inline void access_error040(struct frame *fp)
 			 * (if do_page_fault didn't fix the mapping,
                          * the writeback won't do good)
 			 */
+disable_wb:
 #ifdef DEBUG
 			printk(".. disabling wb2\n");
 #endif
 			if (fp->un.fmt7.wb2a == fp->un.fmt7.faddr)
 				fp->un.fmt7.wb2s &= ~WBV_040;
+			if (fp->un.fmt7.wb3a == fp->un.fmt7.faddr)
+				fp->un.fmt7.wb3s &= ~WBV_040;
 		}
 	} else {
-		printk("68040 access error, ssw=%x\n", ssw);
-		trap_c(fp);
+		/* In case of a bus error we either kill the process or expect
+		 * the kernel to catch the fault, which then is also responsible
+		 * for cleaning up the mess.
+		 */
+		current->thread.signo = SIGBUS;
+		current->thread.faddr = fp->un.fmt7.faddr;
+		if (send_fault_sig(&fp->ptregs) >= 0)
+			printk("68040 bus error (ssw=%x, faddr=%lx)\n", ssw,
+			       fp->un.fmt7.faddr);
+		goto disable_wb;
 	}
 
 	do_040writebacks(fp);
@@ -446,20 +387,21 @@ extern int mmu_emu_handle_fault (unsigned long, int, int);
 
 /* sun3 version of bus_error030 */
 
-static inline void bus_error030(struct frame *fp)
+static inline void bus_error030 (struct frame *fp)
 {
 	unsigned char buserr_type = sun3_get_buserr ();
 	unsigned long addr, errorcode;
 	unsigned short ssw = fp->un.fmtb.ssw;
+	extern unsigned long _sun3_map_test_start, _sun3_map_test_end;
 
-#if DEBUG
+#ifdef DEBUG
 	if (ssw & (FC | FB))
 		printk ("Instruction fault at %#010lx\n",
 			ssw & FC ?
 			fp->ptregs.format == 0xa ? fp->ptregs.pc + 2 : fp->un.fmtb.baddr - 2
 			:
 			fp->ptregs.format == 0xa ? fp->ptregs.pc + 4 : fp->un.fmtb.baddr);
-	if (ssw & DF) 
+	if (ssw & DF)
 		printk ("Data %s fault at %#010lx in %s (pc=%#lx)\n",
 			ssw & RW ? "read" : "write",
 			fp->un.fmtb.daddr,
@@ -471,7 +413,7 @@ static inline void bus_error030(struct frame *fp)
 	 * the testing for a bad kernel-space access (demand-mapping applies
 	 * to kernel accesses too).
 	 */
-	
+
 	if ((ssw & DF)
 	    && (buserr_type & (SUN3_BUSERR_PROTERR | SUN3_BUSERR_INVALID))) {
 		if (mmu_emu_handle_fault (fp->un.fmtb.daddr, ssw & RW, 0))
@@ -490,6 +432,13 @@ static inline void bus_error030(struct frame *fp)
 				printk ("Instruction fault at %#010lx\n",
 					fp->ptregs.pc);
 			if (ssw & DF) {
+				/* was this fault incurred testing bus mappings? */
+				if((fp->ptregs.pc >= (unsigned long)&_sun3_map_test_start) &&
+				   (fp->ptregs.pc <= (unsigned long)&_sun3_map_test_end)) {
+					send_fault_sig(&fp->ptregs);
+					return;
+				}
+
 				printk ("Data %s fault at %#010lx in %s (pc=%#lx)\n",
 					ssw & RW ? "read" : "write",
 					fp->un.fmtb.daddr,
@@ -564,7 +513,7 @@ static inline void bus_error030(struct frame *fp)
 		printk ("protection fault on insn access (segv).\n");
 #endif
 		force_sig (SIGSEGV, current);
-       }	
+       }
 }
 #else
 #if defined(CPU_M68020_OR_M68030)
@@ -574,7 +523,7 @@ static inline void bus_error030 (struct frame *fp)
 	unsigned short mmusr;
 	unsigned long addr, errorcode;
 	unsigned short ssw = fp->un.fmtb.ssw;
-#if DEBUG
+#ifdef DEBUG
 	unsigned long desc;
 
 	printk ("pid = %x  ", current->pid);
@@ -600,19 +549,19 @@ static inline void bus_error030 (struct frame *fp)
 	if (ssw & DF) {
 		addr = fp->un.fmtb.daddr;
 
-#if DEBUG
+#ifdef DEBUG
 		asm volatile ("ptestr %3,%2@,#7,%0\n\t"
-			      "pmove %%psr,%1@"
-			      : "=a&" (desc)
-			      : "a" (&temp), "a" (addr), "d" (ssw));
+			      "pmove %%psr,%1"
+			      : "=a&" (desc), "=m" (temp)
+			      : "a" (addr), "d" (ssw));
 #else
 		asm volatile ("ptestr %2,%1@,#7\n\t"
-			      "pmove %%psr,%0@"
-			      : : "a" (&temp), "a" (addr), "d" (ssw));
+			      "pmove %%psr,%0"
+			      : "=m" (temp) : "a" (addr), "d" (ssw));
 #endif
 		mmusr = temp;
 
-#if DEBUG
+#ifdef DEBUG
 		printk("mmusr is %#x for addr %#lx in task %p\n",
 		       mmusr, addr, current);
 		printk("descriptor address is %#lx, contents %#lx\n",
@@ -636,8 +585,8 @@ static inline void bus_error030 (struct frame *fp)
 			if (do_page_fault (&fp->ptregs, addr, errorcode) < 0)
 				return;
 		} else if (!(mmusr & MMU_I)) {
-			/* propably a 020 cas fault */
-			if (!(ssw & RM))
+			/* probably a 020 cas fault */
+			if (!(ssw & RM) && send_fault_sig(&fp->ptregs) > 0)
 				printk("unexpected bus error (%#x,%#x)\n", ssw, mmusr);
 		} else if (mmusr & (MMU_B|MMU_L|MMU_S)) {
 			printk("invalid %s access at %#lx from pc %#lx\n",
@@ -655,23 +604,21 @@ static inline void bus_error030 (struct frame *fp)
 			       !(ssw & RW) ? "write" : "read", addr,
 			       fp->ptregs.pc, ssw);
 			asm volatile ("ptestr #1,%1@,#0\n\t"
-				      "pmove %%psr,%0@"
-				      : /* no outputs */
-				      : "a" (&temp), "a" (addr));
+				      "pmove %%psr,%0"
+				      : "=m" (temp)
+				      : "a" (addr));
 			mmusr = temp;
 
 			printk ("level 0 mmusr is %#x\n", mmusr);
 #if 0
-			asm volatile ("pmove %%tt0,%0@"
-				      : /* no outputs */
-				      : "a" (&tlong));
+			asm volatile ("pmove %%tt0,%0"
+				      : "=m" (tlong));
 			printk("tt0 is %#lx, ", tlong);
-			asm volatile ("pmove %%tt1,%0@"
-				      : /* no outputs */
-				      : "a" (&tlong));
+			asm volatile ("pmove %%tt1,%0"
+				      : "=m" (tlong));
 			printk("tt1 is %#lx\n", tlong);
 #endif
-#if DEBUG
+#ifdef DEBUG
 			printk("Unknown SIGSEGV - 1\n");
 #endif
 			die_if_kernel("Oops",&fp->ptregs,mmusr);
@@ -716,15 +663,15 @@ static inline void bus_error030 (struct frame *fp)
 		   should still create the ATC entry.  */
 		goto create_atc_entry;
 
-#if DEBUG
+#ifdef DEBUG
 	asm volatile ("ptestr #1,%2@,#7,%0\n\t"
-		      "pmove %%psr,%1@"
-		      : "=a&" (desc)
-		      : "a" (&temp), "a" (addr));
+		      "pmove %%psr,%1"
+		      : "=a&" (desc), "=m" (temp)
+		      : "a" (addr));
 #else
 	asm volatile ("ptestr #1,%1@,#7\n\t"
-		      "pmove %%psr,%0@"
-		      : : "a" (&temp), "a" (addr));
+		      "pmove %%psr,%0"
+		      : "=m" (temp) : "a" (addr));
 #endif
 	mmusr = temp;
 
@@ -740,7 +687,7 @@ static inline void bus_error030 (struct frame *fp)
 	else if (mmusr & (MMU_B|MMU_L|MMU_S)) {
 		printk ("invalid insn access at %#lx from pc %#lx\n",
 			addr, fp->ptregs.pc);
-#if DEBUG
+#ifdef DEBUG
 		printk("Unknown SIGSEGV - 2\n");
 #endif
 		die_if_kernel("Oops",&fp->ptregs,mmusr);
@@ -756,15 +703,119 @@ create_atc_entry:
 #endif /* CPU_M68020_OR_M68030 */
 #endif /* !CONFIG_SUN3 */
 
+#if defined(CONFIG_COLDFIRE) && defined(CONFIG_MMU)
+#include <asm/mcfmmu.h>
+
+/*
+ *	The following table converts the FS encoding of a ColdFire
+ *	exception stack frame into the error_code value needed by
+ *	do_fault.
+*/
+static const unsigned char fs_err_code[] = {
+	0,  /* 0000 */
+	0,  /* 0001 */
+	0,  /* 0010 */
+	0,  /* 0011 */
+	1,  /* 0100 */
+	0,  /* 0101 */
+	0,  /* 0110 */
+	0,  /* 0111 */
+	2,  /* 1000 */
+	3,  /* 1001 */
+	2,  /* 1010 */
+	0,  /* 1011 */
+	1,  /* 1100 */
+	1,  /* 1101 */
+	0,  /* 1110 */
+	0   /* 1111 */
+};
+
+static inline void access_errorcf(unsigned int fs, struct frame *fp)
+{
+	unsigned long mmusr, addr;
+	unsigned int err_code;
+	int need_page_fault;
+
+	mmusr = mmu_read(MMUSR);
+	addr = mmu_read(MMUAR);
+
+	/*
+	 * error_code:
+	 *	bit 0 == 0 means no page found, 1 means protection fault
+	 *	bit 1 == 0 means read, 1 means write
+	 */
+	switch (fs) {
+	case  5:  /* 0101 TLB opword X miss */
+		need_page_fault = cf_tlb_miss(&fp->ptregs, 0, 0, 0);
+		addr = fp->ptregs.pc;
+		break;
+	case  6:  /* 0110 TLB extension word X miss */
+		need_page_fault = cf_tlb_miss(&fp->ptregs, 0, 0, 1);
+		addr = fp->ptregs.pc + sizeof(long);
+		break;
+	case 10:  /* 1010 TLB W miss */
+		need_page_fault = cf_tlb_miss(&fp->ptregs, 1, 1, 0);
+		break;
+	case 14: /* 1110 TLB R miss */
+		need_page_fault = cf_tlb_miss(&fp->ptregs, 0, 1, 0);
+		break;
+	default:
+		/* 0000 Normal  */
+		/* 0001 Reserved */
+		/* 0010 Interrupt during debug service routine */
+		/* 0011 Reserved */
+		/* 0100 X Protection */
+		/* 0111 IFP in emulator mode */
+		/* 1000 W Protection*/
+		/* 1001 Write error*/
+		/* 1011 Reserved*/
+		/* 1100 R Protection*/
+		/* 1101 R Protection*/
+		/* 1111 OEP in emulator mode*/
+		need_page_fault = 1;
+		break;
+	}
+
+	if (need_page_fault) {
+		err_code = fs_err_code[fs];
+		if ((fs == 13) && (mmusr & MMUSR_WF)) /* rd-mod-wr access */
+			err_code |= 2; /* bit1 - write, bit0 - protection */
+		do_page_fault(&fp->ptregs, addr, err_code);
+	}
+}
+#endif /* CONFIG_COLDFIRE CONFIG_MMU */
+
 asmlinkage void buserr_c(struct frame *fp)
 {
 	/* Only set esp0 if coming from user mode */
 	if (user_mode(&fp->ptregs))
 		current->thread.esp0 = (unsigned long) fp;
 
-#if DEBUG
+#ifdef DEBUG
 	printk ("*** Bus Error *** Format is %x\n", fp->ptregs.format);
 #endif
+
+#if defined(CONFIG_COLDFIRE) && defined(CONFIG_MMU)
+	if (CPU_IS_COLDFIRE) {
+		unsigned int fs;
+		fs = (fp->ptregs.vector & 0x3) |
+			((fp->ptregs.vector & 0xc00) >> 8);
+		switch (fs) {
+		case 0x5:
+		case 0x6:
+		case 0x7:
+		case 0x9:
+		case 0xa:
+		case 0xd:
+		case 0xe:
+		case 0xf:
+			access_errorcf(fs, fp);
+			return;
+		default:
+			break;
+		}
+	}
+#endif /* CONFIG_COLDFIRE && CONFIG_MMU */
 
 	switch (fp->ptregs.format) {
 #if defined (CONFIG_M68060)
@@ -785,7 +836,7 @@ asmlinkage void buserr_c(struct frame *fp)
 #endif
 	default:
 	  die_if_kernel("bad frame format",&fp->ptregs,0);
-#if DEBUG
+#ifdef DEBUG
 	  printk("Unknown SIGSEGV - 4\n");
 #endif
 	  force_sig(SIGSEGV, current);
@@ -793,32 +844,7 @@ asmlinkage void buserr_c(struct frame *fp)
 }
 
 
-int kstack_depth_to_print = 48;
-extern struct module kernel_module;
-
-static inline int kernel_text_address(unsigned long addr)
-{
-#ifdef CONFIG_MODULES
-	struct module *mod;
-#endif
-	extern char _stext, _etext;
-
-	if (addr >= (unsigned long) &_stext &&
-	    addr <= (unsigned long) &_etext)
-		return 1;
-
-#ifdef CONFIG_MODULES
-	for (mod = module_list; mod != &kernel_module; mod = mod->next) {
-		/* mod_bound tests for addr being inside the vmalloc'ed
-		 * module area. Of course it'd be better to test only
-		 * for the .text subset... */
-		if (mod_bound(addr, 0, mod))
-			return 1;
-	}
-#endif
-
-	return 0;
-}
+static int kstack_depth_to_print = 48;
 
 void show_trace(unsigned long *stack)
 {
@@ -840,100 +866,129 @@ void show_trace(unsigned long *stack)
 		 * down the cause of the crash will be able to figure
 		 * out the call path that was taken.
 		 */
-		if (kernel_text_address(addr)) {
-			if (i % 4 == 0)
+		if (__kernel_text_address(addr)) {
+#ifndef CONFIG_KALLSYMS
+			if (i % 5 == 0)
 				printk("\n       ");
-			printk(" [<%08lx>]", addr);
+#endif
+			printk(" [<%08lx>] %pS\n", addr, (void *)addr);
 			i++;
 		}
 	}
 	printk("\n");
 }
 
-void show_trace_task(struct task_struct *tsk)
+void show_registers(struct pt_regs *regs)
 {
-	show_trace((unsigned long *)tsk->thread.esp0);
-}
-
-static void show_stack(struct frame *fp)
-{
-	unsigned long *stack, *endstack, addr;
+	struct frame *fp = (struct frame *)regs;
+	mm_segment_t old_fs = get_fs();
+	u16 c, *cp;
+	unsigned long addr;
 	int i;
 
-	if (fp == NULL)
-	    fp = (struct frame *)&fp;
+	print_modules();
+	printk("PC: [<%08lx>] %pS\n", regs->pc, (void *)regs->pc);
+	printk("SR: %04x  SP: %p  a2: %08lx\n", regs->sr, regs, regs->a2);
+	printk("d0: %08lx    d1: %08lx    d2: %08lx    d3: %08lx\n",
+	       regs->d0, regs->d1, regs->d2, regs->d3);
+	printk("d4: %08lx    d5: %08lx    a0: %08lx    a1: %08lx\n",
+	       regs->d4, regs->d5, regs->a0, regs->a1);
 
+	printk("Process %s (pid: %d, task=%p)\n",
+		current->comm, task_pid_nr(current), current);
 	addr = (unsigned long)&fp->un;
-	printk("Frame format=%X ", fp->ptregs.format);
-	switch (fp->ptregs.format) {
+	printk("Frame format=%X ", regs->format);
+	switch (regs->format) {
 	case 0x2:
-	    printk("instr addr=%08lx\n", fp->un.fmt2.iaddr);
-	    addr += sizeof(fp->un.fmt2);
-	    break;
+		printk("instr addr=%08lx\n", fp->un.fmt2.iaddr);
+		addr += sizeof(fp->un.fmt2);
+		break;
 	case 0x3:
-	    printk("eff addr=%08lx\n", fp->un.fmt3.effaddr);
-	    addr += sizeof(fp->un.fmt3);
-	    break;
+		printk("eff addr=%08lx\n", fp->un.fmt3.effaddr);
+		addr += sizeof(fp->un.fmt3);
+		break;
 	case 0x4:
-	    printk((CPU_IS_060 ? "fault addr=%08lx fslw=%08lx\n"
-		    : "eff addr=%08lx pc=%08lx\n"),
-		   fp->un.fmt4.effaddr, fp->un.fmt4.pc);
-	    addr += sizeof(fp->un.fmt4);
-	    break;
+		printk((CPU_IS_060 ? "fault addr=%08lx fslw=%08lx\n"
+			: "eff addr=%08lx pc=%08lx\n"),
+			fp->un.fmt4.effaddr, fp->un.fmt4.pc);
+		addr += sizeof(fp->un.fmt4);
+		break;
 	case 0x7:
-	    printk("eff addr=%08lx ssw=%04x faddr=%08lx\n",
-		   fp->un.fmt7.effaddr, fp->un.fmt7.ssw, fp->un.fmt7.faddr);
-	    printk("wb 1 stat/addr/data: %04x %08lx %08lx\n",
-		   fp->un.fmt7.wb1s, fp->un.fmt7.wb1a, fp->un.fmt7.wb1dpd0);
-	    printk("wb 2 stat/addr/data: %04x %08lx %08lx\n",
-		   fp->un.fmt7.wb2s, fp->un.fmt7.wb2a, fp->un.fmt7.wb2d);
-	    printk("wb 3 stat/addr/data: %04x %08lx %08lx\n",
-		   fp->un.fmt7.wb3s, fp->un.fmt7.wb3a, fp->un.fmt7.wb3d);
-	    printk("push data: %08lx %08lx %08lx %08lx\n",
-		   fp->un.fmt7.wb1dpd0, fp->un.fmt7.pd1, fp->un.fmt7.pd2,
-		   fp->un.fmt7.pd3);
-	    addr += sizeof(fp->un.fmt7);
-	    break;
+		printk("eff addr=%08lx ssw=%04x faddr=%08lx\n",
+			fp->un.fmt7.effaddr, fp->un.fmt7.ssw, fp->un.fmt7.faddr);
+		printk("wb 1 stat/addr/data: %04x %08lx %08lx\n",
+			fp->un.fmt7.wb1s, fp->un.fmt7.wb1a, fp->un.fmt7.wb1dpd0);
+		printk("wb 2 stat/addr/data: %04x %08lx %08lx\n",
+			fp->un.fmt7.wb2s, fp->un.fmt7.wb2a, fp->un.fmt7.wb2d);
+		printk("wb 3 stat/addr/data: %04x %08lx %08lx\n",
+			fp->un.fmt7.wb3s, fp->un.fmt7.wb3a, fp->un.fmt7.wb3d);
+		printk("push data: %08lx %08lx %08lx %08lx\n",
+			fp->un.fmt7.wb1dpd0, fp->un.fmt7.pd1, fp->un.fmt7.pd2,
+			fp->un.fmt7.pd3);
+		addr += sizeof(fp->un.fmt7);
+		break;
 	case 0x9:
-	    printk("instr addr=%08lx\n", fp->un.fmt9.iaddr);
-	    addr += sizeof(fp->un.fmt9);
-	    break;
+		printk("instr addr=%08lx\n", fp->un.fmt9.iaddr);
+		addr += sizeof(fp->un.fmt9);
+		break;
 	case 0xa:
-	    printk("ssw=%04x isc=%04x isb=%04x daddr=%08lx dobuf=%08lx\n",
-		   fp->un.fmta.ssw, fp->un.fmta.isc, fp->un.fmta.isb,
-		   fp->un.fmta.daddr, fp->un.fmta.dobuf);
-	    addr += sizeof(fp->un.fmta);
-	    break;
+		printk("ssw=%04x isc=%04x isb=%04x daddr=%08lx dobuf=%08lx\n",
+			fp->un.fmta.ssw, fp->un.fmta.isc, fp->un.fmta.isb,
+			fp->un.fmta.daddr, fp->un.fmta.dobuf);
+		addr += sizeof(fp->un.fmta);
+		break;
 	case 0xb:
-	    printk("ssw=%04x isc=%04x isb=%04x daddr=%08lx dobuf=%08lx\n",
-		   fp->un.fmtb.ssw, fp->un.fmtb.isc, fp->un.fmtb.isb,
-		   fp->un.fmtb.daddr, fp->un.fmtb.dobuf);
-	    printk("baddr=%08lx dibuf=%08lx ver=%x\n",
-		   fp->un.fmtb.baddr, fp->un.fmtb.dibuf, fp->un.fmtb.ver);
-	    addr += sizeof(fp->un.fmtb);
-	    break;
+		printk("ssw=%04x isc=%04x isb=%04x daddr=%08lx dobuf=%08lx\n",
+			fp->un.fmtb.ssw, fp->un.fmtb.isc, fp->un.fmtb.isb,
+			fp->un.fmtb.daddr, fp->un.fmtb.dobuf);
+		printk("baddr=%08lx dibuf=%08lx ver=%x\n",
+			fp->un.fmtb.baddr, fp->un.fmtb.dibuf, fp->un.fmtb.ver);
+		addr += sizeof(fp->un.fmtb);
+		break;
 	default:
-	    printk("\n");
+		printk("\n");
 	}
+	show_stack(NULL, (unsigned long *)addr);
 
-	stack = (unsigned long *)addr;
-	endstack = (unsigned long *)((addr + THREAD_SIZE - 1) & -THREAD_SIZE);
+	printk("Code:");
+	set_fs(KERNEL_DS);
+	cp = (u16 *)regs->pc;
+	for (i = -8; i < 16; i++) {
+		if (get_user(c, cp + i) && i >= 0) {
+			printk(" Bad PC value.");
+			break;
+		}
+		printk(i ? " %04x" : " <%04x>", c);
+	}
+	set_fs(old_fs);
+	printk ("\n");
+}
+
+void show_stack(struct task_struct *task, unsigned long *stack)
+{
+	unsigned long *p;
+	unsigned long *endstack;
+	int i;
+
+	if (!stack) {
+		if (task)
+			stack = (unsigned long *)task->thread.esp0;
+		else
+			stack = (unsigned long *)&stack;
+	}
+	endstack = (unsigned long *)(((unsigned long)stack + THREAD_SIZE - 1) & -THREAD_SIZE);
 
 	printk("Stack from %08lx:", (unsigned long)stack);
+	p = stack;
 	for (i = 0; i < kstack_depth_to_print; i++) {
-		if (stack + 1 > endstack)
+		if (p + 1 > endstack)
 			break;
 		if (i % 8 == 0)
 			printk("\n       ");
-		printk(" %08lx", *stack++);
+		printk(" %08lx", *p++);
 	}
 	printk("\n");
-	show_trace((unsigned long *)addr);
-
-	printk("Code: ");
-	for (i = 0; i < 10; i++)
-		printk("%04x ", 0xffff & ((short *) fp->ptregs.pc)[i]);
-	printk ("\n");
+	show_trace(stack);
 }
 
 /*
@@ -941,21 +996,34 @@ static void show_stack(struct frame *fp)
  */
 void dump_stack(void)
 {
-	show_stack(0);
+	unsigned long stack;
+
+	show_trace(&stack);
 }
+
+EXPORT_SYMBOL(dump_stack);
+
+/*
+ * The vector number returned in the frame pointer may also contain
+ * the "fs" (Fault Status) bits on ColdFire. These are in the bottom
+ * 2 bits, and upper 2 bits. So we need to mask out the real vector
+ * number before using it in comparisons. You don't need to do this on
+ * real 68k parts, but it won't hurt either.
+ */
 
 void bad_super_trap (struct frame *fp)
 {
+	int vector = (fp->ptregs.vector >> 2) & 0xff;
+
 	console_verbose();
-	if (fp->ptregs.vector < 4*sizeof(vec_names)/sizeof(vec_names[0]))
+	if (vector < ARRAY_SIZE(vec_names))
 		printk ("*** %s ***   FORMAT=%X\n",
-			vec_names[(fp->ptregs.vector) >> 2],
+			vec_names[vector],
 			fp->ptregs.format);
 	else
 		printk ("*** Exception %d ***   FORMAT=%X\n",
-			(fp->ptregs.vector) >> 2, 
-			fp->ptregs.format);
-	if (fp->ptregs.vector >> 2 == VEC_ADDRERR && CPU_IS_020_OR_030) {
+			vector, fp->ptregs.format);
+	if (vector == VEC_ADDRERR && CPU_IS_020_OR_030) {
 		unsigned short ssw = fp->un.fmtb.ssw;
 
 		printk ("SSW=%#06x  ", ssw);
@@ -974,26 +1042,28 @@ void bad_super_trap (struct frame *fp)
 				fp->un.fmtb.daddr, space_names[ssw & DFC],
 				fp->ptregs.pc);
 	}
-	printk ("Current process id is %d\n", current->pid);
+	printk ("Current process id is %d\n", task_pid_nr(current));
 	die_if_kernel("BAD KERNEL TRAP", &fp->ptregs, 0);
 }
 
 asmlinkage void trap_c(struct frame *fp)
 {
 	int sig;
+	int vector = (fp->ptregs.vector >> 2) & 0xff;
 	siginfo_t info;
 
 	if (fp->ptregs.sr & PS_S) {
-		if ((fp->ptregs.vector >> 2) == VEC_TRACE) {
-			/* traced a trapping instruction */
-			current->ptrace |= PT_DTRACE;
-		} else
+		if (vector == VEC_TRACE) {
+			/* traced a trapping instruction on a 68020/30,
+			 * real exception will be executed afterwards.
+			 */
+		} else if (!handle_kernel_fault(&fp->ptregs))
 			bad_super_trap(fp);
 		return;
 	}
 
 	/* send the appropriate signal to the user program */
-	switch ((fp->ptregs.vector) >> 2) {
+	switch (vector) {
 	    case VEC_ADDRERR:
 		info.si_code = BUS_ADRALN;
 		sig = SIGBUS;
@@ -1105,17 +1175,14 @@ void die_if_kernel (char *str, struct pt_regs *fp, int nr)
 
 	console_verbose();
 	printk("%s: %08x\n",str,nr);
-	printk("PC: [<%08lx>]\nSR: %04x  SP: %p  a2: %08lx\n",
-	       fp->pc, fp->sr, fp, fp->a2);
-	printk("d0: %08lx    d1: %08lx    d2: %08lx    d3: %08lx\n",
-	       fp->d0, fp->d1, fp->d2, fp->d3);
-	printk("d4: %08lx    d5: %08lx    a0: %08lx    a1: %08lx\n",
-	       fp->d4, fp->d5, fp->a0, fp->a1);
-
-	printk("Process %s (pid: %d, stackpage=%08lx)\n",
-		current->comm, current->pid, PAGE_SIZE+(unsigned long)current);
-	show_stack((struct frame *)fp);
+	show_registers(fp);
+	add_taint(TAINT_DIE);
 	do_exit(SIGSEGV);
+}
+
+asmlinkage void set_esp0(unsigned long ssp)
+{
+	current->thread.esp0 = ssp;
 }
 
 /*

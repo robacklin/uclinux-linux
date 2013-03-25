@@ -2,8 +2,6 @@
  *
  * Written by David Howells (dhowells@redhat.com).
  * Derived from asm-i386/semaphore.h
- *
- * Trylock by Brian Watson (Brian.J.Watson@compaq.com).
  */
 
 #ifndef _LINUX_RWSEM_H
@@ -11,96 +9,125 @@
 
 #include <linux/linkage.h>
 
-#define RWSEM_DEBUG 0
-
-#ifdef __KERNEL__
-
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <asm/system.h>
-#include <asm/atomic.h>
+#include <linux/list.h>
+#include <linux/spinlock.h>
+
+#include <linux/atomic.h>
 
 struct rw_semaphore;
 
 #ifdef CONFIG_RWSEM_GENERIC_SPINLOCK
 #include <linux/rwsem-spinlock.h> /* use a generic implementation */
 #else
-#include <asm/rwsem.h> /* use an arch-specific implementation */
+/* All arch specific implementations share the same struct */
+struct rw_semaphore {
+	long			count;
+	raw_spinlock_t		wait_lock;
+	struct list_head	wait_list;
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map	dep_map;
+#endif
+};
+
+extern struct rw_semaphore *rwsem_down_read_failed(struct rw_semaphore *sem);
+extern struct rw_semaphore *rwsem_down_write_failed(struct rw_semaphore *sem);
+extern struct rw_semaphore *rwsem_wake(struct rw_semaphore *);
+extern struct rw_semaphore *rwsem_downgrade_wake(struct rw_semaphore *sem);
+
+/* Include the arch specific part */
+#include <asm/rwsem.h>
+
+/* In all implementations count != 0 means locked */
+static inline int rwsem_is_locked(struct rw_semaphore *sem)
+{
+	return sem->count != 0;
+}
+
 #endif
 
-#ifndef rwsemtrace
-#if RWSEM_DEBUG
-extern void FASTCALL(rwsemtrace(struct rw_semaphore *sem, const char *str));
+/* Common initializer macros and functions */
+
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+# define __RWSEM_DEP_MAP_INIT(lockname) , .dep_map = { .name = #lockname }
 #else
-#define rwsemtrace(SEM,FMT)
+# define __RWSEM_DEP_MAP_INIT(lockname)
 #endif
-#endif
+
+#define __RWSEM_INITIALIZER(name)			\
+	{ RWSEM_UNLOCKED_VALUE,				\
+	  __RAW_SPIN_LOCK_UNLOCKED(name.wait_lock),	\
+	  LIST_HEAD_INIT((name).wait_list)		\
+	  __RWSEM_DEP_MAP_INIT(name) }
+
+#define DECLARE_RWSEM(name) \
+	struct rw_semaphore name = __RWSEM_INITIALIZER(name)
+
+extern void __init_rwsem(struct rw_semaphore *sem, const char *name,
+			 struct lock_class_key *key);
+
+#define init_rwsem(sem)						\
+do {								\
+	static struct lock_class_key __key;			\
+								\
+	__init_rwsem((sem), #sem, &__key);			\
+} while (0)
 
 /*
  * lock for reading
  */
-static inline void down_read(struct rw_semaphore *sem)
-{
-	rwsemtrace(sem,"Entering down_read");
-	__down_read(sem);
-	rwsemtrace(sem,"Leaving down_read");
-}
+extern void down_read(struct rw_semaphore *sem);
 
 /*
  * trylock for reading -- returns 1 if successful, 0 if contention
  */
-static inline int down_read_trylock(struct rw_semaphore *sem)
-{
-	int ret;
-	rwsemtrace(sem,"Entering down_read_trylock");
-	ret = __down_read_trylock(sem);
-	rwsemtrace(sem,"Leaving down_read_trylock");
-	return ret;
-}
+extern int down_read_trylock(struct rw_semaphore *sem);
 
 /*
  * lock for writing
  */
-static inline void down_write(struct rw_semaphore *sem)
-{
-	rwsemtrace(sem,"Entering down_write");
-	__down_write(sem);
-	rwsemtrace(sem,"Leaving down_write");
-}
+extern void down_write(struct rw_semaphore *sem);
 
 /*
  * trylock for writing -- returns 1 if successful, 0 if contention
  */
-static inline int down_write_trylock(struct rw_semaphore *sem)
-{
-	int ret;
-	rwsemtrace(sem,"Entering down_write_trylock");
-	ret = __down_write_trylock(sem);
-	rwsemtrace(sem,"Leaving down_write_trylock");
-	return ret;
-}
+extern int down_write_trylock(struct rw_semaphore *sem);
 
 /*
  * release a read lock
  */
-static inline void up_read(struct rw_semaphore *sem)
-{
-	rwsemtrace(sem,"Entering up_read");
-	__up_read(sem);
-	rwsemtrace(sem,"Leaving up_read");
-}
+extern void up_read(struct rw_semaphore *sem);
 
 /*
  * release a write lock
  */
-static inline void up_write(struct rw_semaphore *sem)
-{
-	rwsemtrace(sem,"Entering up_write");
-	__up_write(sem);
-	rwsemtrace(sem,"Leaving up_write");
-}
+extern void up_write(struct rw_semaphore *sem);
 
+/*
+ * downgrade write lock to read lock
+ */
+extern void downgrade_write(struct rw_semaphore *sem);
 
-#endif /* __KERNEL__ */
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+/*
+ * nested locking. NOTE: rwsems are not allowed to recurse
+ * (which occurs if the same task tries to acquire the same
+ * lock instance multiple times), but multiple locks of the
+ * same lock class might be taken, if the order of the locks
+ * is always the same. This ordering rule can be expressed
+ * to lockdep via the _nested() APIs, but enumerating the
+ * subclasses that are used. (If the nesting relationship is
+ * static then another method for expressing nested locking is
+ * the explicit definition of lock class keys and the use of
+ * lockdep_set_class() at lock initialization time.
+ * See Documentation/lockdep-design.txt for more details.)
+ */
+extern void down_read_nested(struct rw_semaphore *sem, int subclass);
+extern void down_write_nested(struct rw_semaphore *sem, int subclass);
+#else
+# define down_read_nested(sem, subclass)		down_read(sem)
+# define down_write_nested(sem, subclass)	down_write(sem)
+#endif
+
 #endif /* _LINUX_RWSEM_H */

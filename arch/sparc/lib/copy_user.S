@@ -11,10 +11,10 @@
  * Returns 0 if successful, otherwise count of bytes not copied yet
  */
 
-#include <asm/cprefix.h>
 #include <asm/ptrace.h>
 #include <asm/asmmacro.h>
 #include <asm/page.h>
+#include <asm/thread_info.h>
 
 /* Work around cpp -rob */
 #define ALLOC #alloc
@@ -118,7 +118,7 @@
 	.globl  __copy_user_begin
 __copy_user_begin:
 
-	.globl	C_LABEL(__copy_user)
+	.globl	__copy_user
 dword_align:
 	andcc	%o1, 1, %g0
 	be	4f
@@ -145,7 +145,7 @@ dword_align:
 	b	3f
 	 add	%o0, 2, %o0
 
-C_LABEL(__copy_user):	/* %o0=dst %o1=src %o2=len */
+__copy_user:	/* %o0=dst %o1=src %o2=len */
 	xor	%o0, %o1, %o4
 1:
 	andcc	%o4, 3, %o5
@@ -367,6 +367,9 @@ fixupretl:
 	blu	1f
 	 cmp	%o1, %g1
 	bgeu	1f
+	 ld	[%g6 + TI_PREEMPT], %g1
+	cmp	%g1, 0
+	bne	1f
 	 nop
 	save	%sp, -64, %sp
 	mov	%i0, %o0

@@ -22,32 +22,19 @@
  *
  *-----------------------------------------------------------------------------
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. The name of the author may not be used to endorse or promote products
- *    derived from this software without specific prior written permission.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
- * combined work to also be released under the terms of the GPL, the terms
- * and conditions of this License will apply in addition to those of the
- * GPL with the exception of any terms or conditions of this License that
- * conflict with, or are expressly prohibited by, the GPL.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHORS AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 
 /*
@@ -210,12 +197,6 @@ struct SYM_FWB_SCR {
 	u32 bad_status		[  7];
 	u32 wsr_ma_helper	[  4];
 
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-	/* Unknown direction handling */
-	u32 data_io		[  2];
-	u32 data_io_com		[  8];
-	u32 data_io_out		[  7];
-#endif
 	/* Data area */
 	u32 zero		[  1];
 	u32 scratch		[  1];
@@ -234,10 +215,6 @@ struct SYM_FWB_SCR {
 struct SYM_FWZ_SCR {
 	u32 snooptest		[  9];
 	u32 snoopend		[  2];
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	u32 start_ram		[  1];
-	u32 scripta0_ba		[  4];
-#endif
 };
 
 static struct SYM_FWA_SCR SYM_FWA_SCR = {
@@ -340,7 +317,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 	/*
 	 *  Now there are 4 possibilities:
 	 *
-	 *  (1) The chip looses arbitration.
+	 *  (1) The chip loses arbitration.
 	 *  This is ok, because it will try again,
 	 *  when the bus becomes idle.
 	 *  (But beware of the timeout function!)
@@ -1043,7 +1020,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 	 *  It shall be a tagged command.
 	 *  Read SIMPLE+TAG.
 	 *  The C code will deal with errors.
-	 *  Agressive optimization, is'nt it? :)
+	 *  Aggressive optimization, isn't it? :)
 	 */
 	SCR_MOVE_ABS (2) ^ SCR_MSG_IN,
 		HADDR_1 (msgin),
@@ -1067,7 +1044,7 @@ static struct SYM_FWA_SCR SYM_FWA_SCR = {
 		RADDR_1 (dsa),
 	/*
 	 *  The SIDL still contains the TAG value.
-	 *  Agressive optimization, isn't it? :):)
+	 *  Aggressive optimization, isn't it? :):)
 	 */
 	SCR_REG_SFBR (sidl, SCR_SHL, 0),
 		0,
@@ -1361,7 +1338,7 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 	 *  some target to reset or some disconnected 
 	 *  job to abort. Since error recovery is a serious 
 	 *  busyness, we will really reset the SCSI BUS, if 
-	 *  case of a SCSI interrupt occuring in this path.
+	 *  case of a SCSI interrupt occurring in this path.
 	 */
 
 #ifdef SYM_CONF_TARGET_ROLE_SUPPORT
@@ -1472,7 +1449,7 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 		PADDR_B (msg_weird_seen),
 	/*
 	 *  We donnot handle extended messages from SCRIPTS.
-	 *  Read the amount of data correponding to the 
+	 *  Read the amount of data corresponding to the 
 	 *  message length and call the C code.
 	 */
 	SCR_COPY (1),
@@ -1764,48 +1741,6 @@ static struct SYM_FWB_SCR SYM_FWB_SCR = {
 	SCR_JUMP,
 		PADDR_A (dispatch),
 
-#ifdef SYM_OPT_HANDLE_DIR_UNKNOWN
-}/*-------------------------< DATA_IO >--------------------------*/,{
-	/*
-	 *  We jump here if the data direction was unknown at the 
-	 *  time we had to queue the command to the scripts processor.
-	 *  Pointers had been set as follow in this situation:
-	 *    savep   -->   DATA_IO
-	 *    lastp   -->   start pointer when DATA_IN
-	 *    wlastp  -->   start pointer when DATA_OUT
-	 *  This script sets savep and lastp according to the 
-	 *  direction chosen by the target.
-	 */
-	SCR_JUMP ^ IFTRUE (WHEN (SCR_DATA_OUT)),
-		PADDR_B (data_io_out),
-}/*-------------------------< DATA_IO_COM >----------------------*/,{
-	/*
-	 *  Direction is DATA IN.
-	 */
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.lastp),
-		HADDR_1 (ccb_head.savep),
-	/*
-	 *  Jump to the SCRIPTS according to actual direction.
-	 */
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.savep),
-		RADDR_1 (temp),
-	SCR_RETURN,
-		0,
-}/*-------------------------< DATA_IO_OUT >----------------------*/,{
-	/*
-	 *  Direction is DATA OUT.
-	 */
-	SCR_REG_REG (HF_REG, SCR_AND, (~HF_DATA_IN)),
-		0,
-	SCR_COPY  (4),
-		HADDR_1 (ccb_head.wlastp),
-		HADDR_1 (ccb_head.lastp),
-	SCR_JUMP,
-		PADDR_B(data_io_com),
-#endif /* SYM_OPT_HANDLE_DIR_UNKNOWN */
-
 }/*-------------------------< ZERO >-----------------------------*/,{
 	SCR_DATA_ZERO,
 }/*-------------------------< SCRATCH >--------------------------*/,{
@@ -1851,24 +1786,5 @@ static struct SYM_FWZ_SCR SYM_FWZ_SCR = {
 	 */
 	SCR_INT,
 		99,
-#ifdef SYM_OPT_NO_BUS_MEMORY_MAPPING
-	/*
-	 *  We may use MEMORY MOVE instructions to load the on chip-RAM,
-	 *  if it happens that mapping PCI memory is not possible.
-	 *  But writing the RAM from the CPU is the preferred method, 
-	 *  since PCI 2.2 seems to disallow PCI self-mastering.
-	 */
-}/*-------------------------< START_RAM >------------------------*/,{
-	/*
-	 *  Load the script into on-chip RAM, 
-	 *  and jump to start point.
-	 */
-	SCR_COPY (sizeof(struct SYM_FWA_SCR)),
-}/*-------------------------< SCRIPTA0_BA >----------------------*/,{
-		0,
-		PADDR_A (start),
-	SCR_JUMP,
-		PADDR_A (init),
-#endif /* SYM_OPT_NO_BUS_MEMORY_MAPPING */
 }/*--------------------------<>----------------------------------*/
 };

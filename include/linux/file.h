@@ -5,73 +5,38 @@
 #ifndef __LINUX_FILE_H
 #define __LINUX_FILE_H
 
-extern void FASTCALL(fput(struct file *));
-extern struct file * FASTCALL(fget(unsigned int fd));
- 
-static inline int get_close_on_exec(unsigned int fd)
+#include <linux/compiler.h>
+#include <linux/types.h>
+#include <linux/posix_types.h>
+
+struct file;
+
+extern void fput(struct file *);
+
+struct file_operations;
+struct vfsmount;
+struct dentry;
+struct path;
+extern struct file *alloc_file(struct path *, fmode_t mode,
+	const struct file_operations *fop);
+
+static inline void fput_light(struct file *file, int fput_needed)
 {
-	struct files_struct *files = current->files;
-	int res;
-	read_lock(&files->file_lock);
-	res = FD_ISSET(fd, files->close_on_exec);
-	read_unlock(&files->file_lock);
-	return res;
+	if (fput_needed)
+		fput(file);
 }
 
-static inline void set_close_on_exec(unsigned int fd, int flag)
-{
-	struct files_struct *files = current->files;
-	write_lock(&files->file_lock);
-	if (flag)
-		FD_SET(fd, files->close_on_exec);
-	else
-		FD_CLR(fd, files->close_on_exec);
-	write_unlock(&files->file_lock);
-}
-
-static inline struct file * fcheck_files(struct files_struct *files, unsigned int fd)
-{
-	struct file * file = NULL;
-
-	if (fd < files->max_fds)
-		file = files->fd[fd];
-	return file;
-}
-
-/*
- * Check whether the specified fd has an open file.
- */
-static inline struct file * fcheck(unsigned int fd)
-{
-	struct file * file = NULL;
-	struct files_struct *files = current->files;
-
-	if (fd < files->max_fds)
-		file = files->fd[fd];
-	return file;
-}
-
+extern struct file *fget(unsigned int fd);
+extern struct file *fget_light(unsigned int fd, int *fput_needed);
+extern struct file *fget_raw(unsigned int fd);
+extern struct file *fget_raw_light(unsigned int fd, int *fput_needed);
+extern void set_close_on_exec(unsigned int fd, int flag);
 extern void put_filp(struct file *);
-
+extern int alloc_fd(unsigned start, unsigned flags);
 extern int get_unused_fd(void);
+#define get_unused_fd_flags(flags) alloc_fd(0, (flags))
+extern void put_unused_fd(unsigned int fd);
 
-static inline void __put_unused_fd(struct files_struct *files, unsigned int fd)
-{
-	FD_CLR(fd, files->open_fds);
-	if (fd < files->next_fd)
-		files->next_fd = fd;
-}
-
-static inline void put_unused_fd(unsigned int fd)
-{
-	struct files_struct *files = current->files;
-
-	write_lock(&files->file_lock);
-	__put_unused_fd(files, fd);
-	write_unlock(&files->file_lock);
-}
-
-void fd_install(unsigned int fd, struct file * file);
-void put_files_struct(struct files_struct *fs);
+extern void fd_install(unsigned int fd, struct file *file);
 
 #endif /* __LINUX_FILE_H */

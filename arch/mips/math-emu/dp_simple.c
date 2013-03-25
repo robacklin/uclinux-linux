@@ -3,8 +3,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -48,16 +47,20 @@ ieee754dp ieee754dp_neg(ieee754dp x)
 	CLEARCX;
 	FLUSHXDP;
 
-	if (xc == IEEE754_CLASS_SNAN) {
-		SETCX(IEEE754_INVALID_OPERATION);
-		return ieee754dp_nanxcpt(ieee754dp_indef(), "neg");
-	}
-
-	if (ieee754dp_isnan(x))	/* but not infinity */
-		return ieee754dp_nanxcpt(x, "neg", x);
-
+	/*
+	 * Invert the sign ALWAYS to prevent an endless recursion on
+	 * pow() in libc.
+	 */
 	/* quick fix up */
 	DPSIGN(x) ^= 1;
+
+	if (xc == IEEE754_CLASS_SNAN) {
+		ieee754dp y = ieee754dp_indef();
+		SETCX(IEEE754_INVALID_OPERATION);
+		DPSIGN(y) = DPSIGN(x);
+		return ieee754dp_nanxcpt(y, "neg");
+	}
+
 	return x;
 }
 
@@ -70,15 +73,13 @@ ieee754dp ieee754dp_abs(ieee754dp x)
 	CLEARCX;
 	FLUSHXDP;
 
+	/* Clear sign ALWAYS, irrespective of NaN */
+	DPSIGN(x) = 0;
+
 	if (xc == IEEE754_CLASS_SNAN) {
 		SETCX(IEEE754_INVALID_OPERATION);
-		return ieee754dp_nanxcpt(ieee754dp_indef(), "neg");
+		return ieee754dp_nanxcpt(ieee754dp_indef(), "abs");
 	}
 
-	if (ieee754dp_isnan(x))	/* but not infinity */
-		return ieee754dp_nanxcpt(x, "abs", x);
-
-	/* quick fix up */
-	DPSIGN(x) = 0;
 	return x;
 }

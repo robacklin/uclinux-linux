@@ -1,10 +1,10 @@
-/* $Id: jade_irq.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
+/* $Id: jade_irq.c,v 1.7.2.4 2004/02/11 13:21:34 keil Exp $
  *
  * Low level JADE IRQ stuff (derived from original hscx_irq.c)
  *
  * Author       Roland Klabunde
  * Copyright    by Roland Klabunde   <R.Klabunde@Berkom.de>
- * 
+ *
  * This software may be used and distributed according to the terms
  * of the GNU General Public License, incorporated herein by reference.
  *
@@ -13,33 +13,28 @@
 static inline void
 waitforCEC(struct IsdnCardState *cs, int jade, int reg)
 {
-  	int to = 50;
-  	int mask = (reg == jade_HDLC_XCMD ? jadeSTAR_XCEC : jadeSTAR_RCEC);
-  	while ((READJADE(cs, jade, jade_HDLC_STAR) & mask) && to) {
-  		udelay(1);
-  		to--;
-  	}
-  	if (!to)
-  		printk(KERN_WARNING "HiSax: waitforCEC (jade) timeout\n");
+	int to = 50;
+	int mask = (reg == jade_HDLC_XCMD ? jadeSTAR_XCEC : jadeSTAR_RCEC);
+	while ((READJADE(cs, jade, jade_HDLC_STAR) & mask) && to) {
+		udelay(1);
+		to--;
+	}
+	if (!to)
+		printk(KERN_WARNING "HiSax: waitforCEC (jade) timeout\n");
 }
 
 
 static inline void
 waitforXFW(struct IsdnCardState *cs, int jade)
 {
-  	/* Does not work on older jade versions, don't care */
+	/* Does not work on older jade versions, don't care */
 }
 
 static inline void
 WriteJADECMDR(struct IsdnCardState *cs, int jade, int reg, u_char data)
 {
-	long flags;
-
-	save_flags(flags);
-	cli();
 	waitforCEC(cs, jade, reg);
 	WRITEJADE(cs, jade, reg, data);
-	restore_flags(flags);
 }
 
 
@@ -49,7 +44,6 @@ jade_empty_fifo(struct BCState *bcs, int count)
 {
 	u_char *ptr;
 	struct IsdnCardState *cs = bcs->cs;
-	long flags;
 
 	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
 		debugl1(cs, "jade_empty_fifo");
@@ -63,11 +57,8 @@ jade_empty_fifo(struct BCState *bcs, int count)
 	}
 	ptr = bcs->hw.hscx.rcvbuf + bcs->hw.hscx.rcvidx;
 	bcs->hw.hscx.rcvidx += count;
-	save_flags(flags);
-	cli();
 	READJADEFIFO(cs, bcs->hw.hscx.hscx, ptr, count);
 	WriteJADECMDR(cs, bcs->hw.hscx.hscx, jade_HDLC_RCMD, jadeRCMD_RMC);
-	restore_flags(flags);
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
@@ -85,7 +76,6 @@ jade_fill_fifo(struct BCState *bcs)
 	int more, count;
 	int fifo_size = 32;
 	u_char *ptr;
-	long flags;
 
 	if ((cs->debug & L1_DEB_HSCX) && !(cs->debug & L1_DEB_HSCX_FIFO))
 		debugl1(cs, "jade_fill_fifo");
@@ -103,15 +93,12 @@ jade_fill_fifo(struct BCState *bcs)
 		count = bcs->tx_skb->len;
 
 	waitforXFW(cs, bcs->hw.hscx.hscx);
-	save_flags(flags);
-	cli();
 	ptr = bcs->tx_skb->data;
 	skb_pull(bcs->tx_skb, count);
 	bcs->tx_cnt -= count;
 	bcs->hw.hscx.count += count;
 	WRITEJADEFIFO(cs, bcs->hw.hscx.hscx, ptr, count);
-	WriteJADECMDR(cs, bcs->hw.hscx.hscx, jade_HDLC_XCMD, more ? jadeXCMD_XF : (jadeXCMD_XF|jadeXCMD_XME));
-	restore_flags(flags);
+	WriteJADECMDR(cs, bcs->hw.hscx.hscx, jade_HDLC_XCMD, more ? jadeXCMD_XF : (jadeXCMD_XF | jadeXCMD_XME));
 	if (cs->debug & L1_DEB_HSCX_FIFO) {
 		char *t = bcs->blog;
 
@@ -123,7 +110,7 @@ jade_fill_fifo(struct BCState *bcs)
 }
 
 
-static inline void
+static void
 jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 {
 	u_char r;
@@ -132,7 +119,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 	int fifo_size = 32;
 	int count;
 	int i_jade = (int) jade; /* To satisfy the compiler */
-	
+
 	if (!test_bit(BC_FLG_INIT, &bcs->Flag))
 		return;
 
@@ -141,13 +128,13 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 		if ((r & 0xf0) != 0xa0) {
 			if (!(r & 0x80))
 				if (cs->debug & L1_DEB_WARN)
-					debugl1(cs, "JADE %s invalid frame", (jade ? "B":"A"));
+					debugl1(cs, "JADE %s invalid frame", (jade ? "B" : "A"));
 			if ((r & 0x40) && bcs->mode)
 				if (cs->debug & L1_DEB_WARN)
-					debugl1(cs, "JADE %c RDO mode=%d", 'A'+jade, bcs->mode);
+					debugl1(cs, "JADE %c RDO mode=%d", 'A' + jade, bcs->mode);
 			if (!(r & 0x20))
 				if (cs->debug & L1_DEB_WARN)
-					debugl1(cs, "JADE %c CRC error", 'A'+jade);
+					debugl1(cs, "JADE %c CRC error", 'A' + jade);
 			WriteJADECMDR(cs, jade, jade_HDLC_RCMD, jadeRCMD_RMC);
 		} else {
 			count = READJADE(cs, i_jade, jade_HDLC_RBCL) & 0x1F;
@@ -158,7 +145,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 				if (cs->debug & L1_DEB_HSCX_FIFO)
 					debugl1(cs, "HX Frame %d", count);
 				if (!(skb = dev_alloc_skb(count)))
-					printk(KERN_WARNING "JADE %s receive out of memory\n", (jade ? "B":"A"));
+					printk(KERN_WARNING "JADE %s receive out of memory\n", (jade ? "B" : "A"));
 				else {
 					memcpy(skb_put(skb, count), bcs->hw.hscx.rcvbuf, count);
 					skb_queue_tail(&bcs->rqueue, skb);
@@ -166,7 +153,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 			}
 		}
 		bcs->hw.hscx.rcvidx = 0;
-		jade_sched_event(bcs, B_RCVBUFREADY);
+		schedule_event(bcs, B_RCVBUFREADY);
 	}
 	if (val & 0x40) {	/* RPF */
 		jade_empty_fifo(bcs, fifo_size);
@@ -179,7 +166,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 				skb_queue_tail(&bcs->rqueue, skb);
 			}
 			bcs->hw.hscx.rcvidx = 0;
-			jade_sched_event(bcs, B_RCVBUFREADY);
+			schedule_event(bcs, B_RCVBUFREADY);
 		}
 	}
 	if (val & 0x10) {	/* XPR */
@@ -188,9 +175,14 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 				jade_fill_fifo(bcs);
 				return;
 			} else {
-				if (bcs->st->lli.l1writewakeup &&
-					(PACKET_NOACK != bcs->tx_skb->pkt_type))
-					bcs->st->lli.l1writewakeup(bcs->st, bcs->hw.hscx.count);
+				if (test_bit(FLG_LLI_L1WAKEUP, &bcs->st->lli.flag) &&
+				    (PACKET_NOACK != bcs->tx_skb->pkt_type)) {
+					u_long	flags;
+					spin_lock_irqsave(&bcs->aclock, flags);
+					bcs->ackcnt += bcs->hw.hscx.count;
+					spin_unlock_irqrestore(&bcs->aclock, flags);
+					schedule_event(bcs, B_ACKPENDING);
+				}
 				dev_kfree_skb_irq(bcs->tx_skb);
 				bcs->hw.hscx.count = 0;
 				bcs->tx_skb = NULL;
@@ -202,7 +194,7 @@ jade_interrupt(struct IsdnCardState *cs, u_char val, u_char jade)
 			jade_fill_fifo(bcs);
 		} else {
 			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
-			jade_sched_event(bcs, B_XMTBUFREADY);
+			schedule_event(bcs, B_XMTBUFREADY);
 		}
 	}
 }
@@ -212,7 +204,7 @@ jade_int_main(struct IsdnCardState *cs, u_char val, int jade)
 {
 	struct BCState *bcs;
 	bcs = cs->bcs + jade;
-	
+
 	if (val & jadeISR_RFO) {
 		/* handled with RDO */
 		val &= ~jadeISR_RFO;
@@ -224,21 +216,21 @@ jade_int_main(struct IsdnCardState *cs, u_char val, int jade)
 			jade_fill_fifo(bcs);
 		else {
 			/* Here we lost an TX interrupt, so
-			   * restart transmitting the whole frame.
+			 * restart transmitting the whole frame.
 			 */
 			if (bcs->tx_skb) {
-			   	skb_push(bcs->tx_skb, bcs->hw.hscx.count);
+				skb_push(bcs->tx_skb, bcs->hw.hscx.count);
 				bcs->tx_cnt += bcs->hw.hscx.count;
 				bcs->hw.hscx.count = 0;
 			}
 			WriteJADECMDR(cs, bcs->hw.hscx.hscx, jade_HDLC_XCMD, jadeXCMD_XRES);
 			if (cs->debug & L1_DEB_WARN)
-				debugl1(cs, "JADE %c EXIR %x Lost TX", 'A'+jade, val);
+				debugl1(cs, "JADE %c EXIR %x Lost TX", 'A' + jade, val);
 		}
 	}
-	if (val & (jadeISR_RME|jadeISR_RPF|jadeISR_XPR)) {
+	if (val & (jadeISR_RME | jadeISR_RPF | jadeISR_XPR)) {
 		if (cs->debug & L1_DEB_HSCX)
-			debugl1(cs, "JADE %c interrupt %x", 'A'+jade, val);
+			debugl1(cs, "JADE %c interrupt %x", 'A' + jade, val);
 		jade_interrupt(cs, val, jade);
 	}
 }

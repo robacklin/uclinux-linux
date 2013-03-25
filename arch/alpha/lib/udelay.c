@@ -1,14 +1,14 @@
-#include <linux/config.h>
-#include <linux/sched.h> /* for udelay's use of smp_processor_id */
-#include <asm/param.h>
-#include <asm/smp.h>
-#include <linux/delay.h>
-
 /*
  * Copyright (C) 1993, 2000 Linus Torvalds
  *
  * Delay routines, using a pre-computed "loops_per_jiffy" value.
  */
+
+#include <linux/module.h>
+#include <linux/sched.h> /* for udelay's use of smp_processor_id */
+#include <asm/param.h>
+#include <asm/smp.h>
+#include <linux/delay.h>
 
 /*
  * Use only for very small delays (< 1 msec). 
@@ -32,17 +32,10 @@ __delay(int loops)
 }
 
 #ifdef CONFIG_SMP
-#define LPJ	cpu_data[smp_processor_id()].loops_per_jiffy
+#define LPJ	 cpu_data[smp_processor_id()].loops_per_jiffy
 #else
-#define LPJ	loops_per_jiffy
+#define LPJ	 loops_per_jiffy
 #endif
-
-void
-ndelay(unsigned long nsecs)
-{
-	nsecs *= (((unsigned long)HZ << 32) / 1000000000) * LPJ;
-	__delay((long)nsecs >> 32);
-}
 
 void
 udelay(unsigned long usecs)
@@ -50,3 +43,12 @@ udelay(unsigned long usecs)
 	usecs *= (((unsigned long)HZ << 32) / 1000000) * LPJ;
 	__delay((long)usecs >> 32);
 }
+EXPORT_SYMBOL(udelay);
+
+void
+ndelay(unsigned long nsecs)
+{
+	nsecs *= (((unsigned long)HZ << 32) / 1000000000) * LPJ;
+	__delay((long)nsecs >> 32);
+}
+EXPORT_SYMBOL(ndelay);

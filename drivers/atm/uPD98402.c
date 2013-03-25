@@ -4,14 +4,14 @@
  
 
 #include <linux/module.h>
-#include <linux/sched.h> /* for jiffies */
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/atmdev.h>
 #include <linux/sonet.h>
 #include <linux/init.h>
+#include <linux/slab.h>
 #include <asm/uaccess.h>
-#include <asm/atomic.h>
+#include <linux/atomic.h>
 
 #include "uPD98402.h"
 
@@ -27,6 +27,7 @@ struct uPD98402_priv {
 	struct k_sonet_stats sonet_stats;/* link diagnostics */
 	unsigned char framing;		/* SONET/SDH framing */
 	int loop_mode;			/* loopback mode */
+	spinlock_t lock;
 };
 
 
@@ -36,7 +37,7 @@ struct uPD98402_priv {
 #define GET(reg) dev->ops->phy_get(dev,uPD98402_##reg)
 
 
-static int fetch_stats(struct atm_dev *dev,struct sonet_stats *arg,int zero)
+static int fetch_stats(struct atm_dev *dev,struct sonet_stats __user *arg,int zero)
 {
 	struct sonet_stats tmp;
  	int error = 0;
@@ -71,29 +72,27 @@ static int set_framing(struct atm_dev *dev,unsigned char framing)
 		default:
 			return -EINVAL;
 	}
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&PRIV(dev)->lock, flags);
 	PUT(set[0],C11T);
 	PUT(set[1],C12T);
 	PUT(set[2],C13T);
 	PUT((GET(MDR) & ~uPD98402_MDR_SS_MASK) | (set[3] <<
 	    uPD98402_MDR_SS_SHIFT),MDR);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&PRIV(dev)->lock, flags);
 	return 0;
 }
 
 
-static int get_sense(struct atm_dev *dev,u8 *arg)
+static int get_sense(struct atm_dev *dev,u8 __user *arg)
 {
 	unsigned long flags;
 	unsigned char s[3];
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&PRIV(dev)->lock, flags);
 	s[0] = GET(C11R);
 	s[1] = GET(C12R);
 	s[2] = GET(C13R);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&PRIV(dev)->lock, flags);
 	return (put_user(s[0], arg) || put_user(s[1], arg+1) ||
 	    put_user(s[2], arg+2) || put_user(0xff, arg+3) ||
 	    put_user(0xff, arg+4) || put_user(0xff, arg+5)) ? -EFAULT : 0;
@@ -133,29 +132,28 @@ static int set_loopback(struct atm_dev *dev,int mode)
 }
 
 
-static int uPD98402_ioctl(struct atm_dev *dev,unsigned int cmd,void *arg)
+static int uPD98402_ioctl(struct atm_dev *dev,unsigned int cmd,void __user *arg)
 {
 	switch (cmd) {
 
 		case SONET_GETSTATZ:
                 case SONET_GETSTAT:
-			return fetch_stats(dev,(struct sonet_stats *) arg,
-			    cmd == SONET_GETSTATZ);
+			return fetch_stats(dev,arg, cmd == SONET_GETSTATZ);
 		case SONET_SETFRAMING:
-			return set_framing(dev,(int) (long) arg);
+			return set_framing(dev, (int)(unsigned long)arg);
 		case SONET_GETFRAMING:
-			return put_user(PRIV(dev)->framing,(int *) arg) ?
+			return put_user(PRIV(dev)->framing,(int __user *)arg) ?
 			    -EFAULT : 0;
 		case SONET_GETFRSENSE:
 			return get_sense(dev,arg);
 		case ATM_SETLOOP:
-			return set_loopback(dev,(int) (long) arg);
+			return set_loopback(dev, (int)(unsigned long)arg);
 		case ATM_GETLOOP:
-			return put_user(PRIV(dev)->loop_mode,(int *) arg) ?
+			return put_user(PRIV(dev)->loop_mode,(int __user *)arg) ?
 			    -EFAULT : 0;
 		case ATM_QUERYLOOP:
 			return put_user(ATM_LM_LOC_PHY | ATM_LM_LOC_ATM |
-			    ATM_LM_RMT_PHY,(int *) arg) ? -EFAULT : 0;
+			    ATM_LM_RMT_PHY,(int __user *)arg) ? -EFAULT : 0;
 		default:
 			return -ENOIOCTLCMD;
 	}
@@ -212,8 +210,9 @@ static void uPD98402_int(struct atm_dev *dev)
 static int uPD98402_start(struct atm_dev *dev)
 {
 	DPRINTK("phy_start\n");
-	if (!(dev->phy_data = kmalloc(sizeof(struct uPD98402_priv),GFP_KERNEL)))
+	if (!(dev->dev_data = kmalloc(sizeof(struct uPD98402_priv),GFP_KERNEL)))
 		return -ENOMEM;
+	spin_lock_init(&PRIV(dev)->lock);
 	memset(&PRIV(dev)->sonet_stats,0,sizeof(struct k_sonet_stats));
 	(void) GET(PCR); /* clear performance events */
 	PUT(uPD98402_PFM_FJ,PCMR); /* ignore frequency adj */
@@ -239,14 +238,14 @@ static int uPD98402_stop(struct atm_dev *dev)
 
 
 static const struct atmphy_ops uPD98402_ops = {
-	start:		uPD98402_start,
-	ioctl:		uPD98402_ioctl,
-	interrupt:	uPD98402_int,
-	stop:		uPD98402_stop,
+	.start		= uPD98402_start,
+	.ioctl		= uPD98402_ioctl,
+	.interrupt	= uPD98402_int,
+	.stop		= uPD98402_stop,
 };
 
 
-int __init uPD98402_init(struct atm_dev *dev)
+int uPD98402_init(struct atm_dev *dev)
 {
 DPRINTK("phy_init\n");
 	dev->phy = &uPD98402_ops;
@@ -254,22 +253,13 @@ DPRINTK("phy_init\n");
 }
 
 
-#ifdef MODULE
 MODULE_LICENSE("GPL");
 
 EXPORT_SYMBOL(uPD98402_init);
 
- 
-int init_module(void)
+static __init int uPD98402_module_init(void)
 {
-	MOD_INC_USE_COUNT;
 	return 0;
 }
-
-
-void cleanup_module(void)
-{
-	/* Nay */
-}
- 
-#endif
+module_init(uPD98402_module_init);
+/* module_exit not defined so not unloadable */

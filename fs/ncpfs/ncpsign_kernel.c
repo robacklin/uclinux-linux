@@ -5,33 +5,32 @@
  *
  */
 
-#include <linux/config.h>
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 
 #include <linux/string.h>
 #include <linux/ncp.h>
+#include <linux/bitops.h>
+#include "ncp_fs.h"
 #include "ncpsign_kernel.h"
 
-#define rol32(i,c) (((((i)&0xffffffff)<<c)&0xffffffff)| \
-                    (((i)&0xffffffff)>>(32-c)))
 /* i386: 32-bit, little endian, handles mis-alignment */
 #ifdef __i386__
-#define GET_LE32(p) (*(int *)(p))
+#define GET_LE32(p) (*(const int *)(p))
 #define PUT_LE32(p,v) { *(int *)(p)=v; }
 #else
 /* from include/ncplib.h */
-#define BVAL(buf,pos) (((__u8 *)(buf))[pos])
+#define BVAL(buf,pos) (((const __u8 *)(buf))[pos])
 #define PVAL(buf,pos) ((unsigned)BVAL(buf,pos))
-#define BSET(buf,pos,val) (BVAL(buf,pos) = (val))
+#define BSET(buf,pos,val) (((__u8 *)(buf))[pos] = (val))
 
 static inline __u16
-WVAL_LH(__u8 * buf, int pos)
+WVAL_LH(const __u8 * buf, int pos)
 {
 	return PVAL(buf, pos) | PVAL(buf, pos + 1) << 8;
 }
 static inline __u32
-DVAL_LH(__u8 * buf, int pos)
+DVAL_LH(const __u8 * buf, int pos)
 {
 	return WVAL_LH(buf, pos) | WVAL_LH(buf, pos + 2) << 16;
 }
@@ -57,7 +56,7 @@ static void nwsign(char *r_data1, char *r_data2, char *outdata) {
  unsigned int w0,w1,w2,w3;
  static int rbit[4]={0, 2, 1, 3};
 #ifdef __i386__
- unsigned int *data2=(int *)r_data2;
+ unsigned int *data2=(unsigned int *)r_data2;
 #else
  unsigned int data2[16];
  for (i=0;i<16;i++)
@@ -93,19 +92,35 @@ static void nwsign(char *r_data1, char *r_data2, char *outdata) {
 
 /* Make a signature for the current packet and add it at the end of the */
 /* packet. */
-void sign_packet(struct ncp_server *server, int *size) {
- char data[64];
+void __sign_packet(struct ncp_server *server, const char *packet, size_t size, __u32 totalsize, void *sign_buff) {
+	unsigned char data[64];
 
- memset(data,0,64);
- memcpy(data,server->sign_root,8);
- PUT_LE32(data+8,(*size));
- memcpy(data+12,server->packet+sizeof(struct ncp_request_header)-1,
-  min_t(unsigned int,(*size)-sizeof(struct ncp_request_header)+1,52));
+	memcpy(data, server->sign_root, 8);
+	*(__u32*)(data + 8) = totalsize;
+	if (size < 52) {
+		memcpy(data + 12, packet, size);
+		memset(data + 12 + size, 0, 52 - size);
+	} else {
+		memcpy(data + 12, packet, 52);
+	}
+	nwsign(server->sign_last, data, server->sign_last);
+	memcpy(sign_buff, server->sign_last, 8);
+}
 
- nwsign(server->sign_last,data,server->sign_last);
+int sign_verify_reply(struct ncp_server *server, const char *packet, size_t size, __u32 totalsize, const void *sign_buff) {
+	unsigned char data[64];
+	unsigned char hash[16];
 
- memcpy(server->packet+(*size),server->sign_last,8);
- (*size)+=8;
+	memcpy(data, server->sign_root, 8);
+	*(__u32*)(data + 8) = totalsize;
+	if (size < 52) {
+		memcpy(data + 12, packet, size);
+		memset(data + 12 + size, 0, 52 - size);
+	} else {
+		memcpy(data + 12, packet, 52);
+	}
+	nwsign(server->sign_last, data, hash);
+	return memcmp(sign_buff, hash, 8);
 }
 
 #endif	/* CONFIG_NCPFS_PACKET_SIGNING */

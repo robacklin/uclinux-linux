@@ -7,39 +7,25 @@
  *
  */
 
-#include <linux/config.h>
 #include <linux/stddef.h>
-#include <linux/errno.h>
+#include <asm/errno.h>
 #include <linux/sysrq.h>
 #include <linux/ctype.h>
-#include <linux/interrupt.h>
 
 #include "ctrlchar.h"
 
 #ifdef CONFIG_MAGIC_SYSRQ
 static int ctrlchar_sysrq_key;
-static struct tq_struct ctrlchar_tq;
 
 static void
-ctrlchar_handle_sysrq(void *tty)
+ctrlchar_handle_sysrq(struct work_struct *work)
 {
-	handle_sysrq(ctrlchar_sysrq_key, NULL, NULL, (struct tty_struct*) tty);
+	handle_sysrq(ctrlchar_sysrq_key);
 }
+
+static DECLARE_WORK(ctrlchar_work, ctrlchar_handle_sysrq);
 #endif
 
-void
-ctrlchar_init(void)
-{
-#ifdef CONFIG_MAGIC_SYSRQ
-	static int init_done = 0;
- 
-	if (init_done++)
-		return;
-	INIT_LIST_HEAD(&ctrlchar_tq.list);
-	ctrlchar_tq.sync = 0;
-	ctrlchar_tq.routine = (void (*)(void *)) ctrlchar_handle_sysrq;
-#endif
-}
 
 /**
  * Check for special chars at start of input.
@@ -67,9 +53,7 @@ ctrlchar_handle(const unsigned char *buf, int len, struct tty_struct *tty)
 	/* racy */
 	if (len == 3 && buf[1] == '-') {
 		ctrlchar_sysrq_key = buf[2];
-		ctrlchar_tq.data = tty;
-		queue_task(&ctrlchar_tq, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&ctrlchar_work);
 		return CTRLCHAR_SYSRQ;
 	}
 #endif

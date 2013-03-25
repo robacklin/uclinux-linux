@@ -7,7 +7,7 @@
  *
  *  linux/arch/m68knommu/kernel/process.c
  *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@uClinux.org>,
+ *  Copyright (C) 1998  D. Jeff Dionne <jeff@ryeham.ee.ryerson.ca>,
  *                      Kenneth Albanowski <kjahds@kjahds.com>,
  *                      The Silver Hammer Group, Ltd.
  *
@@ -22,71 +22,52 @@
  * This file handles the architecture-dependent parts of process handling..
  */
 
-#include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
+#include <linux/interrupt.h>
 #include <linux/reboot.h>
+#include <linux/fs.h>
+#include <linux/slab.h>
 
 #include <asm/uaccess.h>
-#include <asm/system.h>
+#include <asm/traps.h>
 #include <asm/setup.h>
 #include <asm/pgtable.h>
 
-/*
- * Initial task structure. Make this a per-architecture thing,
- * because different architectures tend to have different
- * alignment requirements and potentially different initial
- * setup.
- */
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-struct mm_struct init_mm = INIT_MM(init_mm);
+void (*pm_power_off)(void) = NULL;
+EXPORT_SYMBOL(pm_power_off);
 
-union task_union init_task_union
-__attribute__((section(".data.init_task"), aligned(KTHREAD_SIZE)))
-	= { task: INIT_TASK(init_task_union.task) };
-
-asmlinkage void ret_from_exception(void);
+asmlinkage void ret_from_fork(void);
 
 /*
  * The idle loop on an H8/300..
  */
-#if !defined(CONFIG_GDB_EXEC)
+#if !defined(CONFIG_H8300H_SIM) && !defined(CONFIG_H8S_SIM)
 static void default_idle(void)
 {
-	while(1) {
-		if (!current->need_resched) {
-			sti();
-			__asm__("sleep");
-			cli();
-		}
-		schedule();
-	}
+	local_irq_disable();
+	if (!need_resched()) {
+		local_irq_enable();
+		/* XXX: race here! What if need_resched() gets set now? */
+		__asm__("sleep");
+	} else
+		local_irq_enable();
 }
-
-void (*idle)(void) = default_idle;
 #else
-static void gdb_idle(void)
+static void default_idle(void)
 {
-	while(1) {
-		if (current->need_resched)
-			schedule();
-	}
+	cpu_relax();
 }
-
-void (*idle)(void) = gdb_idle;
 #endif
+void (*idle)(void) = default_idle;
 
 /*
  * The idle thread. There's no useful work to be
@@ -96,50 +77,52 @@ void (*idle)(void) = gdb_idle;
  */
 void cpu_idle(void)
 {
-	/* endless idle loop with no priority at all */
-	init_idle();
-	current->nice = 20;
-	current->counter = -100;
-	idle();
+	while (1) {
+		while (!need_resched())
+			idle();
+		schedule_preempt_disabled();
+	}
 }
 
 void machine_restart(char * __unused)
 {
-	cli();
+	local_irq_disable();
 	__asm__("jmp @@0"); 
 }
 
 void machine_halt(void)
 {
-	cli();
+	local_irq_disable();
 	__asm__("sleep");
 	for (;;);
 }
 
 void machine_power_off(void)
 {
-	cli();
+	local_irq_disable();
 	__asm__("sleep");
 	for (;;);
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	printk("\n");
-	printk("PC: %08lx  Status: %02x\n",
+	printk("\nPC: %08lx  Status: %02x",
 	       regs->pc, regs->ccr);
-	printk("ORIG_ER0: %08lx ER0: %08lx ER1: %08lx\n",
+	printk("\nORIG_ER0: %08lx ER0: %08lx ER1: %08lx",
 	       regs->orig_er0, regs->er0, regs->er1);
-	printk("ER2: %08lx ER3: %08lx ER4: %08lx ER5: %08lx\n",
+	printk("\nER2: %08lx ER3: %08lx ER4: %08lx ER5: %08lx",
 	       regs->er2, regs->er3, regs->er4, regs->er5);
-	if (!(regs->ccr & 0x10))
+	printk("\nER6' %08lx ",regs->er6);
+	if (user_mode(regs))
 		printk("USP: %08lx\n", rdusp());
+	else
+		printk("\n");
 }
 
 /*
  * Create a kernel thread
  */
-int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 {
 	long retval;
 	long clone_arg;
@@ -163,7 +146,7 @@ int arch_kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 		"1:\n\t"
 		"mov.l er0,%0"
 		:"=r"(retval)
-		:"i"(__NR_clone),"g"(clone_arg),"r"(fn),"r"(arg),"i"(__NR_exit)
+		:"i"(__NR_clone),"g"(clone_arg),"g"(fn),"g"(arg),"i"(__NR_exit)
 		:"er0","er1","er2","er3");
 	set_fs (fs);
 	return retval;
@@ -187,7 +170,7 @@ asmlinkage int h8300_fork(struct pt_regs *regs)
 
 asmlinkage int h8300_vfork(struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(), regs, 0, NULL, NULL);
 }
 
 asmlinkage int h8300_clone(struct pt_regs *regs)
@@ -200,95 +183,53 @@ asmlinkage int h8300_clone(struct pt_regs *regs)
 	newsp = regs->er2;
 	if (!newsp)
 		newsp  = rdusp();
-	return do_fork(clone_flags, newsp, regs, 0);
+	return do_fork(clone_flags, newsp, regs, 0, NULL, NULL);
+
 }
 
-int copy_thread(int nr, unsigned long clone_flags,
+int copy_thread(unsigned long clone_flags,
                 unsigned long usp, unsigned long topstk,
 		 struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
-	struct switch_stack * childstack, *stack;
-	unsigned long stack_offset, *retp;
 
-	stack_offset = KTHREAD_SIZE - sizeof(struct pt_regs);
-	childregs = (struct pt_regs *) ((unsigned long)p + stack_offset);
+	childregs = (struct pt_regs *) (THREAD_SIZE + task_stack_page(p)) - 1;
 
 	*childregs = *regs;
-
-	retp = ((unsigned long *) regs);
-	stack = ((struct switch_stack *) retp) - 1;
-
-	childstack = ((struct switch_stack *) childregs) - 1;
-	*childstack = *stack;
+	childregs->retpc = (unsigned long) ret_from_fork;
 	childregs->er0 = 0;
-	childstack->retpc = (unsigned long) ret_from_exception;
 
 	p->thread.usp = usp;
-	p->thread.ksp = (unsigned long)childstack;
+	p->thread.ksp = (unsigned long)childregs;
 
 	return 0;
 }
 
 /*
- * fill in the user structure for a core dump..
- */
-void dump_thread(struct pt_regs * regs, struct user * dump)
-{
-	struct switch_stack *sw;
-
-/* changed the size calculations - should hopefully work better. lbt */
-	dump->magic = CMAGIC;
-	dump->start_code = 0;
-	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = ((unsigned long) current->mm->end_code) >> PAGE_SHIFT;
-	dump->u_dsize = ((unsigned long) (current->mm->brk +
-					  (PAGE_SIZE-1))) >> PAGE_SHIFT;
-	dump->u_dsize -= dump->u_tsize;
-	dump->u_ssize = 0;
-
-	dump->u_ar0 = (struct user_regs_struct *)(((int)(&dump->regs)) -((int)(dump)));
-	sw = ((struct switch_stack *)regs) - 1;
-	dump->regs.er0 = regs->er0;
-	dump->regs.er1 = regs->er1;
-	dump->regs.er2 = regs->er2;
-	dump->regs.er3 = regs->er3;
-	dump->regs.er4 = regs->er4;
-	dump->regs.er5 = regs->er5;
-	dump->regs.er6 = sw->er6;
-	dump->regs.orig_er0 = regs->orig_er0;
-	dump->regs.ccr = regs->ccr;
-	dump->regs.pc  = regs->pc;
-}
-
-/*
  * sys_execve() executes a new program.
  */
-asmlinkage int sys_execve(char *name, char **argv, char **envp, int dummy, ...)
+asmlinkage int sys_execve(const char *name,
+			  const char *const *argv,
+			  const char *const *envp,
+			  int dummy, ...)
 {
 	int error;
 	char * filename;
-	struct pt_regs *regs = (struct pt_regs *) ((unsigned char *)&dummy);
+	struct pt_regs *regs = (struct pt_regs *) ((unsigned char *)&dummy-4);
 
-	lock_kernel();
 	filename = getname(name);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
-		goto out;
+		return error;
 	error = do_execve(filename, argv, envp, regs);
 	putname(filename);
-out:
-	unlock_kernel();
 	return error;
 }
 
-/*
- * These bracket the sleeping functions..
- */
-extern void scheduling_functions_start_here(void);
-extern void scheduling_functions_end_here(void);
-#define first_sched	((unsigned long) scheduling_functions_start_here)
-#define last_sched	((unsigned long) scheduling_functions_end_here)
+unsigned long thread_saved_pc(struct task_struct *tsk)
+{
+	return ((struct pt_regs *)tsk->thread.esp0)->pc;
+}
 
 unsigned long get_wchan(struct task_struct *p)
 {
@@ -299,14 +240,13 @@ unsigned long get_wchan(struct task_struct *p)
 		return 0;
 
 	stack_page = (unsigned long)p;
-	fp = ((struct switch_stack *)p->thread.ksp)->er6;
+	fp = ((struct pt_regs *)p->thread.ksp)->er6;
 	do {
-		if (fp < stack_page+sizeof(struct task_struct) ||
+		if (fp < stack_page+sizeof(struct thread_info) ||
 		    fp >= 8184+stack_page)
 			return 0;
 		pc = ((unsigned long *)fp)[1];
-		/* FIXME: This depends on the order of these functions. */
-		if (pc < first_sched || pc >= last_sched)
+		if (!in_sched_functions(pc))
 			return pc;
 		fp = *(unsigned long *) fp;
 	} while (count++ < 16);

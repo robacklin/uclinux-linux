@@ -9,12 +9,11 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-#include <linux/sys.h>
-#include <linux/config.h>
 #include <linux/linkage.h>
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/ptrace.h>
+#include <asm/thread_info.h>
 #include <asm/spr-regs.h>
 
 #include <asm/errno.h>
@@ -22,21 +21,19 @@
 #
 # the break handler has its own stack
 #
-	.section	.bss.stack
+	.section	.bss..stack
 	.globl		__break_user_context
-	.balign		8192
+	.balign		THREAD_SIZE
 __break_stack:
-	.space		(8192 - (USER_CONTEXT_SIZE + REG__DEBUG_XTRA)) & ~7
-__break_stack_tos:
-	.space		REG__DEBUG_XTRA
-__break_user_context:
-	.space		USER_CONTEXT_SIZE
+	.space		THREAD_SIZE - FRV_FRAME0_SIZE
+__break_frame_0:
+	.space		FRV_FRAME0_SIZE
 
 #
 # miscellaneous variables
 #
 	.section	.bss
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	.globl		__break_tlb_miss_real_return_info
 __break_tlb_miss_real_return_info:
 	.balign		8
@@ -54,6 +51,10 @@ __break_trace_through_exceptions:
 #	setlo		%lo(CS2_ECS1+CS2_USERLED),gr30
 #	setlos		#~\val,\reg
 #	st		\reg,@(gr30,gr0)
+#	setlos		#0x5555,\reg
+#	sethi.p		%hi(0xffc00100),gr30
+#	setlo		%lo(0xffc00100),gr30
+#	sth		\reg,@(gr30,gr0)
 #	membar
 .endm
 
@@ -62,17 +63,17 @@ __break_trace_through_exceptions:
 # entry point for Break Exceptions/Interrupts
 #
 ###############################################################################
-	.text
+	.section	.text..break
 	.balign		4
 	.globl		__entry_break
 __entry_break:
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movgs		gr31,scr3
 #endif
 	LEDS		0x1001,gr31
 
-	sethi.p		%hi(__break_user_context),gr31
-	setlo		%lo(__break_user_context),gr31
+	sethi.p		%hi(__break_frame_0),gr31
+	setlo		%lo(__break_frame_0),gr31
 
 	stdi		gr2,@(gr31,#REG_GR(2))
 	movsg		ccr,gr3
@@ -80,7 +81,7 @@ __entry_break:
 
 	# catch the return from a TLB-miss handler that had single-step disabled
 	# traps will be enabled, so we have to do this now
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		bpcsr,gr3
 	sethi.p		%hi(__break_tlb_miss_return_breaks_here),gr2
 	setlo		%lo(__break_tlb_miss_return_breaks_here),gr2
@@ -155,7 +156,7 @@ __break_return_singlestep:
 	lddi.p		@(gr31,#REG_GR(2)),gr2
 	xor		gr31,gr31,gr31
 	movgs		gr0,brr
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr31
 #endif
 	rett		#1
@@ -165,10 +166,10 @@ __break_return_singlestep:
 # handle BREAK instruction in TLB-miss handler return path
 #
 ###############################################################################
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 __break_return_singlestep_tlbmiss:
 	LEDS		0x1100,gr2
-	
+
 	sethi.p		%hi(__break_tlb_miss_real_return_info),gr3
 	setlo		%lo(__break_tlb_miss_real_return_info),gr3
 	lddi		@(gr3,#0),gr2
@@ -196,12 +197,20 @@ __break_step:
 	movsg		bpcsr,gr2
 	sethi.p		%hi(__entry_kernel_external_interrupt),gr3
 	setlo		%lo(__entry_kernel_external_interrupt),gr3
-	subcc		gr2,gr3,gr0,icc0
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_uspace_external_interrupt),gr3
+	setlo.p		%lo(__entry_uspace_external_interrupt),gr3
 	beq		icc0,#2,__break_step_kernel_external_interrupt
-	sethi.p		%hi(__entry_uspace_external_interrupt),gr3
-	setlo		%lo(__entry_uspace_external_interrupt),gr3
-	subcc		gr2,gr3,gr0,icc0
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_kernel_external_interrupt_virtually_disabled),gr3
+	setlo.p		%lo(__entry_kernel_external_interrupt_virtually_disabled),gr3
 	beq		icc0,#2,__break_step_uspace_external_interrupt
+	subcc.p		gr2,gr3,gr0,icc0
+	sethi		%hi(__entry_kernel_external_interrupt_virtual_reenable),gr3
+	setlo.p		%lo(__entry_kernel_external_interrupt_virtual_reenable),gr3
+	beq		icc0,#2,__break_step_kernel_external_interrupt_virtually_disabled
+	subcc		gr2,gr3,gr0,icc0
+	beq		icc0,#2,__break_step_kernel_external_interrupt_virtual_reenable
 
 	LEDS		0x2007,gr2
 
@@ -250,6 +259,9 @@ __break_step_kernel_softprog_interrupt:
 # step through an external interrupt from kernel mode
 	.globl		__break_step_kernel_external_interrupt
 __break_step_kernel_external_interrupt:
+	# deal with virtual interrupt disablement
+	beq		icc2,#0,__break_step_kernel_external_interrupt_virtually_disabled
+
 	sethi.p		%hi(__entry_kernel_external_interrupt_reentry),gr3
 	setlo		%lo(__entry_kernel_external_interrupt_reentry),gr3
 
@@ -259,7 +271,7 @@ __break_return_as_kernel_prologue:
 	movgs		gr3,bpcsr
 
 	# do the bit we had to skip
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		ear0,gr2		/* EAR0 can get clobbered by gdb-stub (ICI/ICEI) */
 	movgs		gr2,scr2
 #endif
@@ -285,10 +297,68 @@ __break_return_as_kernel_prologue:
 	lddi.p		@(gr31,#REG_GR(2)),gr2
 	xor		gr31,gr31,gr31
 	movgs		gr0,brr
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr31
 #endif
 	rett		#1
+
+# we single-stepped into an interrupt handler whilst interrupts were merely virtually disabled
+# need to really disable interrupts, set flag, fix up and return
+__break_step_kernel_external_interrupt_virtually_disabled:
+	movsg		psr,gr2
+	andi		gr2,#~PSR_PIL,gr2
+	ori		gr2,#PSR_PIL_14,gr2	/* debugging interrupts only */
+	movgs		gr2,psr
+
+	ldi		@(gr31,#REG_CCR),gr3
+	movgs		gr3,ccr
+	subcc.p		gr0,gr0,gr0,icc2	/* leave Z set, clear C */
+
+	# exceptions must've been enabled and we must've been in supervisor mode
+	setlos		BPSR_BET|BPSR_BS,gr3
+	movgs		gr3,bpsr
+
+	# return to where the interrupt happened
+	movsg		pcsr,gr2
+	movgs		gr2,bpcsr
+
+	lddi.p		@(gr31,#REG_GR(2)),gr2
+
+	xor		gr31,gr31,gr31
+	movgs		gr0,brr
+#ifdef CONFIG_MMU
+	movsg		scr3,gr31
+#endif
+	rett		#1
+
+# we stepped through into the virtual interrupt reenablement trap
+#
+# we also want to single step anyway, but after fixing up so that we get an event on the
+# instruction after the broken-into exception returns
+	.globl		__break_step_kernel_external_interrupt_virtual_reenable
+__break_step_kernel_external_interrupt_virtual_reenable:
+	movsg		psr,gr2
+	andi		gr2,#~PSR_PIL,gr2
+	movgs		gr2,psr
+
+	ldi		@(gr31,#REG_CCR),gr3
+	movgs		gr3,ccr
+	subicc		gr0,#1,gr0,icc2		/* clear Z, set C */
+
+	# save the adjusted ICC2
+	movsg		ccr,gr3
+	sti		gr3,@(gr31,#REG_CCR)
+
+	# exceptions must've been enabled and we must've been in supervisor mode
+	setlos		BPSR_BET|BPSR_BS,gr3
+	movgs		gr3,bpsr
+
+	# return to where the trap happened
+	movsg		pcsr,gr2
+	movgs		gr2,bpcsr
+
+	# and then process the single step
+	bra		__break_continue
 
 # step through an internal exception from uspace mode
 	.globl		__break_step_uspace_softprog_interrupt
@@ -330,12 +400,12 @@ __break_return_as_uspace_prologue:
 	lddi.p		@(gr31,#REG_GR(2)),gr2
 	xor		gr31,gr31,gr31
 	movgs		gr0,brr
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr31
 #endif
 	rett		#1
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 # step through an ITLB-miss handler from user mode
 	.globl		__break_user_insn_tlb_miss
 __break_user_insn_tlb_miss:
@@ -346,7 +416,7 @@ __break_user_insn_tlb_miss:
 
 __break_tlb_miss_common:
 	LEDS		0x2101,gr2
-	
+
 	# cancel single-stepping mode
 	movsg		dcr,gr2
 	sethi.p		%hi(~DCR_SE),gr3
@@ -373,7 +443,7 @@ __break_tlb_miss_common:
 	movgs		gr2,psr
 
 	LEDS		0x2102,gr2
-	
+
 	ldi		@(gr31,#REG_CCR),gr3
 	movgs		gr3,ccr
 	lddi		@(gr31,#REG_GR(2)),gr2
@@ -483,6 +553,9 @@ __break_no_user_sstep:
 	movgs		gr2,bpsr
 
 	# return through remainder of the exception prologue
+	# - need to load gr23 with return handler address
+	sethi.p		%hi(__entry_return_from_user_exception),gr23
+	setlo		%lo(__entry_return_from_user_exception),gr23
 	sethi.p		%hi(__entry_common),gr3
 	setlo		%lo(__entry_common),gr3
 	movgs		gr3,bpcsr
@@ -494,7 +567,7 @@ __break_no_user_sstep:
 	lddi.p		@(gr31,#REG_GR(2)),gr2
 	xor		gr31,gr31,gr31
 	movgs		gr0,brr
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr31
 #endif
 	rett		#1
@@ -510,8 +583,8 @@ __break_continue:
 	# set up the kernel stack pointer
 	sti		sp,@(gr31,#REG_SP)
 
-	sethi.p		%hi(__break_stack_tos),sp
-	setlo		%lo(__break_stack_tos),sp
+	sethi.p		%hi(__break_frame_0),sp
+	setlo		%lo(__break_frame_0),sp
 
 	# finish building the exception frame
 	stdi		gr4 ,@(gr31,#REG_GR(4))
@@ -526,12 +599,12 @@ __break_continue:
 	stdi		gr22,@(gr31,#REG_GR(22))
 	stdi		gr24,@(gr31,#REG_GR(24))
 	stdi		gr26,@(gr31,#REG_GR(26))
-	sti		gr0 ,@(gr31,#REG_GR(28))		 /* NULL frame pointer */
+	sti		gr0 ,@(gr31,#REG_GR(28))	/* NULL frame pointer */
 	sti		gr29,@(gr31,#REG_GR(29))
 	sti		gr30,@(gr31,#REG_GR(30))
 	sti		gr8 ,@(gr31,#REG_ORIG_GR8)
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr19
 	sti		gr19,@(gr31,#REG_GR(31))
 #endif
@@ -576,9 +649,12 @@ __break_continue:
 	movsg		nmar,gr5
 	movsg		dcr,gr6
 
-	stdi		gr4 ,@(gr31,#REG_BRR)
-	sti		gr19,@(gr31,#REG_BPSR)
-	sti.p		gr6 ,@(gr31,#REG_DCR)
+	sethi.p		%hi(__debug_status),gr7
+	setlo		%lo(__debug_status),gr7
+
+	stdi		gr4 ,@(gr7,#DEBUG_BRR)
+	sti		gr19,@(gr7,#DEBUG_BPSR)
+	sti.p		gr6 ,@(gr7,#DEBUG_DCR)
 
 	# trap exceptions during break handling and disable h/w breakpoints/watchpoints
 	sethi		%hi(DCR_EBE),gr5
@@ -591,7 +667,8 @@ __break_continue:
 	# set up kernel global registers
 	sethi.p		%hi(__kernel_current_task),gr5
 	setlo		%lo(__kernel_current_task),gr5
-	ld.p		@(gr5,gr0),gr29
+	ld		@(gr5,gr0),gr29
+	ldi.p		@(gr29,#4),gr15		; __current_thread_info = current->thread_info
 
 	sethi		%hi(_gp),gr16
 	setlo.p		%lo(_gp),gr16
@@ -604,7 +681,7 @@ __break_continue:
 	LEDS		0x4007,gr2
 
 	or.p		gr0,gr0,fp
-	call		SYMBOL_NAME(debug_stub)
+	call		debug_stub
 
 	LEDS		0x403f,gr2
 
@@ -622,7 +699,10 @@ __break_continue:
 	lddi		@(gr31,#REG_PSR) ,gr22
 	ldi		@(gr31,#REG_PC)  ,gr21
 	ldi		@(gr31,#REG_TBR) ,gr20
-	ldi.p		@(gr31,#REG_DCR) ,gr6
+
+	sethi.p		%hi(__debug_status),gr6
+	setlo		%lo(__debug_status),gr6
+	ldi.p		@(gr6,#DEBUG_DCR) ,gr6
 
 	andi		gr22,#PSR_S,gr19		/* rebuild BPSR */
 	andi.p		gr22,#PSR_ET,gr5
@@ -641,7 +721,7 @@ __break_continue:
 
 	LEDS		0x407f,gr2
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	ldi		@(gr31,#REG_GR(31)),gr2
 	movgs		gr2,scr3
 #endif
@@ -665,7 +745,7 @@ __break_continue:
 
 	xor		gr31,gr31,gr31
 	movgs		gr0,brr
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	movsg		scr3,gr31
 #endif
 	rett		#1
@@ -685,6 +765,7 @@ gdbstub_console_write:
 #endif
 
 	# GDB stub BUG() trap
+	# GR8 is the proposed signal number
 	.globl		__debug_bug_trap
 __debug_bug_trap:
 	break
@@ -698,7 +779,7 @@ __break_hijack_kernel_event:
 __break_hijack_kernel_event_breaks_here:
 	nop
 
-#ifndef CONFIG_UCLINUX
+#ifdef CONFIG_MMU
 	# handle a return from TLB-miss that requires single-step reactivation
 	.globl		__break_tlb_miss_return_break
 __break_tlb_miss_return_break:

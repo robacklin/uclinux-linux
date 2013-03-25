@@ -38,7 +38,7 @@
  * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGES.
  *
- * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_macro_scan.l#7 $
+ * $Id: //depot/aic7xxx/aic7xxx/aicasm/aicasm_macro_scan.l#8 $
  *
  * $FreeBSD$
  */
@@ -66,6 +66,7 @@ static char string_buf[MAX_STR_CONST];
 static char *string_buf_ptr;
 static int  parren_count;
 static char buf[255];
+int  mmlineno;
 %}
 
 WORD		[A-Za-z_][-A-Za-z_0-9]*
@@ -76,8 +77,9 @@ MCARG		[^(), \t]+
 
 %%
 \n			{
-				++yylineno;
+				++mmlineno;
 			}
+\r			;
 <ARGLIST>{SPACE}	;
 <ARGLIST>\(		{
 				parren_count++;

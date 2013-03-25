@@ -15,7 +15,7 @@
  * 	    Phil Blundell <philb@gnu.org>
  *          Tim Waugh <tim@cyberelk.demon.co.uk>
  *	    Jose Renau <renau@acm.org>
- *          David Campbell <campbell@torque.net>
+ *          David Campbell
  *          Andrea Arcangeli
  */
 
@@ -23,7 +23,6 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
@@ -39,10 +38,10 @@
 #include <asm/superio.h>
 
 #include <linux/parport.h>
-#include <asm/gsc.h>
 #include <asm/pdc.h>
+#include <asm/parisc-device.h>
 #include <asm/hardware.h>
-#include <asm/parport_gsc.h>
+#include "parport_gsc.h"
 
 
 MODULE_AUTHOR("Helge Deller <deller@gmx.de>");
@@ -81,100 +80,6 @@ static int clear_epp_timeout(struct parport *pb)
  * of these are in parport_gsc.h.
  */
 
-static void parport_gsc_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	parport_generic_irq(irq, (struct parport *) dev_id, regs);
-}
-
-void parport_gsc_write_data(struct parport *p, unsigned char d)
-{
-	parport_writeb (d, DATA (p));
-}
-
-unsigned char parport_gsc_read_data(struct parport *p)
-{
-	unsigned char c = parport_readb (DATA (p));
-	return c;
-}
-
-void parport_gsc_write_control(struct parport *p, unsigned char d)
-{
-	const unsigned char wm = (PARPORT_CONTROL_STROBE |
-				  PARPORT_CONTROL_AUTOFD |
-				  PARPORT_CONTROL_INIT |
-				  PARPORT_CONTROL_SELECT);
-
-	/* Take this out when drivers have adapted to the newer interface. */
-	if (d & 0x20) {
-		pr_debug("%s (%s): use data_reverse for this!\n",
-			    p->name, p->cad->name);
-		parport_gsc_data_reverse (p);
-	}
-
-	__parport_gsc_frob_control (p, wm, d & wm);
-}
-
-unsigned char parport_gsc_read_control(struct parport *p)
-{
-	const unsigned char wm = (PARPORT_CONTROL_STROBE |
-				  PARPORT_CONTROL_AUTOFD |
-				  PARPORT_CONTROL_INIT |
-				  PARPORT_CONTROL_SELECT);
-	const struct parport_gsc_private *priv = p->physport->private_data;
-	return priv->ctr & wm; /* Use soft copy */
-}
-
-unsigned char parport_gsc_frob_control (struct parport *p, unsigned char mask,
-				       unsigned char val)
-{
-	const unsigned char wm = (PARPORT_CONTROL_STROBE |
-				  PARPORT_CONTROL_AUTOFD |
-				  PARPORT_CONTROL_INIT |
-				  PARPORT_CONTROL_SELECT);
-
-	/* Take this out when drivers have adapted to the newer interface. */
-	if (mask & 0x20) {
-		pr_debug("%s (%s): use data_%s for this!\n",
-			p->name, p->cad->name,
-			(val & 0x20) ? "reverse" : "forward");
-		if (val & 0x20)
-			parport_gsc_data_reverse (p);
-		else
-			parport_gsc_data_forward (p);
-	}
-
-	/* Restrict mask and val to control lines. */
-	mask &= wm;
-	val &= wm;
-
-	return __parport_gsc_frob_control (p, mask, val);
-}
-
-unsigned char parport_gsc_read_status(struct parport *p)
-{
-	return parport_readb (STATUS (p));
-}
-
-void parport_gsc_disable_irq(struct parport *p)
-{
-	__parport_gsc_frob_control (p, 0x10, 0);
-}
-
-void parport_gsc_enable_irq(struct parport *p)
-{
-	__parport_gsc_frob_control (p, 0x10, 0x10);
-}
-
-void parport_gsc_data_forward (struct parport *p)
-{
-	__parport_gsc_frob_control (p, 0x20, 0);
-}
-
-void parport_gsc_data_reverse (struct parport *p)
-{
-	__parport_gsc_frob_control (p, 0x20, 0x20);
-}
-
 void parport_gsc_init_state(struct pardevice *dev, struct parport_state *s)
 {
 	s->u.pc.ctr = 0xc | (dev->irq_func ? 0x10 : 0x0);
@@ -190,53 +95,41 @@ void parport_gsc_restore_state(struct parport *p, struct parport_state *s)
 	parport_writeb (s->u.pc.ctr, CONTROL (p));
 }
 
-void parport_gsc_inc_use_count(void)
-{
-	MOD_INC_USE_COUNT;
-}
-
-void parport_gsc_dec_use_count(void)
-{
-	MOD_DEC_USE_COUNT;
-}
-
-
 struct parport_operations parport_gsc_ops = 
 {
-	write_data:	parport_gsc_write_data,
-	read_data:	parport_gsc_read_data,
+	.write_data	= parport_gsc_write_data,
+	.read_data	= parport_gsc_read_data,
 
-	write_control:	parport_gsc_write_control,
-	read_control:	parport_gsc_read_control,
-	frob_control:	parport_gsc_frob_control,
+	.write_control	= parport_gsc_write_control,
+	.read_control	= parport_gsc_read_control,
+	.frob_control	= parport_gsc_frob_control,
 
-	read_status:	parport_gsc_read_status,
+	.read_status	= parport_gsc_read_status,
 
-	enable_irq:	parport_gsc_enable_irq,
-	disable_irq:	parport_gsc_disable_irq,
+	.enable_irq	= parport_gsc_enable_irq,
+	.disable_irq	= parport_gsc_disable_irq,
 
-	data_forward:	parport_gsc_data_forward,
-	data_reverse:	parport_gsc_data_reverse,
+	.data_forward	= parport_gsc_data_forward,
+	.data_reverse	= parport_gsc_data_reverse,
 
-	init_state:	parport_gsc_init_state,
-	save_state:	parport_gsc_save_state,
-	restore_state:	parport_gsc_restore_state,
+	.init_state	= parport_gsc_init_state,
+	.save_state	= parport_gsc_save_state,
+	.restore_state	= parport_gsc_restore_state,
 
-	inc_use_count:	parport_gsc_inc_use_count,
-	dec_use_count:	parport_gsc_dec_use_count,
+	.epp_write_data	= parport_ieee1284_epp_write_data,
+	.epp_read_data	= parport_ieee1284_epp_read_data,
+	.epp_write_addr	= parport_ieee1284_epp_write_addr,
+	.epp_read_addr	= parport_ieee1284_epp_read_addr,
 
-	epp_write_data:	parport_ieee1284_epp_write_data,
-	epp_read_data:	parport_ieee1284_epp_read_data,
-	epp_write_addr:	parport_ieee1284_epp_write_addr,
-	epp_read_addr:	parport_ieee1284_epp_read_addr,
+	.ecp_write_data	= parport_ieee1284_ecp_write_data,
+	.ecp_read_data	= parport_ieee1284_ecp_read_data,
+	.ecp_write_addr	= parport_ieee1284_ecp_write_addr,
 
-	ecp_write_data:	parport_ieee1284_ecp_write_data,
-	ecp_read_data:	parport_ieee1284_ecp_read_data,
-	ecp_write_addr:	parport_ieee1284_ecp_write_addr,
+	.compat_write_data 	= parport_ieee1284_write_compat,
+	.nibble_read_data	= parport_ieee1284_read_nibble,
+	.byte_read_data		= parport_ieee1284_read_byte,
 
-	compat_write_data: 	parport_ieee1284_write_compat,
-	nibble_read_data:	parport_ieee1284_read_nibble,
-	byte_read_data:		parport_ieee1284_read_byte,
+	.owner		= THIS_MODULE,
 };
 
 /* --- Mode detection ------------------------------------- */
@@ -349,7 +242,7 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 	struct parport tmp;
 	struct parport *p = &tmp;
 
-	priv = kmalloc (sizeof (struct parport_gsc_private), GFP_KERNEL);
+	priv = kzalloc (sizeof (struct parport_gsc_private), GFP_KERNEL);
 	if (!priv) {
 		printk (KERN_DEBUG "parport (0x%lx): no memory!\n", base);
 		return NULL;
@@ -423,10 +316,9 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 	}
 #undef printmode
 	printk("]\n");
-	parport_proc_register(p);
 
 	if (p->irq != PARPORT_IRQ_NONE) {
-		if (request_irq (p->irq, parport_gsc_interrupt,
+		if (request_irq (p->irq, parport_irq_handler,
 				 0, p->name, p)) {
 			printk (KERN_WARNING "%s: irq %d in use, "
 				"resorting to polled operation\n",
@@ -452,18 +344,20 @@ struct parport *__devinit parport_gsc_probe_port (unsigned long base,
 
 #define PARPORT_GSC_OFFSET 0x800
 
-static int __initdata parport_count;
+static int __devinitdata parport_count;
 
 static int __devinit parport_init_chip(struct parisc_device *dev)
 {
+	struct parport *p;
 	unsigned long port;
 
 	if (!dev->irq) {
-		printk("IRQ not found for parallel device at 0x%lx\n", dev->hpa);
+		printk(KERN_WARNING "IRQ not found for parallel device at 0x%llx\n",
+			(unsigned long long)dev->hpa.start);
 		return -ENODEV;
 	}
 
-	port = dev->hpa + PARPORT_GSC_OFFSET;
+	port = dev->hpa.start + PARPORT_GSC_OFFSET;
 	
 	/* some older machines with ASP-chip don't support
 	 * the enhanced parport modes.
@@ -471,17 +365,41 @@ static int __devinit parport_init_chip(struct parisc_device *dev)
 	if (boot_cpu_data.cpu_type > pcxt && !pdc_add_valid(port+4)) {
 
 		/* Initialize bidirectional-mode (0x10) & data-tranfer-mode #1 (0x20) */
-		printk("%s: initialize bidirectional-mode.\n", __FUNCTION__);
+		printk("%s: initialize bidirectional-mode.\n", __func__);
 		parport_writeb ( (0x10 + 0x20), port + 4);
 
 	} else {
-		printk("%s: enhanced parport-modes not supported.\n", __FUNCTION__);
+		printk("%s: enhanced parport-modes not supported.\n", __func__);
 	}
 	
-	if (parport_gsc_probe_port(port, 0, dev->irq,
-			/* PARPORT_IRQ_NONE */ PARPORT_DMA_NONE, NULL))
+	p = parport_gsc_probe_port(port, 0, dev->irq,
+			/* PARPORT_IRQ_NONE */ PARPORT_DMA_NONE, NULL);
+	if (p)
 		parport_count++;
+	dev_set_drvdata(&dev->dev, p);
 
+	return 0;
+}
+
+static int __devexit parport_remove_chip(struct parisc_device *dev)
+{
+	struct parport *p = dev_get_drvdata(&dev->dev);
+	if (p) {
+		struct parport_gsc_private *priv = p->private_data;
+		struct parport_operations *ops = p->ops;
+		parport_remove_port(p);
+		if (p->dma != PARPORT_DMA_NONE)
+			free_dma(p->dma);
+		if (p->irq != PARPORT_IRQ_NONE)
+			free_irq(p->irq, p);
+		if (priv->dma_buf)
+			pci_free_consistent(priv->dev, PAGE_SIZE,
+					    priv->dma_buf,
+					    priv->dma_handle);
+		kfree (p->private_data);
+		parport_put_port(p);
+		kfree (ops); /* hope no-one cached it */
+	}
 	return 0;
 }
 
@@ -493,9 +411,10 @@ static struct parisc_device_id parport_tbl[] = {
 MODULE_DEVICE_TABLE(parisc, parport_tbl);
 
 static struct parisc_driver parport_driver = {
-	name:		"Parallel",
-	id_table:	parport_tbl,
-	probe:		parport_init_chip,
+	.name		= "Parallel",
+	.id_table	= parport_tbl,
+	.probe		= parport_init_chip,
+	.remove		= __devexit_p(parport_remove_chip),
 };
 
 int __devinit parport_gsc_init(void)
@@ -505,31 +424,8 @@ int __devinit parport_gsc_init(void)
 
 static void __devexit parport_gsc_exit(void)
 {
-	struct parport *p = parport_enumerate(), *tmp;
-	while (p) {
-		tmp = p->next;
-		if (p->modes & PARPORT_MODE_PCSPP) { 
-			struct parport_gsc_private *priv = p->private_data;
-			struct parport_operations *ops = p->ops;
-			if (p->dma != PARPORT_DMA_NONE)
-				free_dma(p->dma);
-			if (p->irq != PARPORT_IRQ_NONE)
-				free_irq(p->irq, p);
-			parport_proc_unregister(p);
-			if (priv->dma_buf)
-				pci_free_consistent(priv->dev, PAGE_SIZE,
-						    priv->dma_buf,
-						    priv->dma_handle);
-			kfree (p->private_data);
-			parport_unregister_port(p);
-			kfree (ops); /* hope no-one cached it */
-		}
-		p = tmp;
-	}
 	unregister_parisc_driver(&parport_driver);
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(parport_gsc_init);
 module_exit(parport_gsc_exit);

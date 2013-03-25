@@ -4,21 +4,23 @@
  * Copyright (c) 1999 Al Smith
  */
 
-#include <linux/efs_fs.h>
+#include <linux/buffer_head.h>
+#include "efs.h"
 
 static int efs_readdir(struct file *, void *, filldir_t);
 
-struct file_operations efs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	efs_readdir,
+const struct file_operations efs_dir_operations = {
+	.llseek		= generic_file_llseek,
+	.read		= generic_read_dir,
+	.readdir	= efs_readdir,
 };
 
-struct inode_operations efs_dir_inode_operations = {
-	lookup:		efs_lookup,
+const struct inode_operations efs_dir_inode_operations = {
+	.lookup		= efs_lookup,
 };
 
 static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
-	struct inode *inode = filp->f_dentry->d_inode;
+	struct inode *inode = filp->f_path.dentry->d_inode;
 	struct buffer_head *bh;
 
 	struct efs_dir		*dirblock;
@@ -91,7 +93,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 				}
 				brelse(bh);
 				filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
-				return 0;
+				goto out;
 			}
 			slot++;
 		}
@@ -102,6 +104,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	}
 
 	filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
+out:
 	return 0;
 }
 

@@ -20,6 +20,7 @@
 #define EPIA_VERSION      "1.02"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -283,46 +284,33 @@ static void epia_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void epia_init_proto( PIA *pi)
+static struct pi_protocol epia = {
+	.owner		= THIS_MODULE,
+	.name		= "epia",
+	.max_mode	= 6,
+	.epp_first	= 3,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= epia_write_regr,
+	.read_regr	= epia_read_regr,
+	.write_block	= epia_write_block,
+	.read_block	= epia_read_block,
+	.connect	= epia_connect,
+	.disconnect	= epia_disconnect,
+	.test_proto	= epia_test_proto,
+	.log_adapter	= epia_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init epia_init(void)
+{
+	return paride_register(&epia);
 }
 
-static void epia_release_proto( PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit epia_exit(void)
+{
+	paride_unregister(&epia);
 }
-
-struct pi_protocol epia = {"epia",0,6,3,1,1,
-                           epia_write_regr,
-                           epia_read_regr,
-                           epia_write_block,
-                           epia_read_block,
-                           epia_connect,
-                           epia_disconnect,
-                           0,
-                           0,
-                           epia_test_proto,
-                           epia_log_adapter,
-                           epia_init_proto,
-                           epia_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &epia ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &epia );
-}
-
-#endif
-
-/* end of epia.c */
 
 MODULE_LICENSE("GPL");
+module_init(epia_init)
+module_exit(epia_exit)

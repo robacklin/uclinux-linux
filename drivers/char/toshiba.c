@@ -57,9 +57,7 @@
 #define TOSH_DEBUG 0
 
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/miscdevice.h>
@@ -69,30 +67,36 @@
 #include <linux/init.h>
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
-
+#include <linux/seq_file.h>
+#include <linux/mutex.h>
 #include <linux/toshiba.h>
 
 #define TOSH_MINOR_DEV 181
 
-static int tosh_id = 0x0000;
-static int tosh_bios = 0x0000;
-static int tosh_date = 0x0000;
-static int tosh_sci = 0x0000;
-static int tosh_fan = 0;
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Jonathan Buzzard <jonathan@buzzard.org.uk>");
+MODULE_DESCRIPTION("Toshiba laptop SMM driver");
+MODULE_SUPPORTED_DEVICE("toshiba");
 
-static int tosh_fn = 0;
+static DEFINE_MUTEX(tosh_mutex);
+static int tosh_fn;
+module_param_named(fn, tosh_fn, int, 0);
+MODULE_PARM_DESC(fn, "User specified Fn key detection port");
 
-MODULE_PARM(tosh_fn, "i");
+static int tosh_id;
+static int tosh_bios;
+static int tosh_date;
+static int tosh_sci;
+static int tosh_fan;
 
-
-static int tosh_get_info(char *, char **, off_t, int);
-static int tosh_ioctl(struct inode *, struct file *, unsigned int,
+static long tosh_ioctl(struct file *, unsigned int,
 	unsigned long);
 
 
-static struct file_operations tosh_fops = {
-	owner:		THIS_MODULE,
-	ioctl:		tosh_ioctl,
+static const struct file_operations tosh_fops = {
+	.owner		= THIS_MODULE,
+	.unlocked_ioctl	= tosh_ioctl,
+	.llseek		= noop_llseek,
 };
 
 static struct miscdevice tosh_device = {
@@ -104,6 +108,7 @@ static struct miscdevice tosh_device = {
 /*
  * Read the Fn key status
  */
+#ifdef CONFIG_PROC_FS
 static int tosh_fn_status(void)
 {
         unsigned char scan;
@@ -112,15 +117,15 @@ static int tosh_fn_status(void)
 	if (tosh_fn!=0) {
 		scan = inb(tosh_fn);
 	} else {
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		outb(0x8e, 0xe4);
 		scan = inb(0xe5);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 
         return (int) scan;
 }
+#endif
 
 
 /*
@@ -139,35 +144,32 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 	if (tosh_id==0xfccb) {
 		if (eax==0xfe00) {
 			/* fan status */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = (unsigned int) (al & 0x01);
 		}
 		if ((eax==0xff00) && (ecx==0x0000)) {
 			/* fan off */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
 			outb(0xbe, 0xe4);
 			outb (al | 0x01, 0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x00;
 		}
 		if ((eax==0xff00) && (ecx==0x0001)) {
 			/* fan on */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
 			outb(0xbe, 0xe4);
 			outb(al & 0xfe, 0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x01;
 		}
@@ -178,33 +180,30 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 	if (tosh_id==0xfccc) {
 		if (eax==0xfe00) {
 			/* fan status */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = al & 0x01;
 		}
 		if ((eax==0xff00) && (ecx==0x0000)) {
 			/* fan off */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
 			outw(0xe0 | ((al & 0xfe) << 8), 0xe4);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x00;
 		}
 		if ((eax==0xff00) && (ecx==0x0001)) {
 			/* fan on */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
 			outw(0xe0 | ((al | 0x01) << 8), 0xe4);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x01;
 		}
@@ -217,7 +216,7 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 /*
  * Put the laptop into System Management Mode
  */
-static int tosh_smm(SMMRegisters *regs)
+int tosh_smm(SMMRegisters *regs)
 {
 	int eax;
 
@@ -252,19 +251,20 @@ static int tosh_smm(SMMRegisters *regs)
 
 	return eax;
 }
+EXPORT_SYMBOL(tosh_smm);
 
 
-static int tosh_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
-	unsigned long arg)
+static long tosh_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 {
 	SMMRegisters regs;
+	SMMRegisters __user *argp = (SMMRegisters __user *)arg;
 	unsigned short ax,bx;
 	int err;
 
-	if (!arg)
+	if (!argp)
 		return -EINVAL;
 
-	if (copy_from_user(&regs, (SMMRegisters *) arg, sizeof(SMMRegisters)))
+	if (copy_from_user(&regs, argp, sizeof(SMMRegisters)))
 		return -EFAULT;
 
 	switch (cmd) {
@@ -276,19 +276,22 @@ static int tosh_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
 				return -EINVAL;
 
 			/* do we need to emulate the fan ? */
+			mutex_lock(&tosh_mutex);
 			if (tosh_fan==1) {
 				if (((ax==0xf300) || (ax==0xf400)) && (bx==0x0004)) {
 					err = tosh_emulate_fan(&regs);
+					mutex_unlock(&tosh_mutex);
 					break;
 				}
 			}
 			err = tosh_smm(&regs);
+			mutex_unlock(&tosh_mutex);
 			break;
 		default:
 			return -EINVAL;
 	}
 
-        if (copy_to_user((SMMRegisters *) arg, &regs, sizeof(SMMRegisters)))
+        if (copy_to_user(argp, &regs, sizeof(SMMRegisters)))
         	return -EFAULT;
 
 	return (err==0) ? 0:-EINVAL;
@@ -298,12 +301,11 @@ static int tosh_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
 /*
  * Print the information for /proc/toshiba
  */
-int tosh_get_info(char *buffer, char **start, off_t fpos, int length)
+#ifdef CONFIG_PROC_FS
+static int proc_toshiba_show(struct seq_file *m, void *v)
 {
-	char *temp;
 	int key;
 
-	temp = buffer;
 	key = tosh_fn_status();
 
 	/* Arguments
@@ -314,8 +316,7 @@ int tosh_get_info(char *buffer, char **start, off_t fpos, int length)
 	     4) BIOS date (in SCI date format)
 	     5) Fn Key status
 	*/
-
-	temp += sprintf(temp, "1.1 0x%04x %d.%d %d.%d 0x%04x 0x%02x\n",
+	seq_printf(m, "1.1 0x%04x %d.%d %d.%d 0x%04x 0x%02x\n",
 		tosh_id,
 		(tosh_sci & 0xff00)>>8,
 		tosh_sci & 0xff,
@@ -323,9 +324,22 @@ int tosh_get_info(char *buffer, char **start, off_t fpos, int length)
 		tosh_bios & 0xff,
 		tosh_date,
 		key);
-
-	return temp-buffer;
+	return 0;
 }
+
+static int proc_toshiba_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, proc_toshiba_show, NULL);
+}
+
+static const struct file_operations proc_toshiba_fops = {
+	.owner		= THIS_MODULE,
+	.open		= proc_toshiba_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
+#endif
 
 
 /*
@@ -355,15 +369,15 @@ static void tosh_set_fn_port(void)
 /*
  * Get the machine identification number of the current model
  */
-static int tosh_get_machine_id(void)
+static int tosh_get_machine_id(void __iomem *bios)
 {
 	int id;
 	SMMRegisters regs;
 	unsigned short bx,cx;
 	unsigned long address;
 
-	id = (0x100*(int) isa_readb(0xffffe))+((int) isa_readb(0xffffa));
-	
+	id = (0x100*(int) readb(bios+0xfffe))+((int) readb(bios+0xfffa));
+
 	/* do we have a SCTTable machine identication number on our hands */
 
 	if (id==0xfc2f) {
@@ -388,12 +402,12 @@ static int tosh_get_machine_id(void)
 
 		/* now twiddle with our pointer a bit */
 
-		address = 0x000f0000+bx;
-		cx = isa_readw(address);
-		address = 0x000f0009+bx+cx;
-		cx = isa_readw(address);
-		address = 0x000f000a+cx;
-		cx = isa_readw(address);
+		address = bx;
+		cx = readw(bios + address);
+		address = 9+bx+cx;
+		cx = readw(bios + address);
+		address = 0xa+cx;
+		cx = readw(bios + address);
 
 		/* now construct our machine identification number */
 
@@ -411,24 +425,29 @@ static int tosh_get_machine_id(void)
  *   laptop, otherwise zero and determines the Machine ID, BIOS version and
  *   date, and SCI version.
  */
-int tosh_probe(void)
+static int tosh_probe(void)
 {
 	int i,major,minor,day,year,month,flag;
 	unsigned char signature[7] = { 0x54,0x4f,0x53,0x48,0x49,0x42,0x41 };
 	SMMRegisters regs;
+	void __iomem *bios = ioremap_cache(0xf0000, 0x10000);
+
+	if (!bios)
+		return -ENOMEM;
 
 	/* extra sanity check for the string "TOSHIBA" in the BIOS because
 	   some machines that are not Toshiba's pass the next test */
 
 	for (i=0;i<7;i++) {
-		if (isa_readb(0xfe010+i)!=signature[i]) {
+		if (readb(bios+0xe010+i)!=signature[i]) {
 			printk("toshiba: not a supported Toshiba laptop\n");
+			iounmap(bios);
 			return -ENODEV;
 		}
 	}
 
 	/* call the Toshiba SCI support check routine */
-	
+
 	regs.eax = 0xf0f0;
 	regs.ebx = 0x0000;
 	regs.ecx = 0x0000;
@@ -438,28 +457,29 @@ int tosh_probe(void)
 
 	if ((flag==1) || ((regs.eax & 0xff00)==0x8600)) {
 		printk("toshiba: not a supported Toshiba laptop\n");
+		iounmap(bios);
 		return -ENODEV;
 	}
 
 	/* if we get this far then we are running on a Toshiba (probably)! */
 
 	tosh_sci = regs.edx & 0xffff;
-	
+
 	/* next get the machine ID of the current laptop */
 
-	tosh_id = tosh_get_machine_id();
+	tosh_id = tosh_get_machine_id(bios);
 
 	/* get the BIOS version */
 
-	major = isa_readb(0xfe009)-'0';
-	minor = ((isa_readb(0xfe00b)-'0')*10)+(isa_readb(0xfe00c)-'0');
+	major = readb(bios+0xe009)-'0';
+	minor = ((readb(bios+0xe00b)-'0')*10)+(readb(bios+0xe00c)-'0');
 	tosh_bios = (major*0x100)+minor;
 
 	/* get the BIOS date */
 
-	day = ((isa_readb(0xffff5)-'0')*10)+(isa_readb(0xffff6)-'0');
-	month = ((isa_readb(0xffff8)-'0')*10)+(isa_readb(0xffff9)-'0');
-	year = ((isa_readb(0xffffb)-'0')*10)+(isa_readb(0xffffc)-'0');
+	day = ((readb(bios+0xfff5)-'0')*10)+(readb(bios+0xfff6)-'0');
+	month = ((readb(bios+0xfff8)-'0')*10)+(readb(bios+0xfff9)-'0');
+	year = ((readb(bios+0xfffb)-'0')*10)+(readb(bios+0xfffc)-'0');
 	tosh_date = (((year-90) & 0x1f)<<10) | ((month & 0xf)<<6)
 		| ((day & 0x1f)<<1);
 
@@ -476,56 +496,51 @@ int tosh_probe(void)
 	if ((tosh_id==0xfccb) || (tosh_id==0xfccc))
 		tosh_fan = 1;
 
+	iounmap(bios);
+
 	return 0;
 }
 
-int __init tosh_init(void)
+static int __init toshiba_init(void)
 {
+	int retval;
 	/* are we running on a Toshiba laptop */
 
-	if (tosh_probe()!=0)
-		return -EIO;
+	if (tosh_probe())
+		return -ENODEV;
 
-	printk(KERN_INFO "Toshiba System Managment Mode driver v"
-		TOSH_VERSION"\n");
+	printk(KERN_INFO "Toshiba System Management Mode driver v" TOSH_VERSION "\n");
 
 	/* set the port to use for Fn status if not specified as a parameter */
-
 	if (tosh_fn==0x00)
 		tosh_set_fn_port();
 
 	/* register the device file */
+	retval = misc_register(&tosh_device);
+	if (retval < 0)
+		return retval;
 
-	misc_register(&tosh_device);
+#ifdef CONFIG_PROC_FS
+	{
+		struct proc_dir_entry *pde;
 
-	/* register the proc entry */
-
-	create_proc_info_entry("toshiba", 0, NULL, tosh_get_info);
+		pde = proc_create("toshiba", 0, NULL, &proc_toshiba_fops);
+		if (!pde) {
+			misc_deregister(&tosh_device);
+			return -ENOMEM;
+		}
+	}
+#endif
 
 	return 0;
 }
 
-#ifdef MODULE
-int init_module(void)
+static void __exit toshiba_exit(void)
 {
-	return tosh_init();
-}
-
-void cleanup_module(void)
-{
-	/* remove the proc entry */
-
 	remove_proc_entry("toshiba", NULL);
-
-	/* unregister the device file */
-
 	misc_deregister(&tosh_device);
 }
-#endif
 
-MODULE_LICENSE("GPL");
-MODULE_PARM_DESC(tosh_fn, "User specified Fn key detection port");
-MODULE_AUTHOR("Jonathan Buzzard <jonathan@buzzard.org.uk>");
-MODULE_DESCRIPTION("Toshiba laptop SMM driver");
-MODULE_SUPPORTED_DEVICE("toshiba");
+module_init(toshiba_init);
+module_exit(toshiba_exit);
 

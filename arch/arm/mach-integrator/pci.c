@@ -21,16 +21,15 @@
  *
  *  PCI functions for Integrator
  */
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
-#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
 
-#include <asm/irq.h>
-#include <asm/system.h>
 #include <asm/mach/pci.h>
+#include <asm/mach-types.h>
+
+#include <mach/irqs.h>
 
 /* 
  * A small note about bridges and interrupts.  The DECchip 21050 (and
@@ -64,13 +63,7 @@
  *
  * Where A = pin 1, B = pin 2 and so on and pin=0 = default = A.
  * Thus, each swizzle is ((pin-1) + (device#-4)) % 4
- *
- * The following code swizzles for exactly one bridge.  
  */
-static inline int bridge_swizzle(int pin, unsigned int slot) 
-{
-	return (pin + slot) & 3;
-}
 
 /*
  * This routine handles multiple bridges.
@@ -82,41 +75,50 @@ static u8 __init integrator_swizzle(struct pci_dev *dev, u8 *pinp)
 	if (pin == 0)
 		pin = 1;
 
-	pin -= 1;
 	while (dev->bus->self) {
-		pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+		pin = pci_swizzle_interrupt_pin(dev, pin);
 		/*
 		 * move up the chain of bridges, swizzling as we go.
 		 */
 		dev = dev->bus->self;
 	}
-	*pinp = pin + 1;
+	*pinp = pin;
 
 	return PCI_SLOT(dev->devfn);
 }
 
 static int irq_tab[4] __initdata = {
-	IRQ_PCIINT0,	IRQ_PCIINT1,	IRQ_PCIINT2,	IRQ_PCIINT3
+	IRQ_AP_PCIINT0,	IRQ_AP_PCIINT1,	IRQ_AP_PCIINT2,	IRQ_AP_PCIINT3
 };
 
 /*
  * map the specified device/slot/pin to an IRQ.  This works out such
  * that slot 9 pin 1 is INT0, pin 2 is INT1, and slot 10 pin 1 is INT1.
  */
-static int __init integrator_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+static int __init integrator_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 {
 	int intnr = ((slot - 9) + (pin - 1)) & 3;
 
 	return irq_tab[intnr];
 }
 
-extern void pci_v3_setup_resources(struct resource **res);
 extern void pci_v3_init(void *);
 
-struct hw_pci integrator_pci __initdata = {
-	.setup_resources	= pci_v3_setup_resources,
-	.init			= pci_v3_init,
-	.mem_offset		= 0x40000000,
+static struct hw_pci integrator_pci __initdata = {
 	.swizzle		= integrator_swizzle,
 	.map_irq		= integrator_map_irq,
+	.setup			= pci_v3_setup,
+	.nr_controllers		= 1,
+	.scan			= pci_v3_scan_bus,
+	.preinit		= pci_v3_preinit,
+	.postinit		= pci_v3_postinit,
 };
+
+static int __init integrator_pci_init(void)
+{
+	if (machine_is_integrator())
+		pci_common_init(&integrator_pci);
+	return 0;
+}
+
+subsys_initcall(integrator_pci_init);

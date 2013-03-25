@@ -11,67 +11,42 @@
 
 #include <linux/types.h>
 
-int a3000_detect(Scsi_Host_Template *);
-int a3000_release(struct Scsi_Host *);
-const char *wd33c93_info(void);
-int wd33c93_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int wd33c93_abort(Scsi_Cmnd *);
-int wd33c93_reset(Scsi_Cmnd *, unsigned int);
-
-#ifndef NULL
-#define NULL 0
-#endif
-
 #ifndef CMD_PER_LUN
-#define CMD_PER_LUN 2
+#define CMD_PER_LUN		2
 #endif
 
 #ifndef CAN_QUEUE
-#define CAN_QUEUE 16
+#define CAN_QUEUE		16
 #endif
-
-#define _A3000_SCSI { proc_name:	   "A3000",			\
-		      proc_info:           NULL,			\
-		      name:                "Amiga 3000 built-in SCSI",	\
-		      detect:              a3000_detect,		\
-		      release:             a3000_release,		\
-		      queuecommand:        wd33c93_queuecommand,	\
-		      abort:               wd33c93_abort,		\
-		      reset:               wd33c93_reset,		\
-		      can_queue:           CAN_QUEUE,			\
-		      this_id:             7,				\
-		      sg_tablesize:        SG_ALL,			\
-		      cmd_per_lun:	   CMD_PER_LUN,			\
-		      use_clustering:      ENABLE_CLUSTERING }
 
 /*
  * if the transfer address ANDed with this results in a non-zero
  * result, then we can't use DMA.
  */
-#define A3000_XFER_MASK  (0x00000003)
+#define A3000_XFER_MASK		(0x00000003)
 
-typedef struct {
-             unsigned char      pad1[2];
-    volatile unsigned short     DAWR;
-    volatile unsigned int       WTC;
-             unsigned char      pad2[2];
-    volatile unsigned short     CNTR;
-    volatile unsigned long      ACR;
-             unsigned char      pad3[2];
-    volatile unsigned short     ST_DMA;
-             unsigned char      pad4[2];
-    volatile unsigned short     FLUSH;
-             unsigned char      pad5[2];
-    volatile unsigned short     CINT;
-             unsigned char      pad6[2];
-    volatile unsigned short     ISTR;
-	     unsigned char      pad7[30];
-    volatile unsigned short     SP_DMA;
-             unsigned char      pad8;
-    volatile unsigned char      SASR;
-             unsigned char      pad9;
-    volatile unsigned char      SCMD;
-} a3000_scsiregs;
+struct a3000_scsiregs {
+		 unsigned char	pad1[2];
+	volatile unsigned short	DAWR;
+	volatile unsigned int	WTC;
+		 unsigned char	pad2[2];
+	volatile unsigned short	CNTR;
+	volatile unsigned long	ACR;
+		 unsigned char	pad3[2];
+	volatile unsigned short	ST_DMA;
+		 unsigned char	pad4[2];
+	volatile unsigned short	FLUSH;
+		 unsigned char	pad5[2];
+	volatile unsigned short	CINT;
+		 unsigned char	pad6[2];
+	volatile unsigned short	ISTR;
+		 unsigned char	pad7[30];
+	volatile unsigned short	SP_DMA;
+		 unsigned char	pad8;
+	volatile unsigned char	SASR;
+		 unsigned char	pad9;
+	volatile unsigned char	SCMD;
+};
 
 #define DAWR_A3000		(3)
 

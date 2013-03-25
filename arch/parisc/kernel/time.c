@@ -10,8 +10,8 @@
  * 1998-12-20  Updated NTP code according to technical memorandum Jan '96
  *             "A Kernel Model for Precision Timekeeping" by Dave Mills
  */
-#include <linux/config.h>
 #include <linux/errno.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
@@ -21,218 +21,253 @@
 #include <linux/time.h>
 #include <linux/init.h>
 #include <linux/smp.h>
+#include <linux/profile.h>
+#include <linux/clocksource.h>
+#include <linux/platform_device.h>
+#include <linux/ftrace.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/page.h>
 #include <asm/param.h>
 #include <asm/pdc.h>
 #include <asm/led.h>
 
 #include <linux/timex.h>
 
-/* xtime and wall_jiffies keep wall-clock time */
-extern unsigned long wall_jiffies;
-extern rwlock_t xtime_lock;
+static unsigned long clocktick __read_mostly;	/* timer cycles per tick */
 
-static long clocktick;	/* timer cycles per tick */
-static long halftick;
-
-#ifdef CONFIG_SMP
-extern void smp_do_timer(struct pt_regs *regs);
-#endif
-
-static inline void
-parisc_do_profile(unsigned long pc)
-{
-	extern char _stext;
-
-	if (!prof_buffer)
-		return;
-
-	pc -= (unsigned long) &_stext;
-	pc >>= prof_shift;
-	/*
-	 * Don't ignore out-of-bounds PC values silently,
-	 * put them into the last histogram slot, so if
-	 * present, they will show up as a sharp peak.
-	 */
-	if (pc > prof_len - 1)
-		pc = prof_len - 1;
-	atomic_inc((atomic_t *)&prof_buffer[pc]);
-}
-
-void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
-{
-	long now = mfctl(16);
-	long next_tick;
-	int nticks;
-	int cpu = smp_processor_id();
-
-	/* initialize next_tick to time at last clocktick */
-
-	next_tick = cpu_data[cpu].it_value;
-
-	/* since time passes between the interrupt and the mfctl()
-	 * above, it is never true that last_tick + clocktick == now.  If we
-	 * never miss a clocktick, we could set next_tick = last_tick + clocktick
-	 * but maybe we'll miss ticks, hence the loop.
-	 *
-	 * Variables are *signed*.
-	 */
-
-	nticks = 0;
-	while((next_tick - now) < halftick) {
-		next_tick += clocktick;
-		nticks++;
-	}
-	mtctl(next_tick, 16);
-	cpu_data[cpu].it_value = next_tick;
-
-	while (nticks--) {
-#ifdef CONFIG_SMP
-		smp_do_timer(regs);
-#endif
-		if (cpu == 0) {
-			extern int pc_in_user_space;
-			write_lock(&xtime_lock);
-#ifndef CONFIG_SMP
-			if (!user_mode(regs))
-				parisc_do_profile(regs->iaoq[0]);
-			else
-				parisc_do_profile(&pc_in_user_space);
-#endif
-			do_timer(regs);
-			write_unlock(&xtime_lock);
-		}
-	}
-    
-#ifdef CONFIG_CHASSIS_LCD_LED
-	/* Only schedule the led tasklet on cpu 0, and only if it
-	 * is enabled.
-	 */
-	if (cpu == 0 && !atomic_read(&led_tasklet.count))
-		tasklet_schedule(&led_tasklet);
-#endif
-
-	/* check soft power switch status */
-	if (cpu == 0 && !atomic_read(&power_tasklet.count))
-		tasklet_schedule(&power_tasklet);
-}
-
-/*** converted from ia64 ***/
 /*
- * Return the number of micro-seconds that elapsed since the last
- * update to wall time (aka xtime aka wall_jiffies).  The xtime_lock
- * must be at least read-locked when calling this routine.
+ * We keep time on PA-RISC Linux by using the Interval Timer which is
+ * a pair of registers; one is read-only and one is write-only; both
+ * accessed through CR16.  The read-only register is 32 or 64 bits wide,
+ * and increments by 1 every CPU clock tick.  The architecture only
+ * guarantees us a rate between 0.5 and 2, but all implementations use a
+ * rate of 1.  The write-only register is 32-bits wide.  When the lowest
+ * 32 bits of the read-only register compare equal to the write-only
+ * register, it raises a maskable external interrupt.  Each processor has
+ * an Interval Timer of its own and they are not synchronised.  
+ *
+ * We want to generate an interrupt every 1/HZ seconds.  So we program
+ * CR16 to interrupt every @clocktick cycles.  The it_value in cpu_data
+ * is programmed with the intended time of the next tick.  We can be
+ * held off for an arbitrarily long period of time by interrupts being
+ * disabled, so we may miss one or more ticks.
  */
-static inline unsigned long
-gettimeoffset (void)
+irqreturn_t __irq_entry timer_interrupt(int irq, void *dev_id)
 {
-#ifndef CONFIG_SMP
-	/*
-	 * FIXME: This won't work on smp because jiffies are updated by cpu 0.
-	 *    Once parisc-linux learns the cr16 difference between processors,
-	 *    this could be made to work.
-	 */
-	long last_tick;
-	long elapsed_cycles;
+	unsigned long now, now2;
+	unsigned long next_tick;
+	unsigned long cycles_elapsed, ticks_elapsed = 1;
+	unsigned long cycles_remainder;
+	unsigned int cpu = smp_processor_id();
+	struct cpuinfo_parisc *cpuinfo = &per_cpu(cpu_data, cpu);
 
-	/* it_value is the intended time of the next tick */
-	last_tick = cpu_data[smp_processor_id()].it_value;
+	/* gcc can optimize for "read-only" case with a local clocktick */
+	unsigned long cpt = clocktick;
 
-	/* Subtract one tick and account for possible difference between
-	 * when we expected the tick and when it actually arrived.
-	 * (aka wall vs real)
-	 */
-	last_tick -= clocktick * (jiffies - wall_jiffies + 1);
-	elapsed_cycles = mfctl(16) - last_tick;
+	profile_tick(CPU_PROFILING);
 
-	/* the precision of this math could be improved */
-	return elapsed_cycles / (PAGE0->mem_10msec / 10000);
-#else
-	return 0;
-#endif
-}
+	/* Initialize next_tick to the expected tick time. */
+	next_tick = cpuinfo->it_value;
 
-void
-do_gettimeofday (struct timeval *tv)
-{
-	unsigned long flags, usec, sec;
+	/* Get current cycle counter (Control Register 16). */
+	now = mfctl(16);
 
-	read_lock_irqsave(&xtime_lock, flags);
-	{
-		usec = gettimeoffset();
-	
-		sec = xtime.tv_sec;
-		usec += xtime.tv_usec;
-	}
-	read_unlock_irqrestore(&xtime_lock, flags);
+	cycles_elapsed = now - next_tick;
 
-	while (usec >= 1000000) {
-		usec -= 1000000;
-		++sec;
-	}
-
-	tv->tv_sec = sec;
-	tv->tv_usec = usec;
-}
-
-void
-do_settimeofday (struct timeval *tv)
-{
-	write_lock_irq(&xtime_lock);
-	{
-		/*
-		 * This is revolting. We need to set "xtime"
-		 * correctly. However, the value in this location is
-		 * the value at the most recent update of wall time.
-		 * Discover what correction gettimeofday would have
-		 * done, and then undo it!
+	if ((cycles_elapsed >> 6) < cpt) {
+		/* use "cheap" math (add/subtract) instead
+		 * of the more expensive div/mul method
 		 */
-		tv->tv_usec -= gettimeoffset();
-		tv->tv_usec -= (jiffies - wall_jiffies) * (1000000 / HZ);
-
-		while (tv->tv_usec < 0) {
-			tv->tv_usec += 1000000;
-			tv->tv_sec--;
+		cycles_remainder = cycles_elapsed;
+		while (cycles_remainder > cpt) {
+			cycles_remainder -= cpt;
+			ticks_elapsed++;
 		}
-
-		xtime = *tv;
-		time_adjust = 0;		/* stop active adjtime() */
-		time_status |= STA_UNSYNC;
-		time_maxerror = NTP_PHASE_LIMIT;
-		time_esterror = NTP_PHASE_LIMIT;
+	} else {
+		/* TODO: Reduce this to one fdiv op */
+		cycles_remainder = cycles_elapsed % cpt;
+		ticks_elapsed += cycles_elapsed / cpt;
 	}
-	write_unlock_irq(&xtime_lock);
+
+	/* convert from "division remainder" to "remainder of clock tick" */
+	cycles_remainder = cpt - cycles_remainder;
+
+	/* Determine when (in CR16 cycles) next IT interrupt will fire.
+	 * We want IT to fire modulo clocktick even if we miss/skip some.
+	 * But those interrupts don't in fact get delivered that regularly.
+	 */
+	next_tick = now + cycles_remainder;
+
+	cpuinfo->it_value = next_tick;
+
+	/* Program the IT when to deliver the next interrupt.
+	 * Only bottom 32-bits of next_tick are writable in CR16!
+	 */
+	mtctl(next_tick, 16);
+
+	/* Skip one clocktick on purpose if we missed next_tick.
+	 * The new CR16 must be "later" than current CR16 otherwise
+	 * itimer would not fire until CR16 wrapped - e.g 4 seconds
+	 * later on a 1Ghz processor. We'll account for the missed
+	 * tick on the next timer interrupt.
+	 *
+	 * "next_tick - now" will always give the difference regardless
+	 * if one or the other wrapped. If "now" is "bigger" we'll end up
+	 * with a very large unsigned number.
+	 */
+	now2 = mfctl(16);
+	if (next_tick - now2 > cpt)
+		mtctl(next_tick+cpt, 16);
+
+#if 1
+/*
+ * GGG: DEBUG code for how many cycles programming CR16 used.
+ */
+	if (unlikely(now2 - now > 0x3000)) 	/* 12K cycles */
+		printk (KERN_CRIT "timer_interrupt(CPU %d): SLOW! 0x%lx cycles!"
+			" cyc %lX rem %lX "
+			" next/now %lX/%lX\n",
+			cpu, now2 - now, cycles_elapsed, cycles_remainder,
+			next_tick, now );
+#endif
+
+	/* Can we differentiate between "early CR16" (aka Scenario 1) and
+	 * "long delay" (aka Scenario 3)? I don't think so.
+	 *
+	 * Timer_interrupt will be delivered at least a few hundred cycles
+	 * after the IT fires. But it's arbitrary how much time passes
+	 * before we call it "late". I've picked one second.
+	 *
+	 * It's important NO printk's are between reading CR16 and
+	 * setting up the next value. May introduce huge variance.
+	 */
+	if (unlikely(ticks_elapsed > HZ)) {
+		/* Scenario 3: very long delay?  bad in any case */
+		printk (KERN_CRIT "timer_interrupt(CPU %d): delayed!"
+			" cycles %lX rem %lX "
+			" next/now %lX/%lX\n",
+			cpu,
+			cycles_elapsed, cycles_remainder,
+			next_tick, now );
+	}
+
+	/* Done mucking with unreliable delivery of interrupts.
+	 * Go do system house keeping.
+	 */
+
+	if (!--cpuinfo->prof_counter) {
+		cpuinfo->prof_counter = cpuinfo->prof_multiplier;
+		update_process_times(user_mode(get_irq_regs()));
+	}
+
+	if (cpu == 0)
+		xtime_update(ticks_elapsed);
+
+	return IRQ_HANDLED;
 }
 
+
+unsigned long profile_pc(struct pt_regs *regs)
+{
+	unsigned long pc = instruction_pointer(regs);
+
+	if (regs->gr[0] & PSW_N)
+		pc -= 4;
+
+#ifdef CONFIG_SMP
+	if (in_lock_functions(pc))
+		pc = regs->gr[2];
+#endif
+
+	return pc;
+}
+EXPORT_SYMBOL(profile_pc);
+
+
+/* clock source code */
+
+static cycle_t read_cr16(struct clocksource *cs)
+{
+	return get_cycles();
+}
+
+static struct clocksource clocksource_cr16 = {
+	.name			= "cr16",
+	.rating			= 300,
+	.read			= read_cr16,
+	.mask			= CLOCKSOURCE_MASK(BITS_PER_LONG),
+	.flags			= CLOCK_SOURCE_IS_CONTINUOUS,
+};
+
+#ifdef CONFIG_SMP
+int update_cr16_clocksource(void)
+{
+	/* since the cr16 cycle counters are not synchronized across CPUs,
+	   we'll check if we should switch to a safe clocksource: */
+	if (clocksource_cr16.rating != 0 && num_online_cpus() > 1) {
+		clocksource_change_rating(&clocksource_cr16, 0);
+		return 1;
+	}
+
+	return 0;
+}
+#else
+int update_cr16_clocksource(void)
+{
+	return 0; /* no change */
+}
+#endif /*CONFIG_SMP*/
+
+void __init start_cpu_itimer(void)
+{
+	unsigned int cpu = smp_processor_id();
+	unsigned long next_tick = mfctl(16) + clocktick;
+
+	mtctl(next_tick, 16);		/* kick off Interval Timer (CR16) */
+
+	per_cpu(cpu_data, cpu).it_value = next_tick;
+}
+
+static struct platform_device rtc_generic_dev = {
+	.name = "rtc-generic",
+	.id = -1,
+};
+
+static int __init rtc_init(void)
+{
+	if (platform_device_register(&rtc_generic_dev) < 0)
+		printk(KERN_ERR "unable to register rtc device...\n");
+
+	/* not necessarily an error */
+	return 0;
+}
+module_init(rtc_init);
+
+void read_persistent_clock(struct timespec *ts)
+{
+	static struct pdc_tod tod_data;
+	if (pdc_tod_read(&tod_data) == 0) {
+		ts->tv_sec = tod_data.tod_sec;
+		ts->tv_nsec = tod_data.tod_usec * 1000;
+	} else {
+		printk(KERN_ERR "Error reading tod clock\n");
+	        ts->tv_sec = 0;
+		ts->tv_nsec = 0;
+	}
+}
 
 void __init time_init(void)
 {
-	unsigned long next_tick;
-	static struct pdc_tod tod_data;
+	unsigned long current_cr16_khz;
 
 	clocktick = (100 * PAGE0->mem_10msec) / HZ;
-	halftick = clocktick / 2;
 
-	/* Setup clock interrupt timing */
+	start_cpu_itimer();	/* get CPU 0 started */
 
-	next_tick = mfctl(16);
-	next_tick += clocktick;
-	cpu_data[smp_processor_id()].it_value = next_tick;
-
-	/* kick off Itimer (CR16) */
-	mtctl(next_tick, 16);
-
-	if(pdc_tod_read(&tod_data) == 0) {
-		write_lock_irq(&xtime_lock);
-		xtime.tv_sec = tod_data.tod_sec;
-		xtime.tv_usec = tod_data.tod_usec;
-		write_unlock_irq(&xtime_lock);
-	} else {
-		printk(KERN_ERR "Error reading tod clock\n");
-	        xtime.tv_sec = 0;
-		xtime.tv_usec = 0;
-	}
+	/* register at clocksource framework */
+	current_cr16_khz = PAGE0->mem_10msec/10;  /* kHz */
+	clocksource_register_khz(&clocksource_cr16, current_cr16_khz);
 }

@@ -1,387 +1,259 @@
-/* $Id: setup.c,v 1.1.1.1.2.7 2003/06/20 13:13:25 trent Exp $
+/*
+ * arch/sh/kernel/setup.c
  *
- *  linux/arch/sh/kernel/setup.c
+ * This file handles the architecture-dependent parts of initialization
  *
  *  Copyright (C) 1999  Niibe Yutaka
- *
- * Modified by Rahul Chaturvedi on 22/06/2004 (justanotheraliasforrahul@yahoo.com)
- * Lines 158-164 (For copying the ROMFS from the .bss image in ROM instead of RAM)
- * 
+ *  Copyright (C) 2002 - 2010 Paul Mundt
  */
-
-/*
- * This file handles the architecture-dependent parts of initialization
- */
-
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
-#include <linux/stddef.h>
-#include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/slab.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/tty.h>
+#include <linux/screen_info.h>
 #include <linux/ioport.h>
-#include <linux/delay.h>
-#include <linux/config.h>
 #include <linux/init.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
+#include <linux/initrd.h>
 #include <linux/bootmem.h>
 #include <linux/console.h>
-#include <linux/ctype.h>
-#include <linux/seq_file.h>
-#include <asm/processor.h>
-#include <asm/page.h>
-#include <asm/pgtable.h>
+#include <linux/root_dev.h>
+#include <linux/utsname.h>
+#include <linux/nodemask.h>
+#include <linux/cpu.h>
+#include <linux/pfn.h>
+#include <linux/fs.h>
+#include <linux/mm.h>
+#include <linux/kexec.h>
+#include <linux/module.h>
+#include <linux/smp.h>
+#include <linux/err.h>
+#include <linux/crash_dump.h>
+#include <linux/mmzone.h>
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/platform_device.h>
+#include <linux/memblock.h>
 #include <asm/uaccess.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include <asm/io_generic.h>
-#include <asm/machvec.h>
-#ifdef CONFIG_SH_EARLY_PRINTK
-#include <asm/sh_bios.h>
-#endif
-#include <asm/byteorder.h>
-
-#ifdef CONFIG_SH_KGDB
-#include <asm/kgdb.h>
-static int kgdb_parse_options(char *options);
-#endif
-
-/*
- * Machine setup..
- */
+#include <asm/page.h>
+#include <asm/elf.h>
+#include <asm/sections.h>
+#include <asm/irq.h>
+#include <asm/setup.h>
+#include <asm/clock.h>
+#include <asm/smp.h>
+#include <asm/mmu_context.h>
+#include <asm/mmzone.h>
+#include <asm/sparsemem.h>
 
 /*
  * Initialize loops_per_jiffy as 10000000 (1000MIPS).
  * This value will be used at the very early stage of serial setup.
  * The bigger value means no problem.
  */
-struct sh_cpuinfo boot_cpu_data = { CPU_SH_NONE, 0, 10000000, };
+struct sh_cpuinfo cpu_data[NR_CPUS] __read_mostly = {
+	[0] = {
+		.type			= CPU_SH_NONE,
+		.family			= CPU_FAMILY_UNKNOWN,
+		.loops_per_jiffy	= 10000000,
+		.phys_bits		= MAX_PHYSMEM_BITS,
+	},
+};
+EXPORT_SYMBOL(cpu_data);
+
+/*
+ * The machine vector. First entry in .machvec.init, or clobbered by
+ * sh_mv= on the command line, prior to .machvec.init teardown.
+ */
+struct sh_machine_vector sh_mv = { .mv_name = "generic", };
+EXPORT_SYMBOL(sh_mv);
+
+#ifdef CONFIG_VT
 struct screen_info screen_info;
-unsigned char aux_device_present = 0xaa;
-
-#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
-struct sh_machine_vector sh_mv;
 #endif
 
-/* We need this to satisfy some external references. */
-struct screen_info screen_info = {
-        0, 25,                  /* orig-x, orig-y */
-        0,                      /* unused */
-        0,                      /* orig-video-page */
-        0,                      /* orig-video-mode */
-        80,                     /* orig-video-cols */
-        0,0,0,                  /* ega_ax, ega_bx, ega_cx */
-        25,                     /* orig-video-lines */
-        0,                      /* orig-video-isVGA */
-        16                      /* orig-video-points */
-};
-
-extern void fpu_init(void);
 extern int root_mountflags;
-extern int _text, _etext, _edata, _end;
 
-#define MV_NAME_SIZE 32
-
-static struct sh_machine_vector* __init get_mv_byname(const char* name);
-
-/*
- * This is set up by the setup-routine at boot-time
- */
-#define PARAM	((unsigned char *)empty_zero_page)
-
-#define MOUNT_ROOT_RDONLY (*(unsigned long *) (PARAM+0x000))
-#define RAMDISK_FLAGS (*(unsigned long *) (PARAM+0x004))
-#define ORIG_ROOT_DEV (*(unsigned long *) (PARAM+0x008))
-#define LOADER_TYPE (*(unsigned long *) (PARAM+0x00c))
-#define INITRD_START __pa(*(unsigned long *) (PARAM+0x010))
-#define INITRD_SIZE (*(unsigned long *) (PARAM+0x014))
-/* ... */
-#define COMMAND_LINE ((char *) (PARAM+0x100))
-#define COMMAND_LINE_SIZE 256
-
-#define RAMDISK_IMAGE_START_MASK  	0x07FF
+#define RAMDISK_IMAGE_START_MASK	0x07FF
 #define RAMDISK_PROMPT_FLAG		0x8000
-#define RAMDISK_LOAD_FLAG		0x4000	
+#define RAMDISK_LOAD_FLAG		0x4000
 
-#ifdef CONFIG_COMMAND_LINE
-#undef COMMAND_LINE
-static char COMMAND_LINE[COMMAND_LINE_SIZE] = CONFIG_COMMAND_LINE_VALUE;
-#endif
-static char command_line[COMMAND_LINE_SIZE] = { 0, };
-       char saved_command_line[COMMAND_LINE_SIZE];
+static char __initdata command_line[COMMAND_LINE_SIZE] = { 0, };
 
-struct resource standard_io_resources[] = {
-	{ "dma1", 0x00, 0x1f },
-	{ "pic1", 0x20, 0x3f },
-	{ "timer", 0x40, 0x5f },
-	{ "keyboard", 0x60, 0x6f },
-	{ "dma page reg", 0x80, 0x8f },
-	{ "pic2", 0xa0, 0xbf },
-	{ "dma2", 0xc0, 0xdf },
-	{ "fpu", 0xf0, 0xff }
+static struct resource code_resource = {
+	.name = "Kernel code",
+	.flags = IORESOURCE_BUSY | IORESOURCE_MEM,
 };
 
-#define STANDARD_IO_RESOURCES (sizeof(standard_io_resources)/sizeof(struct resource))
-
-/* System RAM - interrupted by the 640kB-1M hole */
-#define code_resource (ram_resources[3])
-#define data_resource (ram_resources[4])
-static struct resource ram_resources[] = {
-	{ "System RAM", 0x000000, 0x09ffff, IORESOURCE_BUSY },
-	{ "System RAM", 0x100000, 0x100000, IORESOURCE_BUSY },
-	{ "Video RAM area", 0x0a0000, 0x0bffff },
-	{ "Kernel code", 0x100000, 0 },
-	{ "Kernel data", 0, 0 }
+static struct resource data_resource = {
+	.name = "Kernel data",
+	.flags = IORESOURCE_BUSY | IORESOURCE_MEM,
 };
 
-unsigned long memory_start, memory_end;
+static struct resource bss_resource = {
+	.name	= "Kernel bss",
+	.flags	= IORESOURCE_BUSY | IORESOURCE_MEM,
+};
 
+unsigned long memory_start;
+EXPORT_SYMBOL(memory_start);
+unsigned long memory_end = 0;
+EXPORT_SYMBOL(memory_end);
+unsigned long memory_limit = 0;
 
-#if defined(CONFIG_SH_SNAPGEAR)
+static struct resource mem_resources[MAX_NUMNODES];
 
-/*
- * do not call printk in here,  bad things will happen,  the kernel isn't
- * actually up yet,  we are called from head.S before BSS is cleared.
- */
+int l1i_cache_shape, l1d_cache_shape, l2_cache_shape;
 
-extern void copy_romfs(void);
-void copy_romfs()
+static int __init early_parse_mem(char *p)
 {
-	unsigned long	*sp, *dp, len;
-	extern int __bss_start;
-#ifdef CONFIG_SH_ROMBOOT
-	extern int _mem_start, _rom_store;
+	if (!p)
+		return 1;
 
-	sp = (unsigned long *) &__bss_start - ((_mem_start - _rom_store) / 4);
-#else
-	sp = (unsigned long *) &__bss_start;
+	memory_limit = PAGE_ALIGN(memparse(p, &p));
+
+	pr_notice("Memory limited to %ldMB\n", memory_limit >> 20);
+
+	return 0;
+}
+early_param("mem", early_parse_mem);
+
+void __init check_for_initrd(void)
+{
+#ifdef CONFIG_BLK_DEV_INITRD
+	unsigned long start, end;
+
+	/*
+	 * Check for the rare cases where boot loaders adhere to the boot
+	 * ABI.
+	 */
+	if (!LOADER_TYPE || !INITRD_START || !INITRD_SIZE)
+		goto disable;
+
+	start = INITRD_START + __MEMORY_START;
+	end = start + INITRD_SIZE;
+
+	if (unlikely(end <= start))
+		goto disable;
+	if (unlikely(start & ~PAGE_MASK)) {
+		pr_err("initrd must be page aligned\n");
+		goto disable;
+	}
+
+	if (unlikely(start < __MEMORY_START)) {
+		pr_err("initrd start (%08lx) < __MEMORY_START(%x)\n",
+			start, __MEMORY_START);
+		goto disable;
+	}
+
+	if (unlikely(end > memblock_end_of_DRAM())) {
+		pr_err("initrd extends beyond end of memory "
+		       "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
+		       end, (unsigned long)memblock_end_of_DRAM());
+		goto disable;
+	}
+
+	/*
+	 * If we got this far in spite of the boot loader's best efforts
+	 * to the contrary, assume we actually have a valid initrd and
+	 * fix up the root dev.
+	 */
+	ROOT_DEV = Root_RAM0;
+
+	/*
+	 * Address sanitization
+	 */
+	initrd_start = (unsigned long)__va(start);
+	initrd_end = initrd_start + INITRD_SIZE;
+
+	memblock_reserve(__pa(initrd_start), INITRD_SIZE);
+
+	return;
+
+disable:
+	pr_info("initrd disabled\n");
+	initrd_start = initrd_end = 0;
 #endif
-	dp = (unsigned long *) &_end;
+}
 
-	if (memcmp(&sp[0], "-rom1fs-", 8) == 0) { /* romfs */
-		len = be32_to_cpu(sp[2]);
-	} else if (sp[0] == 0x28cd3d45) { /* cramfs */
-		len = sp[1];
-	} else {
-		*dp = 0; /* make sure we don't see an old FS there */
+void __cpuinit calibrate_delay(void)
+{
+	struct clk *clk = clk_get(NULL, "cpu_clk");
+
+	if (IS_ERR(clk))
+		panic("Need a sane CPU clock definition!");
+
+	loops_per_jiffy = (clk_get_rate(clk) >> 1) / HZ;
+
+	printk(KERN_INFO "Calibrating delay loop (skipped)... "
+			 "%lu.%02lu BogoMIPS PRESET (lpj=%lu)\n",
+			 loops_per_jiffy/(500000/HZ),
+			 (loops_per_jiffy/(5000/HZ)) % 100,
+			 loops_per_jiffy);
+}
+
+void __init __add_active_range(unsigned int nid, unsigned long start_pfn,
+						unsigned long end_pfn)
+{
+	struct resource *res = &mem_resources[nid];
+	unsigned long start, end;
+
+	WARN_ON(res->name); /* max one active range per node for now */
+
+	start = start_pfn << PAGE_SHIFT;
+	end = end_pfn << PAGE_SHIFT;
+
+	res->name = "System RAM";
+	res->start = start;
+	res->end = end - 1;
+	res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+
+	if (request_resource(&iomem_resource, res)) {
+		pr_err("unable to request memory_resource 0x%lx 0x%lx\n",
+		       start_pfn, end_pfn);
 		return;
 	}
 
-	len = (len + 0xfff) & ~0xfff; /* make it a multiple of a page */
-	INITRD_SIZE = len;
-
-	sp += (len / 4);
-	dp += (len / 4);
-
-	/* copy backwards to avoid writing over ourselves */
-	while (dp >= ((unsigned long *) &_end))
-		*dp-- = *sp--;
-}
+	/*
+	 * We don't know which RAM region contains kernel data or
+	 * the reserved crashkernel region, so try it repeatedly
+	 * and let the resource manager test it.
+	 */
+	request_resource(res, &code_resource);
+	request_resource(res, &data_resource);
+	request_resource(res, &bss_resource);
+#ifdef CONFIG_KEXEC
+	request_resource(res, &crashk_res);
 #endif
-
-
-
-#ifdef CONFIG_SH_EARLY_PRINTK
-
-#ifndef CONFIG_SH_STANDARD_BIOS
-/*
- * if we don't have a BIOS, assume the debug serial port for now.
- */
-#if defined(CONFIG_CPU_SH3)
-#define SCBASE	0xa4000150
-#define	SCSSRT	short
-#define SCTDR ((volatile unsigned char *)   (SCBASE + 0x6))
-#define SCSSR ((volatile unsigned SCSSRT *) (SCBASE + 0x8))
-#elif defined(CONFIG_CPU_SH4)
-#define SCBASE	0xffe80000
-#define	SCSSRT	short
-#define SCTDR ((volatile unsigned char *)   (SCBASE + 0xc))
-#define SCSSR ((volatile unsigned SCSSRT *) (SCBASE + 0x10))
-#else
-#error "Unknown CPU type"
-#endif
-
-static void sci_put_char(char ch)
-{
-	unsigned SCSSRT status = 0;
-	while ((*SCSSR & 0x20) == 0)
-		;
-	*SCTDR = ch;
-	status = *SCSSR;
-	*SCSSR = status & ~0x20;
-}
-
-#endif
-
-
-/*
- *	Print a string through the BIOS
- */
-static void sh_console_write(struct console *co, const char *s,
-				 unsigned count)
-{
-#ifdef CONFIG_SH_STANDARD_BIOS
-	sh_bios_console_write(s, count);
-#else
-	int flags;
-	save_and_cli(flags);
-	while (count-- > 0) {
-		if (*s == '\n')
-			sci_put_char('\r');
-		sci_put_char(*s++);
-	}
-	restore_flags(flags);
-#endif
-}
-
-static kdev_t sh_console_device(struct console *c)
-{
-    	/* TODO: this is totally bogus */
-	/* return MKDEV(SCI_MAJOR, SCI_MINOR_START + c->index); */
-	return 0;
-}
-
-/*
- *	Setup initial baud/bits/parity. We do two things here:
- *	- construct a cflag setting for the first rs_open()
- *	- initialize the serial port
- *	Return non-zero if we didn't find a serial port.
- */
-static int __init sh_console_setup(struct console *co, char *options)
-{
-	int	cflag = CREAD | HUPCL | CLOCAL;
 
 	/*
-	 *	Now construct a cflag setting.
-	 *  	TODO: this is a totally bogus cflag, as we have
-	 *  	no idea what serial settings the BIOS is using, or
-	 *  	even if its using the serial port at all.
+	 * Also make sure that there is a PMB mapping that covers this
+	 * range before we attempt to activate it, to avoid reset by MMU.
+	 * We can hit this path with NUMA or memory hot-add.
 	 */
-	cflag |= B115200 | CS8 | /*no parity*/0;
+	pmb_bolt_mapping((unsigned long)__va(start), start, end - start,
+			 PAGE_KERNEL);
 
-	co->cflag = cflag;
-
-	return 0;
+	memblock_set_node(PFN_PHYS(start_pfn),
+			  PFN_PHYS(end_pfn - start_pfn), nid);
 }
 
-static struct console sh_console = {
-#ifdef CONFIG_SH_STANDARD_BIOS
-	name:		"bios",
-#else
-	name:		"sci",
-#endif
-	write:		sh_console_write,
-	device:		sh_console_device,
-	setup:		sh_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
-};
-
-void sh_console_init(void)
+void __init __weak plat_early_device_setup(void)
 {
-	register_console(&sh_console);
-}
-
-void sh_console_unregister(void)
-{
-	unregister_console(&sh_console);
-}
-
-#endif
-
-static inline void parse_cmdline (char ** cmdline_p, char mv_name[MV_NAME_SIZE],
-				  struct sh_machine_vector** mvp,
-				  unsigned long *mv_io_base,
-				  int *mv_mmio_enable)
-{
-	char c = ' ', *to = command_line, *from = COMMAND_LINE;
-	int len = 0;
-
-	/* Save unparsed command line copy for /proc/cmdline */
-	memcpy(saved_command_line, COMMAND_LINE, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
-
-	memory_start = (unsigned long)PAGE_OFFSET+__MEMORY_START;
-	memory_end = memory_start + __MEMORY_SIZE;
-
-	for (;;) {
-		/*
-		 * "mem=XXX[kKmM]" defines a size of memory.
-		 */
-		if (c == ' ' && !memcmp(from, "mem=", 4)) {
-			if (to != command_line)
-				to--;
-			{
-				unsigned long mem_size;
-
-				mem_size = memparse(from+4, &from);
-				memory_end = memory_start + mem_size;
-			}
-		}
-		if (c == ' ' && !memcmp(from, "sh_mv=", 6)) {
-			char* mv_end;
-			char* mv_comma;
-			int mv_len;
-			if (to != command_line)
-				to--;
-			from += 6;
-			mv_end = strchr(from, ' ');
-			if (mv_end == NULL)
-				mv_end = from + strlen(from);
-
-			mv_comma = strchr(from, ',');
-			if ((mv_comma != NULL) && (mv_comma < mv_end)) {
-				int ints[3];
-				get_options(mv_comma+1, ARRAY_SIZE(ints), ints);
-				*mv_io_base = ints[1];
-				*mv_mmio_enable = ints[2];
-				mv_len = mv_comma - from;
-			} else {
-				mv_len = mv_end - from;
-			}
-			if (mv_len > (MV_NAME_SIZE-1))
-				mv_len = MV_NAME_SIZE-1;
-			memcpy(mv_name, from, mv_len);
-			mv_name[mv_len] = '\0';
-			from = mv_end;
-
-			*mvp = get_mv_byname(mv_name);
-		}
-		c = *(from++);
-		if (!c)
-			break;
-		if (COMMAND_LINE_SIZE <= ++len)
-			break;
-		*(to++) = c;
-	}
-	*to = '\0';
-	*cmdline_p = command_line;
 }
 
 void __init setup_arch(char **cmdline_p)
 {
-#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
-	extern struct sh_machine_vector mv_unknown;
-#endif
-	struct sh_machine_vector *mv = NULL;
-	char mv_name[MV_NAME_SIZE] = "";
-	unsigned long mv_io_base = 0;
-	int mv_mmio_enable = 0;
-	unsigned long bootmap_size;
-	unsigned long start_pfn, max_pfn, max_low_pfn;
+	enable_mmu();
 
-#ifdef CONFIG_SH_EARLY_PRINTK
-	sh_console_init();
-#endif
-	
-	ROOT_DEV = to_kdev_t(ORIG_ROOT_DEV);
+	ROOT_DEV = old_decode_dev(ORIG_ROOT_DEV);
+
+	printk(KERN_NOTICE "Boot params:\n"
+			   "... MOUNT_ROOT_RDONLY - %08lx\n"
+			   "... RAMDISK_FLAGS     - %08lx\n"
+			   "... ORIG_ROOT_DEV     - %08lx\n"
+			   "... LOADER_TYPE       - %08lx\n"
+			   "... INITRD_START      - %08lx\n"
+			   "... INITRD_SIZE       - %08lx\n",
+			   MOUNT_ROOT_RDONLY, RAMDISK_FLAGS,
+			   ORIG_ROOT_DEV, LOADER_TYPE,
+			   INITRD_START, INITRD_SIZE);
 
 #ifdef CONFIG_BLK_DEV_RAM
 	rd_image_start = RAMDISK_FLAGS & RAMDISK_IMAGE_START_MASK;
@@ -391,391 +263,62 @@ void __init setup_arch(char **cmdline_p)
 
 	if (!MOUNT_ROOT_RDONLY)
 		root_mountflags &= ~MS_RDONLY;
-	init_mm.start_code = (unsigned long)&_text;
-	init_mm.end_code = (unsigned long) &_etext;
-	init_mm.end_data = (unsigned long) &_edata;
-	init_mm.brk = (unsigned long) &_end;
+	init_mm.start_code = (unsigned long) _text;
+	init_mm.end_code = (unsigned long) _etext;
+	init_mm.end_data = (unsigned long) _edata;
+	init_mm.brk = (unsigned long) _end;
 
-	code_resource.start = virt_to_bus(&_text);
-	code_resource.end = virt_to_bus(&_etext)-1;
-	data_resource.start = virt_to_bus(&_etext);
-	data_resource.end = virt_to_bus(&_edata)-1;
+	code_resource.start = virt_to_phys(_text);
+	code_resource.end = virt_to_phys(_etext)-1;
+	data_resource.start = virt_to_phys(_etext);
+	data_resource.end = virt_to_phys(_edata)-1;
+	bss_resource.start = virt_to_phys(__bss_start);
+	bss_resource.end = virt_to_phys(_ebss)-1;
 
-	parse_cmdline(cmdline_p, mv_name, &mv, &mv_io_base, &mv_mmio_enable);
-
-#ifdef CONFIG_CMDLINE_BOOL
-	sprintf(*cmdline_p, CONFIG_CMDLINE);
+#ifdef CONFIG_CMDLINE_OVERWRITE
+	strlcpy(command_line, CONFIG_CMDLINE, sizeof(command_line));
+#else
+	strlcpy(command_line, COMMAND_LINE, sizeof(command_line));
+#ifdef CONFIG_CMDLINE_EXTEND
+	strlcat(command_line, " ", sizeof(command_line));
+	strlcat(command_line, CONFIG_CMDLINE, sizeof(command_line));
+#endif
 #endif
 
-#ifdef CONFIG_SH_GENERIC
-	if (mv == NULL) {
-		mv = &mv_unknown;
-		if (*mv_name != '\0') {
-			printk("Warning: Unsupported machine %s, using unknown\n",
-			       mv_name);
-		}
-	}
-	sh_mv = *mv;
-#endif
-#ifdef CONFIG_SH_UNKNOWN
-	sh_mv = mv_unknown;
-#endif
+	/* Save unparsed command line copy for /proc/cmdline */
+	memcpy(boot_command_line, command_line, COMMAND_LINE_SIZE);
+	*cmdline_p = command_line;
 
-#if defined(CONFIG_SH_GENERIC) || defined(CONFIG_SH_UNKNOWN)
-	if (mv_io_base != 0) {
-		sh_mv.mv_inb = generic_inb;
-		sh_mv.mv_inw = generic_inw;
-		sh_mv.mv_inl = generic_inl;
-		sh_mv.mv_outb = generic_outb;
-		sh_mv.mv_outw = generic_outw;
-		sh_mv.mv_outl = generic_outl;
+	parse_early_param();
 
-		sh_mv.mv_inb_p = generic_inb_p;
-		sh_mv.mv_inw_p = generic_inw_p;
-		sh_mv.mv_inl_p = generic_inl_p;
-		sh_mv.mv_outb_p = generic_outb_p;
-		sh_mv.mv_outw_p = generic_outw_p;
-		sh_mv.mv_outl_p = generic_outl_p;
+	plat_early_device_setup();
 
-		sh_mv.mv_insb = generic_insb;
-		sh_mv.mv_insw = generic_insw;
-		sh_mv.mv_insl = generic_insl;
-		sh_mv.mv_outsb = generic_outsb;
-		sh_mv.mv_outsw = generic_outsw;
-		sh_mv.mv_outsl = generic_outsl;
+	sh_mv_setup();
 
-		sh_mv.mv_isa_port2addr = generic_isa_port2addr;
-		generic_io_base = mv_io_base;
-	}
-	if (mv_mmio_enable != 0) {
-		sh_mv.mv_readb = generic_readb;
-		sh_mv.mv_readw = generic_readw;
-		sh_mv.mv_readl = generic_readl;
-		sh_mv.mv_writeb = generic_writeb;
-		sh_mv.mv_writew = generic_writew;
-		sh_mv.mv_writel = generic_writel;
-	}
-#endif
+	/* Let earlyprintk output early console messages */
+	early_platform_driver_probe("earlyprintk", 1, 1);
 
-#define PFN_UP(x)	(((x) + PAGE_SIZE-1) >> PAGE_SHIFT)
-#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
-#define PFN_PHYS(x)	((x) << PAGE_SHIFT)
+	paging_init();
 
-#ifdef CONFIG_DISCONTIGMEM
-	NODE_DATA(0)->bdata = &discontig_node_bdata[0];
-	NODE_DATA(1)->bdata = &discontig_node_bdata[1];
-
-	bootmap_size = init_bootmem_node(NODE_DATA(1), 
-					 PFN_UP(__MEMORY_START_2ND),
-					 PFN_UP(__MEMORY_START_2ND),
-					 PFN_DOWN(__MEMORY_START_2ND+__MEMORY_SIZE_2ND));
-	free_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, __MEMORY_SIZE_2ND);
-	reserve_bootmem_node(NODE_DATA(1), __MEMORY_START_2ND, bootmap_size);
-#endif
-
-	/*
-	 * Find the highest page frame number we have available
-	 */
-	max_pfn = PFN_DOWN(__pa(memory_end));
-
-	/*
-	 * Determine low and high memory ranges:
-	 */
-	max_low_pfn = max_pfn;
-
- 	/*
-	 * Partially used pages are not usable - thus
-	 * we are rounding upwards:
- 	 */
-#ifdef CONFIG_BLK_DEV_INITRD
-	if (INITRD_START == __pa(&_end))
-		start_pfn = PFN_UP(__pa(&_end) + INITRD_SIZE);
-	else
-#endif
-	start_pfn = PFN_UP(__pa(&_end));
-	/*
-	 * Find a proper area for the bootmem bitmap. After this
-	 * bootstrap step all allocations (until the page allocator
-	 * is intact) must be done via bootmem_alloc().
-	 */
-	bootmap_size = init_bootmem_node(NODE_DATA(0), start_pfn,
-					 __MEMORY_START>>PAGE_SHIFT,
-					 max_low_pfn);
-
-	/*
-	 * Register fully available low RAM pages with the bootmem allocator.
-	 */
-	{
-		unsigned long curr_pfn, last_pfn, pages;
-
-		/*
-		 * We are rounding up the start address of usable memory:
-		 */
-		curr_pfn = PFN_UP(__MEMORY_START);
-		/*
-		 * ... and at the end of the usable range downwards:
-		 */
-		last_pfn = PFN_DOWN(__pa(memory_end));
-
-		if (last_pfn > max_low_pfn)
-			last_pfn = max_low_pfn;
-
-		pages = last_pfn - curr_pfn;
-		free_bootmem_node(NODE_DATA(0), PFN_PHYS(curr_pfn),
-				  PFN_PHYS(pages));
-	}
-
-	/*
-	 * Reserve the kernel text and
-	 * Reserve the bootmem bitmap. We do this in two steps (first step
-	 * was init_bootmem()), because this catches the (definitely buggy)
-	 * case of us accidentally initializing the bootmem allocator with
-	 * an invalid RAM area.
-	 */
-	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START+PAGE_SIZE,
-		(PFN_PHYS(start_pfn)+bootmap_size+PAGE_SIZE-1)-__MEMORY_START);
-
-	/*
-	 * reserve physical page 0 - it's a special BIOS page on many boxes,
-	 * enabling clean reboots, SMP operation, laptop functions.
-	 */
-	reserve_bootmem_node(NODE_DATA(0), __MEMORY_START, PAGE_SIZE);
-
-#ifdef CONFIG_BLK_DEV_INITRD
-	if (LOADER_TYPE && INITRD_START && INITRD_SIZE) {
-		if (INITRD_START + INITRD_SIZE <= (max_low_pfn << PAGE_SHIFT)) {
-			if (INITRD_START == __pa(&_end)) {
-				initrd_start = INITRD_START + PAGE_OFFSET;
-			} else {
-				reserve_bootmem_node(NODE_DATA(0), INITRD_START+__MEMORY_START, INITRD_SIZE);
-				initrd_start =
-					INITRD_START ? INITRD_START + PAGE_OFFSET + __MEMORY_START : 0;
-			}
-			initrd_end = initrd_start + INITRD_SIZE;
-		} else {
-			printk("initrd extends beyond end of memory "
-			    "(0x%08lx > 0x%08lx)\ndisabling initrd\n",
-				    INITRD_START + INITRD_SIZE,
-				    max_low_pfn << PAGE_SHIFT);
-			initrd_start = 0;
-		}
-	}
-#endif
-
-#if 0
-	/*
-	 * Request the standard RAM and ROM resources -
-	 * they eat up PCI memory space
-	 */
-	request_resource(&iomem_resource, ram_resources+0);
-	request_resource(&iomem_resource, ram_resources+1);
-	request_resource(&iomem_resource, ram_resources+2);
-	request_resource(ram_resources+1, &code_resource);
-	request_resource(ram_resources+1, &data_resource);
-	probe_roms();
-
-	/* request I/O space for devices used on all i[345]86 PCs */
-	for (i = 0; i < STANDARD_IO_RESOURCES; i++)
-		request_resource(&ioport_resource, standard_io_resources+i);
-#endif
-
-#ifdef CONFIG_VT
-#if defined(CONFIG_VGA_CONSOLE)
-	conswitchp = &vga_con;
-#elif defined(CONFIG_DUMMY_CONSOLE)
+#ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
-#endif
 #endif
 
 	/* Perform the machine specific initialisation */
-	if (sh_mv.mv_init_arch != NULL) {
-		sh_mv.mv_init_arch();
-	}
+	if (likely(sh_mv.mv_setup))
+		sh_mv.mv_setup(cmdline_p);
 
-#if defined(CONFIG_CPU_SH4)
-	init_task.used_math = 0;
-	init_task.flags &= ~PF_USEDFPU;
-#endif
-
-#ifdef CONFIG_UBC_WAKEUP
-	/*
-	 * Some brain-damaged loaders decided it would be a good idea to put
-	 * the UBC to sleep. This causes some issues when it comes to things
-	 * like PTRACE_SINGLESTEP or doing hardware watchpoints in GDB.  So ..
-	 * we wake it up and hope that all is well.
-	 */
-	ubc_wakeup();
-#endif
-
-	paging_init();
+	plat_smp_setup();
 }
 
-struct sh_machine_vector* __init get_mv_byname(const char* name)
+/* processor boot mode configuration */
+int generic_mode_pins(void)
 {
-	extern int strcasecmp(const char *, const char *);
-	extern long __machvec_start, __machvec_end;
-	struct sh_machine_vector *all_vecs =
-		(struct sh_machine_vector *)&__machvec_start;
-
-	int i, n = ((unsigned long)&__machvec_end
-		    - (unsigned long)&__machvec_start)/
-		sizeof(struct sh_machine_vector);
-
-	for (i = 0; i < n; ++i) {
-		struct sh_machine_vector *mv = &all_vecs[i];
-		if (mv == NULL)
-			continue;
-		if (strcasecmp(name, mv->mv_name) == 0) {
-			return mv;
-		}
-	}
-	return NULL;
-}
-
-/*
- *	Get CPU information for use by the procfs.
- */
-#ifdef CONFIG_PROC_FS
-static int show_cpuinfo(struct seq_file *m, void *v)
-{
-#if defined(CONFIG_CPU_SH3)
-	seq_printf(m, "cpu family\t: SH-3\n"
-		      "cache size\t: 8K-byte\n");
-#if defined(CONFIG_SH_DSP)
-{
-	extern int sh3_dsp(void);
-	seq_printf(m, "dsp unit\t: %s\n",
-			(sh3_dsp() ? "present" : "not present"));
-}
-#endif
-#elif defined(CONFIG_CPU_SH4)
-	seq_printf(m, "cpu family\t: SH-4\n"
-		      "cache size\t: 8K-byte/16K-byte\n");
-#endif
-	seq_printf(m, "bogomips\t: %lu.%02lu\n\n",
-		     loops_per_jiffy/(500000/HZ),
-		     (loops_per_jiffy/(5000/HZ)) % 100);
-	seq_printf(m, "Machine: %s\n", sh_mv.mv_name);
-
-#define PRINT_CLOCK(name, value) \
-	seq_printf(m, name " clock: %d.%02dMHz\n", \
-		     ((value) / 1000000), ((value) % 1000000)/10000)
-	
-	PRINT_CLOCK("CPU", boot_cpu_data.cpu_clock);
-	PRINT_CLOCK("Bus", boot_cpu_data.bus_clock);
-#ifdef CONFIG_CPU_SUBTYPE_ST40
-	PRINT_CLOCK("Memory", boot_cpu_data.memory_clock);
-#endif
-	PRINT_CLOCK("Peripheral module", boot_cpu_data.module_clock);
-
+	pr_warning("generic_mode_pins(): missing mode pin configuration\n");
 	return 0;
 }
 
-static void *c_start(struct seq_file *m, loff_t *pos)
+int test_mode_pin(int pin)
 {
-	return (void*)(*pos == 0);
+	return sh_mv.mv_mode_pins() & pin;
 }
-static void *c_next(struct seq_file *m, void *v, loff_t *pos)
-{
-	return NULL;
-}
-static void c_stop(struct seq_file *m, void *v)
-{
-}
-struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
-};
-#endif /* CONFIG_PROC_FS */
-
-#ifdef CONFIG_SH_KGDB
-/*
- * Parse command-line kgdb options.  By default KGDB is enabled,
- * entered on error (or other action) using default serial info.
- * The command-line option can include a serial port specification
- * and an action to override default or configured behavior.
- */
-struct kgdb_sermap kgdb_sci_sermap =
-{ "ttySC", 5, kgdb_sci_setup, NULL };
-
-struct kgdb_sermap *kgdb_serlist = &kgdb_sci_sermap;
-struct kgdb_sermap *kgdb_porttype = &kgdb_sci_sermap;
-
-void kgdb_register_sermap(struct kgdb_sermap *map)
-{
-	struct kgdb_sermap *last;
-
-	for (last = kgdb_serlist; last->next; last = last->next)
-		;
-	last->next = map;
-	if (!map->namelen) {
-		map->namelen = strlen(map->name);
-	}
-}
-
-static int __init kgdb_parse_options(char *options)
-{
-	char c;
-	int baud;
-
-	/* Check for port spec (or use default) */
-
-	/* Determine port type and instance */
-	if (!memcmp(options, "tty", 3)) {
-		struct kgdb_sermap *map = kgdb_serlist;
-
-		while (map && memcmp(options, map->name, map->namelen))
-			map = map->next;
-
-		if (!map) {
-			KGDB_PRINTK("unknown port spec in %s\n", options);
-			return -1;
-		}
-
-		kgdb_porttype = map;
-		kgdb_serial_setup = map->setup_fn;
-		kgdb_portnum = options[map->namelen] - '0';
-		options += map->namelen + 1;
-
-		options = (*options == ',') ? options+1 : options;
-		
-		/* Read optional parameters (baud/parity/bits) */
-		baud = simple_strtoul(options, &options, 10);
-		if (baud != 0) {
-			kgdb_baud = baud;
-
-			c = toupper(*options);
-			if (c == 'E' || c == 'O' || c == 'N') {
-				kgdb_parity = c;
-				options++;
-			}
-
-			c = *options;
-			if (c == '7' || c == '8') {
-				kgdb_bits = c;
-				options++;
-			}
-			options = (*options == ',') ? options+1 : options;
-		}
-	}
-
-	/* Check for action specification */
-	if (!memcmp(options, "halt", 4)) {
-		kgdb_halt = 1;
-		options += 4;
-	} else if (!memcmp(options, "disabled", 8)) {
-		kgdb_enabled = 0;
-		options += 8;
-	}
-
-	if (*options) {
-                KGDB_PRINTK("ignored unknown options: %s\n", options);
-		return 0;
-	}
-	return 1;
-}
-__setup("kgdb=", kgdb_parse_options);
-#endif /* CONFIG_SH_KGDB */
-

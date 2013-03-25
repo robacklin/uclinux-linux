@@ -1,4 +1,4 @@
-/* 
+/*
    CMTP implementation for Linux Bluetooth stack (BlueZ).
    Copyright (C) 2002-2003 Marcel Holtmann <marcel@holtmann.org>
 
@@ -10,23 +10,22 @@
    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY RIGHTS.
    IN NO EVENT SHALL THE COPYRIGHT HOLDER(S) AND AUTHOR(S) BE LIABLE FOR ANY
-   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES 
-   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN 
-   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF 
+   CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES, OR ANY DAMAGES
+   WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+   ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
    OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS, 
-   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS 
+   ALL LIABILITY, INCLUDING LIABILITY FOR INFRINGEMENT OF ANY PATENTS,
+   COPYRIGHTS, TRADEMARKS OR OTHER RIGHTS, RELATING TO USE OF THIS
    SOFTWARE IS DISCLAIMED.
 */
 
-#include <linux/config.h>
 #include <linux/module.h>
-
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
-#include <linux/major.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/poll.h>
@@ -35,22 +34,15 @@
 #include <linux/socket.h>
 #include <linux/ioctl.h>
 #include <linux/file.h>
+#include <linux/wait.h>
+#include <linux/kthread.h>
 #include <net/sock.h>
 
-#include <linux/capi.h>
-
-#include "../drivers/isdn/avmb1/capilli.h"
-#include "../drivers/isdn/avmb1/capicmd.h"
-#include "../drivers/isdn/avmb1/capiutil.h"
+#include <linux/isdn/capilli.h>
+#include <linux/isdn/capicmd.h>
+#include <linux/isdn/capiutil.h>
 
 #include "cmtp.h"
-
-#ifndef CONFIG_BLUEZ_CMTP_DEBUG
-#undef  BT_DBG
-#define BT_DBG(D...)
-#endif
-
-#define REVISION "1.0"
 
 #define CAPI_INTEROPERABILITY		0x20
 
@@ -73,8 +65,6 @@
 #define CAPI_FUNCTION_MANUFACTURER	6
 #define CAPI_FUNCTION_LOOPBACK		7
 
-static struct capi_driver_interface *di;
-
 
 #define CMTP_MSGNUM	1
 #define CMTP_APPLID	2
@@ -82,14 +72,12 @@ static struct capi_driver_interface *di;
 
 static struct cmtp_application *cmtp_application_add(struct cmtp_session *session, __u16 appl)
 {
-	struct cmtp_application *app = kmalloc(sizeof(*app), GFP_KERNEL);
+	struct cmtp_application *app = kzalloc(sizeof(*app), GFP_KERNEL);
 
 	BT_DBG("session %p application %p appl %d", session, app, appl);
 
 	if (!app)
 		return NULL;
-
-	memset(app, 0, sizeof(*app));
 
 	app->state = BT_OPEN;
 	app->appl = appl;
@@ -145,6 +133,19 @@ static int cmtp_msgnum_get(struct cmtp_session *session)
 	return session->msgnum;
 }
 
+static void cmtp_send_capimsg(struct cmtp_session *session, struct sk_buff *skb)
+{
+	struct cmtp_scb *scb = (void *) skb->cb;
+
+	BT_DBG("session %p skb %p len %d", session, skb, skb->len);
+
+	scb->id = -1;
+	scb->data = (CAPIMSG_COMMAND(skb->data) == CAPI_DATA_B3);
+
+	skb_queue_tail(&session->transmit, skb);
+
+	wake_up_interruptible(sk_sleep(session->sock->sk));
+}
 
 static void cmtp_send_interopmsg(struct cmtp_session *session,
 					__u8 subcmd, __u16 appl, __u16 msgnum,
@@ -155,7 +156,8 @@ static void cmtp_send_interopmsg(struct cmtp_session *session,
 
 	BT_DBG("session %p subcmd 0x%02x appl %d msgnum %d", session, subcmd, appl, msgnum);
 
-	if (!(skb = alloc_skb(CAPI_MSG_BASELEN + 6 + len, GFP_ATOMIC))) {
+	skb = alloc_skb(CAPI_MSG_BASELEN + 6 + len, GFP_ATOMIC);
+	if (!skb) {
 		BT_ERR("Can't allocate memory for interoperability packet");
 		return;
 	}
@@ -183,7 +185,7 @@ static void cmtp_send_interopmsg(struct cmtp_session *session,
 
 static void cmtp_recv_interopmsg(struct cmtp_session *session, struct sk_buff *skb)
 {
-	struct capi_ctr *ctrl = session->ctrl;
+	struct capi_ctr *ctrl = &session->ctrl;
 	struct cmtp_application *application;
 	__u16 appl, msgnum, func, info;
 	__u32 controller;
@@ -242,7 +244,7 @@ static void cmtp_recv_interopmsg(struct cmtp_session *session, struct sk_buff *s
 					skb->data + CAPI_MSG_BASELEN + 11,
 					sizeof(capi_profile));
 				session->state = BT_CONNECTED;
-				ctrl->ready(ctrl);
+				capi_ctr_ready(ctrl);
 			}
 
 			break;
@@ -322,10 +324,10 @@ static void cmtp_recv_interopmsg(struct cmtp_session *session, struct sk_buff *s
 
 void cmtp_recv_capimsg(struct cmtp_session *session, struct sk_buff *skb)
 {
-	struct capi_ctr *ctrl = session->ctrl;
+	struct capi_ctr *ctrl = &session->ctrl;
 	struct cmtp_application *application;
-	__u16 cmd, appl, info;
-	__u32 ncci, contr;
+	__u16 appl;
+	__u32 contr;
 
 	BT_DBG("session %p skb %p len %d", session, skb, skb->len);
 
@@ -342,7 +344,6 @@ void cmtp_recv_capimsg(struct cmtp_session *session, struct sk_buff *skb)
 		return;
 	}
 
-	cmd = CAPICMD(CAPIMSG_COMMAND(skb->data), CAPIMSG_SUBCOMMAND(skb->data));
 	appl = CAPIMSG_APPID(skb->data);
 	contr = CAPIMSG_CONTROL(skb->data);
 
@@ -367,85 +368,26 @@ void cmtp_recv_capimsg(struct cmtp_session *session, struct sk_buff *skb)
 		return;
 	}
 
-	switch (cmd) {
-	case CAPI_CONNECT_B3_CONF:
-		ncci = CAPIMSG_NCCI(skb->data);
-		info = CAPIMSG_U16(skb->data, 12);
-
-		BT_DBG("CONNECT_B3_CONF ncci 0x%02x info 0x%02x", ncci, info);
-
-		if (info == 0)
-			ctrl->new_ncci(ctrl, appl, ncci, 8);
-
-		ctrl->handle_capimsg(ctrl, appl, skb);
-		break;
-
-	case CAPI_CONNECT_B3_IND:
-		ncci = CAPIMSG_NCCI(skb->data);
-
-		BT_DBG("CONNECT_B3_IND ncci 0x%02x", ncci);
-
-		ctrl->new_ncci(ctrl, appl, ncci, 8);
-		ctrl->handle_capimsg(ctrl, appl, skb);
-		break;
-
-	case CAPI_DISCONNECT_B3_IND:
-		ncci = CAPIMSG_NCCI(skb->data);
-
-		BT_DBG("DISCONNECT_B3_IND ncci 0x%02x", ncci);
-
-		if (ncci == 0xffffffff)
-			BT_ERR("DISCONNECT_B3_IND with ncci 0xffffffff");
-
-		ctrl->handle_capimsg(ctrl, appl, skb);
-		ctrl->free_ncci(ctrl, appl, ncci);
-		break;
-
-	default:
-		ctrl->handle_capimsg(ctrl, appl, skb);
-		break;
-	}
+	capi_ctr_handle_message(ctrl, appl, skb);
 }
-
-void cmtp_send_capimsg(struct cmtp_session *session, struct sk_buff *skb)
-{
-	struct cmtp_scb *scb = (void *) skb->cb;
-
-	BT_DBG("session %p skb %p len %d", session, skb, skb->len);
-
-	scb->id = -1;
-	scb->data = (CAPIMSG_COMMAND(skb->data) == CAPI_DATA_B3);
-
-	skb_queue_tail(&session->transmit, skb);
-
-	cmtp_schedule(session);
-}
-
 
 static int cmtp_load_firmware(struct capi_ctr *ctrl, capiloaddata *data)
 {
 	BT_DBG("ctrl %p data %p", ctrl, data);
 
-	return -EIO;
+	return 0;
 }
 
 static void cmtp_reset_ctr(struct capi_ctr *ctrl)
-{
-	BT_DBG("ctrl %p", ctrl);
-
-	ctrl->reseted(ctrl);
-}
-
-static void cmtp_remove_ctr(struct capi_ctr *ctrl)
 {
 	struct cmtp_session *session = ctrl->driverdata;
 
 	BT_DBG("ctrl %p", ctrl);
 
-	ctrl->suspend_output(ctrl);
+	capi_ctr_down(ctrl);
 
 	atomic_inc(&session->terminate);
-	cmtp_schedule(session);
+	wake_up_process(session->task);
 }
 
 static void cmtp_register_appl(struct capi_ctr *ctrl, __u16 appl, capi_register_params *rp)
@@ -463,7 +405,6 @@ static void cmtp_register_appl(struct capi_ctr *ctrl, __u16 appl, capi_register_
 	application = cmtp_application_add(session, appl);
 	if (!application) {
 		BT_ERR("Can't allocate memory for new application");
-		ctrl->appl_released(ctrl, appl);
 		return;
 	}
 
@@ -513,20 +454,15 @@ static void cmtp_register_appl(struct capi_ctr *ctrl, __u16 appl, capi_register_
 	remove_wait_queue(&session->wait, &wait);
 
 	if (err) {
-		ctrl->appl_released(ctrl, appl);
 		cmtp_application_del(session, application);
 		return;
 	}
-
-	ctrl->appl_registered(ctrl, appl);
 }
 
 static void cmtp_release_appl(struct capi_ctr *ctrl, __u16 appl)
 {
-	DECLARE_WAITQUEUE(wait, current);
 	struct cmtp_session *session = ctrl->driverdata;
 	struct cmtp_application *application;
-	unsigned long timeo = CMTP_INTEROP_TIMEOUT;
 
 	BT_DBG("ctrl %p appl %d", ctrl, appl);
 
@@ -541,26 +477,13 @@ static void cmtp_release_appl(struct capi_ctr *ctrl, __u16 appl)
 	cmtp_send_interopmsg(session, CAPI_REQ, application->mapping, application->msgnum,
 				CAPI_FUNCTION_RELEASE, NULL, 0);
 
-	add_wait_queue(&session->wait, &wait);
-	while (timeo) {
-		set_current_state(TASK_INTERRUPTIBLE);
-
-		if (application->state == BT_CLOSED)
-			break;
-
-		if (signal_pending(current))
-			break;
-
-		timeo = schedule_timeout(timeo);
-	}
-	set_current_state(TASK_RUNNING);
-	remove_wait_queue(&session->wait, &wait);
+	wait_event_interruptible_timeout(session->wait,
+			(application->state == BT_CLOSED), CMTP_INTEROP_TIMEOUT);
 
 	cmtp_application_del(session, application);
-	ctrl->appl_released(ctrl, appl);
 }
 
-static void cmtp_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
+static u16 cmtp_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 {
 	struct cmtp_session *session = ctrl->driverdata;
 	struct cmtp_application *application;
@@ -575,8 +498,7 @@ static void cmtp_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	application = cmtp_application_get(session, CMTP_APPLID, appl);
 	if ((!application) || (application->state != BT_CONNECTED)) {
 		BT_ERR("Can't find application with id %d", appl);
-		kfree_skb(skb);
-		return;
+		return CAPI_ILLAPPNR;
 	}
 
 	CAPIMSG_SETAPPID(skb->data, application->mapping);
@@ -587,6 +509,8 @@ static void cmtp_send_message(struct capi_ctr *ctrl, struct sk_buff *skb)
 	}
 
 	cmtp_send_capimsg(session, skb);
+
+	return CAPI_NOERROR;
 }
 
 static char *cmtp_procinfo(struct capi_ctr *ctrl)
@@ -594,55 +518,42 @@ static char *cmtp_procinfo(struct capi_ctr *ctrl)
 	return "CAPI Message Transport Protocol";
 }
 
-static int cmtp_ctr_read_proc(char *page, char **start, off_t off, int count, int *eof, struct capi_ctr *ctrl)
+static int cmtp_proc_show(struct seq_file *m, void *v)
 {
+	struct capi_ctr *ctrl = m->private;
 	struct cmtp_session *session = ctrl->driverdata;
 	struct cmtp_application *app;
 	struct list_head *p, *n;
-	int len = 0;
 
-	len += sprintf(page + len, "%s (Revision %s)\n\n", cmtp_procinfo(ctrl), REVISION);
-	len += sprintf(page + len, "addr %s\n", session->name);
-	len += sprintf(page + len, "ctrl %d\n", session->num);
+	seq_printf(m, "%s\n\n", cmtp_procinfo(ctrl));
+	seq_printf(m, "addr %s\n", session->name);
+	seq_printf(m, "ctrl %d\n", session->num);
 
 	list_for_each_safe(p, n, &session->applications) {
 		app = list_entry(p, struct cmtp_application, list);
-		len += sprintf(page + len, "appl %d -> %d\n", app->appl, app->mapping);
+		seq_printf(m, "appl %d -> %d\n", app->appl, app->mapping);
 	}
 
-	if (off + count >= len)
-		*eof = 1;
-
-	if (len < off)
-		return 0;
-
-	*start = page + off;
-
-	return ((count < len - off) ? count : len - off);
+	return 0;
 }
 
-static struct capi_driver cmtp_driver = {
-	name:		"cmtp",
-	revision:	REVISION,
-	load_firmware:	cmtp_load_firmware,
-	reset_ctr:	cmtp_reset_ctr,
-	remove_ctr:	cmtp_remove_ctr,
-	register_appl:	cmtp_register_appl,
-	release_appl:	cmtp_release_appl,
-	send_message:	cmtp_send_message,
-	procinfo:	cmtp_procinfo,
-	ctr_read_proc:	cmtp_ctr_read_proc,
+static int cmtp_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, cmtp_proc_show, PDE(inode)->data);
+}
 
-	driver_read_proc:	0,
-	add_card:		0,
+static const struct file_operations cmtp_proc_fops = {
+	.owner		= THIS_MODULE,
+	.open		= cmtp_proc_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
 };
-
 
 int cmtp_attach_device(struct cmtp_session *session)
 {
-	DECLARE_WAITQUEUE(wait, current);
-	unsigned long timeo = CMTP_INTEROP_TIMEOUT;
 	unsigned char buf[4];
+	long ret;
 
 	BT_DBG("session %p", session);
 
@@ -651,41 +562,42 @@ int cmtp_attach_device(struct cmtp_session *session)
 	cmtp_send_interopmsg(session, CAPI_REQ, 0xffff, CMTP_INITIAL_MSGNUM,
 				CAPI_FUNCTION_GET_PROFILE, buf, 4);
 
-	add_wait_queue(&session->wait, &wait);
-	while (timeo) {
-		set_current_state(TASK_INTERRUPTIBLE);
-
-		if (session->ncontroller)
-			break;
-
-		if (signal_pending(current))
-			break;
-
-		timeo = schedule_timeout(timeo);
-	}
-	set_current_state(TASK_RUNNING);
-	remove_wait_queue(&session->wait, &wait);
+	ret = wait_event_interruptible_timeout(session->wait,
+			session->ncontroller, CMTP_INTEROP_TIMEOUT);
 
 	BT_INFO("Found %d CAPI controller(s) on device %s", session->ncontroller, session->name);
 
-	if (!timeo)
+	if (!ret)
 		return -ETIMEDOUT;
 
 	if (!session->ncontroller)
 		return -ENODEV;
 
-
 	if (session->ncontroller > 1)
 		BT_INFO("Setting up only CAPI controller 1");
 
-	if (!(session->ctrl = di->attach_ctr(&cmtp_driver, session->name, session))) {
+	session->ctrl.owner      = THIS_MODULE;
+	session->ctrl.driverdata = session;
+	strcpy(session->ctrl.name, session->name);
+
+	session->ctrl.driver_name   = "cmtp";
+	session->ctrl.load_firmware = cmtp_load_firmware;
+	session->ctrl.reset_ctr     = cmtp_reset_ctr;
+	session->ctrl.register_appl = cmtp_register_appl;
+	session->ctrl.release_appl  = cmtp_release_appl;
+	session->ctrl.send_message  = cmtp_send_message;
+
+	session->ctrl.procinfo      = cmtp_procinfo;
+	session->ctrl.proc_fops = &cmtp_proc_fops;
+
+	if (attach_capi_ctr(&session->ctrl) < 0) {
 		BT_ERR("Can't attach new controller");
 		return -EBUSY;
 	}
 
-	session->num = session->ctrl->cnr;
+	session->num = session->ctrl.cnr;
 
-	BT_DBG("session %p ctrl %p num %d", session, session->ctrl, session->num);
+	BT_DBG("session %p num %d", session, session->num);
 
 	capimsg_setu32(buf, 0, 1);
 
@@ -706,29 +618,7 @@ int cmtp_attach_device(struct cmtp_session *session)
 
 void cmtp_detach_device(struct cmtp_session *session)
 {
-	struct capi_ctr *ctrl = session->ctrl;
+	BT_DBG("session %p", session);
 
-	BT_DBG("session %p ctrl %p", session, ctrl);
-
-	if (!ctrl)
-		return;
-
-	ctrl->reseted(ctrl);
-
-	di->detach_ctr(ctrl);
-}
-
-int cmtp_init_capi(void)
-{
-	if (!(di = attach_capi_driver(&cmtp_driver))) {
-		BT_ERR("Can't attach CAPI driver");
-		return -EIO;
-	}
-
-	return 0;
-}
-
-void cmtp_cleanup_capi(void)
-{
-	detach_capi_driver(&cmtp_driver);
+	detach_capi_ctr(&session->ctrl);
 }

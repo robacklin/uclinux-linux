@@ -4,7 +4,7 @@
  *	(c) 1999 Martin Mares <mj@ucw.cz>
  */
 
-#include <asm/vmlinux.h>
+#include <asm/sections.h>
 
 #undef DEBUG
 
@@ -17,8 +17,6 @@
 #define PCI_PROBE_BIOS		0x0001
 #define PCI_PROBE_CONF1		0x0002
 #define PCI_PROBE_CONF2		0x0004
-#define PCI_NO_SORT		0x0100
-#define PCI_BIOS_SORT		0x0200
 #define PCI_NO_CHECKS		0x0400
 #define PCI_ASSIGN_ROMS		0x1000
 #define PCI_BIOS_IRQ_SCAN	0x2000
@@ -26,14 +24,11 @@
 
 extern unsigned int __nongpreldata pci_probe;
 
-/* pci-i386.c */
-
-extern unsigned int pcibios_max_latency;
+/* pci-frv.c */
 
 void pcibios_resource_survey(void);
-int pcibios_enable_resources(struct pci_dev *, int);
 
-/* pci-pc.c */
+/* pci-vdk.c */
 
 extern int __nongpreldata pcibios_last_bus;
 extern struct pci_bus *__nongpreldata pci_root_bus;

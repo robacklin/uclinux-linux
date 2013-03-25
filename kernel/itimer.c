@@ -7,76 +7,100 @@
 /* These are all the functions necessary to implement itimers */
 
 #include <linux/mm.h>
-#include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/syscalls.h>
+#include <linux/time.h>
+#include <linux/posix-timers.h>
+#include <linux/hrtimer.h>
+#include <trace/events/timer.h>
 
 #include <asm/uaccess.h>
 
-/*
- * change timeval to jiffies, trying to avoid the 
- * most obvious overflows..
+/**
+ * itimer_get_remtime - get remaining time for the timer
  *
- * The tv_*sec values are signed, but nothing seems to 
- * indicate whether we really should use them as signed values
- * when doing itimers. POSIX doesn't mention this (but if
- * alarm() uses itimers without checking, we have to use unsigned
- * arithmetic).
+ * @timer: the timer to read
+ *
+ * Returns the delta between the expiry time and now, which can be
+ * less than zero or 1usec for an pending expired timer
  */
-static unsigned long tvtojiffies(struct timeval *value)
+static struct timeval itimer_get_remtime(struct hrtimer *timer)
 {
-	unsigned long sec = (unsigned) value->tv_sec;
-	unsigned long usec = (unsigned) value->tv_usec;
+	ktime_t rem = hrtimer_get_remaining(timer);
 
-	if (sec > (ULONG_MAX / HZ))
-		return ULONG_MAX;
-	usec += 1000000 / HZ - 1;
-	usec /= 1000000 / HZ;
-	return HZ*sec+usec;
+	/*
+	 * Racy but safe: if the itimer expires after the above
+	 * hrtimer_get_remtime() call but before this condition
+	 * then we return 0 - which is correct.
+	 */
+	if (hrtimer_active(timer)) {
+		if (rem.tv64 <= 0)
+			rem.tv64 = NSEC_PER_USEC;
+	} else
+		rem.tv64 = 0;
+
+	return ktime_to_timeval(rem);
 }
 
-static void jiffiestotv(unsigned long jiffies, struct timeval *value)
+static void get_cpu_itimer(struct task_struct *tsk, unsigned int clock_id,
+			   struct itimerval *const value)
 {
-	value->tv_usec = (jiffies % HZ) * (1000000 / HZ);
-	value->tv_sec = jiffies / HZ;
+	cputime_t cval, cinterval;
+	struct cpu_itimer *it = &tsk->signal->it[clock_id];
+
+	spin_lock_irq(&tsk->sighand->siglock);
+
+	cval = it->expires;
+	cinterval = it->incr;
+	if (cval) {
+		struct task_cputime cputime;
+		cputime_t t;
+
+		thread_group_cputimer(tsk, &cputime);
+		if (clock_id == CPUCLOCK_PROF)
+			t = cputime.utime + cputime.stime;
+		else
+			/* CPUCLOCK_VIRT */
+			t = cputime.utime;
+
+		if (cval < t)
+			/* about to fire */
+			cval = cputime_one_jiffy;
+		else
+			cval = cval - t;
+	}
+
+	spin_unlock_irq(&tsk->sighand->siglock);
+
+	cputime_to_timeval(cval, &value->it_value);
+	cputime_to_timeval(cinterval, &value->it_interval);
 }
 
 int do_getitimer(int which, struct itimerval *value)
 {
-	register unsigned long val, interval;
+	struct task_struct *tsk = current;
 
 	switch (which) {
 	case ITIMER_REAL:
-		interval = current->it_real_incr;
-		val = 0;
-		/* 
-		 * FIXME! This needs to be atomic, in case the kernel timer happens!
-		 */
-		if (timer_pending(&current->real_timer)) {
-			val = current->real_timer.expires - jiffies;
-
-			/* look out for negative/zero itimer.. */
-			if ((long) val <= 0)
-				val = 1;
-		}
+		spin_lock_irq(&tsk->sighand->siglock);
+		value->it_value = itimer_get_remtime(&tsk->signal->real_timer);
+		value->it_interval =
+			ktime_to_timeval(tsk->signal->it_real_incr);
+		spin_unlock_irq(&tsk->sighand->siglock);
 		break;
 	case ITIMER_VIRTUAL:
-		val = current->it_virt_value;
-		interval = current->it_virt_incr;
+		get_cpu_itimer(tsk, CPUCLOCK_VIRT, value);
 		break;
 	case ITIMER_PROF:
-		val = current->it_prof_value;
-		interval = current->it_prof_incr;
+		get_cpu_itimer(tsk, CPUCLOCK_PROF, value);
 		break;
 	default:
 		return(-EINVAL);
 	}
-	jiffiestotv(val, &value->it_value);
-	jiffiestotv(interval, &value->it_interval);
 	return 0;
 }
 
-/* SMP: Only we modify our itimer values. */
-asmlinkage long sys_getitimer(int which, struct itimerval *value)
+SYSCALL_DEFINE2(getitimer, int, which, struct itimerval __user *, value)
 {
 	int error = -EFAULT;
 	struct itimerval get_buffer;
@@ -90,66 +114,169 @@ asmlinkage long sys_getitimer(int which, struct itimerval *value)
 	return error;
 }
 
-void it_real_fn(unsigned long __data)
-{
-	struct task_struct * p = (struct task_struct *) __data;
-	unsigned long interval;
 
-	send_sig(SIGALRM, p, 1);
-	interval = p->it_real_incr;
-	if (interval) {
-		if (interval > (unsigned long) LONG_MAX)
-			interval = LONG_MAX;
-		p->real_timer.expires = jiffies + interval;
-		add_timer(&p->real_timer);
+/*
+ * The timer is automagically restarted, when interval != 0
+ */
+enum hrtimer_restart it_real_fn(struct hrtimer *timer)
+{
+	struct signal_struct *sig =
+		container_of(timer, struct signal_struct, real_timer);
+
+	trace_itimer_expire(ITIMER_REAL, sig->leader_pid, 0);
+	kill_pid_info(SIGALRM, SEND_SIG_PRIV, sig->leader_pid);
+
+	return HRTIMER_NORESTART;
+}
+
+static inline u32 cputime_sub_ns(cputime_t ct, s64 real_ns)
+{
+	struct timespec ts;
+	s64 cpu_ns;
+
+	cputime_to_timespec(ct, &ts);
+	cpu_ns = timespec_to_ns(&ts);
+
+	return (cpu_ns <= real_ns) ? 0 : cpu_ns - real_ns;
+}
+
+static void set_cpu_itimer(struct task_struct *tsk, unsigned int clock_id,
+			   const struct itimerval *const value,
+			   struct itimerval *const ovalue)
+{
+	cputime_t cval, nval, cinterval, ninterval;
+	s64 ns_ninterval, ns_nval;
+	u32 error, incr_error;
+	struct cpu_itimer *it = &tsk->signal->it[clock_id];
+
+	nval = timeval_to_cputime(&value->it_value);
+	ns_nval = timeval_to_ns(&value->it_value);
+	ninterval = timeval_to_cputime(&value->it_interval);
+	ns_ninterval = timeval_to_ns(&value->it_interval);
+
+	error = cputime_sub_ns(nval, ns_nval);
+	incr_error = cputime_sub_ns(ninterval, ns_ninterval);
+
+	spin_lock_irq(&tsk->sighand->siglock);
+
+	cval = it->expires;
+	cinterval = it->incr;
+	if (cval || nval) {
+		if (nval > 0)
+			nval += cputime_one_jiffy;
+		set_process_cpu_timer(tsk, clock_id, &nval, &cval);
+	}
+	it->expires = nval;
+	it->incr = ninterval;
+	it->error = error;
+	it->incr_error = incr_error;
+	trace_itimer_state(clock_id == CPUCLOCK_VIRT ?
+			   ITIMER_VIRTUAL : ITIMER_PROF, value, nval);
+
+	spin_unlock_irq(&tsk->sighand->siglock);
+
+	if (ovalue) {
+		cputime_to_timeval(cval, &ovalue->it_value);
+		cputime_to_timeval(cinterval, &ovalue->it_interval);
 	}
 }
 
+/*
+ * Returns true if the timeval is in canonical form
+ */
+#define timeval_valid(t) \
+	(((t)->tv_sec >= 0) && (((unsigned long) (t)->tv_usec) < USEC_PER_SEC))
+
 int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 {
-	register unsigned long i, j;
-	int k;
+	struct task_struct *tsk = current;
+	struct hrtimer *timer;
+	ktime_t expires;
 
-	i = tvtojiffies(&value->it_interval);
-	j = tvtojiffies(&value->it_value);
-	if (ovalue && (k = do_getitimer(which, ovalue)) < 0)
-		return k;
+	/*
+	 * Validate the timevals in value.
+	 */
+	if (!timeval_valid(&value->it_value) ||
+	    !timeval_valid(&value->it_interval))
+		return -EINVAL;
+
 	switch (which) {
-		case ITIMER_REAL:
-			del_timer_sync(&current->real_timer);
-			current->it_real_value = j;
-			current->it_real_incr = i;
-			if (!j)
-				break;
-			if (j > (unsigned long) LONG_MAX)
-				j = LONG_MAX;
-			i = j + jiffies;
-			current->real_timer.expires = i;
-			add_timer(&current->real_timer);
-			break;
-		case ITIMER_VIRTUAL:
-			if (j)
-				j++;
-			current->it_virt_value = j;
-			current->it_virt_incr = i;
-			break;
-		case ITIMER_PROF:
-			if (j)
-				j++;
-			current->it_prof_value = j;
-			current->it_prof_incr = i;
-			break;
-		default:
-			return -EINVAL;
+	case ITIMER_REAL:
+again:
+		spin_lock_irq(&tsk->sighand->siglock);
+		timer = &tsk->signal->real_timer;
+		if (ovalue) {
+			ovalue->it_value = itimer_get_remtime(timer);
+			ovalue->it_interval
+				= ktime_to_timeval(tsk->signal->it_real_incr);
+		}
+		/* We are sharing ->siglock with it_real_fn() */
+		if (hrtimer_try_to_cancel(timer) < 0) {
+			spin_unlock_irq(&tsk->sighand->siglock);
+			goto again;
+		}
+		expires = timeval_to_ktime(value->it_value);
+		if (expires.tv64 != 0) {
+			tsk->signal->it_real_incr =
+				timeval_to_ktime(value->it_interval);
+			hrtimer_start(timer, expires, HRTIMER_MODE_REL);
+		} else
+			tsk->signal->it_real_incr.tv64 = 0;
+
+		trace_itimer_state(ITIMER_REAL, value, 0);
+		spin_unlock_irq(&tsk->sighand->siglock);
+		break;
+	case ITIMER_VIRTUAL:
+		set_cpu_itimer(tsk, CPUCLOCK_VIRT, value, ovalue);
+		break;
+	case ITIMER_PROF:
+		set_cpu_itimer(tsk, CPUCLOCK_PROF, value, ovalue);
+		break;
+	default:
+		return -EINVAL;
 	}
 	return 0;
 }
 
-/* SMP: Again, only we play with our itimers, and signals are SMP safe
- *      now so that is not an issue at all anymore.
+/**
+ * alarm_setitimer - set alarm in seconds
+ *
+ * @seconds:	number of seconds until alarm
+ *		0 disables the alarm
+ *
+ * Returns the remaining time in seconds of a pending timer or 0 when
+ * the timer is not active.
+ *
+ * On 32 bit machines the seconds value is limited to (INT_MAX/2) to avoid
+ * negative timeval settings which would cause immediate expiry.
  */
-asmlinkage long sys_setitimer(int which, struct itimerval *value,
-			      struct itimerval *ovalue)
+unsigned int alarm_setitimer(unsigned int seconds)
+{
+	struct itimerval it_new, it_old;
+
+#if BITS_PER_LONG < 64
+	if (seconds > INT_MAX)
+		seconds = INT_MAX;
+#endif
+	it_new.it_value.tv_sec = seconds;
+	it_new.it_value.tv_usec = 0;
+	it_new.it_interval.tv_sec = it_new.it_interval.tv_usec = 0;
+
+	do_setitimer(ITIMER_REAL, &it_new, &it_old);
+
+	/*
+	 * We can't return 0 if we have an alarm pending ...  And we'd
+	 * better return too much than too little anyway
+	 */
+	if ((!it_old.it_value.tv_sec && it_old.it_value.tv_usec) ||
+	      it_old.it_value.tv_usec >= 500000)
+		it_old.it_value.tv_sec++;
+
+	return it_old.it_value.tv_sec;
+}
+
+SYSCALL_DEFINE3(setitimer, int, which, struct itimerval __user *, value,
+		struct itimerval __user *, ovalue)
 {
 	struct itimerval set_buffer, get_buffer;
 	int error;
@@ -157,14 +284,18 @@ asmlinkage long sys_setitimer(int which, struct itimerval *value,
 	if (value) {
 		if(copy_from_user(&set_buffer, value, sizeof(set_buffer)))
 			return -EFAULT;
-	} else
-		memset((char *) &set_buffer, 0, sizeof(set_buffer));
+	} else {
+		memset(&set_buffer, 0, sizeof(set_buffer));
+		printk_once(KERN_WARNING "%s calls setitimer() with new_value NULL pointer."
+			    " Misfeature support will be removed\n",
+			    current->comm);
+	}
 
-	error = do_setitimer(which, &set_buffer, ovalue ? &get_buffer : 0);
+	error = do_setitimer(which, &set_buffer, ovalue ? &get_buffer : NULL);
 	if (error || !ovalue)
 		return error;
 
 	if (copy_to_user(ovalue, &get_buffer, sizeof(get_buffer)))
-		return -EFAULT; 
+		return -EFAULT;
 	return 0;
 }

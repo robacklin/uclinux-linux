@@ -20,6 +20,7 @@
 #define FIT3_VERSION      "1.0"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -179,45 +180,32 @@ static void fit3_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void fit3_init_proto(PIA *pi)
+static struct pi_protocol fit3 = {
+	.owner		= THIS_MODULE,
+	.name		= "fit3",
+	.max_mode	= 3,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= fit3_write_regr,
+	.read_regr	= fit3_read_regr,
+	.write_block	= fit3_write_block,
+	.read_block	= fit3_read_block,
+	.connect	= fit3_connect,
+	.disconnect	= fit3_disconnect,
+	.log_adapter	= fit3_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init fit3_init(void)
+{
+	return paride_register(&fit3);
 }
 
-static void fit3_release_proto(PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit fit3_exit(void)
+{
+	paride_unregister(&fit3);
 }
 
-struct pi_protocol fit3 = {"fit3",0,3,2,1,1,
-                           fit3_write_regr,
-                           fit3_read_regr,
-                           fit3_write_block,
-                           fit3_read_block,
-                           fit3_connect,
-                           fit3_disconnect,
-                           0,
-                           0,
-                           0,
-                           fit3_log_adapter,
-                           fit3_init_proto,
-                           fit3_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &fit3 ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &fit3 );
-}
-
-#endif
-
-/* end of fit3.c */
 MODULE_LICENSE("GPL");
+module_init(fit3_init)
+module_exit(fit3_exit)

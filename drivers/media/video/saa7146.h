@@ -1,7 +1,7 @@
-/*  
+/*
     saa7146.h - definitions philips saa7146 based cards
     Copyright (C) 1999 Nathan Laredo (laredo@gnu.org)
-    
+
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
     the Free Software Foundation; either version 2 of the License, or
@@ -25,10 +25,7 @@
 #include <linux/types.h>
 #include <linux/wait.h>
 
-#include <linux/i2c-old.h>
-#include <linux/videodev.h>
-
-#ifndef O_NONCAP  
+#ifndef O_NONCAP
 #define O_NONCAP	O_TRUNC
 #endif
 
@@ -37,7 +34,7 @@
 
 #ifdef __KERNEL__
 
-struct saa7146_window 
+struct saa7146_window
 {
 	int x, y;
 	ushort width, height;
@@ -71,16 +68,14 @@ struct saa7146
 	int irqstate;		/* irq routine is state driven */
 	int writemode;
 	int playmode;
-        unsigned int nr;
+	unsigned int nr;
 	unsigned long irq;          /* IRQ used by SAA7146 card */
 	unsigned short id;
-	struct i2c_bus i2c;
-	struct pci_dev *dev;
 	unsigned char revision;
 	unsigned char boardcfg[64];	/* 64 bytes of config from eeprom */
 	unsigned long saa7146_adr;   /* bus address of IO mem from PCI BIOS */
 	struct saa7146_window win;
-	unsigned char *saa7146_mem; /* pointer to mapped IO memory */
+	unsigned char __iomem *saa7146_mem; /* pointer to mapped IO memory */
 	struct device_open open_data[MAX_OPENS];
 #define MAX_MARKS 16
 	/* for a/v sync */
@@ -97,10 +92,10 @@ struct saa7146
 #endif
 
 #ifdef _ALPHA_SAA7146
-#define saawrite(dat,adr)    writel((dat),(char *) (saa->saa7146_adr+(adr)))
+#define saawrite(dat,adr)    writel((dat), saa->saa7146_adr+(adr))
 #define saaread(adr)         readl(saa->saa7146_adr+(adr))
 #else
-#define saawrite(dat,adr)    writel((dat), (char *) (saa->saa7146_mem+(adr)))
+#define saawrite(dat,adr)    writel((dat), saa->saa7146_mem+(adr))
 #define saaread(adr)         readl(saa->saa7146_mem+(adr))
 #endif
 

@@ -5,7 +5,7 @@
  * to set up the kernel's global pointer and jump to the kernel
  * entry point.
  *
- * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003, 2005 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
@@ -15,23 +15,158 @@
  * Copyright (C) 1999 Don Dugger <Don.Dugger@intel.com>
  * Copyright (C) 2002 Fenghua Yu <fenghua.yu@intel.com>
  *   -Optimize __ia64_save_fpu() and __ia64_load_fpu() for Itanium 2.
- * Copyright (C) 2003 Silicon Graphics, Inc.
+ * Copyright (C) 2004 Ashok Raj <ashok.raj@intel.com>
+ *   Support for CPU Hotplug
  */
 
-#include <linux/config.h>
 
 #include <asm/asmmacro.h>
 #include <asm/fpu.h>
 #include <asm/kregs.h>
 #include <asm/mmu_context.h>
-#include <asm/offsets.h>
+#include <asm/asm-offsets.h>
 #include <asm/pal.h>
+#include <asm/paravirt.h>
 #include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>
+#include <asm/mca_asm.h>
+#include <linux/init.h>
+#include <linux/linkage.h>
 
-	.section __special_page_section,"ax"
+#ifdef CONFIG_HOTPLUG_CPU
+#define SAL_PSR_BITS_TO_SET				\
+	(IA64_PSR_AC | IA64_PSR_BN | IA64_PSR_MFH | IA64_PSR_MFL)
+
+#define SAVE_FROM_REG(src, ptr, dest)	\
+	mov dest=src;;						\
+	st8 [ptr]=dest,0x08
+
+#define RESTORE_REG(reg, ptr, _tmp)		\
+	ld8 _tmp=[ptr],0x08;;				\
+	mov reg=_tmp
+
+#define SAVE_BREAK_REGS(ptr, _idx, _breg, _dest)\
+	mov ar.lc=IA64_NUM_DBG_REGS-1;; 			\
+	mov _idx=0;; 								\
+1: 												\
+	SAVE_FROM_REG(_breg[_idx], ptr, _dest);;	\
+	add _idx=1,_idx;;							\
+	br.cloop.sptk.many 1b
+
+#define RESTORE_BREAK_REGS(ptr, _idx, _breg, _tmp, _lbl)\
+	mov ar.lc=IA64_NUM_DBG_REGS-1;;			\
+	mov _idx=0;;							\
+_lbl:  RESTORE_REG(_breg[_idx], ptr, _tmp);;	\
+	add _idx=1, _idx;;						\
+	br.cloop.sptk.many _lbl
+
+#define SAVE_ONE_RR(num, _reg, _tmp) \
+	movl _tmp=(num<<61);;	\
+	mov _reg=rr[_tmp]
+
+#define SAVE_REGION_REGS(_tmp, _r0, _r1, _r2, _r3, _r4, _r5, _r6, _r7) \
+	SAVE_ONE_RR(0,_r0, _tmp);; \
+	SAVE_ONE_RR(1,_r1, _tmp);; \
+	SAVE_ONE_RR(2,_r2, _tmp);; \
+	SAVE_ONE_RR(3,_r3, _tmp);; \
+	SAVE_ONE_RR(4,_r4, _tmp);; \
+	SAVE_ONE_RR(5,_r5, _tmp);; \
+	SAVE_ONE_RR(6,_r6, _tmp);; \
+	SAVE_ONE_RR(7,_r7, _tmp);;
+
+#define STORE_REGION_REGS(ptr, _r0, _r1, _r2, _r3, _r4, _r5, _r6, _r7) \
+	st8 [ptr]=_r0, 8;; \
+	st8 [ptr]=_r1, 8;; \
+	st8 [ptr]=_r2, 8;; \
+	st8 [ptr]=_r3, 8;; \
+	st8 [ptr]=_r4, 8;; \
+	st8 [ptr]=_r5, 8;; \
+	st8 [ptr]=_r6, 8;; \
+	st8 [ptr]=_r7, 8;;
+
+#define RESTORE_REGION_REGS(ptr, _idx1, _idx2, _tmp) \
+	mov		ar.lc=0x08-1;;						\
+	movl	_idx1=0x00;;						\
+RestRR:											\
+	dep.z	_idx2=_idx1,61,3;;					\
+	ld8		_tmp=[ptr],8;;						\
+	mov		rr[_idx2]=_tmp;;					\
+	srlz.d;;									\
+	add		_idx1=1,_idx1;;						\
+	br.cloop.sptk.few	RestRR
+
+#define SET_AREA_FOR_BOOTING_CPU(reg1, reg2) \
+	movl reg1=sal_state_for_booting_cpu;;	\
+	ld8 reg2=[reg1];;
+
+/*
+ * Adjust region registers saved before starting to save
+ * break regs and rest of the states that need to be preserved.
+ */
+#define SAL_TO_OS_BOOT_HANDOFF_STATE_SAVE(_reg1,_reg2,_pred)  \
+	SAVE_FROM_REG(b0,_reg1,_reg2);;						\
+	SAVE_FROM_REG(b1,_reg1,_reg2);;						\
+	SAVE_FROM_REG(b2,_reg1,_reg2);;						\
+	SAVE_FROM_REG(b3,_reg1,_reg2);;						\
+	SAVE_FROM_REG(b4,_reg1,_reg2);;						\
+	SAVE_FROM_REG(b5,_reg1,_reg2);;						\
+	st8 [_reg1]=r1,0x08;;								\
+	st8 [_reg1]=r12,0x08;;								\
+	st8 [_reg1]=r13,0x08;;								\
+	SAVE_FROM_REG(ar.fpsr,_reg1,_reg2);;				\
+	SAVE_FROM_REG(ar.pfs,_reg1,_reg2);;					\
+	SAVE_FROM_REG(ar.rnat,_reg1,_reg2);;				\
+	SAVE_FROM_REG(ar.unat,_reg1,_reg2);;				\
+	SAVE_FROM_REG(ar.bspstore,_reg1,_reg2);;			\
+	SAVE_FROM_REG(cr.dcr,_reg1,_reg2);;					\
+	SAVE_FROM_REG(cr.iva,_reg1,_reg2);;					\
+	SAVE_FROM_REG(cr.pta,_reg1,_reg2);;					\
+	SAVE_FROM_REG(cr.itv,_reg1,_reg2);;					\
+	SAVE_FROM_REG(cr.pmv,_reg1,_reg2);;					\
+	SAVE_FROM_REG(cr.cmcv,_reg1,_reg2);;				\
+	SAVE_FROM_REG(cr.lrr0,_reg1,_reg2);;				\
+	SAVE_FROM_REG(cr.lrr1,_reg1,_reg2);;				\
+	st8 [_reg1]=r4,0x08;;								\
+	st8 [_reg1]=r5,0x08;;								\
+	st8 [_reg1]=r6,0x08;;								\
+	st8 [_reg1]=r7,0x08;;								\
+	st8 [_reg1]=_pred,0x08;;							\
+	SAVE_FROM_REG(ar.lc, _reg1, _reg2);;				\
+	stf.spill.nta [_reg1]=f2,16;;						\
+	stf.spill.nta [_reg1]=f3,16;;						\
+	stf.spill.nta [_reg1]=f4,16;;						\
+	stf.spill.nta [_reg1]=f5,16;;						\
+	stf.spill.nta [_reg1]=f16,16;;						\
+	stf.spill.nta [_reg1]=f17,16;;						\
+	stf.spill.nta [_reg1]=f18,16;;						\
+	stf.spill.nta [_reg1]=f19,16;;						\
+	stf.spill.nta [_reg1]=f20,16;;						\
+	stf.spill.nta [_reg1]=f21,16;;						\
+	stf.spill.nta [_reg1]=f22,16;;						\
+	stf.spill.nta [_reg1]=f23,16;;						\
+	stf.spill.nta [_reg1]=f24,16;;						\
+	stf.spill.nta [_reg1]=f25,16;;						\
+	stf.spill.nta [_reg1]=f26,16;;						\
+	stf.spill.nta [_reg1]=f27,16;;						\
+	stf.spill.nta [_reg1]=f28,16;;						\
+	stf.spill.nta [_reg1]=f29,16;;						\
+	stf.spill.nta [_reg1]=f30,16;;						\
+	stf.spill.nta [_reg1]=f31,16;;
+
+#else
+#define SET_AREA_FOR_BOOTING_CPU(a1, a2)
+#define SAL_TO_OS_BOOT_HANDOFF_STATE_SAVE(a1,a2, a3)
+#define SAVE_REGION_REGS(_tmp, _r0, _r1, _r2, _r3, _r4, _r5, _r6, _r7)
+#define STORE_REGION_REGS(ptr, _r0, _r1, _r2, _r3, _r4, _r5, _r6, _r7)
+#endif
+
+#define SET_ONE_RR(num, pgsize, _tmp1, _tmp2, vhpt) \
+	movl _tmp1=(num << 61);;	\
+	mov _tmp2=((ia64_rid(IA64_REGION_ID_KERNEL, (num<<61)) << 8) | (pgsize << 2) | vhpt);; \
+	mov rr[_tmp1]=_tmp2
+
+	__PAGE_ALIGNED_DATA
 
 	.global empty_zero_page
 empty_zero_page:
@@ -45,7 +180,7 @@ swapper_pg_dir:
 halt_msg:
 	stringz "Halting kernel\n"
 
-	.text
+	__REF
 
 	.global start_ap
 
@@ -57,23 +192,45 @@ halt_msg:
 GLOBAL_ENTRY(_start)
 start_ap:
 	.prologue
-	.save rp, r4		// terminate unwind chain with a NULL rp
-	mov r4=r0
+	.save rp, r0		// terminate unwind chain with a NULL rp
 	.body
 
-	/*
-	 * Initialize the region register for region 7 and install a translation register
-	 * that maps the kernel's text and data:
-	 */
 	rsm psr.i | psr.ic
 	;;
 	srlz.i
 	;;
-	mov r20=((ia64_rid(IA64_REGION_ID_KERNEL, (7<<61)) << 8) | (IA64_GRANULE_SHIFT << 2))
-	movl r21=(7<<61)
+ {
+	flushrs				// must be first insn in group
+	srlz.i
+ }
 	;;
-	mov rr[r21]=r20
-	;;
+	/*
+	 * Save the region registers, predicate before they get clobbered
+	 */
+	SAVE_REGION_REGS(r2, r8,r9,r10,r11,r12,r13,r14,r15);
+	mov r25=pr;;
+
+	/*
+	 * Initialize kernel region registers:
+	 *	rr[0]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[1]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[2]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[3]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[4]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[5]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[6]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 *	rr[7]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 * We initialize all of them to prevent inadvertently assuming
+	 * something about the state of address translation early in boot.
+	 */
+	SET_ONE_RR(0, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(1, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(2, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(3, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(4, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(5, PAGE_SHIFT, r2, r16, 1);;
+	SET_ONE_RR(6, IA64_GRANULE_SHIFT, r2, r16, 0);;
+	SET_ONE_RR(7, IA64_GRANULE_SHIFT, r2, r16, 0);;
 	/*
 	 * Now pin mappings into the TLB for kernel text and data
 	 */
@@ -102,7 +259,7 @@ start_ap:
 	 * Switch into virtual mode:
 	 */
 	movl r16=(IA64_PSR_IT|IA64_PSR_IC|IA64_PSR_DT|IA64_PSR_RT|IA64_PSR_DFH|IA64_PSR_BN \
-		  |IA64_PSR_DI)
+		  |IA64_PSR_DI|IA64_PSR_AC)
 	;;
 	mov cr.ipsr=r16
 	movl r17=1f
@@ -113,6 +270,12 @@ start_ap:
 	rfi
 	;;
 1:	// now we are in virtual mode
+
+	SET_AREA_FOR_BOOTING_CPU(r2, r16);
+
+	STORE_REGION_REGS(r16, r8,r9,r10,r11,r12,r13,r14,r15);
+	SAL_TO_OS_BOOT_HANDOFF_STATE_SAVE(r16,r17,r25)
+	;;
 
 	// set IVT entry point---can't access I/O ports without it
 	movl r3=ia64_ivt
@@ -126,55 +289,32 @@ start_ap:
 	mov ar.fpsr=r2
 	;;
 
-#ifdef CONFIG_IA64_EARLY_PRINTK
-	mov r3=(6<<8) | (IA64_GRANULE_SHIFT<<2)
-	movl r2=6<<61
-	;;
-	mov rr[r2]=r3
-	;;
-	srlz.i
-	;;
-#endif
-
 #define isAP	p2	// are we an Application Processor?
 #define isBP	p3	// are we the Bootstrap Processor?
 
 #ifdef CONFIG_SMP
 	/*
 	 * Find the init_task for the currently booting CPU.  At poweron, and in
-	 * UP mode, cpucount is 0.
+	 * UP mode, task_for_booting_cpu is NULL.
 	 */
-	movl r3=cpucount
+	movl r3=task_for_booting_cpu
  	;;
-	ld4 r3=[r3]		// r3 <- smp_processor_id()
+	ld8 r3=[r3]
+	movl r2=init_task
+	;;
+	cmp.eq isBP,isAP=r3,r0
+	;;
+(isAP)	mov r2=r3
 #else
-	mov r3=0
+	movl r2=init_task
+	cmp.eq isBP,isAP=r0,r0
 #endif
 	;;
-	cmp4.ne isAP,isBP=r3,r0
-
-	/*
-	 * Make task struct pointer in init_tasks an identity mapped pointer.
-	 * The value that is compiled into the array may not be identity mapped.
-	 */
-	movl r18=init_tasks
-	;;
-	shladd r18=r3,3,r18
-	;;
-	ld8 r8=[r18]
-	;;
-	tpa r3=r8		// r3 == phys addr of task struct
-	;;
-	dep r2=-1,r3,61,3	// IMVA of task
-	;;
-	st8 [r18]=r2		// and save it back in init_tasks[thiscpu]
+	tpa r3=r2		// r3 == phys addr of task struct
+	mov r16=-1
+(isBP)	br.cond.dpnt .load_current // BP stack is on region 5 --- no need to map it
 
 	// load mapping for stack (virtaddr in r2, physaddr in r3)
-	// load dtr[2] only if the va for current (r2) isn't covered by the dtr[0] 
-	shr.u r18=r2,KERNEL_TR_PAGE_SHIFT               /* va of current in units of kernel-pages */
-	movl r17=KERNEL_START>>KERNEL_TR_PAGE_SHIFT     /* va of kernel-start in units of kernel-pages */
-	;;
-	cmp.eq p0,p6=r17,r18
 	rsm psr.ic
 	movl r17=PAGE_KERNEL
 	;;
@@ -182,6 +322,7 @@ start_ap:
 	dep r18=0,r3,0,12
 	;;
 	or r18=r17,r18
+	dep r2=-1,r3,61,3	// IMVA of task
 	;;
 	mov r17=rr[r2]
 	shr.u r16=r3,IA64_GRANULE_SHIFT
@@ -193,29 +334,56 @@ start_ap:
 
 	mov r19=IA64_TR_CURRENT_STACK
 	;;
-(p6)	itr.d dtr[r19]=r18
+	itr.d dtr[r19]=r18
 	;;
 	ssm psr.ic
 	srlz.d
-	;;
+  	;;
 
+.load_current:
 	// load the "current" pointer (r13) and ar.k6 with the current task
-	mov IA64_KR(CURRENT)=r3		// Physical address
+	mov IA64_KR(CURRENT)=r2		// virtual address
 	mov IA64_KR(CURRENT_STACK)=r16
 	mov r13=r2
-
 	/*
-	 * Reserve space at the top of the stack for "struct pt_regs".  Kernel threads
-	 * don't store interesting values in that structure, but the space still needs
-	 * to be there because time-critical stuff such as the context switching can
-	 * be implemented more efficiently (for example, __switch_to()
+	 * Reserve space at the top of the stack for "struct pt_regs".  Kernel
+	 * threads don't store interesting values in that structure, but the space
+	 * still needs to be there because time-critical stuff such as the context
+	 * switching can be implemented more efficiently (for example, __switch_to()
 	 * always sets the psr.dfh bit of the task it is switching to).
 	 */
+
 	addl r12=IA64_STK_OFFSET-IA64_PT_REGS_SIZE-16,r2
 	addl r2=IA64_RBS_OFFSET,r2	// initialize the RSE
 	mov ar.rsc=0		// place RSE in enforced lazy mode
 	;;
 	loadrs			// clear the dirty partition
+	movl r19=__phys_per_cpu_start
+	mov r18=PERCPU_PAGE_SIZE
+	;;
+#ifndef CONFIG_SMP
+	add r19=r19,r18
+	;;
+#else
+(isAP)	br.few 2f
+	movl r20=__cpu0_per_cpu
+	;;
+	shr.u r18=r18,3
+1:
+	ld8 r21=[r19],8;;
+	st8[r20]=r21,8
+	adds r18=-1,r18;;
+	cmp4.lt p7,p6=0,r18
+(p7)	br.cond.dptk.few 1b
+	mov r19=r20
+	;;
+2:
+#endif
+	tpa r19=r19
+	;;
+	.pred.rel.mutex isBP,isAP
+(isBP)	mov IA64_KR(PER_CPU_DATA)=r19	// per-CPU base for cpu0
+(isAP)	mov IA64_KR(PER_CPU_DATA)=r0	// clear physical per-CPU base
 	;;
 	mov ar.bspstore=r2	// establish the new RSE stack
 	;;
@@ -226,20 +394,43 @@ start_ap:
 	;;
 (isBP)	st8 [r2]=r28		// save the address of the boot param area passed by the bootloader
 
-#ifdef CONFIG_IA64_EARLY_PRINTK
-	.rodata
-alive_msg:
-	stringz "I'm alive and well\n"
-alive_msg_end:
+#ifdef CONFIG_PARAVIRT
+
+	movl r14=hypervisor_setup_hooks
+	movl r15=hypervisor_type
+	mov r16=num_hypervisor_hooks
+	;;
+	ld8 r2=[r15]
+	;;
+	cmp.ltu p7,p0=r2,r16	// array size check
+	shladd r8=r2,3,r14
+	;;
+(p7)	ld8 r9=[r8]
+	;;
+(p7)	mov b1=r9
+(p7)	cmp.ne.unc p7,p0=r9,r0	// no actual branch to NULL
+	;;
+(p7)	br.call.sptk.many rp=b1
+
+	__INITDATA
+
+default_setup_hook = 0		// Currently nothing needs to be done.
+
+	.weak xen_setup_hook
+
+	.global hypervisor_type
+hypervisor_type:
+	data8		PARAVIRT_HYPERVISOR_TYPE_DEFAULT
+
+	// must have the same order with PARAVIRT_HYPERVISOR_TYPE_xxx
+
+hypervisor_setup_hooks:
+	data8		default_setup_hook
+	data8		xen_setup_hook
+num_hypervisor_hooks = (. - hypervisor_setup_hooks) / 8
 	.previous
 
-	alloc r2=ar.pfs,0,0,2,0
-	movl out0=alive_msg
-	movl out1=alive_msg_end-alive_msg-1
-	;;
-	br.call.sptk.many rp=early_printk
-1:	// force new bundle
-#endif /* CONFIG_IA64_EARLY_PRINTK */
+#endif
 
 #ifdef CONFIG_SMP
 (isAP)	br.call.sptk.many rp=start_secondary
@@ -261,8 +452,12 @@ alive_msg_end:
 	;;
 	ld8 out0=[r3]
 	br.call.sptk.many b0=console_print
-self:	br.sptk.many self		// endless loop
+
+self:	hint @pause
+	br.sptk.many self		// endless loop
 END(_start)
+
+	.text
 
 GLOBAL_ENTRY(ia64_save_debug_regs)
 	alloc r16=ar.pfs,1,0,0,0
@@ -722,12 +917,14 @@ END(__ia64_init_fpu)
  *
  * Inputs:
  *	r16 = new psr to establish
+ * Output:
+ *	r19 = old virtual address of ar.bsp
+ *	r20 = old virtual address of sp
  *
  * Note: RSE must already be in enforced lazy mode
  */
 GLOBAL_ENTRY(ia64_switch_mode_phys)
  {
-	alloc r2=ar.pfs,0,0,0,0
 	rsm psr.i | psr.ic		// disable interrupts and interrupt collection
 	mov r15=ip
  }
@@ -740,12 +937,13 @@ GLOBAL_ENTRY(ia64_switch_mode_phys)
 	mov cr.ipsr=r16			// set new PSR
 	add r3=1f-ia64_switch_mode_phys,r15
 
-	mov r17=ar.bsp
+	mov r19=ar.bsp
+	mov r20=sp
 	mov r14=rp			// get return address into a general register
 	;;
 
 	// going to physical mode, use tpa to translate virt->phys
-	tpa r17=r17
+	tpa r17=r19
 	tpa r3=r3
 	tpa sp=sp
 	tpa r14=r14
@@ -768,12 +966,13 @@ END(ia64_switch_mode_phys)
  *
  * Inputs:
  *	r16 = new psr to establish
+ *	r19 = new bspstore to establish
+ *	r20 = new sp to establish
  *
  * Note: RSE must already be in enforced lazy mode
  */
 GLOBAL_ENTRY(ia64_switch_mode_virt)
  {
-	alloc r2=ar.pfs,0,0,0,0
 	rsm psr.i | psr.ic		// disable interrupts and interrupt collection
 	mov r15=ip
  }
@@ -786,26 +985,23 @@ GLOBAL_ENTRY(ia64_switch_mode_virt)
 	mov cr.ipsr=r16			// set new PSR
 	add r3=1f-ia64_switch_mode_virt,r15
 
-	mov r17=ar.bsp
 	mov r14=rp			// get return address into a general register
 	;;
 
 	// going to virtual
 	//   - for code addresses, set upper bits of addr to KERNEL_START
-	//   - for stack addresses, set upper 3 bits to 0xe.... Dont change any of the
-	//     lower bits since we want it to stay identity mapped
+	//   - for stack addresses, copy from input argument
 	movl r18=KERNEL_START
 	dep r3=0,r3,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
 	dep r14=0,r14,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
-	dep r17=-1,r17,61,3
-	dep sp=-1,sp,61,3
+	mov sp=r20
 	;;
 	or r3=r3,r18
 	or r14=r14,r18
 	;;
 
 	mov r18=ar.rnat			// save ar.rnat
-	mov ar.bspstore=r17		// this steps on ar.rnat
+	mov ar.bspstore=r19		// this steps on ar.rnat
 	mov cr.iip=r3
 	mov cr.ifs=r0
 	;;
@@ -815,6 +1011,100 @@ GLOBAL_ENTRY(ia64_switch_mode_virt)
 1:	mov rp=r14
 	br.ret.sptk.many rp
 END(ia64_switch_mode_virt)
+
+GLOBAL_ENTRY(ia64_delay_loop)
+	.prologue
+{	nop 0			// work around GAS unwind info generation bug...
+	.save ar.lc,r2
+	mov r2=ar.lc
+	.body
+	;;
+	mov ar.lc=r32
+}
+	;;
+	// force loop to be 32-byte aligned (GAS bug means we cannot use .align
+	// inside function body without corrupting unwind info).
+{	nop 0 }
+1:	br.cloop.sptk.few 1b
+	;;
+	mov ar.lc=r2
+	br.ret.sptk.many rp
+END(ia64_delay_loop)
+
+/*
+ * Return a CPU-local timestamp in nano-seconds.  This timestamp is
+ * NOT synchronized across CPUs its return value must never be
+ * compared against the values returned on another CPU.  The usage in
+ * kernel/sched.c ensures that.
+ *
+ * The return-value of sched_clock() is NOT supposed to wrap-around.
+ * If it did, it would cause some scheduling hiccups (at the worst).
+ * Fortunately, with a 64-bit cycle-counter ticking at 100GHz, even
+ * that would happen only once every 5+ years.
+ *
+ * The code below basically calculates:
+ *
+ *   (ia64_get_itc() * local_cpu_data->nsec_per_cyc) >> IA64_NSEC_PER_CYC_SHIFT
+ *
+ * except that the multiplication and the shift are done with 128-bit
+ * intermediate precision so that we can produce a full 64-bit result.
+ */
+GLOBAL_ENTRY(ia64_native_sched_clock)
+	addl r8=THIS_CPU(ia64_cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
+	mov.m r9=ar.itc		// fetch cycle-counter				(35 cyc)
+	;;
+	ldf8 f8=[r8]
+	;;
+	setf.sig f9=r9		// certain to stall, so issue it _after_ ldf8...
+	;;
+	xmpy.lu f10=f9,f8	// calculate low 64 bits of 128-bit product	(4 cyc)
+	xmpy.hu f11=f9,f8	// calculate high 64 bits of 128-bit product
+	;;
+	getf.sig r8=f10		//						(5 cyc)
+	getf.sig r9=f11
+	;;
+	shrp r8=r9,r8,IA64_NSEC_PER_CYC_SHIFT
+	br.ret.sptk.many rp
+END(ia64_native_sched_clock)
+#ifndef CONFIG_PARAVIRT
+	//unsigned long long
+	//sched_clock(void) __attribute__((alias("ia64_native_sched_clock")));
+	.global sched_clock
+sched_clock = ia64_native_sched_clock
+#endif
+
+#ifdef CONFIG_VIRT_CPU_ACCOUNTING
+GLOBAL_ENTRY(cycle_to_cputime)
+	alloc r16=ar.pfs,1,0,0,0
+	addl r8=THIS_CPU(ia64_cpu_info) + IA64_CPUINFO_NSEC_PER_CYC_OFFSET,r0
+	;;
+	ldf8 f8=[r8]
+	;;
+	setf.sig f9=r32
+	;;
+	xmpy.lu f10=f9,f8	// calculate low 64 bits of 128-bit product	(4 cyc)
+	xmpy.hu f11=f9,f8	// calculate high 64 bits of 128-bit product
+	;;
+	getf.sig r8=f10		//						(5 cyc)
+	getf.sig r9=f11
+	;;
+	shrp r8=r9,r8,IA64_NSEC_PER_CYC_SHIFT
+	br.ret.sptk.many rp
+END(cycle_to_cputime)
+#endif /* CONFIG_VIRT_CPU_ACCOUNTING */
+
+GLOBAL_ENTRY(start_kernel_thread)
+	.prologue
+	.save rp, r0				// this is the end of the call-chain
+	.body
+	alloc r2 = ar.pfs, 0, 0, 2, 0
+	mov out0 = r9
+	mov out1 = r11;;
+	br.call.sptk.many rp = kernel_thread_helper;;
+	mov out0 = r8
+	br.call.sptk.many rp = sys_exit;;
+1:	br.sptk.few 1b				// not reached
+END(start_kernel_thread)
 
 #ifdef CONFIG_IA64_BRL_EMU
 
@@ -840,73 +1130,99 @@ SET_REG(b5);
 
 #ifdef CONFIG_SMP
 
+#ifdef CONFIG_HOTPLUG_CPU
+GLOBAL_ENTRY(ia64_jump_to_sal)
+	alloc r16=ar.pfs,1,0,0,0;;
+	rsm psr.i  | psr.ic
+{
+	flushrs
+	srlz.i
+}
+	tpa r25=in0
+	movl r18=tlb_purge_done;;
+	DATA_VA_TO_PA(r18);;
+	mov b1=r18 	// Return location
+	movl r18=ia64_do_tlb_purge;;
+	DATA_VA_TO_PA(r18);;
+	mov b2=r18 	// doing tlb_flush work
+	mov ar.rsc=0  // Put RSE  in enforced lazy, LE mode
+	movl r17=1f;;
+	DATA_VA_TO_PA(r17);;
+	mov cr.iip=r17
+	movl r16=SAL_PSR_BITS_TO_SET;;
+	mov cr.ipsr=r16
+	mov cr.ifs=r0;;
+	rfi;;			// note: this unmask MCA/INIT (psr.mc)
+1:
 	/*
-	 * This routine handles spinlock contention.  It uses a simple exponential backoff
-	 * algorithm to reduce unnecessary bus traffic.  The initial delay is selected from
-	 * the low-order bits of the cycle counter (a cheap "randomizer").  I'm sure this
-	 * could use additional tuning, especially on systems with a large number of CPUs.
-	 * Also, I think the maximum delay should be made a function of the number of CPUs in
-	 * the system. --davidm 00/08/05
-	 *
-	 * WARNING: This is not a normal procedure.  It gets called from C code without
-	 * the compiler knowing about it.  Thus, we must not use any scratch registers
-	 * beyond those that were declared "clobbered" at the call-site (see spin_lock()
-	 * macro).  We may not even use the stacked registers, because that could overwrite
-	 * output registers.  Similarly, we can't use the scratch stack area as it may be
-	 * in use, too.
-	 *
-	 * Inputs:
-	 *	ar.ccv = 0 (and available for use)
-	 *	r28 = available for use
-	 *	r29 = available for use
-	 *	r30 = non-zero (and available for use)
-	 *	r31 = address of lock we're trying to acquire
-	 *	p15 = available for use
+	 * Invalidate all TLB data/inst
 	 */
+	br.sptk.many b2;; // jump to tlb purge code
 
-#	define delay	r28
-#	define timeout	r29
-#	define tmp	r30
+tlb_purge_done:
+	RESTORE_REGION_REGS(r25, r17,r18,r19);;
+	RESTORE_REG(b0, r25, r17);;
+	RESTORE_REG(b1, r25, r17);;
+	RESTORE_REG(b2, r25, r17);;
+	RESTORE_REG(b3, r25, r17);;
+	RESTORE_REG(b4, r25, r17);;
+	RESTORE_REG(b5, r25, r17);;
+	ld8 r1=[r25],0x08;;
+	ld8 r12=[r25],0x08;;
+	ld8 r13=[r25],0x08;;
+	RESTORE_REG(ar.fpsr, r25, r17);;
+	RESTORE_REG(ar.pfs, r25, r17);;
+	RESTORE_REG(ar.rnat, r25, r17);;
+	RESTORE_REG(ar.unat, r25, r17);;
+	RESTORE_REG(ar.bspstore, r25, r17);;
+	RESTORE_REG(cr.dcr, r25, r17);;
+	RESTORE_REG(cr.iva, r25, r17);;
+	RESTORE_REG(cr.pta, r25, r17);;
+	srlz.d;;	// required not to violate RAW dependency
+	RESTORE_REG(cr.itv, r25, r17);;
+	RESTORE_REG(cr.pmv, r25, r17);;
+	RESTORE_REG(cr.cmcv, r25, r17);;
+	RESTORE_REG(cr.lrr0, r25, r17);;
+	RESTORE_REG(cr.lrr1, r25, r17);;
+	ld8 r4=[r25],0x08;;
+	ld8 r5=[r25],0x08;;
+	ld8 r6=[r25],0x08;;
+	ld8 r7=[r25],0x08;;
+	ld8 r17=[r25],0x08;;
+	mov pr=r17,-1;;
+	RESTORE_REG(ar.lc, r25, r17);;
+	/*
+	 * Now Restore floating point regs
+	 */
+	ldf.fill.nta f2=[r25],16;;
+	ldf.fill.nta f3=[r25],16;;
+	ldf.fill.nta f4=[r25],16;;
+	ldf.fill.nta f5=[r25],16;;
+	ldf.fill.nta f16=[r25],16;;
+	ldf.fill.nta f17=[r25],16;;
+	ldf.fill.nta f18=[r25],16;;
+	ldf.fill.nta f19=[r25],16;;
+	ldf.fill.nta f20=[r25],16;;
+	ldf.fill.nta f21=[r25],16;;
+	ldf.fill.nta f22=[r25],16;;
+	ldf.fill.nta f23=[r25],16;;
+	ldf.fill.nta f24=[r25],16;;
+	ldf.fill.nta f25=[r25],16;;
+	ldf.fill.nta f26=[r25],16;;
+	ldf.fill.nta f27=[r25],16;;
+	ldf.fill.nta f28=[r25],16;;
+	ldf.fill.nta f29=[r25],16;;
+	ldf.fill.nta f30=[r25],16;;
+	ldf.fill.nta f31=[r25],16;;
 
-GLOBAL_ENTRY(ia64_spinlock_contention)
-	mov tmp=ar.itc
-	;;
-	and delay=0x3f,tmp
-	;;
+	/*
+	 * Now that we have done all the register restores
+	 * we are now ready for the big DIVE to SAL Land
+	 */
+	ssm psr.ic;;
+	srlz.d;;
+	br.ret.sptk.many b0;;
+END(ia64_jump_to_sal)
+#endif /* CONFIG_HOTPLUG_CPU */
 
-.retry:	add timeout=tmp,delay
-	shl delay=delay,1
-	;;
-	dep delay=delay,r0,0,13	// limit delay to 8192 cycles
-	;;
-	// delay a little...
-.wait:	sub tmp=tmp,timeout
-#ifdef GAS_HAS_HINT_INSN
-	hint @pause
-#endif
-	or delay=0xf,delay	// make sure delay is non-zero (otherwise we get stuck with 0)
-	;;
-	cmp.lt p15,p0=tmp,r0
-	mov tmp=ar.itc
-(p15)	br.cond.sptk .wait
-	;;
-	ld4 tmp=[r31]
-	;;
-	cmp.ne p15,p0=tmp,r0
-	mov tmp=ar.itc
-(p15)	br.cond.sptk .retry	// lock is still busy
-	;;
-	// try acquiring lock (we know ar.ccv is still zero!):
-	mov tmp=1
-	;;
-	cmpxchg4.acq tmp=[r31],tmp,ar.ccv
-	;;
-	cmp.eq p15,p0=tmp,r0
-
-	mov tmp=ar.itc
-(p15)	br.ret.sptk.many b7	// got lock -> return
-	br .retry		// still no luck, retry
-
-END(ia64_spinlock_contention)
-
-#endif
+#endif /* CONFIG_SMP */

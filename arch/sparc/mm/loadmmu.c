@@ -1,4 +1,4 @@
-/* $Id: loadmmu.c,v 1.56 2000/02/08 20:24:21 davem Exp $
+/*
  * loadmmu.c:  This code loads up all the mm function pointers once the
  *             machine type has been determined.  It also sets the static
  *             mmu values such as PAGE_NONE, etc.
@@ -11,10 +11,8 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 
-#include <asm/system.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/a.out.h>
 #include <asm/mmu_context.h>
 #include <asm/oplib.h>
 
@@ -22,11 +20,8 @@ struct ctx_list *ctx_list_pool;
 struct ctx_list ctx_free;
 struct ctx_list ctx_used;
 
-unsigned int pg_iobits;
-
 extern void ld_mmu_sun4c(void);
 extern void ld_mmu_srmmu(void);
-extern void ioport_init(void);
 
 void __init load_mmu(void)
 {
@@ -37,6 +32,7 @@ void __init load_mmu(void)
 		break;
 	case sun4m:
 	case sun4d:
+	case sparc_leon:
 		ld_mmu_srmmu();
 		break;
 	default:
@@ -44,5 +40,4 @@ void __init load_mmu(void)
 		prom_halt();
 	}
 	btfixup();
-	ioport_init();
 }

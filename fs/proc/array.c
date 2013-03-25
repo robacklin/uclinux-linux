@@ -40,7 +40,7 @@
  *
  *
  * Alan Cox	     :  security fixes.
- *			<Alan.Cox@linux.org>
+ *			<alan@lxorguk.ukuu.org.uk>
  *
  * Al Viro           :  safe handling of mm_struct
  *
@@ -50,14 +50,11 @@
  * Al Viro & Jeff Garzik :  moved most of the thing into base.c and
  *			 :  proc_misc.c. The rest may eventually go into
  *			 :  base.c too.
- *
- * David McCullough  :  added NO_MM support <davidm@snapgear.com>
  */
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/kernel_stat.h>
 #include <linux/tty.h>
@@ -65,37 +62,45 @@
 #include <linux/mman.h>
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
+#include <linux/uaccess.h>
+#include <linux/io.h>
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
-#include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/highmem.h>
+#include <linux/file.h>
+#include <linux/fdtable.h>
+#include <linux/times.h>
+#include <linux/cpuset.h>
+#include <linux/rcupdate.h>
+#include <linux/delayacct.h>
 #include <linux/seq_file.h>
+#include <linux/pid_namespace.h>
+#include <linux/ptrace.h>
+#include <linux/tracehook.h>
 
-#include <asm/uaccess.h>
 #include <asm/pgtable.h>
-#include <asm/io.h>
 #include <asm/processor.h>
+#include "internal.h"
 
-/* Gcc optimizes away "strlen(x)" for constant x */
-#define ADDBUF(buffer, string) \
-do { memcpy(buffer, string, strlen(string)); \
-     buffer += strlen(string); } while (0)
-
-static inline char * task_name(struct task_struct *p, char * buf)
+static inline void task_name(struct seq_file *m, struct task_struct *p)
 {
 	int i;
-	char * name;
+	char *buf, *end;
+	char *name;
 	char tcomm[sizeof(p->comm)];
 
 	get_task_comm(tcomm, p);
 
-	ADDBUF(buf, "Name:\t");
+	seq_puts(m, "Name:\t");
+	end = m->buf + m->size;
+	buf = m->buf + m->count;
 	name = tcomm;
 	i = sizeof(tcomm);
-	do {
+	while (i && (buf < end)) {
 		unsigned char c = *name;
 		name++;
 		i--;
@@ -103,20 +108,21 @@ static inline char * task_name(struct task_struct *p, char * buf)
 		if (!c)
 			break;
 		if (c == '\\') {
-			buf[1] = c;
-			buf += 2;
+			buf++;
+			if (buf < end)
+				*buf++ = c;
 			continue;
 		}
 		if (c == '\n') {
-			buf[0] = '\\';
-			buf[1] = 'n';
-			buf += 2;
+			*buf++ = '\\';
+			if (buf < end)
+				*buf++ = 'n';
 			continue;
 		}
 		buf++;
-	} while (i);
-	*buf = '\n';
-	return buf+1;
+	}
+	m->count = buf - m->buf;
+	seq_putc(m, '\n');
 }
 
 /*
@@ -125,23 +131,25 @@ static inline char * task_name(struct task_struct *p, char * buf)
  * you can test for combinations of others with
  * simple bit tests.
  */
-static const char *task_state_array[] = {
-	"R (running)",		/*  0 */
-	"S (sleeping)",		/*  1 */
-	"D (disk sleep)",	/*  2 */
-	"Z (zombie)",		/*  4 */
-	"T (stopped)",		/*  8 */
-	"W (paging)"		/* 16 */
+static const char * const task_state_array[] = {
+	"R (running)",		/*   0 */
+	"S (sleeping)",		/*   1 */
+	"D (disk sleep)",	/*   2 */
+	"T (stopped)",		/*   4 */
+	"t (tracing stop)",	/*   8 */
+	"Z (zombie)",		/*  16 */
+	"X (dead)",		/*  32 */
+	"x (dead)",		/*  64 */
+	"K (wakekill)",		/* 128 */
+	"W (waking)",		/* 256 */
 };
 
-static inline const char * get_task_state(struct task_struct *tsk)
+static inline const char *get_task_state(struct task_struct *tsk)
 {
-	unsigned int state = tsk->state & (TASK_RUNNING |
-					   TASK_INTERRUPTIBLE |
-					   TASK_UNINTERRUPTIBLE |
-					   TASK_ZOMBIE |
-					   TASK_STOPPED);
-	const char **p = &task_state_array[0];
+	unsigned int state = (tsk->state & TASK_REPORT) | tsk->exit_state;
+	const char * const *p = &task_state_array[0];
+
+	BUILD_BUG_ON(1 + ilog2(TASK_STATE_MAX) != ARRAY_SIZE(task_state_array));
 
 	while (state) {
 		p++;
@@ -150,12 +158,26 @@ static inline const char * get_task_state(struct task_struct *tsk)
 	return *p;
 }
 
-static inline char * task_state(struct task_struct *p, char *buffer)
+static inline void task_state(struct seq_file *m, struct pid_namespace *ns,
+				struct pid *pid, struct task_struct *p)
 {
+	struct group_info *group_info;
 	int g;
+	struct fdtable *fdt = NULL;
+	const struct cred *cred;
+	pid_t ppid, tpid;
 
-	read_lock(&tasklist_lock);
-	buffer += sprintf(buffer,
+	rcu_read_lock();
+	ppid = pid_alive(p) ?
+		task_tgid_nr_ns(rcu_dereference(p->real_parent), ns) : 0;
+	tpid = 0;
+	if (pid_alive(p)) {
+		struct task_struct *tracer = ptrace_parent(p);
+		if (tracer)
+			tpid = task_pid_nr_ns(tracer, ns);
+	}
+	cred = get_task_cred(p);
+	seq_printf(m,
 		"State:\t%s\n"
 		"Tgid:\t%d\n"
 		"Pid:\t%d\n"
@@ -163,123 +185,52 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 		"TracerPid:\t%d\n"
 		"Uid:\t%d\t%d\t%d\t%d\n"
 		"Gid:\t%d\t%d\t%d\t%d\n",
-		get_task_state(p), p->tgid,
-		p->pid, p->pid ? p->p_opptr->pid : 0, 0,
-		p->uid, p->euid, p->suid, p->fsuid,
-		p->gid, p->egid, p->sgid, p->fsgid);
-	read_unlock(&tasklist_lock);	
+		get_task_state(p),
+		task_tgid_nr_ns(p, ns),
+		pid_nr_ns(pid, ns),
+		ppid, tpid,
+		cred->uid, cred->euid, cred->suid, cred->fsuid,
+		cred->gid, cred->egid, cred->sgid, cred->fsgid);
+
 	task_lock(p);
-	buffer += sprintf(buffer,
+	if (p->files)
+		fdt = files_fdtable(p->files);
+	seq_printf(m,
 		"FDSize:\t%d\n"
 		"Groups:\t",
-		p->files ? p->files->max_fds : 0);
+		fdt ? fdt->max_fds : 0);
+	rcu_read_unlock();
+
+	group_info = cred->group_info;
 	task_unlock(p);
 
-	for (g = 0; g < p->ngroups; g++)
-		buffer += sprintf(buffer, "%d ", p->groups[g]);
+	for (g = 0; g < min(group_info->ngroups, NGROUPS_SMALL); g++)
+		seq_printf(m, "%d ", GROUP_AT(group_info, g));
+	put_cred(cred);
 
-	buffer += sprintf(buffer, "\n");
-	return buffer;
+	seq_putc(m, '\n');
 }
 
-static inline char * task_mem(struct mm_struct *mm, char *buffer)
+static void render_sigset_t(struct seq_file *m, const char *header,
+				sigset_t *set)
 {
-#ifndef NO_MM
-	struct vm_area_struct * vma;
-	unsigned long data = 0, stack = 0;
-	unsigned long exec = 0, lib = 0;
+	int i;
 
-	down_read(&mm->mmap_sem);
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
-		if (!vma->vm_file) {
-			data += len;
-			if (vma->vm_flags & VM_GROWSDOWN)
-				stack += len;
-			continue;
-		}
-		if (vma->vm_flags & VM_WRITE)
-			continue;
-		if (vma->vm_flags & VM_EXEC) {
-			exec += len;
-			if (vma->vm_flags & VM_EXECUTABLE)
-				continue;
-			lib += len;
-		}
-	}
-	buffer += sprintf(buffer,
-		"VmSize:\t%8lu kB\n"
-		"VmLck:\t%8lu kB\n"
-		"VmRSS:\t%8lu kB\n"
-		"VmData:\t%8lu kB\n"
-		"VmStk:\t%8lu kB\n"
-		"VmExe:\t%8lu kB\n"
-		"VmLib:\t%8lu kB\n",
-		mm->total_vm << (PAGE_SHIFT-10),
-		mm->locked_vm << (PAGE_SHIFT-10),
-		mm->rss << (PAGE_SHIFT-10),
-		data - stack, stack,
-		exec - lib, lib);
-	up_read(&mm->mmap_sem);
-#else
-	unsigned long bytes = 0, sbytes = 0, slack = 0;
-	struct vm_list_struct *vml;
-        
-	/* Logic: we've got two memory sums for each process, "shared", and
-	 * "non-shared". Shared memory may get counted more then once, for
-	 * each process that owns it. Non-shared memory is counted
-	 * accurately.
-	 *
-	 *	-- Kenneth Albanowski
-	 */
+	seq_puts(m, header);
 
-	down_read(&mm->mmap_sem);
-	for (vml = mm->vmlist; vml; vml = vml->next) {
-		if (vml->vma) {
-			bytes += ksize(vml);
-			if (atomic_read(&mm->mm_count) > 1 ||
-					atomic_read(&vml->vma->vm_usage) > 1) {
-				sbytes += ksize((void *) vml->vma->vm_start);
-				sbytes += ksize(vml->vma) ;
-			} else {
-				bytes += ksize((void *) vml->vma->vm_start);
-				bytes += ksize(vml->vma) ;
-				slack += ksize((void *) vml->vma->vm_start) -
-					(vml->vma->vm_end - vml->vma->vm_start);
-			}
-		}
-	}
-	
-	if (atomic_read(&mm->mm_count) > 1)
-		sbytes += ksize(mm);
-	else
-		bytes += ksize(mm);
-	if (current->fs && atomic_read(&current->fs->count) > 1)
-		sbytes += ksize(current->fs);
-	else
-		bytes += ksize(current->fs);
-	if (current->files && atomic_read(&current->files->count) > 1)
-		sbytes += ksize(current->files);
-	else
-		bytes += ksize(current->files);
-	if (current->sig && atomic_read(&current->sig->count) > 1)
-		sbytes += ksize(current->sig);
-	else
-		bytes += ksize(current->sig);
+	i = _NSIG;
+	do {
+		int x = 0;
 
-	bytes += ksize(current); /* includes kernel stack */
+		i -= 4;
+		if (sigismember(set, i+1)) x |= 1;
+		if (sigismember(set, i+2)) x |= 2;
+		if (sigismember(set, i+3)) x |= 4;
+		if (sigismember(set, i+4)) x |= 8;
+		seq_printf(m, "%x", x);
+	} while (i >= 4);
 
-	buffer += sprintf(buffer,
-		"Mem:\t%8lu bytes\n"
-		"Slack:\t%8lu bytes\n"
-		"Shared:\t%8lu bytes\n",
-		bytes,
-		slack,
-		sbytes);
-
-	up_read(&mm->mmap_sem);
-#endif
-	return buffer;
+	seq_putc(m, '\n');
 }
 
 static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
@@ -288,540 +239,320 @@ static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
 	struct k_sigaction *k;
 	int i;
 
-	sigemptyset(ign);
-	sigemptyset(catch);
-
-	spin_lock_irq(&p->sigmask_lock);
-
-	if (p->sig) {
-		k = p->sig->action;
-		for (i = 1; i <= _NSIG; ++i, ++k) {
-			if (k->sa.sa_handler == SIG_IGN)
-				sigaddset(ign, i);
-			else if (k->sa.sa_handler != SIG_DFL)
-				sigaddset(catch, i);
-		}
+	k = p->sighand->action;
+	for (i = 1; i <= _NSIG; ++i, ++k) {
+		if (k->sa.sa_handler == SIG_IGN)
+			sigaddset(ign, i);
+		else if (k->sa.sa_handler != SIG_DFL)
+			sigaddset(catch, i);
 	}
-	spin_unlock_irq(&p->sigmask_lock);
 }
 
-static inline char * task_sig(struct task_struct *p, char *buffer)
+static inline void task_sig(struct seq_file *m, struct task_struct *p)
 {
-	sigset_t ign, catch;
+	unsigned long flags;
+	sigset_t pending, shpending, blocked, ignored, caught;
+	int num_threads = 0;
+	unsigned long qsize = 0;
+	unsigned long qlim = 0;
 
-	buffer += sprintf(buffer, "SigPnd:\t");
-	buffer = render_sigset_t(&p->pending.signal, buffer);
-	*buffer++ = '\n';
-	buffer += sprintf(buffer, "SigBlk:\t");
-	buffer = render_sigset_t(&p->blocked, buffer);
-	*buffer++ = '\n';
+	sigemptyset(&pending);
+	sigemptyset(&shpending);
+	sigemptyset(&blocked);
+	sigemptyset(&ignored);
+	sigemptyset(&caught);
 
-	collect_sigign_sigcatch(p, &ign, &catch);
-	buffer += sprintf(buffer, "SigIgn:\t");
-	buffer = render_sigset_t(&ign, buffer);
-	*buffer++ = '\n';
-	buffer += sprintf(buffer, "SigCgt:\t"); /* Linux 2.0 uses "SigCgt" */
-	buffer = render_sigset_t(&catch, buffer);
-	*buffer++ = '\n';
+	if (lock_task_sighand(p, &flags)) {
+		pending = p->pending.signal;
+		shpending = p->signal->shared_pending.signal;
+		blocked = p->blocked;
+		collect_sigign_sigcatch(p, &ignored, &caught);
+		num_threads = get_nr_threads(p);
+		rcu_read_lock();  /* FIXME: is this correct? */
+		qsize = atomic_read(&__task_cred(p)->user->sigpending);
+		rcu_read_unlock();
+		qlim = task_rlimit(p, RLIMIT_SIGPENDING);
+		unlock_task_sighand(p, &flags);
+	}
 
-	return buffer;
+	seq_printf(m, "Threads:\t%d\n", num_threads);
+	seq_printf(m, "SigQ:\t%lu/%lu\n", qsize, qlim);
+
+	/* render them all */
+	render_sigset_t(m, "SigPnd:\t", &pending);
+	render_sigset_t(m, "ShdPnd:\t", &shpending);
+	render_sigset_t(m, "SigBlk:\t", &blocked);
+	render_sigset_t(m, "SigIgn:\t", &ignored);
+	render_sigset_t(m, "SigCgt:\t", &caught);
 }
 
-static inline char *task_cap(struct task_struct *p, char *buffer)
+static void render_cap_t(struct seq_file *m, const char *header,
+			kernel_cap_t *a)
 {
-    return buffer + sprintf(buffer, "CapInh:\t%016x\n"
-			    "CapPrm:\t%016x\n"
-			    "CapEff:\t%016x\n",
-			    cap_t(p->cap_inheritable),
-			    cap_t(p->cap_permitted),
-			    cap_t(p->cap_effective));
+	unsigned __capi;
+
+	seq_puts(m, header);
+	CAP_FOR_EACH_U32(__capi) {
+		seq_printf(m, "%08x",
+			   a->cap[(_KERNEL_CAPABILITY_U32S-1) - __capi]);
+	}
+	seq_putc(m, '\n');
 }
 
-
-int proc_pid_status(struct task_struct *task, char * buffer)
+static inline void task_cap(struct seq_file *m, struct task_struct *p)
 {
-	char * orig = buffer;
-	struct mm_struct *mm;
+	const struct cred *cred;
+	kernel_cap_t cap_inheritable, cap_permitted, cap_effective, cap_bset;
 
-	buffer = task_name(task, buffer);
-	buffer = task_state(task, buffer);
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
+	rcu_read_lock();
+	cred = __task_cred(p);
+	cap_inheritable	= cred->cap_inheritable;
+	cap_permitted	= cred->cap_permitted;
+	cap_effective	= cred->cap_effective;
+	cap_bset	= cred->cap_bset;
+	rcu_read_unlock();
+
+	render_cap_t(m, "CapInh:\t", &cap_inheritable);
+	render_cap_t(m, "CapPrm:\t", &cap_permitted);
+	render_cap_t(m, "CapEff:\t", &cap_effective);
+	render_cap_t(m, "CapBnd:\t", &cap_bset);
+}
+
+static inline void task_context_switch_counts(struct seq_file *m,
+						struct task_struct *p)
+{
+	seq_printf(m,	"voluntary_ctxt_switches:\t%lu\n"
+			"nonvoluntary_ctxt_switches:\t%lu\n",
+			p->nvcsw,
+			p->nivcsw);
+}
+
+static void task_cpus_allowed(struct seq_file *m, struct task_struct *task)
+{
+	seq_puts(m, "Cpus_allowed:\t");
+	seq_cpumask(m, &task->cpus_allowed);
+	seq_putc(m, '\n');
+	seq_puts(m, "Cpus_allowed_list:\t");
+	seq_cpumask_list(m, &task->cpus_allowed);
+	seq_putc(m, '\n');
+}
+
+int proc_pid_status(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
+{
+	struct mm_struct *mm = get_task_mm(task);
+
+	task_name(m, task);
+	task_state(m, ns, pid, task);
+
 	if (mm) {
-#if defined(CONFIG_FRV) && !defined(NO_MM)
-		buffer = proc_pid_status_frv_cxnr(mm, buffer);
-#endif
-		buffer = task_mem(mm, buffer);
+		task_mem(m, mm);
 		mmput(mm);
 	}
-	buffer = task_sig(task, buffer);
-	buffer = task_cap(task, buffer);
-#if defined(CONFIG_ARCH_S390)
-	buffer = task_show_regs(task, buffer);
-#endif
-	return buffer - orig;
+	task_sig(m, task);
+	task_cap(m, task);
+	task_cpus_allowed(m, task);
+	cpuset_task_status_allowed(m, task);
+	task_context_switch_counts(m, task);
+	return 0;
 }
 
-int proc_pid_stat(struct task_struct *task, char * buffer)
+static int do_task_stat(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task, int whole)
 {
-	unsigned long vsize, eip, esp, wchan;
+	unsigned long vsize, eip, esp, wchan = ~0UL;
 	long priority, nice;
 	int tty_pgrp = -1, tty_nr = 0;
 	sigset_t sigign, sigcatch;
 	char state;
-	int res;
-	pid_t ppid;
+	pid_t ppid = 0, pgid = -1, sid = -1;
+	int num_threads = 0;
+	int permitted;
 	struct mm_struct *mm;
+	unsigned long long start_time;
+	unsigned long cmin_flt = 0, cmaj_flt = 0;
+	unsigned long  min_flt = 0,  maj_flt = 0;
+	cputime_t cutime, cstime, utime, stime;
+	cputime_t cgtime, gtime;
+	unsigned long rsslim = 0;
 	char tcomm[sizeof(task->comm)];
+	unsigned long flags;
 
 	state = *get_task_state(task);
 	vsize = eip = esp = 0;
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		atomic_inc(&mm->mm_users);
-	if (task->tty) {
-		tty_pgrp = task->tty->pgrp;
-		tty_nr = kdev_t_to_nr(task->tty->device);
-	}
-	task_unlock(task);
+	permitted = ptrace_may_access(task, PTRACE_MODE_READ | PTRACE_MODE_NOAUDIT);
+	mm = get_task_mm(task);
 	if (mm) {
-#ifndef NO_MM
-		struct vm_area_struct *vma;
-#endif
-		down_read(&mm->mmap_sem);
-#ifndef NO_MM
-		vma = mm->mmap;
-		while (vma) {
-			vsize += vma->vm_end - vma->vm_start;
-			vma = vma->vm_next;
+		vsize = task_vsize(mm);
+		if (permitted) {
+			eip = KSTK_EIP(task);
+			esp = KSTK_ESP(task);
 		}
-#else /* !NO_MM */
-		vsize = 0;
-		{
-			struct vm_list_struct *vml = mm->vmlist;
-
-			while (vml) {
-				if (vml->vma)
-					vsize += ksize((void *) vml->vma->vm_start);
-				vml = vml->next;
-			}
-		}
-#endif /* !NO_MM */
-		eip = KSTK_EIP(task);
-		esp = KSTK_ESP(task);
-		up_read(&mm->mmap_sem);
 	}
 
 	get_task_comm(tcomm, task);
 
-	wchan = get_wchan(task);
+	sigemptyset(&sigign);
+	sigemptyset(&sigcatch);
+	cutime = cstime = utime = stime = 0;
+	cgtime = gtime = 0;
 
-	collect_sigign_sigcatch(task, &sigign, &sigcatch);
+	if (lock_task_sighand(task, &flags)) {
+		struct signal_struct *sig = task->signal;
+
+		if (sig->tty) {
+			struct pid *pgrp = tty_get_pgrp(sig->tty);
+			tty_pgrp = pid_nr_ns(pgrp, ns);
+			put_pid(pgrp);
+			tty_nr = new_encode_dev(tty_devnum(sig->tty));
+		}
+
+		num_threads = get_nr_threads(task);
+		collect_sigign_sigcatch(task, &sigign, &sigcatch);
+
+		cmin_flt = sig->cmin_flt;
+		cmaj_flt = sig->cmaj_flt;
+		cutime = sig->cutime;
+		cstime = sig->cstime;
+		cgtime = sig->cgtime;
+		rsslim = ACCESS_ONCE(sig->rlim[RLIMIT_RSS].rlim_cur);
+
+		/* add up live thread stats at the group level */
+		if (whole) {
+			struct task_struct *t = task;
+			do {
+				min_flt += t->min_flt;
+				maj_flt += t->maj_flt;
+				gtime += t->gtime;
+				t = next_thread(t);
+			} while (t != task);
+
+			min_flt += sig->min_flt;
+			maj_flt += sig->maj_flt;
+			thread_group_times(task, &utime, &stime);
+			gtime += sig->gtime;
+		}
+
+		sid = task_session_nr_ns(task, ns);
+		ppid = task_tgid_nr_ns(task->real_parent, ns);
+		pgid = task_pgrp_nr_ns(task, ns);
+
+		unlock_task_sighand(task, &flags);
+	}
+
+	if (permitted && (!whole || num_threads < 2))
+		wchan = get_wchan(task);
+	if (!whole) {
+		min_flt = task->min_flt;
+		maj_flt = task->maj_flt;
+		task_times(task, &utime, &stime);
+		gtime = task->gtime;
+	}
 
 	/* scale priority and nice values from timeslices to -20..20 */
 	/* to make it look like a "normal" Unix priority/nice value  */
-	priority = task->counter;
-	priority = 20 - (priority * 10 + DEF_COUNTER / 2) / DEF_COUNTER;
-	nice = task->nice;
+	priority = task_prio(task);
+	nice = task_nice(task);
 
-	read_lock(&tasklist_lock);
-	ppid = task->pid ? task->p_opptr->pid : 0;
-	read_unlock(&tasklist_lock);
-	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
-%lu %lu %lu %lu %lu %lu %lu %lu %d %d\n",
-		task->pid,
-		tcomm,
-		state,
-		ppid,
-		task->pgrp,
-		task->session,
-	        tty_nr,
-		tty_pgrp,
-		task->flags,
-		task->min_flt,
-		task->cmin_flt,
-		task->maj_flt,
-		task->cmaj_flt,
-		task->times.tms_utime,
-		task->times.tms_stime,
-		task->times.tms_cutime,
-		task->times.tms_cstime,
-		priority,
-		nice,
-		0UL /* removed */,
-		task->it_real_value,
-		task->start_time,
-		vsize,
-		mm ? mm->rss : 0, /* you might want to shift this left 3 */
-		task->rlim[RLIMIT_RSS].rlim_cur,
-		mm ? mm->start_code : 0,
-		mm ? mm->end_code : 0,
-		mm ? mm->start_stack : 0,
-		esp,
-		eip,
-		/* The signal information here is obsolete.
-		 * It must be decimal for Linux 2.0 compatibility.
-		 * Use /proc/#/status for real-time signals.
-		 */
-		task->pending.signal.sig[0] & 0x7fffffffUL,
-		task->blocked.sig[0] & 0x7fffffffUL,
-		sigign      .sig[0] & 0x7fffffffUL,
-		sigcatch    .sig[0] & 0x7fffffffUL,
-		wchan,
-		task->nswap,
-		task->cnswap,
-		task->exit_signal,
-		task->processor);
-	if(mm)
-		mmput(mm);
-	return res;
-}
-		
-#ifndef NO_MM
+	/* Temporary variable needed for gcc-2.96 */
+	/* convert timespec -> nsec*/
+	start_time =
+		(unsigned long long)task->real_start_time.tv_sec * NSEC_PER_SEC
+				+ task->real_start_time.tv_nsec;
+	/* convert nsec -> ticks */
+	start_time = nsec_to_clock_t(start_time);
 
-static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned long size,
-	int * pages, int * shared, int * dirty, int * total)
-{
-	pte_t * pte;
-	unsigned long end;
-
-	if (pmd_none(*pmd))
-		return;
-	if (pmd_bad(*pmd)) {
-		pmd_ERROR(*pmd);
-		pmd_clear(pmd);
-		return;
-	}
-	pte = pte_offset(pmd, address);
-	address &= ~PMD_MASK;
-	end = address + size;
-	if (end > PMD_SIZE)
-		end = PMD_SIZE;
-	do {
-		pte_t page = *pte;
-		struct page *ptpage;
-
-		address += PAGE_SIZE;
-		pte++;
-		if (pte_none(page))
-			continue;
-		++*total;
-		if (!pte_present(page))
-			continue;
-		ptpage = pte_page(page);
-		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
-			continue;
-		++*pages;
-		if (pte_dirty(page))
-			++*dirty;
-		if (page_count(pte_page(page)) > 1)
-			++*shared;
-	} while (address < end);
-}
-
-static inline void statm_pmd_range(pgd_t * pgd, unsigned long address, unsigned long size,
-	int * pages, int * shared, int * dirty, int * total)
-{
-	pmd_t * pmd;
-	unsigned long end;
-
-	if (pgd_none(*pgd))
-		return;
-	if (pgd_bad(*pgd)) {
-		pgd_ERROR(*pgd);
-		pgd_clear(pgd);
-		return;
-	}
-	pmd = pmd_offset(pgd, address);
-	address &= ~PGDIR_MASK;
-	end = address + size;
-	if (end > PGDIR_SIZE)
-		end = PGDIR_SIZE;
-	do {
-		statm_pte_range(pmd, address, end - address, pages, shared, dirty, total);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address < end);
-}
-
-static void statm_pgd_range(pgd_t * pgd, unsigned long address, unsigned long end,
-	int * pages, int * shared, int * dirty, int * total)
-{
-	while (address < end) {
-		statm_pmd_range(pgd, address, end - address, pages, shared, dirty, total);
-		address = (address + PGDIR_SIZE) & PGDIR_MASK;
-		pgd++;
-	}
-}
-
-#endif /* !NO_MM */
-
-int proc_pid_statm(struct task_struct *task, char * buffer)
-{
-	struct mm_struct *mm;
-	int size=0, resident=0, share=0, trs=0, lrs=0, drs=0, dt=0;
-
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
-	if (mm) {
-#ifndef NO_MM
-		struct vm_area_struct * vma;
-#endif
-		down_read(&mm->mmap_sem);
-#ifndef NO_MM
-		vma = mm->mmap;
-		while (vma) {
-			pgd_t *pgd = pgd_offset(mm, vma->vm_start);
-			int pages = 0, shared = 0, dirty = 0, total = 0;
-
-			statm_pgd_range(pgd, vma->vm_start, vma->vm_end, &pages, &shared, &dirty, &total);
-			resident += pages;
-			share += shared;
-			dt += dirty;
-			size += total;
-			if (vma->vm_flags & VM_EXECUTABLE)
-				trs += pages;	/* text */
-			else if (vma->vm_flags & VM_GROWSDOWN)
-				drs += pages;	/* stack */
-			else if (vma->vm_end > 0x60000000)
-				lrs += pages;	/* library */
-			else
-				drs += pages;
-			vma = vma->vm_next;
-		}
-#else /* !NO_MM */
-		/* DAVIDM - may be able to clean this up a bit */
-		{
-			struct vm_list_struct *vml = mm->vmlist;
-
-			size += ksize(mm);
-			while (vml) {
-				if (vml->next)
-					size += ksize(vml->next);
-				if (vml->vma) {
-					size += ksize(vml->vma);
-					size += ksize((void *) vml->vma->vm_start);
-					if (atomic_read(&mm->mm_count) > 1 ||
-					    atomic_read(&vml->vma->vm_usage) > 1)
-						share += vml->vma->vm_end - vml->vma->vm_start;
-				}
-				vml = vml->next;
-			}
-
-			size += (trs = mm->end_code - mm->start_code);
-			size += (drs = mm->start_stack - mm->start_data);
-			dt  = 0;
-			lrs = 0;
-			resident = size;
-
-			/* User programs expect the units to be pages. */
-			size = (size + PAGE_SIZE - 1) >> PAGE_SHIFT;
-			resident = (resident + PAGE_SIZE - 1) >> PAGE_SHIFT;
-			share = (share + PAGE_SIZE - 1) >> PAGE_SHIFT;
-			trs = (trs + PAGE_SIZE - 1) >> PAGE_SHIFT;
-			drs = (drs + PAGE_SIZE - 1) >> PAGE_SHIFT;
-		}
-#endif /* !NO_MM */
-		up_read(&mm->mmap_sem);
-		mmput(mm);
-	}
-	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
-		       size, resident, share, trs, lrs, drs, dt);
-}
-
-#ifndef NO_MM
-static int show_map(struct seq_file *m, void *v)
-{
-	struct vm_area_struct *map = v;
-	struct file *file = map->vm_file;
-	int flags = map->vm_flags;
-	unsigned long ino = 0;
-	dev_t dev = 0;
-	int len;
-
-	if (file) {
-		struct inode *inode = map->vm_file->f_dentry->d_inode;
-		dev = kdev_t_to_nr(inode->i_sb->s_dev);
-		ino = inode->i_ino;
-	}
-
-	seq_printf(m, "%08lx-%08lx %c%c%c%c %08lx %02x:%02x %lu %n",
-			map->vm_start,
-			map->vm_end,
-			flags & VM_READ ? 'r' : '-',
-			flags & VM_WRITE ? 'w' : '-',
-			flags & VM_EXEC ? 'x' : '-',
-			flags & VM_MAYSHARE ? 's' : 'p',
-			map->vm_pgoff << PAGE_SHIFT,
-			MAJOR(dev), MINOR(dev), ino, &len);
-
-	if (map->vm_file) {
-		len = 25 + sizeof(void*) * 6 - len;
-		if (len < 1)
-			len = 1;
-		seq_printf(m, "%*c", len, ' ');
-		seq_path(m, file->f_vfsmnt, file->f_dentry, "");
-	}
+	seq_printf(m, "%d (%s) %c", pid_nr_ns(pid, ns), tcomm, state);
+	seq_put_decimal_ll(m, ' ', ppid);
+	seq_put_decimal_ll(m, ' ', pgid);
+	seq_put_decimal_ll(m, ' ', sid);
+	seq_put_decimal_ll(m, ' ', tty_nr);
+	seq_put_decimal_ll(m, ' ', tty_pgrp);
+	seq_put_decimal_ull(m, ' ', task->flags);
+	seq_put_decimal_ull(m, ' ', min_flt);
+	seq_put_decimal_ull(m, ' ', cmin_flt);
+	seq_put_decimal_ull(m, ' ', maj_flt);
+	seq_put_decimal_ull(m, ' ', cmaj_flt);
+	seq_put_decimal_ull(m, ' ', cputime_to_clock_t(utime));
+	seq_put_decimal_ull(m, ' ', cputime_to_clock_t(stime));
+	seq_put_decimal_ll(m, ' ', cputime_to_clock_t(cutime));
+	seq_put_decimal_ll(m, ' ', cputime_to_clock_t(cstime));
+	seq_put_decimal_ll(m, ' ', priority);
+	seq_put_decimal_ll(m, ' ', nice);
+	seq_put_decimal_ll(m, ' ', num_threads);
+	seq_put_decimal_ull(m, ' ', 0);
+	seq_put_decimal_ull(m, ' ', start_time);
+	seq_put_decimal_ull(m, ' ', vsize);
+	seq_put_decimal_ll(m, ' ', mm ? get_mm_rss(mm) : 0);
+	seq_put_decimal_ull(m, ' ', rsslim);
+	seq_put_decimal_ull(m, ' ', mm ? (permitted ? mm->start_code : 1) : 0);
+	seq_put_decimal_ull(m, ' ', mm ? (permitted ? mm->end_code : 1) : 0);
+	seq_put_decimal_ull(m, ' ', (permitted && mm) ? mm->start_stack : 0);
+	seq_put_decimal_ull(m, ' ', esp);
+	seq_put_decimal_ull(m, ' ', eip);
+	/* The signal information here is obsolete.
+	 * It must be decimal for Linux 2.0 compatibility.
+	 * Use /proc/#/status for real-time signals.
+	 */
+	seq_put_decimal_ull(m, ' ', task->pending.signal.sig[0] & 0x7fffffffUL);
+	seq_put_decimal_ull(m, ' ', task->blocked.sig[0] & 0x7fffffffUL);
+	seq_put_decimal_ull(m, ' ', sigign.sig[0] & 0x7fffffffUL);
+	seq_put_decimal_ull(m, ' ', sigcatch.sig[0] & 0x7fffffffUL);
+	seq_put_decimal_ull(m, ' ', wchan);
+	seq_put_decimal_ull(m, ' ', 0);
+	seq_put_decimal_ull(m, ' ', 0);
+	seq_put_decimal_ll(m, ' ', task->exit_signal);
+	seq_put_decimal_ll(m, ' ', task_cpu(task));
+	seq_put_decimal_ull(m, ' ', task->rt_priority);
+	seq_put_decimal_ull(m, ' ', task->policy);
+	seq_put_decimal_ull(m, ' ', delayacct_blkio_ticks(task));
+	seq_put_decimal_ull(m, ' ', cputime_to_clock_t(gtime));
+	seq_put_decimal_ll(m, ' ', cputime_to_clock_t(cgtime));
+	seq_put_decimal_ull(m, ' ', (mm && permitted) ? mm->start_data : 0);
+	seq_put_decimal_ull(m, ' ', (mm && permitted) ? mm->end_data : 0);
+	seq_put_decimal_ull(m, ' ', (mm && permitted) ? mm->start_brk : 0);
 	seq_putc(m, '\n');
-	return 0;
-}
-
-static void *m_start(struct seq_file *m, loff_t *pos)
-{
-	struct task_struct *task = m->private;
-	struct mm_struct *mm;
-	struct vm_area_struct * map;
-	loff_t l = *pos;
-
-	task_lock(task);
-	mm = task->mm;
 	if (mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
-
-	if (!mm)
-		return NULL;
-
-	down_read(&mm->mmap_sem);
-	map = mm->mmap;
-	while (l-- && map)
-		map = map->vm_next;
-	if (!map) {
-		up_read(&mm->mmap_sem);
 		mmput(mm);
-	}
-	return map;
-}
-
-static void m_stop(struct seq_file *m, void *v)
-{
-	struct vm_area_struct *map = v;
-	if (map) {
-		struct mm_struct *mm = map->vm_mm;
-		up_read(&mm->mmap_sem);
-		mmput(mm);
-	}
-}
-
-static void *m_next(struct seq_file *m, void *v, loff_t *pos)
-{
-	struct vm_area_struct *map = v;
-	(*pos)++;
-	if (map->vm_next)
-		return map->vm_next;
-	m_stop(m, v);
-	return NULL;
-}
-
-#else
-
-static int show_map(struct seq_file *m, void *v)
-{
-	struct vm_list_struct *vml = v;
-	struct vm_area_struct *map = vml->vma;
-	struct mm_struct *mm = m->private;
-	struct file *file = map->vm_file;
-	int flags = map->vm_flags;
-	unsigned long ino = 0;
-	dev_t dev = 0;
-	int len;
-
-	if (file) {
-		struct inode *inode = map->vm_file->f_dentry->d_inode;
-		dev = kdev_t_to_nr(inode->i_sb->s_dev);
-		ino = inode->i_ino;
-	}
-
-	seq_printf(m, "%08lx-%08lx %c%c%c%c %08lx %02x:%02x %lu %n",
-			map->vm_start,
-			map->vm_end,
-			flags & VM_READ ? 'r' : '-',
-			flags & VM_WRITE ? 'w' : '-',
-			flags & VM_EXEC ? 'x' : '-',
-			flags & VM_MAYSHARE ? 's' : 'p',
-			map->vm_pgoff << PAGE_SHIFT,
-			MAJOR(dev), MINOR(dev), ino, &len);
-
-	if (map->vm_file) {
-		len = 25 + sizeof(void*) * 6 - len;
-		if (len < 1)
-			len = 1;
-		seq_printf(m, "%*c", len, ' ');
-		seq_path(m, file->f_vfsmnt, file->f_dentry, "");
-	}
-	else {
-		if (map->vm_start <= mm->start_stack && mm->start_stack <= map->vm_end)
-			seq_puts(m, "[brk]");
-		if (map->vm_start <= mm->start_stack && mm->start_stack <= map->vm_end)
-			seq_puts(m, "[stack]");
-	}
-
-	seq_putc(m, '\n');
 	return 0;
 }
 
-static void *m_start(struct seq_file *m, loff_t *pos)
+int proc_tid_stat(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
 {
-	struct vm_list_struct *vml;
-	struct mm_struct *mm = m->private;
-	loff_t l = *pos;
-
-	if (!mm)
-		return NULL;
-
-	down_read(&mm->mmap_sem);
-	vml = mm->vmlist;
-	while (l-- && vml)
-		vml = vml->next;
-	return vml;
+	return do_task_stat(m, ns, pid, task, 0);
 }
 
-static void m_stop(struct seq_file *m, void *v)
+int proc_tgid_stat(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
 {
-	struct mm_struct *mm = m->private;
-	up_read(&mm->mmap_sem);
+	return do_task_stat(m, ns, pid, task, 1);
 }
 
-static void *m_next(struct seq_file *m, void *v, loff_t *pos)
+int proc_pid_statm(struct seq_file *m, struct pid_namespace *ns,
+			struct pid *pid, struct task_struct *task)
 {
-	struct vm_list_struct *vml = v;
-	(*pos)++;
-	return vml->next;
+	unsigned long size = 0, resident = 0, shared = 0, text = 0, data = 0;
+	struct mm_struct *mm = get_task_mm(task);
+
+	if (mm) {
+		size = task_statm(mm, &shared, &text, &data, &resident);
+		mmput(mm);
+	}
+	/*
+	 * For quick read, open code by putting numbers directly
+	 * expected format is
+	 * seq_printf(m, "%lu %lu %lu %lu 0 %lu 0\n",
+	 *               size, resident, shared, text, data);
+	 */
+	seq_put_decimal_ull(m, 0, size);
+	seq_put_decimal_ull(m, ' ', resident);
+	seq_put_decimal_ull(m, ' ', shared);
+	seq_put_decimal_ull(m, ' ', text);
+	seq_put_decimal_ull(m, ' ', 0);
+	seq_put_decimal_ull(m, ' ', data);
+	seq_put_decimal_ull(m, ' ', 0);
+	seq_putc(m, '\n');
+
+	return 0;
 }
-
-#endif
-
-struct seq_operations proc_pid_maps_op = {
-	.start	= m_start,
-	.next	= m_next,
-	.stop	= m_stop,
-	.show	= show_map
-};
-
-#ifdef CONFIG_SMP
-int proc_pid_cpu(struct task_struct *task, char * buffer)
-{
-	int i, len;
-
-	len = sprintf(buffer,
-		"cpu  %lu %lu\n",
-		task->times.tms_utime,
-		task->times.tms_stime);
-		
-	for (i = 0 ; i < smp_num_cpus; i++)
-		len += sprintf(buffer + len, "cpu%d %lu %lu\n",
-			i,
-			task->per_cpu_utime[cpu_logical_map(i)],
-			task->per_cpu_stime[cpu_logical_map(i)]);
-
-	return len;
-}
-#endif

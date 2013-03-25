@@ -27,14 +27,14 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_fshead.c,v 1.20 2002/01/02 22:02:12 hch Exp hch $"
-
 /*
  * Veritas filesystem driver - fileset header routines.
  */
 #include <linux/fs.h>
+#include <linux/buffer_head.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 
 #include "vxfs.h"
 #include "vxfs_inode.h"
@@ -78,17 +78,18 @@ vxfs_getfsh(struct inode *ip, int which)
 	struct buffer_head		*bp;
 
 	bp = vxfs_bread(ip, which);
-	if (buffer_mapped(bp)) {
+	if (bp) {
 		struct vxfs_fsh		*fhp;
 
-		if (!(fhp = kmalloc(sizeof(*fhp), SLAB_KERNEL)))
-			return NULL;
+		if (!(fhp = kmalloc(sizeof(*fhp), GFP_KERNEL)))
+			goto out;
 		memcpy(fhp, bp->b_data, sizeof(*fhp));
 
-		brelse(bp);
+		put_bh(bp);
 		return (fhp);
 	}
-
+out:
+	brelse(bp);
 	return NULL;
 }
 
@@ -109,13 +110,15 @@ vxfs_read_fshead(struct super_block *sbp)
 	struct vxfs_fsh			*pfp, *sfp;
 	struct vxfs_inode_info		*vip, *tip;
 
-	if (!(vip = vxfs_blkiget(sbp, infp->vsi_iext, infp->vsi_fshino))) {
-		printk(KERN_ERR "vxfs: unabled to read fsh inode\n");
+	vip = vxfs_blkiget(sbp, infp->vsi_iext, infp->vsi_fshino);
+	if (!vip) {
+		printk(KERN_ERR "vxfs: unable to read fsh inode\n");
 		return -EINVAL;
-	} else if (!VXFS_ISFSH(vip)) {
+	}
+	if (!VXFS_ISFSH(vip)) {
 		printk(KERN_ERR "vxfs: fsh list inode is of wrong type (%x)\n",
 				vip->vii_mode & VXFS_TYPE_MASK); 
-		return -EINVAL;
+		goto out_free_fship;
 	}
 
 
@@ -124,23 +127,26 @@ vxfs_read_fshead(struct super_block *sbp)
 	vxfs_dumpi(vip, infp->vsi_fshino);
 #endif
 
-	if (!(infp->vsi_fship = vxfs_get_fake_inode(sbp, vip))) {
-		printk(KERN_ERR "vxfs: unabled to get fsh inode\n");
-		return -EINVAL;
+	infp->vsi_fship = vxfs_get_fake_inode(sbp, vip);
+	if (!infp->vsi_fship) {
+		printk(KERN_ERR "vxfs: unable to get fsh inode\n");
+		goto out_free_fship;
 	}
 
-	if (!(sfp = vxfs_getfsh(infp->vsi_fship, 0))) {
-		printk(KERN_ERR "vxfs: unabled to get structural fsh\n");
-		return -EINVAL;
+	sfp = vxfs_getfsh(infp->vsi_fship, 0);
+	if (!sfp) {
+		printk(KERN_ERR "vxfs: unable to get structural fsh\n");
+		goto out_iput_fship;
 	} 
 
 #ifdef DIAGNOSTIC
 	vxfs_dumpfsh(sfp);
 #endif
 
-	if (!(pfp = vxfs_getfsh(infp->vsi_fship, 1))) {
-		printk(KERN_ERR "vxfs: unabled to get primary fsh\n");
-		return -EINVAL;
+	pfp = vxfs_getfsh(infp->vsi_fship, 1);
+	if (!pfp) {
+		printk(KERN_ERR "vxfs: unable to get primary fsh\n");
+		goto out_free_sfp;
 	}
 
 #ifdef DIAGNOSTIC
@@ -148,24 +154,50 @@ vxfs_read_fshead(struct super_block *sbp)
 #endif
 
 	tip = vxfs_blkiget(sbp, infp->vsi_iext, sfp->fsh_ilistino[0]);
-	if (!tip || ((infp->vsi_stilist = vxfs_get_fake_inode(sbp, tip)) == NULL)) {
-		printk(KERN_ERR "vxfs: unabled to get structual list inode\n");
-		return -EINVAL;
-	} else if (!VXFS_ISILT(VXFS_INO(infp->vsi_stilist))) {
-		printk(KERN_ERR "vxfs: structual list inode is of wrong type (%x)\n",
+	if (!tip)
+		goto out_free_pfp;
+
+	infp->vsi_stilist = vxfs_get_fake_inode(sbp, tip);
+	if (!infp->vsi_stilist) {
+		printk(KERN_ERR "vxfs: unable to get structural list inode\n");
+		kfree(tip);
+		goto out_free_pfp;
+	}
+	if (!VXFS_ISILT(VXFS_INO(infp->vsi_stilist))) {
+		printk(KERN_ERR "vxfs: structural list inode is of wrong type (%x)\n",
 				VXFS_INO(infp->vsi_stilist)->vii_mode & VXFS_TYPE_MASK); 
-		return -EINVAL;
+		goto out_iput_stilist;
 	}
 
 	tip = vxfs_stiget(sbp, pfp->fsh_ilistino[0]);
-	if (!tip || ((infp->vsi_ilist = vxfs_get_fake_inode(sbp, tip)) == NULL)) {
-		printk(KERN_ERR "vxfs: unabled to get inode list inode\n");
-		return -EINVAL;
-	} else if (!VXFS_ISILT(VXFS_INO(infp->vsi_ilist))) {
+	if (!tip)
+		goto out_iput_stilist;
+	infp->vsi_ilist = vxfs_get_fake_inode(sbp, tip);
+	if (!infp->vsi_ilist) {
+		printk(KERN_ERR "vxfs: unable to get inode list inode\n");
+		kfree(tip);
+		goto out_iput_stilist;
+	}
+	if (!VXFS_ISILT(VXFS_INO(infp->vsi_ilist))) {
 		printk(KERN_ERR "vxfs: inode list inode is of wrong type (%x)\n",
 				VXFS_INO(infp->vsi_ilist)->vii_mode & VXFS_TYPE_MASK);
-		return -EINVAL;
+		goto out_iput_ilist;
 	}
 
 	return 0;
+
+ out_iput_ilist:
+ 	iput(infp->vsi_ilist);
+ out_iput_stilist:
+ 	iput(infp->vsi_stilist);
+ out_free_pfp:
+	kfree(pfp);
+ out_free_sfp:
+ 	kfree(sfp);
+ out_iput_fship:
+	iput(infp->vsi_fship);
+	return -EINVAL;
+ out_free_fship:
+ 	kfree(vip);
+	return -EINVAL;
 }

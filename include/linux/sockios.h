@@ -7,7 +7,7 @@
  *
  * Version:	@(#)sockios.h	1.0.2	03/09/93
  *
- * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
+ * Authors:	Ross Biro
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  *		This program is free software; you can redistribute it and/or
@@ -22,7 +22,7 @@
 
 /* Linux-specific socket ioctls */
 #define SIOCINQ		FIONREAD
-#define SIOCOUTQ	TIOCOUTQ
+#define SIOCOUTQ	TIOCOUTQ        /* output queue size (not sent + not acked) */
 
 /* Routing table calls. */
 #define SIOCADDRT	0x890B		/* add routing table entry	*/
@@ -72,8 +72,8 @@
 #define SIOCGIFTXQLEN	0x8942		/* Get the tx queue length	*/
 #define SIOCSIFTXQLEN	0x8943		/* Set the tx queue length 	*/
 
-#define SIOCGIFDIVERT	0x8944		/* Frame diversion support */
-#define SIOCSIFDIVERT	0x8945		/* Set frame diversion options */
+/* SIOCGIFDIVERT was:	0x8944		Frame diversion support */
+/* SIOCSIFDIVERT was:	0x8945		Set frame diversion options */
 
 #define SIOCETHTOOL	0x8946		/* Ethtool interface		*/
 
@@ -82,6 +82,8 @@
 #define SIOCSMIIREG	0x8949		/* Write MII PHY register.	*/
 
 #define SIOCWANDEV	0x894A		/* get/set netdev parameters	*/
+
+#define SIOCOUTQNSD	0x894B		/* output queue size (not sent only) */
 
 /* ARP cache control calls. */
 		    /*  0x8950 - 0x8952  * obsolete calls, don't re-use */
@@ -116,6 +118,15 @@
 #define SIOCBONDINFOQUERY      0x8994	/* rtn info about bond state    */
 #define SIOCBONDCHANGEACTIVE   0x8995   /* update to a new active slave */
 			
+/* bridge calls */
+#define SIOCBRADDBR     0x89a0		/* create new bridge device     */
+#define SIOCBRDELBR     0x89a1		/* remove bridge device         */
+#define SIOCBRADDIF	0x89a2		/* add interface to bridge      */
+#define SIOCBRDELIF	0x89a3		/* remove interface from bridge */
+
+/* hardware time stamping: parameters in linux/net_tstamp.h */
+#define SIOCSHWTSTAMP   0x89b0
+
 /* Device private ioctl calls */
 
 /*

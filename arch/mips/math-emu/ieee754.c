@@ -8,8 +8,7 @@
  */
 /*
  * MIPS floating point support
- * Copyright (C) 1994-2000 Algorithmics Ltd.  All rights reserved.
- * http://www.algor.co.uk
+ * Copyright (C) 1994-2000 Algorithmics Ltd.
  *
  * ########################################################################
  *
@@ -31,6 +30,8 @@
 
 
 #include "ieee754int.h"
+#include "ieee754sp.h"
+#include "ieee754dp.h"
 
 #define DP_EBIAS	1023
 #define DP_EMIN		(-1022)
@@ -40,32 +41,18 @@
 #define SP_EMIN		(-126)
 #define SP_EMAX		127
 
-/* indexed by class */
-const char *const ieee754_cname[] = {
-	"Normal",
-	"Zero",
-	"Denormal",
-	"Infinity",
-	"QNaN",
-	"SNaN",
-};
-
-/* the control status register
-*/
-struct ieee754_csr ieee754_csr;
-
 /* special constants
 */
 
 
 #if (defined(BYTE_ORDER) && BYTE_ORDER == LITTLE_ENDIAN) || defined(__MIPSEL__)
-#define SPSTR(s,b,m) {m,b,s}
-#define DPSTR(s,b,mh,ml) {ml,mh,b,s}
+#define SPSTR(s, b, m) {m, b, s}
+#define DPSTR(s, b, mh, ml) {ml, mh, b, s}
 #endif
 
 #ifdef __MIPSEB__
-#define SPSTR(s,b,m) {s,b,m}
-#define DPSTR(s,b,mh,ml) {s,b,mh,ml}
+#define SPSTR(s, b, m) {s, b, m}
+#define DPSTR(s, b, mh, ml) {s, b, mh, ml}
 #endif
 
 const struct ieee754dp_konst __ieee754dp_spcvals[] = {
@@ -77,7 +64,7 @@ const struct ieee754dp_konst __ieee754dp_spcvals[] = {
 	DPSTR(1, 3 + DP_EBIAS, 0x40000, 0),	/* - 10.0   */
 	DPSTR(0, DP_EMAX + 1 + DP_EBIAS, 0, 0),	/* + infinity */
 	DPSTR(1, DP_EMAX + 1 + DP_EBIAS, 0, 0),	/* - infinity */
-	DPSTR(0,DP_EMAX+1+DP_EBIAS,0x7FFFF,0xFFFFFFFF), /* + indef quiet Nan */
+	DPSTR(0, DP_EMAX+1+DP_EBIAS, 0x7FFFF, 0xFFFFFFFF), /* + indef quiet Nan */
 	DPSTR(0, DP_EMAX + DP_EBIAS, 0xFFFFF, 0xFFFFFFFF),	/* + max */
 	DPSTR(1, DP_EMAX + DP_EBIAS, 0xFFFFF, 0xFFFFFFFF),	/* - max */
 	DPSTR(0, DP_EMIN + DP_EBIAS, 0, 0),	/* + min normal */
@@ -97,7 +84,7 @@ const struct ieee754sp_konst __ieee754sp_spcvals[] = {
 	SPSTR(1, 3 + SP_EBIAS, 0x200000),	/* - 10.0   */
 	SPSTR(0, SP_EMAX + 1 + SP_EBIAS, 0),	/* + infinity */
 	SPSTR(1, SP_EMAX + 1 + SP_EBIAS, 0),	/* - infinity */
-	SPSTR(0,SP_EMAX+1+SP_EBIAS,0x3FFFFF),     /* + indef quiet Nan  */
+	SPSTR(0, SP_EMAX+1+SP_EBIAS, 0x3FFFFF),     /* + indef quiet Nan  */
 	SPSTR(0, SP_EMAX + SP_EBIAS, 0x7FFFFF),	/* + max normal */
 	SPSTR(1, SP_EMAX + SP_EBIAS, 0x7FFFFF),	/* - max normal */
 	SPSTR(0, SP_EMIN + SP_EBIAS, 0),	/* + min normal */
@@ -120,6 +107,7 @@ int ieee754si_xcpt(int r, const char *op, ...)
 	ax.rv.si = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.si;
 }
 
@@ -134,5 +122,6 @@ s64 ieee754di_xcpt(s64 r, const char *op, ...)
 	ax.rv.di = r;
 	va_start(ax.ap, op);
 	ieee754_xcpt(&ax);
+	va_end(ax.ap);
 	return ax.rv.di;
 }

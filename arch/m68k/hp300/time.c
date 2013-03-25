@@ -15,9 +15,8 @@
 #include <asm/machdep.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/system.h>
 #include <asm/traps.h>
-#include "ints.h"
+#include <asm/blinken.h>
 
 /* Clock hardware definitions */
 
@@ -36,13 +35,15 @@
 
 #define INTVAL ((10000 / 4) - 1)
 
-static void hp300_tick(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t hp300_tick(int irq, void *dev_id)
 {
-  unsigned long tmp;
-  void (*vector)(int, void *, struct pt_regs *) = dev_id;
-  in_8(CLOCKBASE + CLKSR);
-  asm volatile ("movpw %1@(5),%0" : "=d" (tmp) : "a" (CLOCKBASE));
-  vector(irq, NULL, regs);
+	unsigned long tmp;
+	irq_handler_t vector = dev_id;
+	in_8(CLOCKBASE + CLKSR);
+	asm volatile ("movpw %1@(5),%0" : "=d" (tmp) : "a" (CLOCKBASE));
+	/* Turn off the network and SCSI leds */
+	blinken_leds(0, 0xe0);
+	return vector(irq, NULL);
 }
 
 unsigned long hp300_gettimeoffset(void)
@@ -61,14 +62,15 @@ unsigned long hp300_gettimeoffset(void)
   return (USECS_PER_JIFFY * ticks) / INTVAL;
 }
 
-void __init hp300_sched_init(void (*vector)(int, void *, struct pt_regs *))
+void __init hp300_sched_init(irq_handler_t vector)
 {
   out_8(CLOCKBASE + CLKCR2, 0x1);		/* select CR1 */
   out_8(CLOCKBASE + CLKCR1, 0x1);		/* reset */
 
   asm volatile(" movpw %0,%1@(5)" : : "d" (INTVAL), "a" (CLOCKBASE));
 
-  sys_request_irq(6, hp300_tick, IRQ_FLG_STD, "timer tick", vector);
+  if (request_irq(IRQ_AUTO_6, hp300_tick, 0, "timer tick", vector))
+    pr_err("Couldn't register timer interrupt\n");
 
   out_8(CLOCKBASE + CLKCR2, 0x1);		/* select CR1 */
   out_8(CLOCKBASE + CLKCR1, 0x40);		/* enable irq */

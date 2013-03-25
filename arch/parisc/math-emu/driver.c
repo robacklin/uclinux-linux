@@ -16,7 +16,7 @@
  *
  *    You should have received a copy of the GNU General Public License
  *    along with this program; if not, write to the Free Software
- *    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
 /*
  *  linux/arch/math-emu/driver.c.c
@@ -27,7 +27,6 @@
  *  Copyright (C) 2001	      Hewlett-Packard <bame@debian.org>
  */
 
-#include <linux/config.h>
 #include <linux/sched.h>
 #include "float.h"
 #include "math-emu.h"
@@ -80,11 +79,10 @@ struct exc_reg {
 int
 handle_fpe(struct pt_regs *regs)
 {
-	extern int printbinary(char *buf, unsigned long x, int nbits);
+	extern void printbinary(unsigned long x, int nbits);
 	struct siginfo si;
 	unsigned int orig_sw, sw;
 	int signalcode;
-	char buf[128];
 	/* need an intermediate copy of float regs because FPU emulation
 	 * code expects an artificial last entry which contains zero
 	 *
@@ -101,8 +99,8 @@ handle_fpe(struct pt_regs *regs)
 
 	if (FPUDEBUG) {
 		printk(KERN_DEBUG "FP VZOUICxxxxCQCQCQCQCQCRMxxTDVZOUI ->\n   ");
-		printbinary(buf, orig_sw, 32);
-		printk(KERN_DEBUG "%s\n", buf);
+		printbinary(orig_sw, 32);
+		printk(KERN_DEBUG "\n");
 	}
 
 	signalcode = decode_fpu(frcopy, 0x666);
@@ -112,8 +110,8 @@ handle_fpe(struct pt_regs *regs)
 	if (FPUDEBUG) {
 		printk(KERN_DEBUG "VZOUICxxxxCQCQCQCQCQCRMxxTDVZOUI decode_fpu returns %d|0x%x\n",
 			signalcode >> 24, signalcode & 0xffffff);
-		printbinary(buf, sw, 32);
-		printk(KERN_DEBUG "%s\n", buf);
+		printbinary(sw, 32);
+		printk(KERN_DEBUG "\n");
 	}
 
 	memcpy(regs->fr, frcopy, sizeof regs->fr);
@@ -121,7 +119,7 @@ handle_fpe(struct pt_regs *regs)
 	    si.si_signo = signalcode >> 24;
 	    si.si_errno = 0;
 	    si.si_code = signalcode & 0xffffff;
-	    si.si_addr = (void *) regs->iaoq[0];
+	    si.si_addr = (void __user *) regs->iaoq[0];
 	    force_sig_info(si.si_signo, &si, current);
 	    return -1;
 	}
