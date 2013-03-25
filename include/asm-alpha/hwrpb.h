@@ -1,5 +1,5 @@
-#ifndef _HWRPB_H
-#define _HWRPB_H
+#ifndef __ALPHA_HWRPB_H
+#define __ALPHA_HWRPB_H
 
 #define INIT_HWRPB ((struct hwrpb_struct *) 0x10000000)
 
@@ -14,9 +14,16 @@
 #define EV5_CPU                 5       /* EV5 (21164)          */
 #define EV45_CPU                6       /* EV4.5 (21064/xxx)    */
 #define EV56_CPU		7	/* EV5.6 (21164)	*/
-#define EV6_CPU			8	/* EV6 (21164)		*/
+#define EV6_CPU			8	/* EV6 (21264)		*/
 #define PCA56_CPU		9	/* PCA56 (21164PC)	*/
-#define PCA57_CPU		10	/* PCA57 (21164??)	*/
+#define PCA57_CPU		10	/* PCA57 (notyet)	*/
+#define EV67_CPU		11	/* EV67 (21264A)	*/
+#define EV68CB_CPU		12	/* EV68CB (21264C)	*/
+#define EV68AL_CPU		13	/* EV68AL (21264B)	*/
+#define EV68CX_CPU		14	/* EV68CX (21264D)	*/
+#define EV7_CPU			15	/* EV7 (21364)		*/
+#define EV79_CPU		16	/* EV79 (21364??)	*/
+#define EV69_CPU		17	/* EV69 (21264/EV69A)	*/
 
 /*
  * DEC system types for Alpha systems.  Found in HWRPB.
@@ -34,6 +41,7 @@
 #define ST_DEC_AXPPCI_33	 11	/* NoName system type	*/
 #define ST_DEC_TLASER		 12	/* Turbolaser systype	*/
 #define ST_DEC_2100_A50		 13	/* Avanti systype	*/
+#define ST_DEC_MUSTANG		 14	/* Mustang systype	*/
 #define ST_DEC_ALCOR		 15	/* Alcor (EV5) systype	*/
 #define ST_DEC_1000		 17	/* Mikasa systype	*/
 #define ST_DEC_EB64		 18	/* EB64 systype		*/
@@ -54,10 +62,17 @@
 #define ST_DEC_TSUNAMI		 34	/* Tsunami systype	*/
 #define ST_DEC_WILDFIRE		 35	/* Wildfire systype	*/
 #define ST_DEC_CUSCO		 36	/* CUSCO systype	*/
+#define ST_DEC_EIGER		 37	/* Eiger systype	*/
+#define ST_DEC_TITAN		 38	/* Titan systype	*/
+#define ST_DEC_MARVEL		 39	/* Marvel systype	*/
 
 /* UNOFFICIAL!!! */
 #define ST_UNOFFICIAL_BIAS	100
 #define ST_DTI_RUFFIAN		101	/* RUFFIAN systype	*/
+
+/* Alpha Processor, Inc. systems */
+#define ST_API_BIAS		200
+#define ST_API_NAUTILUS		201	/* UP1000 systype	*/
 
 struct pcb_struct {
 	unsigned long ksp;
@@ -95,6 +110,9 @@ struct percpu_struct {
 	unsigned long ipc_buffer[21];
 	unsigned long palcode_avail[16];
 	unsigned long compatibility;
+	unsigned long console_data_log_pa;
+	unsigned long console_data_log_length;
+	unsigned long bcache_info;
 };
 
 struct procdesc_struct {
@@ -137,9 +155,9 @@ struct memdesc_struct {
 };
 
 struct dsr_struct {
-	long smm;                       /* SMM nubber used by LMF       */
-	unsigned long  lurt_off;        /* offset to LURT table         */
-	unsigned long  sysname_off;     /* offset to sysname char count */
+	long smm;			/* SMM nubber used by LMF       */
+	unsigned long  lurt_off;	/* offset to LURT table         */
+	unsigned long  sysname_off;	/* offset to sysname char count */
 };
 
 struct hwrpb_struct {
@@ -184,4 +202,19 @@ struct hwrpb_struct {
 	unsigned long dsr_offset;	/* "Dynamic System Recognition Data Block Table" */
 };
 
-#endif
+#ifdef __KERNEL__
+
+extern struct hwrpb_struct *hwrpb;
+
+static inline void
+hwrpb_update_checksum(struct hwrpb_struct *h)
+{
+	unsigned long sum = 0, *l;
+        for (l = (unsigned long *) h; l < (unsigned long *) &h->chksum; ++l)
+                sum += *l;
+        h->chksum = sum;
+}
+
+#endif /* __KERNEL__ */
+
+#endif /* __ALPHA_HWRPB_H */

@@ -6,7 +6,7 @@
  *
  *
  *	This software may be used and distributed according to the terms
- *	of the GNU Public License, incorporated herein by reference.
+ *	of the GNU General Public License, incorporated herein by reference.
  * 
  * The author may be reached as simon@ncm.com, or C/O
  *    NCM
@@ -36,7 +36,7 @@
 #define EQL_SETMASTRCFG (SIOCDEVPRIVATE + 5)
 
 typedef struct slave {
-  struct device *dev;
+  struct net_device *dev;
   long priority;
   long priority_bps;
   long priority_Bps;
@@ -48,7 +48,7 @@ typedef struct slave_queue {
   slave_t *head;
   slave_t *best_slave;
   int num_slaves;
-  struct device *master_dev;
+  struct net_device *master_dev;
   char lock;
 } slave_queue_t;
 
@@ -56,7 +56,7 @@ typedef struct equalizer {
   slave_queue_t *queue;
   int min_slaves;
   int max_slaves;
-  struct enet_statistics *stats;
+  struct net_device_stats *stats;
   struct timer_list timer;
   char timer_on;
 } equalizer_t;  

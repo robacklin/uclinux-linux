@@ -3,28 +3,25 @@
  *
  *  Copyright (C) 1996  Martin von Löwis
  *  original #!-checking implemented by tytso.
- *
- */
- 
-/*
- * uClinux revisions for NO_MM
- * Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- *
- *  FIXME: Modifications are untested!
- *	^^^^^: tested it, found a small bug, seems to work now (davidm@lineo.com)
  */
 
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/binfmts.h>
+#include <linux/init.h>
+#include <linux/file.h>
+#include <linux/smp_lock.h>
 
-static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *interp, *i_name, *i_arg;
+	char *cp, *i_name, *i_arg;
+	struct file *file;
+	char interp[BINPRM_BUF_SIZE];
 	int retval;
-	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang))
+
+	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang)) 
 		return -ENOEXEC;
 	/*
 	 * This section does the #! interpretation.
@@ -32,12 +29,13 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 */
 
 	bprm->sh_bang++;
-	iput(bprm->inode);
-	bprm->dont_iput=1;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
-	bprm->buf[127] = '\0';
+	bprm->buf[BINPRM_BUF_SIZE - 1] = '\0';
 	if ((cp = strchr(bprm->buf, '\n')) == NULL)
-		cp = bprm->buf+127;
+		cp = bprm->buf+BINPRM_BUF_SIZE-1;
 	*cp = '\0';
 	while (cp > bprm->buf) {
 		cp--;
@@ -47,18 +45,17 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 			break;
 	}
 	for (cp = bprm->buf+2; (*cp == ' ') || (*cp == '\t'); cp++);
-	if (!cp || *cp == '\0') 
+	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
-	interp = i_name = cp;
+	i_name = cp;
 	i_arg = 0;
-	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
-		if (*cp == '/')
-			i_name = cp+1;
-	}
+	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++)
+		/* nothing */ ;
 	while ((*cp == ' ') || (*cp == '\t'))
 		*cp++ = '\0';
 	if (*cp)
 		i_arg = cp;
+	strcpy (interp, i_name);
 	/*
 	 * OK, we've parsed out the interpreter name and
 	 * (optional) argument.
@@ -69,107 +66,46 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * This is done in reverse order, because of how the
 	 * user environment and arguments are stored.
 	 */
-#ifndef NO_MM
 	remove_arg_zero(bprm);
-	bprm->p = copy_strings(1, &bprm->filename, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
-		bprm->p = copy_strings(1, &i_arg, bprm->page, bprm->p, 2);
+		retval = copy_strings_kernel(1, &i_arg, bprm);
+		if (retval < 0) return retval; 
 		bprm->argc++;
 	}
-	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &i_name, bprm);
+	if (retval) return retval; 
 	bprm->argc++;
-	if ((long)bprm->p < 0)
-		return (long)bprm->p;
 	/*
-	 * OK, now restart the process with the interpreter's inode.
-	 * Note that we use open_namei() as the name is now in kernel
-	 * space, and we don't need to copy it.
+	 * OK, now restart the process with the interpreter's dentry.
 	 */
-	retval = open_namei(interp, 0, 0, &bprm->inode, NULL);
-	if (retval)
-		return retval;
-	bprm->dont_iput=0;
-	retval=prepare_binprm(bprm);
-	if(retval<0)
+	file = open_exec(interp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
+
+	bprm->file = file;
+	retval = prepare_binprm(bprm);
+	if (retval < 0)
 		return retval;
 	return search_binary_handler(bprm,regs);
-#else /* !NO_MM */
-	{
-		char ** oldargv = bprm->argv;
-		int oldargc = bprm->argc;
-		int i;
-		
-		bprm->argc = oldargc + (i_arg ? 2 : 1);
-		bprm->argv = kmalloc(sizeof(char*) * bprm->argc, GFP_KERNEL);
-		
-		if (!bprm->argv) {
-			bprm->argc = oldargc;
-			bprm->argv = oldargv;
-			return -E2BIG;
-		}
-		
-		for(i=1;i<=oldargc;i++)
-			bprm->argv[bprm->argc-i] = oldargv[oldargc-i];
-		
-		bprm->argv[0] = i_name;
-		i=1;
-		if (i_arg)
-			bprm->argv[i++] = i_arg;
-		bprm->argv[i++] = bprm->filename;
-		
-		
-		/*
-		 * OK, now restart the process with the interpreter's inode.
-		 * Note that we use open_namei() as the name is now in kernel
-		 * space, and we don't need to copy it.
-		 */
-		retval = open_namei(interp, 0, 0, &bprm->inode, NULL);
-		if (!retval) {
-			bprm->dont_iput=0;
-			retval=prepare_binprm(bprm);
-		}
-		if (retval >= 0) {
-			retval =  search_binary_handler(bprm,regs);
-		}
-		
-		kfree(bprm->argv);
-		bprm->argv = oldargv;
-		bprm->argc = oldargc;
-
-		return retval;
-	}
-#endif /* !NO_MM */
-}
-
-static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
-{
-	int retval;
-	MOD_INC_USE_COUNT;
-	retval = do_load_script(bprm,regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
 }
 
 struct linux_binfmt script_format = {
-#ifndef MODULE
-	NULL, 0, load_script, NULL, NULL
-#else
-	NULL, &mod_use_count_, load_script, NULL, NULL
-#endif
+	NULL, THIS_MODULE, load_script, NULL, NULL, 0
 };
 
-int init_script_binfmt(void) {
+static int __init init_script_binfmt(void)
+{
 	return register_binfmt(&script_format);
 }
 
-#ifdef MODULE
-int init_module(void)
+static void __exit exit_script_binfmt(void)
 {
-	return init_script_binfmt();
-}
-
-void cleanup_module( void) {
 	unregister_binfmt(&script_format);
 }
-#endif
+
+module_init(init_script_binfmt)
+module_exit(exit_script_binfmt)
+MODULE_LICENSE("GPL");

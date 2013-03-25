@@ -1,6 +1,7 @@
 /*
- * include/asm-armnommu/arch-netarm/netarm_nvram.h
+ * include/asm-armnommu/arch-netarm/netarm_mmap.h
  *
+ * Copyright (C) 2003 Videon Central, Inc.
  * Copyright (C) 2000, 2001 NETsilicon, Inc.
  * Copyright (C) 2000, 2001 Red Hat, Inc.
  *
@@ -27,6 +28,8 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * author(s) : Joe deBlaquiere
+ *
+ * Modified to support NS7520 by Art Shipkowski <art@videon-central.com>
  */
 
 #ifndef __NETARM_MEMORY_MAP_H
@@ -34,10 +37,10 @@
 
 #include <linux/autoconf.h>
 
+#ifndef (CONFIG_NETARM_NS7520)
 /* structure definitions for per-unit configuration data */
-
-#define	NETARM_MMAP_CS0_BASE	(0x10000000)	/* Flash AM29DL322DB */
-#define	NETARM_MMAP_CS0_MASK	(0xFF000000)	/* 8M bytes */
+#define	NETARM_MMAP_CS0_BASE	(0x10000000)	/* Flash AM29DL323DB */
+#define	NETARM_MMAP_CS0_MASK	(0xFF800000)	/* 8M bytes */
 
 #define	NETARM_MMAP_CS1_BASE	(0x00000000)	/* EDO DRAM MT4LC4M16R6 */
 #define	NETARM_MMAP_CS1_MASK	(0xFF000000)	/* 16M bytes */
@@ -50,6 +53,32 @@
 
 #define	NETARM_MMAP_CS4_BASE	(0x30000000)	/* EPSON SED1355 */
 #define	NETARM_MMAP_CS4_MASK	(0xFF000000)	/* Memory Mapped I/O */
+#else
+/*
+ * The NS7520 has a nasty bug relating to SDRAM refresh if you place any
+ * chip selects above the first 256MB of addressable space.
+ *
+ * There is also a limit on memory-to-memory DMA that requires the source
+ * address be in the first 512MB addressable.
+ *
+ * These defaults are a little silly IMHO, anyhow. Perhaps they should be
+ * set up in the kernel configuration for those not using a bootloader?
+ */
+#define	NETARM_MMAP_CS0_BASE	(FLASH_BASE) 	/* Flash AM29DL323DB */
+#define	NETARM_MMAP_CS0_MASK	(0xFF800000)	/* 8M bytes */
+
+#define	NETARM_MMAP_CS1_BASE	(DRAM_BASE) 	/* EDO DRAM MT4LC4M16R6 */
+#define	NETARM_MMAP_CS1_MASK	(0xFF000000)	/* 16M bytes */
+
+#define	NETARM_MMAP_CS2_BASE	(0x01000000)	/* EDO DRAM MT4LC4M16R6 */
+#define	NETARM_MMAP_CS2_MASK	(0xFF000000)	/* 16M bytes */
+
+#define	NETARM_MMAP_CS3_BASE	(0x02000000)	/* EEPROM - AT28LV64B */
+#define	NETARM_MMAP_CS3_MASK	(0xFFFFE000)	/* 8K bytes */
+
+#define	NETARM_MMAP_CS4_BASE	(0x03000000)	/* EPSON SED1355 */
+#define	NETARM_MMAP_CS4_MASK	(0xFF000000)	/* Memory Mapped I/O */
+#endif
 
 #define NETARM_MMAP_RAM_BASE	(NETARM_MMAP_CS1_BASE)
 #define NETARM_MMAP_FLASH_BASE	(NETARM_MMAP_CS0_BASE)

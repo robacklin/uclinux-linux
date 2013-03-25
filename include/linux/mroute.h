@@ -10,6 +10,9 @@
  *
  *	See the mrouted code for the original history.
  *
+ *      Protocol Independent Multicast (PIM) data structures included
+ *      Carlos Picoto (cap@di.fc.ul.pt)
+ *
  */
 
 #define MRT_BASE	200
@@ -21,9 +24,11 @@
 #define MRT_DEL_MFC	(MRT_BASE+5)	/* Delete a multicast forwarding entry	*/
 #define MRT_VERSION	(MRT_BASE+6)	/* Get the kernel multicast version	*/
 #define MRT_ASSERT	(MRT_BASE+7)	/* Activate PIM assert mode		*/
+#define MRT_PIM		(MRT_BASE+8)	/* enable PIM code	*/
 
 #define SIOCGETVIFCNT	SIOCPROTOPRIVATE	/* IP protocol privates */
 #define SIOCGETSGCNT	(SIOCPROTOPRIVATE+1)
+#define SIOCGETRPF	(SIOCPROTOPRIVATE+2)
 
 #define MAXVIFS		32	
 typedef unsigned long vifbitmap_t;	/* User mode code depends on this lot */
@@ -55,11 +60,12 @@ struct vifctl {
 	struct in_addr vifc_rmt_addr;	/* IPIP tunnel addr */
 };
 
-#define VIFF_TUNNEL	0x1		/* IPIP tunnel */
-#define VIFF_SRCRT	0x02		/* NI */
+#define VIFF_TUNNEL	0x1	/* IPIP tunnel */
+#define VIFF_SRCRT	0x2	/* NI */
+#define VIFF_REGISTER	0x4	/* register vif	*/
 
 /*
- *	Cache manipulation structures for mrouted
+ *	Cache manipulation structures for mrouted and PIMd
  */
  
 struct mfcctl
@@ -68,6 +74,10 @@ struct mfcctl
 	struct in_addr mfcc_mcastgrp;		/* Group in question	*/
 	vifi_t	mfcc_parent;			/* Where it arrived	*/
 	unsigned char mfcc_ttls[MAXVIFS];	/* Where it is going	*/
+	unsigned int mfcc_pkt_cnt;		/* pkt count for src-grp */
+	unsigned int mfcc_byte_cnt;
+	unsigned int mfcc_wrong_if;
+	int	     mfcc_expire;
 };
 
 /* 
@@ -103,7 +113,7 @@ struct sioc_vif_req
  
 struct igmpmsg
 {
-	unsigned long unused1,unused2;
+	__u32 unused1,unused2;
 	unsigned char im_msgtype;		/* What is this */
 	unsigned char im_mbz;			/* Must be zero */
 	unsigned char im_vif;			/* Interface (this ought to be a vifi_t!) */
@@ -116,25 +126,25 @@ struct igmpmsg
  */
 
 #ifdef __KERNEL__
-extern struct sock *mroute_socket;
 extern int ip_mroute_setsockopt(struct sock *, int, char *, int);
 extern int ip_mroute_getsockopt(struct sock *, int, char *, int *);
 extern int ipmr_ioctl(struct sock *sk, int cmd, unsigned long arg);
-extern void mroute_close(struct sock *sk);
-extern void ipmr_forward(struct sk_buff *skb, int is_frag);
+extern void ip_mr_init(void);
 
 
 struct vif_device
 {
-	struct device 	*dev;			/* Device we are using */
-	struct route 	*rt_cache;		/* Tunnel route cache */
+	struct net_device 	*dev;			/* Device we are using */
 	unsigned long	bytes_in,bytes_out;
 	unsigned long	pkt_in,pkt_out;		/* Statistics 			*/
 	unsigned long	rate_limit;		/* Traffic shaping (NI) 	*/
 	unsigned char	threshold;		/* TTL threshold 		*/
 	unsigned short	flags;			/* Control flags 		*/
-	unsigned long	local,remote;		/* Addresses(remote for tunnels)*/
+	__u32		local,remote;		/* Addresses(remote for tunnels)*/
+	int		link;			/* Physical interface index	*/
 };
+
+#define VIFF_STATIC 0x8000
 
 struct mfc_cache 
 {
@@ -142,18 +152,27 @@ struct mfc_cache
 	__u32 mfc_mcastgrp;			/* Group the entry belongs to 	*/
 	__u32 mfc_origin;			/* Source of packet 		*/
 	vifi_t mfc_parent;			/* Source interface		*/
-	struct timer_list mfc_timer;		/* Expiry timer			*/
 	int mfc_flags;				/* Flags on line		*/
-	struct sk_buff_head mfc_unresolved;	/* Unresolved buffers		*/
-	int mfc_queuelen;			/* Unresolved buffer counter	*/
-	unsigned char mfc_ttls[MAXVIFS];	/* TTL thresholds		*/
-	unsigned long mfc_packets;		/* Packets on this entry	*/
-	unsigned long mfc_bytes;		/* Bytes on this entry		*/
+
+	union {
+		struct {
+			unsigned long expires;
+			struct sk_buff_head unresolved;	/* Unresolved buffers		*/
+		} unres;
+		struct {
+			unsigned long last_assert;
+			int minvif;
+			int maxvif;
+			unsigned long bytes;
+			unsigned long pkt;
+			unsigned long wrong_if;
+			unsigned char ttls[MAXVIFS];	/* TTL thresholds		*/
+		} res;
+	} mfc_un;
 };
 
-#define MFC_QUEUED		1
-#define MFC_RESOLVED		2
-
+#define MFC_STATIC		1
+#define MFC_NOTIFY		2
 
 #define MFC_LINES		64
 
@@ -165,11 +184,42 @@ struct mfc_cache
 
 #endif
 
+
+#define MFC_ASSERT_THRESH (3*HZ)		/* Maximal freq. of asserts */
+
 /*
  *	Pseudo messages used by mrouted
  */
 
-#define IGMPMSG_NOCACHE		1		/* Kernel cache fill request to mrouted */
+#define IGMPMSG_NOCACHE		1		/* Kern cache fill request to mrouted */
 #define IGMPMSG_WRONGVIF	2		/* For PIM assert processing (unused) */
+#define IGMPMSG_WHOLEPKT	3		/* For PIM Register processing */
+
+#ifdef __KERNEL__
+
+#define PIM_V1_VERSION		__constant_htonl(0x10000000)
+#define PIM_V1_REGISTER		1
+
+#define PIM_VERSION		2
+#define PIM_REGISTER		1
+
+#define PIM_NULL_REGISTER	__constant_htonl(0x40000000)
+
+/* PIMv2 register message header layout (ietf-draft-idmr-pimvsm-v2-00.ps */
+
+struct pimreghdr
+{
+	__u8	type;
+	__u8	reserved;
+	__u16	csum;
+	__u32	flags;
+};
+
+extern int pim_rcv(struct sk_buff *);
+extern int pim_rcv_v1(struct sk_buff *);
+
+struct rtmsg;
+extern int ipmr_get_route(struct sk_buff *skb, struct rtmsg *rtm, int nowait);
+#endif
 
 #endif

@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -60,6 +60,9 @@
  *	12/19/98 bv, v1.02a Use spinlocks for 2.1.95 and up.
  **************************************************************************/
 
+#include <linux/config.h>
+#include <linux/types.h>
+
 #define ULONG   unsigned long
 #define PVOID   void *
 #define USHORT  unsigned short
@@ -70,11 +73,7 @@
 #define UBYTE   unsigned char
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32     unsigned int
-#else
-#define U32     unsigned long
-#endif
+#define U32     u32
 
 #ifndef NULL
 #define NULL     0		/* zero          */
@@ -343,14 +342,10 @@ typedef struct ORC_Ha_Ctrl_Struc {
 	UBYTE ActiveTags[16][16];	/* 50 */
 	ORC_TCS HCS_Tcs[16];	/* 28 */
 	U32 BitAllocFlag[MAX_CHANNELS][8];	/* Max STB is 256, So 256/32 */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t BitAllocFlagLock;
-#endif
 	ULONG pSRB_head;
 	ULONG pSRB_tail;
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t pSRB_lock;
-#endif
 } ORC_HCS;
 
 /* Bit Definition for HCS_Flags */

@@ -3,13 +3,17 @@
  *
  *  Copyright (C) 1996  Russell King
  *
- * Changelog:
- *  26/01/1996	RMK	Cleaned up various areas to make little more generic
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   26/01/1996	RMK	Cleaned up various areas to make little more generic
+ *   07/02/1999	RMK	Support added for 16K and 32K page sizes
+ *			containing 8K blocks
  */
-
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/head.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -20,182 +24,190 @@
 #include <linux/swap.h>
 #include <linux/smp.h>
 
-#define SMALL_ALLOC_SHIFT	(10)
-#define SMALL_ALLOC_SIZE	(1 << SMALL_ALLOC_SHIFT)
-#define NR_BLOCKS		(PAGE_SIZE / SMALL_ALLOC_SIZE)
+#include <asm/bitops.h>
+#include <asm/pgtable.h>
 
-#if NR_BLOCKS != 4
-#error I only support 4 blocks per page!
-#endif
-
-#define USED(pg)		(((pg)->count >> 8) & 15)
-#define SET_USED(pg,off)	((pg)->count |= 256 << off)
-#define CLEAR_USED(pg,off)	((pg)->count &= ~(256 << off))
-#define IS_FREE(pg,off)		(!((pg)->count & (256 << off)))
-#define PAGE_PTR(page,block)	((struct free_small_page *)((page) + \
-					((block) << SMALL_ALLOC_SHIFT)))
-
-struct free_small_page {
-	unsigned long next;
-	unsigned long prev;
-};
+#define PEDANTIC
 
 /*
- * To handle allocating small pages, we use the main get_free_page routine,
- * and split the page up into 4.  The page is marked in mem_map as reserved,
- * so it can't be free'd by free_page.  The count field is used to keep track
- * of which sections of this page are allocated.
+ * Requirement:
+ *  We need to be able to allocate naturally aligned memory of finer
+ *  granularity than the page size.  This is typically used for the
+ *  second level page tables on 32-bit ARMs.
+ *
+ * Theory:
+ *  We "misuse" the Linux memory management system.  We use alloc_page
+ *  to allocate a page and then mark it as reserved.  The Linux memory
+ *  management system will then ignore the "offset", "next_hash" and
+ *  "pprev_hash" entries in the mem_map for this page.
+ *
+ *  We then use a bitstring in the "offset" field to mark which segments
+ *  of the page are in use, and manipulate this as required during the
+ *  allocation and freeing of these small pages.
+ *
+ *  We also maintain a queue of pages being used for this purpose using
+ *  the "next_hash" and "pprev_hash" entries of mem_map;
  */
-static unsigned long small_page_ptr;
 
-static unsigned char offsets[1<<NR_BLOCKS] = {
-	0,	/* 0000 */
-	1,	/* 0001 */
-	0,	/* 0010 */
-	2,	/* 0011 */
-	0,	/* 0100 */
-	1,	/* 0101 */
-	0,	/* 0110 */
-	3,	/* 0111 */
-	0,	/* 1000 */
-	1,	/* 1001 */
-	0,	/* 1010 */
-	2,	/* 1011 */
-	0,	/* 1100 */
-	1,	/* 1101 */
-	0,	/* 1110 */
-	4	/* 1111 */
+struct order {
+	struct page *queue;
+	unsigned int mask;		/* (1 << shift) - 1		*/
+	unsigned int shift;		/* (1 << shift) size of page	*/
+	unsigned int block_mask;	/* nr_blocks - 1		*/
+	unsigned int all_used;		/* (1 << nr_blocks) - 1		*/
 };
 
-static inline void clear_page_links(unsigned long page)
-{
-	struct free_small_page *fsp;
-	int i;
 
-	for (i = 0; i < NR_BLOCKS; i++) {
-		fsp = PAGE_PTR(page, i);
-		fsp->next = fsp->prev = 0;
+static struct order orders[] = {
+#if PAGE_SIZE == 4096
+	{ NULL, 2047, 11,  1, 0x00000003 }
+#elif PAGE_SIZE == 32768
+	{ NULL, 2047, 11, 15, 0x0000ffff },
+	{ NULL, 8191, 13,  3, 0x0000000f }
+#else
+#error unsupported page size
+#endif
+};
+
+#define USED_MAP(pg)			((pg)->index)
+#define TEST_AND_CLEAR_USED(pg,off)	(test_and_clear_bit(off, &USED_MAP(pg)))
+#define SET_USED(pg,off)		(set_bit(off, &USED_MAP(pg)))
+
+static spinlock_t small_page_lock = SPIN_LOCK_UNLOCKED;
+
+static void add_page_to_queue(struct page *page, struct page **p)
+{
+#ifdef PEDANTIC
+	if (page->pprev_hash)
+		PAGE_BUG(page);
+#endif
+	page->next_hash = *p;
+	if (*p)
+		(*p)->pprev_hash = &page->next_hash;
+	*p = page;
+	page->pprev_hash = p;
+}
+
+static void remove_page_from_queue(struct page *page)
+{
+	if (page->pprev_hash) {
+		if (page->next_hash)
+			page->next_hash->pprev_hash = page->pprev_hash;
+		*page->pprev_hash = page->next_hash;
+		page->pprev_hash = NULL;
 	}
 }
 
-static inline void set_page_links_prev(unsigned long page, unsigned long prev)
+static unsigned long __get_small_page(int priority, struct order *order)
 {
-	struct free_small_page *fsp;
-	unsigned int mask;
-	int i;
-
-	if (!page)
-		return;
-
-	mask = USED(&mem_map[MAP_NR(page)]);
-	for (i = 0; i < NR_BLOCKS; i++) {
-		if (mask & (1 << i))
-			continue;
-		fsp = PAGE_PTR(page, i);
-		fsp->prev = prev;
-	}
-}
-
-static inline void set_page_links_next(unsigned long page, unsigned long next)
-{
-	struct free_small_page *fsp;
-	unsigned int mask;
-	int i;
-
-	if (!page)
-		return;
-
-	mask = USED(&mem_map[MAP_NR(page)]);
-	for (i = 0; i < NR_BLOCKS; i++) {
-		if (mask & (1 << i))
-			continue;
-		fsp = PAGE_PTR(page, i);
-		fsp->next = next;
-	}
-}
-
-unsigned long get_small_page(int priority)
-{
-	struct free_small_page *fsp;
-	unsigned long new_page;
 	unsigned long flags;
 	struct page *page;
 	int offset;
 
-	save_flags(flags);
-	if (!small_page_ptr)
+	if (!order->queue)
 		goto need_new_page;
-	cli();
+
+	spin_lock_irqsave(&small_page_lock, flags);
+	page = order->queue;
 again:
-	page = mem_map + MAP_NR(small_page_ptr);
-	offset = offsets[USED(page)];
+#ifdef PEDANTIC
+	if (USED_MAP(page) & ~order->all_used)
+		PAGE_BUG(page);
+#endif
+	offset = ffz(USED_MAP(page));
 	SET_USED(page, offset);
-	new_page = (unsigned long)PAGE_PTR(small_page_ptr, offset);
-	if (USED(page) == 15) {
-		fsp = (struct free_small_page *)new_page;
-		set_page_links_prev (fsp->next, 0);
-		small_page_ptr = fsp->next;
-	}
-	restore_flags(flags);
-	return new_page;
+	if (USED_MAP(page) == order->all_used)
+		remove_page_from_queue(page);
+	spin_unlock_irqrestore(&small_page_lock, flags);
+
+	return (unsigned long) page_address(page) + (offset << order->shift);
 
 need_new_page:
-	new_page = __get_free_page(priority);
-	if (!small_page_ptr) {
-		if (new_page) {
-			set_bit (PG_reserved, &mem_map[MAP_NR(new_page)].flags);
-			clear_page_links (new_page);
-			cli();
-			small_page_ptr = new_page;
-			goto again;
-		}
-		restore_flags(flags);
-		return 0;
+	page = alloc_page(priority);
+
+	spin_lock_irqsave(&small_page_lock, flags);
+	if (!order->queue) {
+		if (!page)
+			goto no_page;
+		SetPageReserved(page);
+		USED_MAP(page) = 0;
+		cli();
+		add_page_to_queue(page, &order->queue);
+	} else {
+		__free_page(page);
+		cli();
+		page = order->queue;
 	}
-	free_page(new_page);
-	cli();
 	goto again;
+
+no_page:
+	spin_unlock_irqrestore(&small_page_lock, flags);
+	return 0;
 }
 
-void free_small_page(unsigned long spage)
+static void __free_small_page(unsigned long spage, struct order *order)
 {
-	struct free_small_page *ofsp, *cfsp;
 	unsigned long flags;
 	struct page *page;
-	int offset, oldoffset;
 
-	offset = (spage >> SMALL_ALLOC_SHIFT) & (NR_BLOCKS - 1);
-	spage -= offset << SMALL_ALLOC_SHIFT;
+	page = virt_to_page(spage);
+	if (VALID_PAGE(page)) {
 
-	page = mem_map + MAP_NR(spage);
-	if (!PageReserved(page) || !USED(page)) {
-		printk ("Trying to free non-small page from %p\n", __builtin_return_address(0));
-		return;
+		/*
+		 * The container-page must be marked Reserved
+		 */
+		if (!PageReserved(page) || spage & order->mask)
+			goto non_small;
+
+#ifdef PEDANTIC
+		if (USED_MAP(page) & ~order->all_used)
+			PAGE_BUG(page);
+#endif
+
+		spage = spage >> order->shift;
+		spage &= order->block_mask;
+
+		/*
+		 * the following must be atomic wrt get_page
+		 */
+		spin_lock_irqsave(&small_page_lock, flags);
+
+		if (USED_MAP(page) == order->all_used)
+			add_page_to_queue(page, &order->queue);
+
+		if (!TEST_AND_CLEAR_USED(page, spage))
+			goto already_free;
+
+		if (USED_MAP(page) == 0)
+			goto free_page;
+
+		spin_unlock_irqrestore(&small_page_lock, flags);
 	}
-	if (IS_FREE(page, offset)) {
-		printk ("Trying to free free small page from %p\n", __builtin_return_address(0));
-		return;
-	}
-	save_flags_cli (flags);
-	oldoffset = offsets[USED(page)];
-	CLEAR_USED(page, offset);
-	ofsp = PAGE_PTR(spage, oldoffset);
-	cfsp = PAGE_PTR(spage, offset);
+	return;
 
-	if (oldoffset == NR_BLOCKS) { /* going from totally used to mostly used */
-		cfsp->prev = 0;
-		cfsp->next = small_page_ptr;
-		set_page_links_prev (small_page_ptr, spage);
-		small_page_ptr = spage;
-	} else if (!USED(page)) {
-		set_page_links_prev (ofsp->next, ofsp->prev);
-		set_page_links_next (ofsp->prev, ofsp->next);
-		if (spage == small_page_ptr)
-			small_page_ptr = ofsp->next;
-		clear_bit (PG_reserved, &page->flags);
-		restore_flags(flags);
-		free_page (spage);
-	} else
-		*cfsp = *ofsp;
-	restore_flags(flags);
+free_page:
+	/*
+	 * unlink the page from the small page queue and free it
+	 */
+	remove_page_from_queue(page);
+	spin_unlock_irqrestore(&small_page_lock, flags);
+	ClearPageReserved(page);
+	__free_page(page);
+	return;
+
+non_small:
+	printk("Trying to free non-small page from %p\n", __builtin_return_address(0));
+	return;
+already_free:
+	printk("Trying to free free small page from %p\n", __builtin_return_address(0));
+}
+
+unsigned long get_page_8k(int priority)
+{
+	return __get_small_page(priority, orders+1);
+}
+
+void free_page_8k(unsigned long spage)
+{
+	__free_small_page(spage, orders+1);
 }

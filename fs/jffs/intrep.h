@@ -10,16 +10,18 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * $Id: intrep.h,v 1.2 2000-10-06 08:39:31 davidm Exp $
+ * $Id: intrep.h,v 1.14 2001/09/23 23:28:37 dwmw2 Exp $
  *
  */
 
 #ifndef __LINUX_JFFS_INTREP_H__
 #define __LINUX_JFFS_INTREP_H__
+#include "jffs_fm.h"
+struct jffs_node *jffs_alloc_node(void);
+void jffs_free_node(struct jffs_node *n);
+int jffs_get_node_inuse(void);
+long jffs_get_file_count(void);
 
-void jffs_hexdump(const unsigned char* ptr, int size);
-inline int jffs_min(int a, int b);
-inline int jffs_max(int a, int b);
 __u32 jffs_checksum(const void *data, int size);
 
 void jffs_cleanup_control(struct jffs_control *c);
@@ -47,11 +49,34 @@ int jffs_file_count(struct jffs_file *f);
 
 int jffs_write_node(struct jffs_control *c, struct jffs_node *node,
 		    struct jffs_raw_inode *raw_inode,
-		    const char *name, const unsigned char *buf);
-int jffs_read_data(struct jffs_file *f, char *buf, __u32 read_offset, __u32 size);
+		    const char *name, const unsigned char *buf,
+		    int recoverable, struct jffs_file *f);
+int jffs_read_data(struct jffs_file *f, unsigned char *buf, __u32 read_offset, __u32 size);
 
 /* Garbage collection stuff.  */
-int jffs_garbage_collect(struct jffs_control *c);
+int jffs_garbage_collect_thread(void *c);
+void jffs_garbage_collect_trigger(struct jffs_control *c);
+int jffs_garbage_collect_now(struct jffs_control *c);
+
+/* Is there enough space on the flash?  */
+static inline int JFFS_ENOUGH_SPACE(struct jffs_control *c, __u32 space)
+{
+	struct jffs_fmcontrol *fmc = c->fmc;
+
+	while (1) {
+		if ((fmc->flash_size - (fmc->used_size + fmc->dirty_size)) 
+			>= fmc->min_free_size + space) {
+			return 1;
+		}
+		if (fmc->dirty_size < fmc->sector_size)
+			return 0;
+
+		if (jffs_garbage_collect_now(c)) {
+		  D1(printk("JFFS_ENOUGH_SPACE: jffs_garbage_collect_now() failed.\n"));
+		  return 0;
+		}
+	}
+}
 
 /* For debugging purposes.  */
 void jffs_print_node(struct jffs_node *n);

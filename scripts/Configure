@@ -1,24 +1,14 @@
 #! /bin/sh
 #
-# This script is used to configure the linux kernel.
+# This script is used to configure the Linux kernel.
 #
 # It was inspired by the challenge in the original Configure script
 # to ``do something better'', combined with the actual need to ``do
 # something better'' because the old configure script wasn't flexible
 # enough.
 #
-# Please send comments / questions / bug fixes to raymondc@microsoft.com.
-#
-#              ***** IMPORTANT COMPATIBILITY NOTE ****
-# If configuration changes are made which might adversely effect 
-# Menuconfig or xconfig, please notify the respective authors so that 
-# those utilities can be updated in parallel.
-#
-# Menuconfig:  <roadcapw@titus.org>
-# xconfig:     <apenwarr@foxnet.net>  <eric@aib.com>
-#              ****************************************
-#
-# Each line in the config file is a command.
+# Raymond Chen was the original author of Configure.
+# Michael Elizabeth Chastain (mec@shout.net) is the current maintainer.
 #
 # 050793 - use IFS='@' to get around a bug in a pre-version of bash-1.13
 # with an empty IFS.
@@ -45,9 +35,19 @@
 #
 # 090397 Axel Boldt (boldt@math.ucsb.edu) - avoid ? and + in regular 
 # expressions for GNU expr since version 1.15 and up use \? and \+.
-
-# 040697 Larry Augustin (lma@varesearch.com) - integer expr test
-# fails with GNU expr 1.12. Re-write to work with new and old expr.
+#
+# 300397 Phil Blundell (pjb27@cam.ac.uk) - added support for min/max 
+# arguments to "int", allow dep_tristate to take a list of dependencies
+# rather than just one.
+#
+# 090398 Axel Boldt (boldt@math.ucsb.edu) - allow for empty lines in help
+# texts.
+#
+# 102598 Michael Chastain (mec@shout.net) - put temporary files in
+# current directory, not in /tmp.
+#
+# 24 January 1999, Michael Elizabeth Chastain, <mec@shout.net>
+# - Improve the exit message (Jeff Ronne).
 
 #
 # Make sure we're really running bash.
@@ -81,27 +81,29 @@ function endmenu () {
 #       help variable
 #
 function help () {
-  [ -f "$HELP_FILE" ] || HELP_FILE=Documentation/Configure.help
-  if [ -f "$HELP_FILE" ]
+  if [ -f Documentation/Configure.help ]
   then
      #first escape regexp special characters in the argument:
      var=$(echo "$1"|sed 's/[][\/.^$*]/\\&/g')
      #now pick out the right help text:
      text=$(sed -n "/^$var[ 	]*\$/,\${
-			/^$var[ 	]*\$/b
-			/^#.*/b
-			/^[ 	]*\$/q
+			/^$var[ 	]*\$/c\\
+${var}:\\
+
+			/^#/b
+			/^[^ 	]/q
+			/<file:\\([^>]*\\)>/s//\\1/g
 			p
-		    }" "$HELP_FILE")
+		    }" Documentation/Configure.help)
      if [ -z "$text" ]
      then
 	  echo; echo "  Sorry, no help available for this option yet.";echo
      else
-	  (echo; echo "$text"; echo) | ${PAGER:-more}
+	  (echo; echo "$text") | ${PAGER:-more}
      fi
   else
      echo;
-     echo "  Can't access the file $HELP_FILE which"
+     echo "  Can't access the file Documentation/Configure.help which"
      echo "  should contain the help texts."
      echo
   fi
@@ -120,7 +122,7 @@ function readln () {
 	else
 		echo -n "$1"
 		[ -z "$3" ] && echo -n "(NEW) "
-		IFS='@' read ans </dev/tty || exit 1
+		IFS='@' read ans || exit 1
 		[ -z "$ans" ] && ans=$2
 	fi
 }
@@ -142,6 +144,10 @@ function comment () {
 #	define_bool define value
 #
 function define_bool () {
+	define_tristate $1 $2
+}
+
+function define_tristate () {
 	case "$2" in
 	 "y")
 		echo "$1=y" >>$CONFIG
@@ -212,11 +218,11 @@ function tristate () {
 	  while :; do
 	    readln "$1 ($2) [$defprompt] " "$def" "$old"
 	    case "$ans" in
-	      [yY] | [yY]es ) define_bool "$2" "y"
+	      [yY] | [yY]es ) define_tristate "$2" "y"
 			      break ;;
-	      [nN] | [nN]o )  define_bool "$2" "n"
+	      [nN] | [nN]o )  define_tristate "$2" "n"
 			      break ;;
-	      [mM] )          define_bool "$2" "m"
+	      [mM] )          define_tristate "$2" "m"
 			      break ;;
 	      * )             help "$2"
 			      ;;
@@ -227,22 +233,35 @@ function tristate () {
 
 #
 # dep_tristate processes a tristate argument that depends upon
-# another option.  If the option we depend upon is a module,
-# then the only allowable options are M or N.  If Y, then
+# another option or options.  If any of the options we depend upon is a
+# module, then the only allowable options are M or N.  If all are Y, then
 # this is a normal tristate.  This is used in cases where modules
 # are nested, and one module requires the presence of something
 # else in the kernel.
 #
-#	tristate question define default
+#	dep_tristate question define default ...
 #
 function dep_tristate () {
 	old=$(eval echo "\${$2}")
 	def=${old:-'n'}
-	if [ "$3" = "n" ]; then
-		define_bool "$2" "n"
-	elif [ "$3" = "y" ]; then
-		tristate "$1" "$2"
-	else
+	ques=$1
+	var=$2
+	need_module=0
+	shift 2
+	while [ $# -gt 0 ]; do
+	  case "$1" in
+ 	    n)
+	      define_tristate "$var" "n"
+	      return
+	      ;;
+	    m)
+	      need_module=1
+	      ;;
+	  esac
+	  shift
+	done
+
+	if [ $need_module = 1 ]; then
 	   if [ "$CONFIG_MODULES" = "y" ]; then
 		case "$def" in
 		 "y" | "m") defprompt="M/n/?"
@@ -252,11 +271,11 @@ function dep_tristate () {
 		      ;;
 		esac
 		while :; do
-		  readln "$1 ($2) [$defprompt] " "$def" "$old"
+		  readln "$ques ($var) [$defprompt] " "$def" "$old"
 		  case "$ans" in
-		      [nN] | [nN]o )  define_bool "$2" "n"
+		      [nN] | [nN]o )  define_tristate "$var" "n"
 				      break ;;
-		      [mM] )          define_bool "$2" "m"
+		      [mM] )          define_tristate "$var" "m"
 				      break ;;
 		      [yY] | [yY]es ) echo 
    echo "  This answer is not allowed, because it is not consistent with"
@@ -266,12 +285,48 @@ function dep_tristate () {
    echo "  as a module as well (with M) or leave it out altogether (N)."
 				      echo
 				      ;;
-		      * )             help "$2"
+		      * )             help "$var"
 				      ;;
 		  esac
 		done
 	   fi
+	else
+	   tristate "$ques" "$var"
 	fi
+}
+
+function dep_bool () {
+	ques=$1
+	var=$2
+	shift 2
+	while [ $# -gt 0 ]; do
+	  case "$1" in
+	    m | n)
+	      define_bool "$var" "n"
+	      return
+	      ;;
+	  esac
+	  shift
+	done
+
+	bool "$ques" "$var"
+}
+
+function dep_mbool () {
+	ques=$1
+	var=$2
+	shift 2
+	while [ $# -gt 0 ]; do
+	  case "$1" in
+	    n)
+	      define_bool "$var" "n"
+	      return
+	      ;;
+	  esac
+	  shift
+	done
+
+	bool "$ques" "$var"
 }
 
 #
@@ -286,30 +341,24 @@ function define_int () {
 }
 
 #
-# int processes an integer argument
+# int processes an integer argument with optional limits
 #
 #	int question define default
-# GNU expr changed handling of ?.  In older versions you need ?,
-# in newer you need \?
-OLD_EXPR=`expr "0" : '0\?'`
-if [ $OLD_EXPR -eq 1 ]; then
-    INT_EXPR='0$\|-\?[1-9][0-9]*$'
-else
-    INT_EXPR='0$\|-?[1-9][0-9]*$'
-fi
+#
 function int () {
 	old=$(eval echo "\${$2}")
 	def=${old:-$3}
 	while :; do
 	  readln "$1 ($2) [$def] " "$def" "$old"
-	  if expr "$ans" : $INT_EXPR > /dev/null; then
-	    define_int "$2" "$ans"
+	  if expr "$ans" : '[0-9]*$' > /dev/null; then
+            define_int "$2" "$ans"
 	    break
-	  else
+          else
 	    help "$2"
-	  fi
+          fi
 	done
 }
+
 #
 # define_hex sets the value of a hexadecimal argument
 #
@@ -329,19 +378,55 @@ function define_hex () {
 function hex () {
 	old=$(eval echo "\${$2}")
 	def=${old:-$3}
-	def=${def#*[x,X]}
 	while :; do
 	  readln "$1 ($2) [$def] " "$def" "$old"
-	  ans=${ans#*[x,X]}
-	  if expr "$ans" : '[0-9a-fA-F][0-9a-fA-F]*$' > /dev/null; then
+	  if expr "$ans" : '0x[0-9a-fA-F][0-9a-fA-F]*$' > /dev/null; then
 	    define_hex "$2" "$ans"
 	    break
 	  else
-	    help "$2"
+	    if expr "$ans" : '[0-9a-fA-F][0-9a-fA-F]*$' > /dev/null; then
+	      define_hex "$2" "0x$ans"
+	      break
+	    else
+	      help "$2"
+	    fi
 	  fi
 	done
 }
 
+#
+# define_string sets the value of a string argument
+#
+#	define_string define value
+#
+function define_string () {
+	echo "$1=\"$2\"" >>$CONFIG
+	echo "#define $1 \"$2\"" >>$CONFIG_H
+	eval "$1=\"$2\""
+}
+
+#
+# string processes a string argument
+#
+#	string question define default
+#
+function string () {
+	old=$(eval echo "\${$2}")
+	def=${old:-$3}
+	while :; do
+          if [ "$old" = "?" ]; then
+             readln "$1 ($2) [$def] " "$def" ""
+          else
+	     readln "$1 ($2) [$def] " "$def" "$old"
+          fi
+	  if [ "$ans" = "?" ]; then
+	    help "$2"
+	  else
+	    break
+	  fi
+	done
+	define_string "$2" "$ans"
+}
 #
 # choice processes a choice list (1-out-of-n)
 #
@@ -388,11 +473,14 @@ function choice () {
 		while [ -n "$1" ]; do
 			name=$(echo $1 | tr a-z A-Z)
 			case "$name" in
-				"$ans"* )
-					if [ "$name" = "$ans" ]; then
-						val="$2"
-						break	# stop on exact match
-					fi
+				"$ans"* | */"$ans"* )
+					case "$name" in
+						"$ans" | */"$ans"/* | \
+						"$ans"/* | */"$ans" )
+							val="$2"
+							break # exact match
+						;;
+					esac
 					if [ -n "$val" ]; then
 						echo;echo \
 		"  Sorry, \"$ans\" is ambiguous; please enter a longer string."
@@ -459,9 +547,9 @@ if [ -f $DEFAULTS ]; then
   echo "# Using defaults found in" $DEFAULTS
   echo "#"
   . $DEFAULTS
-  sed -e 's/# \(.*\) is not.*/\1=n/' < $DEFAULTS > .tmp.conf.$$
-  . .tmp.conf.$$
-  rm .tmp.conf.$$
+  sed -e 's/# \(CONFIG_[^ ]*\) is not.*/\1=n/' <$DEFAULTS >.config-is-not.$$
+  . .config-is-not.$$
+  rm .config-is-not.$$
 else
   echo "#"
   echo "# No defaults found"
@@ -475,14 +563,16 @@ if [ -f .config ]; then
 	mv .config .config.old
 fi
 mv .tmpconfig .config
-[ -d include/linux ] && mv .tmpconfig.h include/linux/autoconf.h
-[ ! -d include/linux ] && exit 0
+mv .tmpconfig.h include/linux/autoconf.h
 
 echo
-echo "The linux kernel is now hopefully configured for your setup."
-echo "Check the top-level Makefile for additional configuration,"
-echo "and do a 'make dep ; make clean' if you want to be sure all"
-echo "the files are correctly re-made"
+echo "*** End of Linux kernel configuration."
+echo "*** Check the top-level Makefile for additional configuration."
+if [ ! -f .hdepend -o "$CONFIG_MODVERSIONS" = "y" ] ; then
+    echo "*** Next, you must run 'make dep'."
+else
+    echo "*** Next, you may run 'make bzImage', 'make bzdisk', or 'make install'."
+fi
 echo
 
 exit 0

@@ -1,29 +1,27 @@
-#ifndef __ASM_MIPS_SIGNAL_H
-#define __ASM_MIPS_SIGNAL_H
-
 /*
- * For now ...
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1995, 1996, 1997, 1998, 1999 by Ralf Baechle
+ * Copyright (C) 1999 Silicon Graphics, Inc.
  */
+#ifndef _ASM_SIGNAL_H
+#define _ASM_SIGNAL_H
+
+#include <linux/config.h>
 #include <linux/types.h>
-typedef __u64	sigset_t;
 
-#if 0
-/*
- * This is what we should really use but the kernel can't handle
- * a non-scalar type yet.  Since we use 64 signals only anyway we
- * just use __u64 and pad another 64 bits in the kernel for now ...
- */
+#define _NSIG		128
+#define _NSIG_BPW	32
+#define _NSIG_WORDS	(_NSIG / _NSIG_BPW)
+
 typedef struct {
-	unsigned int	sigbits[4];
+	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
-#endif
 
-#define _NSIG		65
-#define NSIG		_NSIG
+typedef unsigned long old_sigset_t;		/* at least 32 bits */
 
-/*
- * For 1.3.0 Linux/MIPS changed the signal numbers to be compatible the ABI.
- */
 #define SIGHUP		 1	/* Hangup (POSIX).  */
 #define SIGINT		 2	/* Interrupt (ANSI).  */
 #define SIGQUIT		 3	/* Quit (POSIX).  */
@@ -59,39 +57,67 @@ typedef struct {
 #define SIGXCPU		30	/* CPU limit exceeded (4.2 BSD).  */
 #define SIGXFSZ		31	/* File size limit exceeded (4.2 BSD).  */
 
+/* These should not be considered constants from userland.  */
+#define SIGRTMIN	32
+#define SIGRTMAX	(_NSIG-1)
+
 /*
- * sa_flags values: SA_STACK is not currently supported, but will allow the
- * usage of signal stacks by using the (now obsolete) sa_restorer field in
- * the sigaction structure as a stack pointer. This is now possible due to
- * the changes in signal handling. LBT 010493.
+ * SA_FLAGS values:
+ *
+ * SA_ONSTACK indicates that a registered stack_t will be used.
  * SA_INTERRUPT is a no-op, but left due to historical reasons. Use the
  * SA_RESTART flag to get restarting signals (which were the default long ago)
- * SA_SHIRQ flag is for shared interrupt support on PCI and EISA.
+ * SA_NOCLDSTOP flag to turn off SIGCHLD when children stop.
+ * SA_RESETHAND clears the handler when the signal is delivered.
+ * SA_NOCLDWAIT flag on SIGCHLD to inhibit zombies.
+ * SA_NODEFER prevents the current signal from being masked in the handler.
+ *
+ * SA_ONESHOT and SA_NOMASK are the historical Linux names for the Single
+ * Unix names RESETHAND and NODEFER respectively.
  */
-#define SA_STACK	0x1
-#define SA_ONSTACK	SA_STACK
-#define SA_RESTART	0x4
-#define SA_NOCLDSTOP	0x20000
-/* Non ABI signals */
-#define SA_INTERRUPT	0x01000000
-#define SA_NOMASK	0x02000000
-#define SA_ONESHOT	0x04000000
-#define SA_SHIRQ	0x08000000
+#define SA_ONSTACK	0x08000000
+#define SA_RESETHAND	0x80000000
+#define SA_RESTART	0x10000000
+#define SA_SIGINFO	0x00000008
+#define SA_NODEFER	0x40000000
+#define SA_NOCLDWAIT	0x00010000	/* Not supported yet */
+#define SA_NOCLDSTOP	0x00000001
+
+#define SA_NOMASK	SA_NODEFER
+#define SA_ONESHOT	SA_RESETHAND
+#define SA_INTERRUPT	0x20000000	/* dummy -- ignored */
+
+#define SA_RESTORER	0x04000000
+
+/*
+ * sigaltstack controls
+ */
+#define SS_ONSTACK     1
+#define SS_DISABLE     2
+
+#define MINSIGSTKSZ    2048
+#define SIGSTKSZ       8192
 
 #ifdef __KERNEL__
+
 /*
  * These values of sa_flags are used only by the kernel as part of the
  * irq handling routines.
  *
  * SA_INTERRUPT is also used by the irq handling routines.
+ * SA_SHIRQ flag is for shared interrupt support on PCI and EISA.
  */
-#define SA_PROBE SA_ONESHOT
-#define SA_SAMPLE_RANDOM SA_RESTART
-#endif
+#define SA_PROBE		SA_ONESHOT
+#define SA_SAMPLE_RANDOM	SA_RESTART
+#define SA_SHIRQ		0x02000000
 
-#define SIG_BLOCK          1	/* for blocking signals */
-#define SIG_UNBLOCK        2	/* for unblocking signals */
-#define SIG_SETMASK        3	/* for setting the signal mask */
+#endif /* __KERNEL__ */
+
+#define SIG_BLOCK	1	/* for blocking signals */
+#define SIG_UNBLOCK	2	/* for unblocking signals */
+#define SIG_SETMASK	3	/* for setting the signal mask */
+#define SIG_SETMASK32	256	/* Goodie from SGI for BSD compatibility:
+				   set only the low 32 bit of the sigset.  */
 
 /* Type of a signal handler.  */
 typedef void (*__sighandler_t)(int);
@@ -105,24 +131,45 @@ struct sigaction {
 	unsigned int	sa_flags;
 	__sighandler_t	sa_handler;
 	sigset_t	sa_mask;
-	/*
-	 * To keep the ABI structure size we have to fill a little gap ...
-	 */
-	unsigned int	sa_mask_pad[2];
+};
 
-	/* Abi says here follows reserved int[2] */
+struct k_sigaction {
+	struct sigaction sa;
+#ifdef CONFIG_BINFMT_IRIX
 	void		(*sa_restorer)(void);
-#if __mips < 3
-	/*
-	 * For 32 bit code we have to pad struct sigaction to get
-	 * constant size for the ABI
-	 */
-	int		pad0[1];	/* reserved */
 #endif
 };
 
+/* IRIX compatible stack_t  */
+typedef struct sigaltstack {
+	void *ss_sp;
+	size_t ss_size;
+	int ss_flags;
+} stack_t;
+
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
-#endif
 
-#endif /* __ASM_MIPS_SIGNAL_H */
+/*
+ * The following break codes are or were in use for specific purposes in
+ * other MIPS operating systems.  Linux/MIPS doesn't use all of them.  The
+ * unused ones are here as placeholders; we might encounter them in
+ * non-Linux/MIPS object files or make use of them in the future.
+ */
+#define BRK_USERBP	0	/* User bp (used by debuggers) */
+#define BRK_KERNELBP	1	/* Break in the kernel */
+#define BRK_ABORT	2	/* Sometimes used by abort(3) to SIGIOT */
+#define BRK_BD_TAKEN	3	/* For bd slot emulation - not implemented */
+#define BRK_BD_NOTTAKEN	4	/* For bd slot emulation - not implemented */
+#define BRK_SSTEPBP	5	/* User bp (used by debuggers) */
+#define BRK_OVERFLOW	6	/* Overflow check */
+#define BRK_DIVZERO	7	/* Divide by zero check */
+#define BRK_RANGE	8	/* Range error check */
+#define BRK_STACKOVERFLOW 9	/* For Ada stackchecking */
+#define BRK_NORLD	10	/* No rld found - not used by Linux/MIPS */
+#define _BRK_THREADBP	11	/* For threads, user bp (used by debuggers) */
+#define BRK_MULOVF	1023	/* Multiply overflow */
+
+#endif /* defined (__KERNEL__) */
+
+#endif /* _ASM_SIGNAL_H */

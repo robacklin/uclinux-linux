@@ -3,7 +3,7 @@
  . Copyright (C) 1996 by Erik Stahlman 
  .
  . This software may be used and distributed according to the terms
- . of the GNU Public License, incorporated herein by reference.
+ . of the GNU General Public License, incorporated herein by reference.
  .
  . This file contains register information and access macros for 
  . the SMC91xxx chipset.   
@@ -65,15 +65,13 @@ typedef unsigned long int 		dword;
 #define TCR_ENABLE	0x0001	/* if this is 1, we can transmit */ 
 #define TCR_FDUPLX    	0x0800  /* receive packets sent out */
 #define TCR_STP_SQET	0x1000	/* stop transmitting if Signal quality error */
-#define	TCR_EPH_LOOP	0x2000	/* eph loopback */
 #define	TCR_MON_CNS	0x0400	/* monitors the carrier status */
 #define	TCR_PAD_ENABLE	0x0080	/* pads short packets to 64 bytes */
-#define	TCR_SWFDUP	0x8000	/* enable switched full duplex */
 
 #define	TCR_CLEAR	0	/* do NOTHING */
 /* the normal settings for the TCR register : */ 
 /* QUESTION: do I want to enable padding of short packets ? */
-#define	TCR_NORMAL  	TCR_ENABLE
+#define	TCR_NORMAL  	TCR_ENABLE 
 
 
 #define EPH_STATUS	2
@@ -124,7 +122,6 @@ typedef unsigned long int 		dword;
 #define MC_FREEPKT  	0xA0  	/* Release packet in PNR register */
 #define MC_ENQUEUE	0xC0 	/* Enqueue the packet for transmit */
  	
-#
 #define	PNR_ARR		2
 #define FIFO_PORTS	4
 
@@ -150,15 +147,12 @@ typedef unsigned long int 		dword;
 #define	IM_EPH_INT	0x20
 #define	IM_ERCV_INT	0x40 /* not on SMC9192 */		
 
-#define	INT_MASK_W	12
-
 /* BANK 3 */
 #define	MULTICAST1	0
 #define	MULTICAST2	2
 #define	MULTICAST3	4
 #define	MULTICAST4	6
 #define	MGMT		8
-#define	MGMT_MSK_CRS100	0x4000
 #define	REVISION	10 /* ( hi: chip id   low: rev # ) */
 
 
@@ -177,11 +171,9 @@ static const char * chip_ids[ 15 ] =  {
 	/* 5 */ "SMC91C95",
 	NULL,
 	/* 7 */ "SMC91C100", 
-	NULL, 
-	/* 9 */ "SMC91C110", 
+	/* 8 */ "SMC91C100FD", 
 	NULL, NULL, NULL, 
-	NULL, NULL
-};  
+	NULL, NULL, NULL};  
 
 /* 
  . Transmit status bits 
@@ -218,35 +210,31 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
 			inw( ioaddr + RCR );\
 			inw( ioaddr + RCR );  }
 
-/*
- *	On ColdFire systems the SMC part can only be accessed with
- *	16bit transfers -- no 8 bit reads or writes. So we need to
- *	clean up the outb() calls to all be outw.
- */
 #if defined(CONFIG_COLDFIRE) || defined(CONFIG_M68EZ328)
 
 /* this enables an interrupt in the interrupt mask register */
 #define SMC_ENABLE_INT(x) {\
-		unsigned short mask;\
+		unsigned char mask;\
 		SMC_SELECT_BANK(2);\
 		mask = inb( ioaddr + INT_MASK );\
 		mask |= (x);\
-		outw( mask << 8, ioaddr + INT_MASK_W ); \
+		outw( mask << 8, ioaddr + INTERRUPT ); \
 }
 
 /* this disables an interrupt from the interrupt mask register */
+
 #define SMC_DISABLE_INT(x) {\
-		unsigned short mask;\
+		unsigned char mask;\
 		SMC_SELECT_BANK(2);\
 		mask = inb( ioaddr + INT_MASK );\
 		mask &= ~(x);\
-		outw( mask << 8, ioaddr + INT_MASK_W ); \
+		outw( mask << 8, ioaddr + INTERRUPT ); \
 }
 
 /* set the interrupt mask register */
 #define	SMC_SET_INT(x) {\
 		SMC_SELECT_BANK(2);\
-		outw( ((unsigned short) (x)) << 8, ioaddr + INT_MASK_W );\
+		outw( ((unsigned short) (x)) << 8, ioaddr + INTERRUPT );\
 }
 
 /* acknowledge an interrupt */
@@ -255,7 +243,7 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
 		/* assume BANK 2 selected */\
 		val = inb( ioaddr + INT_MASK );\
 		val = (val << 8) | (x);\
-		outw( val, ioaddr + INT_MASK_W );\
+		outw( val, ioaddr + INTERRUPT );\
 }
 
 #else
@@ -270,6 +258,7 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
 }
 
 /* this disables an interrupt from the interrupt mask register */
+
 #define SMC_DISABLE_INT(x) {\
 		unsigned char mask;\
 		SMC_SELECT_BANK(2);\
@@ -277,7 +266,6 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
 		mask &= ~(x);\
 		outb( mask, ioaddr + INT_MASK ); \
 }
-
 
 /* set the interrupt mask register */
 #define	SMC_SET_INT(x) {\
@@ -288,7 +276,7 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
 /* acknowledge an interrupt */
 #define	SMC_ACK_INT(x)	outb( (x), ioaddr + INTERRUPT )
 
-#endif	/* CONFIG_COLDFIRE */
+#endif
 
 /*----------------------------------------------------------------------
  . Define the interrupts that I want to receive from the card
@@ -299,8 +287,6 @@ static const char * interfaces[ 2 ] = { "TP", "AUI" };
  .  IM_RX_OVRN_INT, because I have to kick the receiver
  --------------------------------------------------------------------------*/
 #define SMC_INTERRUPT_MASK   (IM_EPH_INT | IM_RX_OVRN_INT | IM_RCV_INT) 
-
-#define SMC_SIOCLINK SIOCDEVPRIVATE
 
 #endif  /* _SMC_9194_H_ */
 

@@ -1,9 +1,13 @@
+/*
+ *  linux/include/asm-arm/checksum.h
+ *
+ * IP checksum routines
+ *
+ * Copyright (C) Original authors of ../asm-i386/checksum.h
+ * Copyright (C) 1996-1999 Russell King
+ */
 #ifndef __ASM_ARM_CHECKSUM_H
 #define __ASM_ARM_CHECKSUM_H
-
-#ifndef __ASM_ARM_SEGMENT_H
-#include <asm/segment.h>
-#endif
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -21,129 +25,142 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 
 /*
  * the same as csum_partial, but copies from src while it
- * checksums
+ * checksums, and handles user-space pointer exceptions correctly, when needed.
  *
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
  */
 
-unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
+unsigned int
+csum_partial_copy_nocheck(const char *src, char *dst, int len, int sum);
 
+unsigned int
+csum_partial_copy_from_user(const char *src, char *dst, int len, int sum, int *err_ptr);
 
 /*
- * the same as csum_partial_copy, but copies from user space.
+ * These are the old (and unsafe) way of doing checksums, a warning message will be
+ * printed if they are used and an exception occurs.
  *
- * here even more important to align src and dst on a 32-bit (or even
- * better 64-bit) boundary
+ * these functions should go away after some time.
  */
-
-static __INLINE__ unsigned int csum_partial_copy_fromuser(const char *src, char *dst, int len, int sum)
-{
-	extern unsigned int __csum_partial_copy_fromuser(const char *src, char *dst, int len, int sum);
-
-	if (IS_USER_SEG)
-		return __csum_partial_copy_fromuser (src, dst, len, sum);
-	else
-		return csum_partial_copy (src, dst, len, sum);
-}
+#define csum_partial_copy(src,dst,len,sum)	csum_partial_copy_nocheck(src,dst,len,sum)
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
  *	which always checksum on 4 octet boundaries.
- *
- *	By Jorge Cwik <jorge@laser.satlink.net>, adapted for linux by
- *	Arnt Gulbrandsen.
- *
- *	Converted to ARM by R.M.King
  */
-static inline unsigned short ip_fast_csum(unsigned char * iph,
-					  unsigned int ihl) {
+static inline unsigned short
+ip_fast_csum(unsigned char * iph, unsigned int ihl)
+{
 	unsigned int sum, tmp1;
 
-    __asm__ __volatile__("
-	sub	%2, %2, #5
-	ldr	%0, [%1], #4
-	ldr	%3, [%1], #4
-	adds	%0, %0, %3
-	ldr	%3, [%1], #4
-	adcs	%0, %0, %3
-	ldr	%3, [%1], #4
-	adcs	%0, %0, %3
-1:	ldr	%3, [%1], #4
-	adcs	%0, %0, %3
-	tst	%2, #15
-	subne	%2, %2, #1
-	bne	1b
-	adc	%0, %0, #0
-	adds	%0, %0, %0, lsl #16
-	addcs	%0, %0, #0x10000
-	mvn	%0, %0
-	mov	%0, %0, lsr #16
-	 "
-	: "=&r" (sum), "=&r" (iph), "=&r" (ihl), "=&r" (tmp1)
-	: "1" (iph), "2" (ihl));
-	return(sum);
-}
-
-/*
- * computes the checksum of the TCP/UDP pseudo-header
- * returns a 16-bit checksum, already complemented
- */
-static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
-						   unsigned long daddr,
-						   unsigned short len,
-						   unsigned short proto,
-						   unsigned int sum) {
-    __asm__ __volatile__("
-    adds	%0, %0, %1
-    adcs	%0, %0, %4
-    adcs	%0, %0, %5
-    adc		%0, %0, #0
-    adds	%0, %0, %0, lsl #16
-    addcs	%0, %0, #0x10000
-    mvn		%0, %0
-    mov		%0, %0, lsr #16
-	"
-	: "=&r" (sum), "=&r" (saddr)
-	: "0" (daddr), "1"(saddr), "r"((ntohs(len)<<16)+proto*256), "r"(sum));
-	return((unsigned short)sum);
+	__asm__ __volatile__(
+	"ldr	%0, [%1], #4		@ ip_fast_csum 		\n"
+	"ldr	%3, [%1], #4					\n"
+	"sub	%2, %2, #5					\n"
+	"adds	%0, %0, %3					\n"
+	"ldr	%3, [%1], #4					\n"
+	"adcs	%0, %0, %3					\n"
+	"ldr	%3, [%1], #4					\n"
+	"adcs	%0, %0, %3					\n"
+"1:	ldr	%3, [%1], #4					\n"
+	"adcs	%0, %0, %3					\n"
+	"tst	%2, #15						\n"
+	"subne	%2, %2, #1					\n"
+	"bne	1b						\n"
+	"adc	%0, %0, #0					\n"
+	"adds	%0, %0, %0, lsl #16				\n"
+	"addcs	%0, %0, #0x10000				\n"
+	"mvn	%0, %0						\n"
+	"mov	%0, %0, lsr #16"
+	: "=r" (sum), "=r" (iph), "=r" (ihl), "=r" (tmp1)
+	: "1" (iph), "2" (ihl)
+	: "cc");
+	return sum;
 }
 
 /*
  * 	Fold a partial checksum without adding pseudo headers
  */
-static inline unsigned int csum_fold(unsigned int sum)
+static inline unsigned int
+csum_fold(unsigned int sum)
 {
-    __asm__ __volatile__("
-    adds	%0, %0, %0, lsl #16
-    addcss	%0, %0, #0x10000
-    addcs	%0, %0, #0x10000
-    mvn		%0, %0
-    mov		%0, %0, lsr #16
-	"
+	__asm__(
+	"adds	%0, %1, %1, lsl #16	@ csum_fold	\n"
+	"addcs	%0, %0, #0x10000"
 	: "=r" (sum)
-	: "0" (sum));
+	: "r" (sum)
+	: "cc");
+	return (~sum) >> 16;
+}
+
+static inline unsigned int
+csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr, unsigned short len,
+		   unsigned int proto, unsigned int sum)
+{
+	__asm__(
+	"adds	%0, %1, %2		@ csum_tcpudp_nofold	\n"
+	"adcs	%0, %0, %3					\n"
+	"adcs	%0, %0, %4					\n"
+	"adcs	%0, %0, %5					\n"
+	"adc	%0, %0, #0"
+	: "=&r"(sum)
+#ifndef __ARMEB__
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (ntohs(len) << 16), "Ir" (proto << 8)
+#else
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (len), "Ir" (proto)
+#endif
+	: "cc");
 	return sum;
 }	
-	
+/*
+ * computes the checksum of the TCP/UDP pseudo-header
+ * returns a 16-bit checksum, already complemented
+ */
+static inline unsigned short int
+csum_tcpudp_magic(unsigned long saddr, unsigned long daddr, unsigned short len,
+		  unsigned int proto, unsigned int sum)
+{
+	__asm__(
+	"adds	%0, %1, %2		@ csum_tcpudp_magic	\n"
+	"adcs	%0, %0, %3					\n"
+	"adcs	%0, %0, %4					\n"
+	"adcs	%0, %0, %5					\n"
+	"adc	%0, %0, #0					\n"
+	"adds	%0, %0, %0, lsl #16				\n"
+	"addcs	%0, %0, #0x10000				\n"
+	"mvn	%0, %0"
+	: "=&r"(sum)
+#ifndef __ARMEB__
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (ntohs(len)), "Ir" (proto << 8)
+#else
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (len), "Ir" (proto)
+#endif
+	: "cc");
+	return sum >> 16;
+}
+
 
 /*
  * this routine is used for miscellaneous IP-like checksums, mainly
  * in icmp.c
  */
-
-static inline unsigned short ip_compute_csum(unsigned char * buff, int len) {
-    unsigned int sum;
-
-    __asm__ __volatile__("
-    adds	%0, %0, %0, lsl #16
-    addcs	%0, %0, #0x10000
-    mvn		%0, %0
-    mov		%0, %0, lsr #16
-	"
-	: "=r"(sum)
-	: "0" (csum_partial(buff, len, 0)));
-	return(sum);
+static inline unsigned short
+ip_compute_csum(unsigned char * buff, int len)
+{
+	return csum_fold(csum_partial(buff, len, 0));
 }
 
+#define _HAVE_ARCH_IPV6_CSUM
+extern unsigned long
+__csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr, __u32 len,
+		__u32 proto, unsigned int sum);
+
+extern __inline__ unsigned short int
+csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr, __u32 len,
+		unsigned short proto, unsigned int sum)
+{
+	return csum_fold(__csum_ipv6_magic(saddr, daddr, htonl(len),
+					   htonl(proto), sum));
+}
 #endif

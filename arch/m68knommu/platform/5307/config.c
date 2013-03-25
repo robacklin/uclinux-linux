@@ -3,9 +3,8 @@
 /*
  *	linux/arch/m68knommu/platform/5307/config.c
  *
- *	Copyright (C) 1999-2001, Greg Ungerer (gerg@snapgear.com)
- *	Copyright (C) 2000-2001, Lineo (www.lineo.com)
- *	Copyright (C) 2001, SnapGear (www.snapgear.com)
+ *	Copyright (C) 1999-2002, Greg Ungerer (gerg@snapgear.com)
+ *	Copyright (C) 2000, Lineo (www.lineo.com)
  */
 
 /***************************************************************************/
@@ -14,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/param.h>
+#include <linux/init.h>
 #include <linux/ledman.h>
 #include <asm/irq.h>
 #include <asm/dma.h>
@@ -23,7 +23,6 @@
 #include <asm/mcftimer.h>
 #include <asm/mcfsim.h>
 #include <asm/mcfdma.h>
-#include <asm/irq.h>
 #include <asm/delay.h>
 
 #if defined(CONFIG_eLIA)
@@ -73,21 +72,24 @@ void coldfire_timer_init(void (*handler)(int, void *, struct pt_regs *))
 	timerp = (volatile unsigned short *) (MCF_MBAR + MCFTIMER_BASE1);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_DISABLE;
 
-	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_BUSCLK / 16) / HZ);
+	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_CLK / 16) / HZ);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_ENORI | MCFTIMER_TMR_CLK16 |
 		MCFTIMER_TMR_RESTART | MCFTIMER_TMR_ENABLE;
 
 	icrp = (volatile unsigned char *) (MCF_MBAR + MCFSIM_TIMER1ICR);
 
-#if defined(CONFIG_FLASH_SNAPGEAR) || defined(CONFIG_CLEOPATRA)
+#if defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
+    defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3) || \
+    defined(CONFIG_CLEOPATRA) 
 	*icrp = MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL6 | MCFSIM_ICR_PRI3;
-	request_irq(30, handler, SA_INTERRUPT, "ColdFire Timer", NULL);
+	request_irq(30, handler, SA_INTERRUPT, "ColdFire Timer", timerp);
 #else
 	*icrp = MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL5 | MCFSIM_ICR_PRI3;
-	request_irq(29, handler, SA_INTERRUPT, "ColdFire Timer", NULL);
+	request_irq(29, handler, SA_INTERRUPT, "ColdFire Timer", timerp);
 #endif
 
-#ifdef CONFIG_RESETSWITCH
+#if defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
+    defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3)
 	/* This is not really the right place to do this... */
 	reset_setupbutton();
 #endif
@@ -95,6 +97,27 @@ void coldfire_timer_init(void (*handler)(int, void *, struct pt_regs *))
 	coldfire_profile_init();
 #endif
 	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_TIMER1);
+}
+
+/***************************************************************************/
+
+unsigned long coldfire_timer_offset(void)
+{
+	volatile unsigned short *timerp;
+	unsigned long		trr, tcn, offset;
+
+	timerp = (volatile unsigned short *) (MCF_MBAR + MCFTIMER_BASE1);
+	tcn = timerp[MCFTIMER_TCN];
+	trr = timerp[MCFTIMER_TRR];
+
+	/*
+	 * If we are still in the first half of the upcount and a
+	 * timer interupt is pending, then add on a ticks worth of time.
+	 */
+	offset = ((tcn * (1000000 / HZ)) / trr);
+	if (((offset * 2) < (1000000 / HZ)) && (mcf_getipr() & MCFSIM_IMR_TIMER1))
+		offset += 1000000 / HZ;
+	return offset;	
 }
 
 /***************************************************************************/
@@ -138,7 +161,7 @@ void coldfire_profile_init(void)
 	timerp = (volatile unsigned short *) (MCF_MBAR + MCFTIMER_BASE2);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_DISABLE;
 
-	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_BUSCLK / 16) / PROFILEHZ);
+	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_CLK / 16) / PROFILEHZ);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_ENORI | MCFTIMER_TMR_CLK16 |
 		MCFTIMER_TMR_RESTART | MCFTIMER_TMR_ENABLE;
 
@@ -146,7 +169,7 @@ void coldfire_profile_init(void)
 
 	*icrp = MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL7 | MCFSIM_ICR_PRI3;
 	request_irq(31, coldfire_profile_tick, (SA_INTERRUPT | IRQ_FLG_FAST),
-		"Profile Timer", NULL);
+		"Profile Timer", timerp);
 	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_TIMER2);
 }
 
@@ -186,19 +209,15 @@ void set_evector(int vecnum, void (*handler)(void))
 asmlinkage void buserr(void);
 asmlinkage void trap(void);
 asmlinkage void system_call(void);
-asmlinkage void intrhandler(void);
+asmlinkage void inthandler(void);
 
 #ifdef TRAP_DBG_INTERRUPT
 asmlinkage void dbginterrupt(void);
 #endif
 
-void coldfire_trap_init(void)
+void __init coldfire_trap_init(void)
 {
 	int i;
-#ifdef MCF_MEMORY_PROTECT
-	extern unsigned long _end;
-	extern unsigned long memory_end;
-#endif
 
 #ifndef ENABLE_dBUG
 	mcf_setimr(MCFSIM_IMR_MASKALL);
@@ -221,39 +240,19 @@ void coldfire_trap_init(void)
 #endif
 
 	for (i = 24; (i <= 30); i++)
-		_ramvec[i] = intrhandler;
+		_ramvec[i] = inthandler;
 #ifndef ENABLE_dBUG
-	_ramvec[31] = intrhandler;  // Disables the IRQ7 button
+	_ramvec[31] = inthandler;  // Disables the IRQ7 button
 #endif
 
 	for (i = 64; (i < 255); i++)
-		_ramvec[i] = intrhandler;
+		_ramvec[i] = inthandler;
 	_ramvec[255] = 0;
 
 	_ramvec[2] = buserr;
 	_ramvec[32] = system_call;
-	
-#ifdef MCF_MEMORY_PROTECT
-	/* In order to protect memory, we set up an address range breakpoint
-	 * that starts from address 0 and go until the end of the kernel image
-	 * plus data.  This doens't protect the kernel stack, hardware devices
-	 * or user processes from each other but it is better than nothing.
-	 */
-	wdebug(MCFDEBUG_ABLR, &_end);		/* Start of range */
-	wdebug(MCFDEBUG_ABHR, memory_end);	/* End of range */
-	
-	/* Now set the trigger register:
-	 * Ignore RW bit, ignore size field, only user mode accesses
-	 */
-	wdebug(MCFDEBUG_AATR, 0xe300);
-	
-	/* Activate the break point as a level one trigger outside address range */
-	wdebug(MCFDEBUG_TDR,
-			MCFDEBUG_TDR_TRC_INTR | MCFDEBUG_TDR_LXT1 |
-			MCFDEBUG_TDR_EBL1 | MCFDEBUG_TDR_EAI1);
-	printk("Protected memory outside %#x to %#x\n", (int)&_end, (int)memory_end);
-#endif
-#ifdef MCF_BDM_DISABLE
+
+#ifdef CONFIG_BDM_DISABLE
 	/* Disable the BDM clocking.  This also turns off most of the rest of
 	 * the BDM device.  This is good for EMC reasons.  This option is not
 	 * incompatible with the memory protection option.
@@ -300,16 +299,16 @@ void dump(struct pt_regs *fp)
 #endif
 
 	if (current->mm) {
-		printk("TEXT=%08x-%08x DATA=%08x-%08x BSS+STACK=%08x-%08x\n",
+		printk("TEXT=%08x-%08x DATA=%08x-%08x BSS=%08x-%08x\n",
 			(int) current->mm->start_code,
 			(int) current->mm->end_code,
 			(int) current->mm->start_data,
 			(int) current->mm->end_data,
 			(int) current->mm->end_data,
 			(int) current->mm->brk);
-		printk("START-USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
+		printk("USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
 			(int) current->mm->start_stack,
-			(int) current->kernel_stack_page);
+			(int) (((unsigned long) current) + 2 * PAGE_SIZE));
 	}
 
 	printk("PC: %08lx\n", fp->pc);
@@ -331,18 +330,14 @@ void dump(struct pt_regs *fp)
 	printk("\n");
 
 	printk("\nKERNEL STACK:");
-	tp = ((unsigned char *) fp) - 0x80;
-	for (sp = (unsigned long *) tp, i = 0; (i < 0x180); i += 4) {
+	tp = ((unsigned char *) fp) - 0x40;
+	for (sp = (unsigned long *) tp, i = 0; (i < 0xc0); i += 4) {
 		if ((i % 0x10) == 0)
 			printk("\n%08x: ", (int) (tp + i));
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n");
-	if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
-                printk("(Possibly corrupted stack page??)\n");
-	printk("\n");
 
-#if 1
 	printk("\nUSER STACK:");
 	tp = (unsigned char *) (sw_usp - 0x10);
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x80); i += 4) {
@@ -351,7 +346,6 @@ void dump(struct pt_regs *fp)
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n\n");
-#endif
 
 #ifdef CONFIG_DUMPTOFLASH
 	i = sys_getlog((char **) &tp);
@@ -361,78 +355,74 @@ void dump(struct pt_regs *fp)
 
 /***************************************************************************/
 
-#ifdef CONFIG_RESETSWITCH
+#if defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
+    defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3)
+static struct timer_list    resetbutton_timerlist;
 
 /*
  *	Routines to support the NETtel software reset button.
  */
-void reset_button(int irq, void *dev_id, struct pt_regs *regs)
+static void resetbutton_poll(unsigned long arg)
 {
-	static int	inbutton = 0;
-
-	/*
-	 *	IRQ7 is not maskable by the CPU core. It is possible
-	 *	that switch bounce mey get us back here before we have
-	 *	really serviced the interrupt.
-	 */
-	if (inbutton)
-		return;
-	inbutton = 1;
-	/* Disable interrupt at SIM - best we can do... */
-	mcf_setimr(mcf_getimr() | MCFSIM_IMR_EINT7);
-
+    static int inbutton = 0;
+    if ((mcf_getipr() & MCFSIM_IMR_EINT7) != 0) {
+        if (!inbutton) {
+            inbutton = 1;
 #ifdef CONFIG_LEDMAN
-	ledman_signalreset();
+            ledman_signalreset();
+#else 
+			HARD_RESET_NOW();
+			/* Should never get here... */
 #endif
+        }
+    } else
+        inbutton = 0;
 
-	/* Don't leave here 'till button is no longer pushed! */
-	for (;;) {
-		if ((mcf_getipr() & MCFSIM_IMR_EINT7) == 0)
-			break;
-	}
-
-#ifndef CONFIG_LEDMAN
-	HARD_RESET_NOW();
-	/* Should never get here... */
-#endif
-
-	inbutton = 0;
-	/* Interrupt service done, enable it again */
-	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_EINT7);
+	resetbutton_timerlist.expires = jiffies + 5;
+    add_timer(&resetbutton_timerlist);
 }
 
 /***************************************************************************/
 
 void reset_setupbutton(void)
 {
-	volatile unsigned char	*mbar;
-
-	mbar = (volatile unsigned char *) MCF_MBAR;
-	*(mbar + MCFSIM_AVR) |= MCFSIM_IMR_EINT7;
-	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_EINT7);
-	request_irq(31, reset_button, (SA_INTERRUPT | IRQ_FLG_FAST),
-		"Reset Button", NULL);
+	resetbutton_timerlist.expires = jiffies + 5;
+    resetbutton_timerlist.function = resetbutton_poll;
+    resetbutton_timerlist.data = 0;
+    add_timer(&resetbutton_timerlist);
 }
 
-#endif /* CONFIG_RESETSWITCH */
+#endif /* CONFIG_NETtel || CONFIG_eLIA || CONFIG_DISKtel || CONFIG_SECUREEDGEMP3 */
+
+/***************************************************************************/
+
+void coldfire_reset(void)
+{
+	HARD_RESET_NOW();
+}
 
 /***************************************************************************/
 
 void config_BSP(char *commandp, int size)
 {
-#if defined(CONFIG_FLASH_SNAPGEAR) || defined(CONFIG_HW_CLEOPATRA)
+#ifdef CONFIG_BOOTPARAM
+	strncpy(commandp, CONFIG_BOOTPARAM_STRING, size);
+	commandp[size-1] = 0;
+#elif defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || \
+    defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3) || \
+	 defined(CONFIG_HW_CLEOPATRA)
 	/* Copy command line from FLASH to local buffer... */
 	memcpy(commandp, (char *) 0xf0004000, size);
 	commandp[size-1] = 0;
-	if (*commandp == (char) 0xff) /* erased flash */
-		*commandp = '\0';
 #else
 	memset(commandp, 0, size);
-#endif /* CONFIG_FLASH_SNAPGEAR */
+#endif /* CONFIG_NETtel || CONFIG_eLIA || CONFIG_DISKtel || CONFIG_SECUREEDGEMP3 */
 
 	mach_sched_init = coldfire_timer_init;
 	mach_tick = coldfire_tick;
 	mach_trap_init = coldfire_trap_init;
+	mach_reset = coldfire_reset;
+	mach_gettimeoffset = coldfire_timer_offset;
 }
 
 /***************************************************************************/
@@ -441,7 +431,7 @@ void config_BSP(char *commandp, int size)
 asmlinkage void dbginterrupt_c(struct frame *fp)
 {
 	extern void dump(struct pt_regs *fp);
-	printk("%s(%d): BUSS ERROR TRAP\n", __FILE__, __LINE__);
+	printk("%s(%d): BUS ERROR TRAP\n", __FILE__, __LINE__);
 	dump((struct pt_regs *) fp);
 	asm("halt");
 }

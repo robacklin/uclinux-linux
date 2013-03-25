@@ -6,11 +6,13 @@
 	Director, National Security Agency.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-	Center of Excellence in Space Data and Information Sciences
-	   Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
+
 
 	Thanks go to jennings@Montrouge.SMR.slb.com ( Patrick Jennings)
 	and jrs@world.std.com (Rick Sladkey) for testing and bugfixes.
@@ -23,8 +25,12 @@
 	The statistics need to be updated correctly.
 */
 
-static const char *version =
-	"3c507.c:v1.10 9/23/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+#define DRV_NAME		"3c507"
+#define DRV_VERSION		"1.10a"
+#define DRV_RELDATE		"11/17/2001"
+
+static const char version[] =
+	DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE " Donald Becker (becker@scyld.com)\n";
 
 
 #include <linux/module.h>
@@ -49,6 +55,10 @@ static const char *version =
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/string.h>
+#include <linux/spinlock.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -58,7 +68,8 @@ static const char *version =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
+#include <linux/init.h>
 
 
 /* use 0 for production, 1 for verification, 2..7 for debug */
@@ -66,9 +77,11 @@ static const char *version =
 #define NET_DEBUG 1
 #endif
 static unsigned int net_debug = NET_DEBUG;
+#define debug net_debug
+
 
 /* A zero-terminated list of common I/O addresses to be probed. */
-static unsigned int netcard_portlist[] =
+static unsigned int netcard_portlist[] __initdata =
 	{ 0x300, 0x320, 0x340, 0x280, 0};
 
 /*
@@ -115,13 +128,15 @@ enum commands {
 
 /* Information that need to be kept for each board. */
 struct net_local {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	int last_restart;
 	ushort rx_head;
 	ushort rx_tail;
 	ushort tx_head;
 	ushort tx_cmd_link;
 	ushort tx_reap;
+	ushort tx_pkts_in_ring;
+	spinlock_t lock;
 };
 
 /*
@@ -152,15 +167,15 @@ struct net_local {
 
 /*  Since the 3c507 maps the shared memory window so that the last byte is
 	at 82586 address FFFF, the first byte is at 82586 address 0, 16K, 32K, or
-	48K corresponding to window sizes of 64K, 48K, 32K and 16K respectively. 
+	48K corresponding to window sizes of 64K, 48K, 32K and 16K respectively.
 	We can account for this be setting the 'SBC Base' entry in the ISCP table
 	below for all the 16 bit offset addresses, and also adding the 'SCB Base'
 	value to all 24 bit physical addresses (in the SCP table and the TX and RX
 	Buffer Descriptors).
-					-Mark	
+					-Mark
 	*/
 #define SCB_BASE		((unsigned)64*1024 - (dev->mem_end - dev->mem_start))
- 
+
 /*
   What follows in 'init_words[]' is the "program" that is downloaded to the
   82586 memory.	 It's mostly tables and command blocks, and starts at the
@@ -189,18 +204,20 @@ struct net_local {
 #define DUMP_DATA	0x56	/* A 170 byte buffer for dump and Set-MC into. */
 
 #define TX_BUF_START	0x0100
-#define NUM_TX_BUFS 	4
+#define NUM_TX_BUFS 	5
 #define TX_BUF_SIZE 	(1518+14+20+16) /* packet+header+TBD */
 
 #define RX_BUF_START	0x2000
 #define RX_BUF_SIZE 	(1518+14+18)	/* packet+header+RBD */
 #define RX_BUF_END		(dev->mem_end - dev->mem_start)
 
+#define TX_TIMEOUT 5
+
 /*
   That's it: only 86 bytes to set up the beast, including every extra
   command available.  The 170 byte buffer at DUMP_DATA is shared between the
   Dump command (called only by the diagnostic program) and the SetMulticastList
-  command. 
+  command.
 
   To complete the memory setup you only have to write the station address at
   SA_OFFSET and create the Tx & Rx buffer lists.
@@ -229,7 +246,7 @@ struct net_local {
 
   */
 
-unsigned short init_words[] = {
+static unsigned short init_words[] = {
 	/*	System Configuration Pointer (SCP). */
 	0x0000,					/* Set bus size to 16 bits. */
 	0,0,					/* pad words. */
@@ -275,57 +292,54 @@ unsigned short init_words[] = {
 
 /* Index to functions, as function prototypes. */
 
-extern int el16_probe(struct device *dev);	/* Called from Space.c */
+extern int el16_probe(struct net_device *dev);	/* Called from Space.c */
 
-static int	el16_probe1(struct device *dev, int ioaddr);
-static int	el16_open(struct device *dev);
-static int	el16_send_packet(struct sk_buff *skb, struct device *dev);
+static int	el16_probe1(struct net_device *dev, int ioaddr);
+static int	el16_open(struct net_device *dev);
+static int	el16_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void	el16_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void el16_rx(struct device *dev);
-static int	el16_close(struct device *dev);
-static struct enet_statistics *el16_get_stats(struct device *dev);
+static void el16_rx(struct net_device *dev);
+static int	el16_close(struct net_device *dev);
+static struct net_device_stats *el16_get_stats(struct net_device *dev);
+static void el16_tx_timeout (struct net_device *dev);
 
-static void hardware_send_packet(struct device *dev, void *buf, short length);
-void init_82586_mem(struct device *dev);
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad);
+static void init_82586_mem(struct net_device *dev);
+static struct ethtool_ops netdev_ethtool_ops;
+static void init_rx_bufs(struct net_device *);
 
 
-#ifdef HAVE_DEVLIST
-struct netdev_entry netcard_drv =
-{"3c507", el16_probe1, EL16_IO_EXTENT, netcard_portlist};
-#endif
-
 /* Check for a network adaptor of this type, and return '0' iff one exists.
 	If dev->base_addr == 0, probe all likely locations.
 	If dev->base_addr == 1, always return failure.
 	If dev->base_addr == 2, (detachable devices only) allocate space for the
 	device and return success.
 	*/
-int
-el16_probe(struct device *dev)
+
+int __init el16_probe(struct net_device *dev)
 {
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
 	int i;
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)	/* Check a single specified location. */
 		return el16_probe1(dev, base_addr);
 	else if (base_addr != 0)
-		return ENXIO;		/* Don't probe at all. */
+		return -ENXIO;		/* Don't probe at all. */
 
-	for (i = 0; netcard_portlist[i]; i++) {
-		int ioaddr = netcard_portlist[i];
-		if (check_region(ioaddr, EL16_IO_EXTENT))
-			continue;
-		if (el16_probe1(dev, ioaddr) == 0)
+	for (i = 0; netcard_portlist[i]; i++)
+		if (el16_probe1(dev, netcard_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
 
-int el16_probe1(struct device *dev, int ioaddr)
+static int __init el16_probe1(struct net_device *dev, int ioaddr)
 {
-	static unsigned char init_ID_done = 0, version_printed = 0;
-	int i, irq, irqval;
+	static unsigned char init_ID_done, version_printed;
+	int i, irq, irqval, retval;
+	struct net_local *lp;
 
 	if (init_ID_done == 0) {
 		ushort lrs_state = 0xff;
@@ -341,15 +355,14 @@ int el16_probe1(struct device *dev, int ioaddr)
 		init_ID_done = 1;
 	}
 
-	if (inb(ioaddr) == '*' && inb(ioaddr+1) == '3'
-		&& inb(ioaddr+2) == 'C' && inb(ioaddr+3) == 'O')
-		;
-	else
-		return ENODEV;
+	if (!request_region(ioaddr, EL16_IO_EXTENT, dev->name))
+		return -ENODEV;
 
-	/* Allocate a new 'dev' if needed. */
-	if (dev == NULL)
-		dev = init_etherdev(0, sizeof(struct net_local));
+	if ((inb(ioaddr) != '*') || (inb(ioaddr + 1) != '3') || 
+	    (inb(ioaddr + 2) != 'C') || (inb(ioaddr + 3) != 'O')) {
+		retval = -ENODEV;
+		goto out;
+	}
 
 	if (net_debug  &&  version_printed++ == 0)
 		printk(version);
@@ -357,18 +370,18 @@ int el16_probe1(struct device *dev, int ioaddr)
 	printk("%s: 3c507 at %#x,", dev->name, ioaddr);
 
 	/* We should make a few more checks here, like the first three octets of
-	   the S.A. for the manufacturer's code. */ 
+	   the S.A. for the manufacturer's code. */
 
 	irq = inb(ioaddr + IRQ_CONFIG) & 0x0f;
 
-	irqval = request_irq(irq, &el16_interrupt, 0, "3c507", NULL);
+	irqval = request_irq(irq, &el16_interrupt, 0, dev->name, dev);
 	if (irqval) {
 		printk ("unable to get IRQ %d (irqval=%d).\n", irq, irqval);
-		return EAGAIN;
+		retval = -EAGAIN;
+		goto out;
 	}
-	
+
 	/* We've committed to using the board, and can start filling in *dev. */
-	request_region(ioaddr, EL16_IO_EXTENT, "3c507");
 	dev->base_addr = ioaddr;
 
 	outb(0x01, ioaddr + MISC_CTRL);
@@ -411,128 +424,126 @@ int el16_probe1(struct device *dev, int ioaddr)
 		printk(version);
 
 	/* Initialize the device structure. */
-	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
-	if (dev->priv == NULL)
-		return -ENOMEM;
+	lp = dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
+	if (dev->priv == NULL) {
+		retval = -ENOMEM;
+		goto out;
+	}
 	memset(dev->priv, 0, sizeof(struct net_local));
+	spin_lock_init(&lp->lock);
 
 	dev->open		= el16_open;
 	dev->stop		= el16_close;
 	dev->hard_start_xmit = el16_send_packet;
 	dev->get_stats	= el16_get_stats;
+	dev->tx_timeout = el16_tx_timeout;
+	dev->watchdog_timeo = TX_TIMEOUT;
+	dev->ethtool_ops = &netdev_ethtool_ops;
 
 	ether_setup(dev);	/* Generic ethernet behaviour */
-	
+
 	dev->flags&=~IFF_MULTICAST;	/* Multicast doesn't work */
 
 	return 0;
+out:
+	release_region(ioaddr, EL16_IO_EXTENT);
+	return retval;
 }
 
-
-
-static int
-el16_open(struct device *dev)
+static int el16_open(struct net_device *dev)
 {
-	irq2dev_map[dev->irq] = dev;
-
 	/* Initialize the 82586 memory and start it. */
 	init_82586_mem(dev);
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
-
-	MOD_INC_USE_COUNT;
-
+	netif_start_queue(dev);
 	return 0;
 }
 
-static int
-el16_send_packet(struct sk_buff *skb, struct device *dev)
+
+static void el16_tx_timeout (struct net_device *dev)
 {
-	struct net_local *lp = (struct net_local *)dev->priv;
+	struct net_local *lp = (struct net_local *) dev->priv;
 	int ioaddr = dev->base_addr;
-	short *shmem = (short*)dev->mem_start;
+	unsigned long shmem = dev->mem_start;
 
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
+	if (net_debug > 1)
+		printk ("%s: transmit timed out, %s?  ", dev->name,
+			isa_readw (shmem + iSCB_STATUS) & 0x8000 ? "IRQ conflict" :
+			"network cable problem");
+	/* Try to restart the adaptor. */
+	if (lp->last_restart == lp->stats.tx_packets) {
 		if (net_debug > 1)
-			printk("%s: transmit timed out, %s?  ", dev->name,
-				   shmem[iSCB_STATUS>>1] & 0x8000 ? "IRQ conflict" :
-				   "network cable problem");
-		/* Try to restart the adaptor. */
-		if (lp->last_restart == lp->stats.tx_packets) {
-			if (net_debug > 1) printk("Resetting board.\n");
-			/* Completely reset the adaptor. */
-			init_82586_mem(dev);
-		} else {
-			/* Issue the channel attention signal and hope it "gets better". */
-			if (net_debug > 1) printk("Kicking board.\n");
-			shmem[iSCB_CMD>>1] = 0xf000|CUC_START|RX_START;
-			outb(0, ioaddr + SIGNAL_CA);			/* Issue channel-attn. */
-			lp->last_restart = lp->stats.tx_packets;
-		}
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
+			printk ("Resetting board.\n");
+		/* Completely reset the adaptor. */
+		init_82586_mem (dev);
+		lp->tx_pkts_in_ring = 0;
+	} else {
+		/* Issue the channel attention signal and hope it "gets better". */
+		if (net_debug > 1)
+			printk ("Kicking board.\n");
+		isa_writew (0xf000 | CUC_START | RX_START, shmem + iSCB_CMD);
+		outb (0, ioaddr + SIGNAL_CA);	/* Issue channel-attn. */
+		lp->last_restart = lp->stats.tx_packets;
 	}
+	dev->trans_start = jiffies;
+	netif_wake_queue (dev);
+}
 
-	/* If some higher layer thinks we've missed an tx-done interrupt
-	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	   itself. */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
 
-	/* Block a timer-based transmit from overlapping. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-		unsigned char *buf = skb->data;
+static int el16_send_packet (struct sk_buff *skb, struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *) dev->priv;
+	int ioaddr = dev->base_addr;
+	unsigned long flags;
+	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	unsigned char *buf = skb->data;
 
-		/* Disable the 82586's input to the interrupt line. */
-		outb(0x80, ioaddr + MISC_CTRL);
-		hardware_send_packet(dev, buf, length);
-		dev->trans_start = jiffies;
-		/* Enable the 82586 interrupt input. */
-		outb(0x84, ioaddr + MISC_CTRL);
-	}
+	netif_stop_queue (dev);
 
-	dev_kfree_skb (skb, FREE_WRITE);
+	spin_lock_irqsave (&lp->lock, flags);
+
+	lp->stats.tx_bytes += length;
+	/* Disable the 82586's input to the interrupt line. */
+	outb (0x80, ioaddr + MISC_CTRL);
+
+	hardware_send_packet (dev, buf, skb->len, length - skb->len);
+
+	dev->trans_start = jiffies;
+	/* Enable the 82586 interrupt input. */
+	outb (0x84, ioaddr + MISC_CTRL);
+
+	spin_unlock_irqrestore (&lp->lock, flags);
+
+	dev_kfree_skb (skb);
 
 	/* You might need to clean up and record Tx statistics here. */
 
 	return 0;
 }
-
+
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
-static void
-el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
+	struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
 	ushort ack_cmd = 0;
-	ushort *shmem;
-	
+	unsigned long shmem;
+
 	if (dev == NULL) {
 		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
 		return;
 	}
-	dev->interrupt = 1;
-	
+
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
-	shmem = ((ushort*)dev->mem_start);
-	
-	status = shmem[iSCB_STATUS>>1];
-	
+	shmem = dev->mem_start;
+
+	spin_lock(&lp->lock);
+
+	status = isa_readw(shmem+iSCB_STATUS);
+
 	if (net_debug > 4) {
 		printk("%s: 3c507 interrupt, status %4.4x.\n", dev->name, status);
 	}
@@ -541,31 +552,34 @@ el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	outb(0x80, ioaddr + MISC_CTRL);
 
 	/* Reap the Tx packet buffers. */
-	while (lp->tx_reap != lp->tx_head) {
-	  unsigned short tx_status = shmem[lp->tx_reap>>1];
-
-	  if (tx_status == 0) {
-		if (net_debug > 5)  printk("Couldn't reap %#x.\n", lp->tx_reap);
+	while (lp->tx_pkts_in_ring) {
+	  unsigned short tx_status = isa_readw(shmem+lp->tx_reap);
+	  if (!(tx_status & 0x8000)) {
+		if (net_debug > 5) 
+			printk("Tx command incomplete (%#x).\n", lp->tx_reap);
 		break;
 	  }
-	  if (tx_status & 0x2000) {
-		lp->stats.tx_packets++;
-		lp->stats.collisions += tx_status & 0xf;
-		dev->tbusy = 0;
-		mark_bh(NET_BH);		/* Inform upper layers. */
-	  } else {
+	  /* Tx unsuccessful or some interesting status bit set. */
+	  if (!(tx_status & 0x2000) || (tx_status & 0x0f3f)) {
 		lp->stats.tx_errors++;
 		if (tx_status & 0x0600)  lp->stats.tx_carrier_errors++;
 		if (tx_status & 0x0100)  lp->stats.tx_fifo_errors++;
 		if (!(tx_status & 0x0040))  lp->stats.tx_heartbeat_errors++;
 		if (tx_status & 0x0020)  lp->stats.tx_aborted_errors++;
+		lp->stats.collisions += tx_status & 0xf;
 	  }
+	  lp->stats.tx_packets++;
 	  if (net_debug > 5)
 		  printk("Reaped %x, Tx status %04x.\n" , lp->tx_reap, tx_status);
 	  lp->tx_reap += TX_BUF_SIZE;
 	  if (lp->tx_reap > RX_BUF_START - TX_BUF_SIZE)
 		lp->tx_reap = TX_BUF_START;
-	  if (++boguscount > 4)
+
+	  lp->tx_pkts_in_ring--;
+	  /* There is always more space in the Tx ring buffer now. */
+	  netif_wake_queue(dev);
+
+	  if (++boguscount > 10)
 		break;
 	}
 
@@ -578,7 +592,7 @@ el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* Acknowledge the interrupt sources. */
 	ack_cmd = status & 0xf000;
 
-	if ((status & 0x0700) != 0x0200 && dev->start) {
+	if ((status & 0x0700) != 0x0200 && netif_running(dev)) {
 		if (net_debug)
 			printk("%s: Command unit stopped, status %04x, restarting.\n",
 				   dev->name, status);
@@ -588,19 +602,18 @@ el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		ack_cmd |= CUC_RESUME;
 	}
 
-	if ((status & 0x0070) != 0x0040  &&  dev->start) {
-	  static void init_rx_bufs(struct device *);
+	if ((status & 0x0070) != 0x0040 && netif_running(dev)) {
 		/* The Rx unit is not ready, it must be hung.  Restart the receiver by
 		   initializing the rx buffers, and issuing an Rx start command. */
 		if (net_debug)
 			printk("%s: Rx unit stopped, status %04x, restarting.\n",
 				   dev->name, status);
 		init_rx_bufs(dev);
-		shmem[iSCB_RFA >> 1] = RX_BUF_START;
+		isa_writew(RX_BUF_START,shmem+iSCB_RFA);
 		ack_cmd |= RX_START;
 	}
 
-	shmem[iSCB_CMD>>1] = ack_cmd;
+	isa_writew(ack_cmd,shmem+iSCB_CMD);
 	outb(0, ioaddr + SIGNAL_CA);			/* Issue channel-attn. */
 
 	/* Clear the latched interrupt. */
@@ -608,42 +621,33 @@ el16_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	/* Enable the 82586's interrupt input. */
 	outb(0x84, ioaddr + MISC_CTRL);
-
-	return;
+	spin_unlock(&lp->lock);
 }
 
-static int
-el16_close(struct device *dev)
+static int el16_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
-	ushort *shmem = (short*)dev->mem_start;
+	unsigned long shmem = dev->mem_start;
 
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue(dev);
 
 	/* Flush the Tx and disable Rx. */
-	shmem[iSCB_CMD >> 1] = RX_SUSPEND | CUC_SUSPEND;
+	isa_writew(RX_SUSPEND | CUC_SUSPEND,shmem+iSCB_CMD);
 	outb(0, ioaddr + SIGNAL_CA);
 
 	/* Disable the 82586's input to the interrupt line. */
 	outb(0x80, ioaddr + MISC_CTRL);
 
-	/* We always physically use the IRQ line, so we don't do free_irq().
-	   We do remove ourselves from the map. */
-
-	irq2dev_map[dev->irq] = 0;
+	/* We always physically use the IRQ line, so we don't do free_irq(). */
 
 	/* Update the statistics here. */
-
-	MOD_DEC_USE_COUNT;
 
 	return 0;
 }
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct enet_statistics *
-el16_get_stats(struct device *dev)
+static struct net_device_stats *el16_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
@@ -653,58 +657,54 @@ el16_get_stats(struct device *dev)
 }
 
 /* Initialize the Rx-block list. */
-static void
-init_rx_bufs(struct device *dev)
+static void init_rx_bufs(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	unsigned short *write_ptr;
+	unsigned long write_ptr;
 	unsigned short SCB_base = SCB_BASE;
 
 	int cur_rxbuf = lp->rx_head = RX_BUF_START;
-	
+
 	/* Initialize each Rx frame + data buffer. */
 	do {	/* While there is room for one more. */
 
-	  write_ptr = (unsigned short *)(dev->mem_start + cur_rxbuf);
+	  write_ptr = dev->mem_start + cur_rxbuf;
 
-		*write_ptr++ = 0x0000; 				/* Status */
-		*write_ptr++ = 0x0000;				/* Command */
-		*write_ptr++ = cur_rxbuf + RX_BUF_SIZE; /* Link */
-		*write_ptr++ = cur_rxbuf + 22;		/* Buffer offset */
-		*write_ptr++ = 0x0000; 				/* Pad for dest addr. */
-		*write_ptr++ = 0x0000;
-		*write_ptr++ = 0x0000;
-		*write_ptr++ = 0x0000; 				/* Pad for source addr. */
-		*write_ptr++ = 0x0000;
-		*write_ptr++ = 0x0000;
-		*write_ptr++ = 0x0000;				/* Pad for protocol. */
-		
-		*write_ptr++ = 0x0000;				/* Buffer: Actual count */
-		*write_ptr++ = -1;					/* Buffer: Next (none). */
-		*write_ptr++ = cur_rxbuf + 0x20 + SCB_base;	/* Buffer: Address low */
-		*write_ptr++ = 0x0000;
+		isa_writew(0x0000,write_ptr);			/* Status */
+		isa_writew(0x0000,write_ptr+=2);			/* Command */
+		isa_writew(cur_rxbuf + RX_BUF_SIZE,write_ptr+=2);	/* Link */
+		isa_writew(cur_rxbuf + 22,write_ptr+=2);		/* Buffer offset */
+		isa_writew(0x0000,write_ptr+=2);			/* Pad for dest addr. */
+		isa_writew(0x0000,write_ptr+=2);
+		isa_writew(0x0000,write_ptr+=2);
+		isa_writew(0x0000,write_ptr+=2);			/* Pad for source addr. */
+		isa_writew(0x0000,write_ptr+=2);
+		isa_writew(0x0000,write_ptr+=2);
+		isa_writew(0x0000,write_ptr+=2);			/* Pad for protocol. */
+
+		isa_writew(0x0000,write_ptr+=2);			/* Buffer: Actual count */
+		isa_writew(-1,write_ptr+=2);			/* Buffer: Next (none). */
+		isa_writew(cur_rxbuf + 0x20 + SCB_base,write_ptr+=2);/* Buffer: Address low */
+		isa_writew(0x0000,write_ptr+=2);
 		/* Finally, the number of bytes in the buffer. */
-		*write_ptr++ = 0x8000 + RX_BUF_SIZE-0x20;
-		
+		isa_writew(0x8000 + RX_BUF_SIZE-0x20,write_ptr+=2);
+
 		lp->rx_tail = cur_rxbuf;
 		cur_rxbuf += RX_BUF_SIZE;
 	} while (cur_rxbuf <= RX_BUF_END - RX_BUF_SIZE);
-	
+
 	/* Terminate the list by setting the EOL bit, and wrap the pointer to make
 	   the list a ring. */
-	write_ptr = (unsigned short *)
-	  (dev->mem_start + lp->rx_tail + 2);
-	*write_ptr++ = 0xC000;					/* Command, mark as last. */
-	*write_ptr++ = lp->rx_head;				/* Link */
-
+	write_ptr = dev->mem_start + lp->rx_tail + 2;
+	isa_writew(0xC000,write_ptr);				/* Command, mark as last. */
+	isa_writew(lp->rx_head,write_ptr+2);			/* Link */
 }
 
-void
-init_82586_mem(struct device *dev)
+static void init_82586_mem(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
-	ushort *shmem = (short*)dev->mem_start;
+	unsigned long shmem = dev->mem_start;
 
 	/* Enable loopback to protect the wire while starting up,
 	   and hold the 586 in reset during the memory initialization. */
@@ -715,13 +715,13 @@ init_82586_mem(struct device *dev)
 	init_words[7] = SCB_BASE;
 
 	/* Write the words at 0xfff6 (address-aliased to 0xfffff6). */
-	memcpy((void*)dev->mem_end-10, init_words, 10);
+	isa_memcpy_toio(dev->mem_end-10, init_words, 10);
 
 	/* Write the words at 0x0000. */
-	memcpy((char*)dev->mem_start, init_words + 5, sizeof(init_words) - 10);
+	isa_memcpy_toio(dev->mem_start, init_words + 5, sizeof(init_words) - 10);
 
 	/* Fill in the station address. */
-	memcpy((char*)dev->mem_start+SA_OFFSET, dev->dev_addr,
+	isa_memcpy_toio(dev->mem_start+SA_OFFSET, dev->dev_addr,
 		   sizeof(dev->dev_addr));
 
 	/* The Tx-block list is written as needed.  We just set up the values. */
@@ -739,11 +739,11 @@ init_82586_mem(struct device *dev)
 
 	{
 		int boguscnt = 50;
-		while (shmem[iSCB_STATUS>>1] == 0)
+		while (isa_readw(shmem+iSCB_STATUS) == 0)
 			if (--boguscnt == 0) {
 				printk("%s: i82586 initialization timed out with status %04x,"
 					   "cmd %04x.\n", dev->name,
-					   shmem[iSCB_STATUS>>1], shmem[iSCB_CMD>>1]);
+					   isa_readw(shmem+iSCB_STATUS), isa_readw(shmem+iSCB_CMD));
 				break;
 			}
 		/* Issue channel-attn -- the 82586 won't start. */
@@ -754,40 +754,42 @@ init_82586_mem(struct device *dev)
 	outb(0x84, ioaddr + MISC_CTRL);
 	if (net_debug > 4)
 		printk("%s: Initialized 82586, status %04x.\n", dev->name,
-			   shmem[iSCB_STATUS>>1]);
+			   isa_readw(shmem+iSCB_STATUS));
 	return;
 }
 
-static void
-hardware_send_packet(struct device *dev, void *buf, short length)
+static void hardware_send_packet(struct net_device *dev, void *buf, short length, short pad)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
 	ushort tx_block = lp->tx_head;
-	ushort *write_ptr =	  (ushort *)(dev->mem_start + tx_block);
+	unsigned long write_ptr = dev->mem_start + tx_block;
+	static char padding[ETH_ZLEN];
 
 	/* Set the write pointer to the Tx block, and put out the header. */
-	*write_ptr++ = 0x0000;				/* Tx status */
-	*write_ptr++ = CMD_INTR|CmdTx;		/* Tx command */
-	*write_ptr++ = tx_block+16;			/* Next command is a NoOp. */
-	*write_ptr++ = tx_block+8;			/* Data Buffer offset. */
+	isa_writew(0x0000,write_ptr);			/* Tx status */
+	isa_writew(CMD_INTR|CmdTx,write_ptr+=2);		/* Tx command */
+	isa_writew(tx_block+16,write_ptr+=2);		/* Next command is a NoOp. */
+	isa_writew(tx_block+8,write_ptr+=2);			/* Data Buffer offset. */
 
 	/* Output the data buffer descriptor. */
-	*write_ptr++ = length | 0x8000;		/* Byte count parameter. */
-	*write_ptr++ = -1;					/* No next data buffer. */
-	*write_ptr++ = tx_block+22+SCB_BASE;/* Buffer follows the NoOp command. */
-	*write_ptr++ = 0x0000;				/* Buffer address high bits (always zero). */
+	isa_writew((pad + length) | 0x8000,write_ptr+=2);		/* Byte count parameter. */
+	isa_writew(-1,write_ptr+=2);			/* No next data buffer. */
+	isa_writew(tx_block+22+SCB_BASE,write_ptr+=2);	/* Buffer follows the NoOp command. */
+	isa_writew(0x0000,write_ptr+=2);			/* Buffer address high bits (always zero). */
 
 	/* Output the Loop-back NoOp command. */
-	*write_ptr++ = 0x0000;				/* Tx status */
-	*write_ptr++ = CmdNOp;				/* Tx command */
-	*write_ptr++ = tx_block+16;			/* Next is myself. */
+	isa_writew(0x0000,write_ptr+=2);			/* Tx status */
+	isa_writew(CmdNOp,write_ptr+=2);			/* Tx command */
+	isa_writew(tx_block+16,write_ptr+=2);		/* Next is myself. */
 
 	/* Output the packet at the write pointer. */
-	memcpy(write_ptr, buf, length);
+	isa_memcpy_toio(write_ptr+2, buf, length);
+	if(pad)
+		isa_memcpy_toio(write_ptr+length+2, padding, pad);
 
 	/* Set the old command link pointing to this send packet. */
-	*(ushort*)(dev->mem_start + lp->tx_cmd_link) = tx_block;
+	isa_writew(tx_block,dev->mem_start + lp->tx_cmd_link);
 	lp->tx_cmd_link = tx_block + 20;
 
 	/* Set the next free tx region. */
@@ -800,27 +802,27 @@ hardware_send_packet(struct device *dev, void *buf, short length)
 			   dev->name, ioaddr, length, tx_block, lp->tx_head);
 	}
 
-	if (lp->tx_head != lp->tx_reap)
-		dev->tbusy = 0;
+	/* Grimly block further packets if there has been insufficient reaping. */
+	if (++lp->tx_pkts_in_ring < NUM_TX_BUFS) 
+		netif_wake_queue(dev);
 }
 
-static void
-el16_rx(struct device *dev)
+static void el16_rx(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short *shmem = (short*)dev->mem_start;
+	unsigned long shmem = dev->mem_start;
 	ushort rx_head = lp->rx_head;
 	ushort rx_tail = lp->rx_tail;
 	ushort boguscount = 10;
 	short frame_status;
 
-	while ((frame_status = shmem[rx_head>>1]) < 0) {   /* Command complete */
-		ushort *read_frame =  (short *)(dev->mem_start + rx_head);
-		ushort rfd_cmd = read_frame[1];
-		ushort next_rx_frame = read_frame[2];
-		ushort data_buffer_addr = read_frame[3];
-		ushort *data_frame = (short *)(dev->mem_start + data_buffer_addr);
-		ushort pkt_len = data_frame[0];
+	while ((frame_status = isa_readw(shmem+rx_head)) < 0) {   /* Command complete */
+		unsigned long read_frame = dev->mem_start + rx_head;
+		ushort rfd_cmd = isa_readw(read_frame+2);
+		ushort next_rx_frame = isa_readw(read_frame+4);
+		ushort data_buffer_addr = isa_readw(read_frame+6);
+		unsigned long data_frame = dev->mem_start + data_buffer_addr;
+		ushort pkt_len = isa_readw(data_frame);
 
 		if (rfd_cmd != 0 || data_buffer_addr != rx_head + 22
 			|| (pkt_len & 0xC000) != 0xC000) {
@@ -847,23 +849,25 @@ el16_rx(struct device *dev)
 				lp->stats.rx_dropped++;
 				break;
 			}
-			
+
 			skb_reserve(skb,2);
 			skb->dev = dev;
 
 			/* 'skb->data' points to the start of sk_buff data area. */
-			memcpy(skb_put(skb,pkt_len), data_frame + 5, pkt_len);
-		
+			isa_memcpy_fromio(skb_put(skb,pkt_len), data_frame + 10, pkt_len);
+
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 
 		/* Clear the status word and set End-of-List on the rx frame. */
-		read_frame[0] = 0;
-		read_frame[1] = 0xC000;
+		isa_writew(0,read_frame);
+		isa_writew(0xC000,read_frame+2);
 		/* Clear the end-of-list on the prev. RFD. */
-		*(short*)(dev->mem_start + rx_tail + 2) = 0x0000;
+		isa_writew(0x0000,dev->mem_start + rx_tail + 2);
 
 		rx_tail = rx_head;
 		rx_head = next_rx_frame;
@@ -874,17 +878,39 @@ el16_rx(struct device *dev)
 	lp->rx_head = rx_head;
 	lp->rx_tail = rx_tail;
 }
-#ifdef MODULE
-static char devicename[9] = { 0, };
-static struct device dev_3c507 = {
-	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, el16_probe
+
+static void netdev_get_drvinfo(struct net_device *dev,
+			       struct ethtool_drvinfo *info)
+{
+	strcpy(info->driver, DRV_NAME);
+	strcpy(info->version, DRV_VERSION);
+	sprintf(info->bus_info, "ISA 0x%lx", dev->base_addr);
+}
+
+static u32 netdev_get_msglevel(struct net_device *dev)
+{
+	return debug;
+}
+
+static void netdev_set_msglevel(struct net_device *dev, u32 level)
+{
+	debug = level;
+}
+
+static struct ethtool_ops netdev_ethtool_ops = {
+	.get_drvinfo		= netdev_get_drvinfo,
+	.get_msglevel		= netdev_get_msglevel,
+	.set_msglevel		= netdev_set_msglevel,
 };
 
+#ifdef MODULE
+static struct net_device dev_3c507;
 static int io = 0x300;
-static int irq = 0;
+static int irq;
+MODULE_PARM(io, "i");
+MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "EtherLink16 I/O base address");
+MODULE_PARM_DESC(irq, "(ignored)");
 
 int init_module(void)
 {
@@ -892,6 +918,7 @@ int init_module(void)
 		printk("3c507: You should not use auto-probing with insmod!\n");
 	dev_3c507.base_addr = io;
 	dev_3c507.irq       = irq;
+	dev_3c507.init	    = el16_probe;
 	if (register_netdev(&dev_3c507) != 0) {
 		printk("3c507: register_netdev() returned non-zero.\n");
 		return -EIO;
@@ -907,10 +934,12 @@ cleanup_module(void)
 	dev_3c507.priv = NULL;
 
 	/* If we don't do this, we can't re-insmod it later. */
-	free_irq(dev_3c507.irq, NULL);
+	free_irq(dev_3c507.irq, &dev_3c507);
 	release_region(dev_3c507.base_addr, EL16_IO_EXTENT);
 }
 #endif /* MODULE */
+MODULE_LICENSE("GPL");
+
 
 /*
  * Local variables:

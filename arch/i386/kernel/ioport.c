@@ -10,6 +10,10 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
+#include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
+#include <linux/stddef.h>
 
 /* Set EXTENT bits starting at BASE in BITMAP to value TURN_ON. */
 static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_value)
@@ -50,18 +54,39 @@ static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_
  */
 asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 {
-	if (from + num <= from)
-		return -EINVAL;
-	if (from + num > IO_BITMAP_SIZE*32)
-		return -EINVAL;
-	if (!suser() || securelevel > 0)
-		return -EPERM;
+	struct thread_struct * t = &current->thread;
+	struct tss_struct * tss = init_tss + smp_processor_id();
 
-	set_bitmap((unsigned long *)current->tss.io_bitmap, from, num, !turn_on);
+	if ((from + num <= from) || (from + num > IO_BITMAP_SIZE*32))
+		return -EINVAL;
+	if (turn_on && !capable(CAP_SYS_RAWIO))
+		return -EPERM;
+	/*
+	 * If it's the first ioperm() call in this thread's lifetime, set the
+	 * IO bitmap up. ioperm() is much less timing critical than clone(),
+	 * this is why we delay this operation until now:
+	 */
+	if (!t->ioperm) {
+		/*
+		 * just in case ...
+		 */
+		memset(t->io_bitmap,0xff,(IO_BITMAP_SIZE+1)*4);
+		t->ioperm = 1;
+	}
+
+	/*
+	 * do it in the per-thread copy and in the TSS ...
+	 */
+	set_bitmap(t->io_bitmap, from, num, !turn_on);
+	if (tss->bitmap == IO_BITMAP_OFFSET) { /* already active? */
+		set_bitmap(tss->io_bitmap, from, num, !turn_on);
+	} else {
+		memcpy(tss->io_bitmap, t->io_bitmap, IO_BITMAP_BYTES);
+		tss->bitmap = IO_BITMAP_OFFSET; /* Activate it in the TSS */
+	}
+
 	return 0;
 }
-
-unsigned int *stack;
 
 /*
  * sys_iopl has to be used when you want to access the IO ports
@@ -73,17 +98,20 @@ unsigned int *stack;
  * on system-call entry - see also fork() and the signal handling
  * code.
  */
-asmlinkage int sys_iopl(long ebx,long ecx,long edx,
-	     long esi, long edi, long ebp, long eax, long ds,
-	     long es, long fs, long gs, long orig_eax,
-	     long eip,long cs,long eflags,long esp,long ss)
+
+asmlinkage int sys_iopl(unsigned long unused)
 {
-	unsigned int level = ebx;
+	struct pt_regs * regs = (struct pt_regs *) &unused;
+	unsigned int level = regs->ebx;
+	unsigned int old = (regs->eflags >> 12) & 3;
 
 	if (level > 3)
 		return -EINVAL;
-	if (!suser() || securelevel > 0)
-		return -EPERM;
-	*(&eflags) = (eflags & 0xffffcfff) | (level << 12);
+	/* Trying to gain more privileges? */
+	if (level > old) {
+		if (!capable(CAP_SYS_RAWIO))
+			return -EPERM;
+	}
+	regs->eflags = (regs->eflags & 0xffffcfff) | (level << 12);
 	return 0;
 }

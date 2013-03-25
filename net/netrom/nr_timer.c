@@ -1,7 +1,7 @@
 /*
- *	NET/ROM release 006
+ *	NET/ROM release 007
  *
- *	This code REQUIRES 1.2.1 or higher/ NET3.029
+ *	This code REQUIRES 2.1.15 or higher/ NET3.038
  *
  *	This module:
  *		This module is free software; you can redistribute it and/or
@@ -11,10 +11,10 @@
  *
  *	History
  *	NET/ROM 001	Jonathan(G4KLX)	Cloned from ax25_timer.c
+ *	NET/ROM 007	Jonathan(G4KLX)	New timer architecture.
+ *					Implemented idle timer.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -30,49 +30,116 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <net/netrom.h>
 
-static void nr_timer(unsigned long);
+static void nr_heartbeat_expiry(unsigned long);
+static void nr_t1timer_expiry(unsigned long);
+static void nr_t2timer_expiry(unsigned long);
+static void nr_t4timer_expiry(unsigned long);
+static void nr_idletimer_expiry(unsigned long);
 
-/*
- *	Linux set timer
- */
-void nr_set_timer(struct sock *sk)
+void nr_start_t1timer(struct sock *sk)
 {
-	unsigned long flags;
+	del_timer(&sk->protinfo.nr->t1timer);
 
-	save_flags(flags); cli();
+	sk->protinfo.nr->t1timer.data     = (unsigned long)sk;
+	sk->protinfo.nr->t1timer.function = &nr_t1timer_expiry;
+	sk->protinfo.nr->t1timer.expires  = jiffies + sk->protinfo.nr->t1;
+
+	add_timer(&sk->protinfo.nr->t1timer);
+}
+
+void nr_start_t2timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->t2timer);
+
+	sk->protinfo.nr->t2timer.data     = (unsigned long)sk;
+	sk->protinfo.nr->t2timer.function = &nr_t2timer_expiry;
+	sk->protinfo.nr->t2timer.expires  = jiffies + sk->protinfo.nr->t2;
+
+	add_timer(&sk->protinfo.nr->t2timer);
+}
+
+void nr_start_t4timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->t4timer);
+
+	sk->protinfo.nr->t4timer.data     = (unsigned long)sk;
+	sk->protinfo.nr->t4timer.function = &nr_t4timer_expiry;
+	sk->protinfo.nr->t4timer.expires  = jiffies + sk->protinfo.nr->t4;
+
+	add_timer(&sk->protinfo.nr->t4timer);
+}
+
+void nr_start_idletimer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->idletimer);
+
+	if (sk->protinfo.nr->idle > 0) {
+		sk->protinfo.nr->idletimer.data     = (unsigned long)sk;
+		sk->protinfo.nr->idletimer.function = &nr_idletimer_expiry;
+		sk->protinfo.nr->idletimer.expires  = jiffies + sk->protinfo.nr->idle;
+
+		add_timer(&sk->protinfo.nr->idletimer);
+	}
+}
+
+void nr_start_heartbeat(struct sock *sk)
+{
 	del_timer(&sk->timer);
-	restore_flags(flags);
 
 	sk->timer.data     = (unsigned long)sk;
-	sk->timer.function = &nr_timer;
-	sk->timer.expires  = jiffies+10;
+	sk->timer.function = &nr_heartbeat_expiry;
+	sk->timer.expires  = jiffies + 5 * HZ;
 
 	add_timer(&sk->timer);
 }
 
-/*
- *	NET/ROM TIMER 
- *
- *	This routine is called every 100ms. Decrement timer by this
- *	amount - if expired then process the event.
- */
-static void nr_timer(unsigned long param)
+void nr_stop_t1timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->t1timer);
+}
+
+void nr_stop_t2timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->t2timer);
+}
+
+void nr_stop_t4timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->t4timer);
+}
+
+void nr_stop_idletimer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.nr->idletimer);
+}
+
+void nr_stop_heartbeat(struct sock *sk)
+{
+	del_timer(&sk->timer);
+}
+
+int nr_t1timer_running(struct sock *sk)
+{
+	return timer_pending(&sk->protinfo.nr->t1timer);
+}
+
+static void nr_heartbeat_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
 
 	switch (sk->protinfo.nr->state) {
+
 		case NR_STATE_0:
 			/* Magic here: If we listen() and a new link dies before it
 			   is accepted() it isn't 'dead' so doesn't get removed. */
 			if (sk->destroy || (sk->state == TCP_LISTEN && sk->dead)) {
-				del_timer(&sk->timer);
 				nr_destroy_socket(sk);
 				return;
 			}
@@ -82,52 +149,71 @@ static void nr_timer(unsigned long param)
 			/*
 			 * Check for the state of the receive buffer.
 			 */
-			if (sk->rmem_alloc < (sk->rcvbuf / 2) && (sk->protinfo.nr->condition & NR_COND_OWN_RX_BUSY)) {
+			if (atomic_read(&sk->rmem_alloc) < (sk->rcvbuf / 2) &&
+			    (sk->protinfo.nr->condition & NR_COND_OWN_RX_BUSY)) {
 				sk->protinfo.nr->condition &= ~NR_COND_OWN_RX_BUSY;
 				sk->protinfo.nr->condition &= ~NR_COND_ACK_PENDING;
 				sk->protinfo.nr->vl         = sk->protinfo.nr->vr;
 				nr_write_internal(sk, NR_INFOACK);
 				break;
 			}
-			/*
-			 * Check for frames to transmit.
-			 */
-			nr_kick(sk);
-			break;
-
-		default:
 			break;
 	}
 
-	if (sk->protinfo.nr->t2timer > 0 && --sk->protinfo.nr->t2timer == 0) {
-		if (sk->protinfo.nr->state == NR_STATE_3) {
-			if (sk->protinfo.nr->condition & NR_COND_ACK_PENDING) {
-				sk->protinfo.nr->condition &= ~NR_COND_ACK_PENDING;
-				nr_enquiry_response(sk);
-			}
-		}
-	}
+	nr_start_heartbeat(sk);
+}
 
-	if (sk->protinfo.nr->t4timer > 0 && --sk->protinfo.nr->t4timer == 0) {
-		sk->protinfo.nr->condition &= ~NR_COND_PEER_RX_BUSY;
-	}
+static void nr_t2timer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
 
-	if (sk->protinfo.nr->t1timer == 0 || --sk->protinfo.nr->t1timer > 0) {
-		nr_set_timer(sk);
-		return;
+	if (sk->protinfo.nr->condition & NR_COND_ACK_PENDING) {
+		sk->protinfo.nr->condition &= ~NR_COND_ACK_PENDING;
+		nr_enquiry_response(sk);
 	}
+}
+
+static void nr_t4timer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
+
+	sk->protinfo.nr->condition &= ~NR_COND_PEER_RX_BUSY;
+}
+
+static void nr_idletimer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
+
+	nr_clear_queues(sk);
+
+	sk->protinfo.nr->n2count = 0;
+	nr_write_internal(sk, NR_DISCREQ);
+	sk->protinfo.nr->state = NR_STATE_2;
+
+	nr_start_t1timer(sk);
+	nr_stop_t2timer(sk);
+	nr_stop_t4timer(sk);
+
+	sk->state     = TCP_CLOSE;
+	sk->err       = 0;
+	sk->shutdown |= SEND_SHUTDOWN;
+
+	if (!sk->dead)
+		sk->state_change(sk);
+
+	sk->dead = 1;
+}
+
+static void nr_t1timer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
 
 	switch (sk->protinfo.nr->state) {
+
 		case NR_STATE_1: 
 			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
-				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
-				if (!sk->dead)
-					sk->state_change(sk);
-				sk->dead               = 1;
+				nr_disconnect(sk, ETIMEDOUT);
+				return;
 			} else {
 				sk->protinfo.nr->n2count++;
 				nr_write_internal(sk, NR_CONNREQ);
@@ -136,14 +222,8 @@ static void nr_timer(unsigned long param)
 
 		case NR_STATE_2:
 			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
-				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
-				if (!sk->dead)
-					sk->state_change(sk);
-				sk->dead               = 1;
+				nr_disconnect(sk, ETIMEDOUT);
+				return;
 			} else {
 				sk->protinfo.nr->n2count++;
 				nr_write_internal(sk, NR_DISCREQ);
@@ -152,14 +232,8 @@ static void nr_timer(unsigned long param)
 
 		case NR_STATE_3:
 			if (sk->protinfo.nr->n2count == sk->protinfo.nr->n2) {
-				nr_clear_queues(sk);
-				sk->protinfo.nr->state = NR_STATE_0;
-				sk->state              = TCP_CLOSE;
-				sk->err                = ETIMEDOUT;
-				sk->shutdown          |= SEND_SHUTDOWN;
-				if (!sk->dead)
-					sk->state_change(sk);
-				sk->dead               = 1;
+				nr_disconnect(sk, ETIMEDOUT);
+				return;
 			} else {
 				sk->protinfo.nr->n2count++;
 				nr_requeue_frames(sk);
@@ -167,9 +241,5 @@ static void nr_timer(unsigned long param)
 			break;
 	}
 
-	sk->protinfo.nr->t1timer = sk->protinfo.nr->t1;
-
-	nr_set_timer(sk);
+	nr_start_t1timer(sk);
 }
-
-#endif

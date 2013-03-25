@@ -25,15 +25,22 @@
 #ifdef CONFIG_UCSIMM
 #include "ucsimm/bootstd.h"
 #endif
-#if defined(CONFIG_PILOT) && defined(CONFIG_PILOT_INCROMFS)
+#ifdef CONFIG_PILOT
 #include "PalmV/romfs.h"
 #endif
 #include <asm/MC68EZ328.h>
 
-extern void register_console(void (*proc)(const char *));
-
 void BSP_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
 {
+#ifdef CONFIG_M68EZ328_USE_RTC
+  /* Enable RTC */
+  RTCCTL |= RTCCTL_EN;
+
+  /* Enable 128 Hz interrupt line */
+  RTCIENR |= RTCIENR_SAM5;
+
+  request_irq(SAM_IRQ_NUM, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
+#else
   /* Restart mode, Enable int, 32KHz, Enable timer */
   TCTL = TCTL_OM | TCTL_IRQEN | TCTL_CLKSOURCE_32KHZ | TCTL_TEN;
   /* Set prescaler (Divide 32KHz by 32)*/
@@ -41,18 +48,29 @@ void BSP_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
   /* Set compare register  32Khz / 32 / 10 = 100 */
   TCMP = 10;                                                              
 
-  request_irq(IRQ_MACHSPEC | 1, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
+  request_irq(TMR_IRQ_NUM, timer_routine, IRQ_FLG_LOCK, "timer", NULL);  
+#endif
 }
 
 void BSP_tick(void)
 {
   	/* Reset Timer1 */
-	TSTAT &= 0;
+#ifdef CONFIG_M68EZ328_USE_RTC
+	RTCISR |= RTCISR_SAM5;
+#else
+  	TSTAT &= 0;
+#endif
 }
 
 unsigned long BSP_gettimeoffset (void)
 {
   return 0;
+}
+
+void BSP_gettod (int *yearp, int *monp, int *dayp,
+		   int *hourp, int *minp, int *secp)
+{
+	*yearp = *monp = *dayp = *hourp = *minp = *secp = 0;
 }
 
 int BSP_hwclk(int op, struct hwclk_time *t)
@@ -81,12 +99,12 @@ int BSP_set_clock_mmss (unsigned long nowtime)
 void BSP_reset (void)
 {
   cli();
-  asm volatile ("
-    moveal #0x10c00000, %a0;
-    moveb #0, 0xFFFFF300;
-    moveal 0(%a0), %sp;
-    moveal 4(%a0), %a0;
-    jmp (%a0);
+  asm volatile ("\n\
+    moveal #0x10c00000, %a0; \n\
+    moveb #0, 0xFFFFF300; \n\
+    moveal 0(%a0), %sp; \n\
+    moveal 4(%a0), %a0; \n\
+    jmp (%a0); \n\
     ");
 }
 
@@ -102,10 +120,6 @@ _bsc1(char *, getbenv, char *, a)
 void config_BSP(char *command, int len)
 {
   unsigned char *p;
-#ifdef CONFIG_68328_SERIAL
-  extern void console_print_68328(const char * b);
-  register_console(console_print_68328);
-#endif  
 
   printk("\n68EZ328 DragonBallEZ support (C) 1999 Rt-Control, Inc\n");
 
@@ -126,24 +140,18 @@ void config_BSP(char *command, int len)
 #endif
 
 #ifdef CONFIG_CWEZ328
-  strcpy(command, "console=ttyS0");
+    strcpy(command, "/bin/sh console=ttyS0");
 #endif
 
   mach_sched_init      = BSP_sched_init;
   mach_tick            = BSP_tick;
   mach_gettimeoffset   = BSP_gettimeoffset;
+  mach_gettod          = BSP_gettod;
   mach_hwclk           = NULL;
-  mach_mksound         = NULL;
+  mach_set_clock_mmss  = NULL;
+  // mach_mksound         = NULL;
   mach_reset           = BSP_reset;
-  mach_debug_init      = NULL;
-#if defined(CONFIG_DS1743)
-  {
-	  extern int ds1743_set_clock_mmss(unsigned long);
-	  extern void ds1743_gettod(int *, int *, int *, int *, int *, int *);
-	  mach_set_clock_mmss = ds1743_set_clock_mmss;
-	  mach_gettod = ds1743_gettod;
-  }
-#endif
+  // mach_debug_init      = NULL;
 
   config_M68EZ328_irq();
 }

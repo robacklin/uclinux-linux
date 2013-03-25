@@ -1,15 +1,14 @@
-/* $Id: byteorder.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $ */
+/* $Id: byteorder.h,v 1.15 1997/12/16 19:20:44 davem Exp $ */
 #ifndef _SPARC_BYTEORDER_H
 #define _SPARC_BYTEORDER_H
 
-#define ntohl(x) x
-#define ntohs(x) x
-#define htonl(x) x
-#define htons(x) x
+#include <asm/types.h>
 
-#ifdef __KERNEL__
-#define __BIG_ENDIAN
+#if defined(__GNUC__) && !defined(__STRICT_ANSI__) || defined(__KERNEL__)
+#  define __BYTEORDER_HAS_U64__
+#  define __SWAB_64_THRU_32__
 #endif
-#define __BIG_ENDIAN_BITFIELD
 
-#endif /* !(_SPARC_BYTEORDER_H) */
+#include <linux/byteorder/big_endian.h>
+
+#endif /* _SPARC_BYTEORDER_H */

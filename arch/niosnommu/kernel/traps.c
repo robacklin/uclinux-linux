@@ -91,15 +91,15 @@ void do_hw_interrupt(unsigned long type, unsigned long psr, unsigned long pc)
 {
 	if(type < 0x10) {
 		printk("Unimplemented Nios TRAP, type = %02lx\n", type);
-		die_if_kernel("Whee... Hello Mr. Penguin", current->tss.kregs);
+		die_if_kernel("Whee... Hello Mr. Penguin", current->thread.kregs);
 	}	
 #if 0
 	if(type == SP_TRAP_SBPT) {
 		send_sig(SIGTRAP, current, 1);
 		return;
 	}
-	current->tss.sig_desc = SUBSIG_BADTRAP(type - 0x80);
-	current->tss.sig_address = pc;
+	current->thread.sig_desc = SUBSIG_BADTRAP(type - 0x80);
+	current->thread.sig_address = pc;
 	send_sig(SIGILL, current, 1);
 #endif
 }

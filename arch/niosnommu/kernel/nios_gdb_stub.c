@@ -1211,7 +1211,6 @@ void GDBMainLoop ()
 }
 
 // ----------main------------
-
 void GDBMain(void)
 {
 	char c;
@@ -1228,21 +1227,22 @@ void GDBMain(void)
  * that is just starting up.  Display the  .text  .data  .bss  regions.
  */
 	if (gdb.trapNumber == 5) {
+		extern struct task_struct *_current_task;
 		sprintf(gdb.textBuffer,
 				"\r\n\nGDB: trap 5 at 0x%08lX", gdb.registers.pc);
 		puts(gdb.textBuffer);
-		if (current) {
-			if ( current->mm->start_code > _etext )
+		if (_current_task) {
+			if ( _current_task->mm->start_code > _etext )
 				sprintf(gdb.textBuffer,
 					"\r\nGDB: Enter the following command in the nios-elf-gdb Console Window:"
 					"\r\nGDB:    add-symbol-file %s.abself 0x%08lX 0x%08lX 0x%08lX\r\n\n",
-					current->comm,
-					(unsigned long)current->mm->start_code,
-					(unsigned long)current->mm->start_data,
-					(unsigned long)current->mm->end_data );
+					_current_task->comm,
+					(unsigned long)_current_task->mm->start_code,
+					(unsigned long)_current_task->mm->start_data,
+					(unsigned long)_current_task->mm->end_data );
 			else
 				sprintf(gdb.textBuffer,
-					", kernel process: %s\r\n", current->comm );
+					", kernel process: %s\r\n", _current_task->comm );
 		} else
 			sprintf(gdb.textBuffer,
 				", kernel process unknown\r\n" );

@@ -18,7 +18,7 @@
 #define EFL 14
 #define UESP 15
 #define SS   16
-
+#define FRAME_SIZE 17
 
 /* this struct defines the way the registers are stored on the 
    stack during a system call. */
@@ -31,16 +31,14 @@ struct pt_regs {
 	long edi;
 	long ebp;
 	long eax;
-	unsigned short ds, __dsu;
-	unsigned short es, __esu;
-	unsigned short fs, __fsu;
-	unsigned short gs, __gsu;
+	int  xds;
+	int  xes;
 	long orig_eax;
 	long eip;
-	unsigned short cs, __csu;
+	int  xcs;
 	long eflags;
 	long esp;
-	unsigned short ss, __ssu;
+	int  xss;
 };
 
 /* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
@@ -48,13 +46,19 @@ struct pt_regs {
 #define PTRACE_SETREGS            13
 #define PTRACE_GETFPREGS          14
 #define PTRACE_SETFPREGS          15
+#define PTRACE_GETFPXREGS         18
+#define PTRACE_SETFPXREGS         19
+
+#define PTRACE_SETOPTIONS         21
+
+/* options set using PTRACE_SETOPTIONS */
+#define PTRACE_O_TRACESYSGOOD     0x00000001
 
 #ifdef __KERNEL__
-#define user_mode(regs) ((VM_MASK & (regs)->eflags) || (3 & (regs)->cs))
+#define user_mode(regs) ((VM_MASK & (regs)->eflags) || (3 & (regs)->xcs))
 #define instruction_pointer(regs) ((regs)->eip)
+#define user_stack(regs) ((regs)->esp)
 extern void show_regs(struct pt_regs *);
-struct task_struct;
-extern void get_pt_regs_for_task(struct pt_regs *, struct task_struct *p);
 #endif
 
 #endif

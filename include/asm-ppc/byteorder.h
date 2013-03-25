@@ -1,93 +1,96 @@
 #ifndef _PPC_BYTEORDER_H
 #define _PPC_BYTEORDER_H
 
-#ifndef __BIG_ENDIAN
-#define __BIG_ENDIAN
-#endif
+#include <asm/types.h>
+#include <linux/compiler.h>
 
-#ifndef __BIG_ENDIAN_BITFIELD
-#define __BIG_ENDIAN_BITFIELD
-#endif
+#ifdef __GNUC__
+#ifdef __KERNEL__
 
-#if 0 /* Assume PowerPC is Big-Endian! */
-#undef ntohl
-#undef ntohs
-#undef htonl
-#undef htons
-
-extern unsigned long int	ntohl(unsigned long int);
-extern unsigned short int	ntohs(unsigned short int);
-extern unsigned long int	htonl(unsigned long int);
-extern unsigned short int	htons(unsigned short int);
-
-extern unsigned long int	__ntohl(unsigned long int);
-extern unsigned short int	__ntohs(unsigned short int);
-extern unsigned long int	__constant_ntohl(unsigned long int);
-extern unsigned short int	__constant_ntohs(unsigned short int);
-
-extern __inline__ unsigned long int
-__ntohl(unsigned long int x)
+extern __inline__ unsigned ld_le16(const volatile unsigned short *addr)
 {
-	return (((x & 0x000000ffU) << 24) |
-		((x & 0x0000ff00U) <<  8) |
-		((x & 0x00ff0000U) >>  8) |
-		((x & 0xff000000U) >> 24));
+	unsigned val;
+
+	__asm__ __volatile__ ("lhbrx %0,0,%1" : "=r" (val) : "r" (addr), "m" (*addr));
+	return val;
 }
 
-extern __inline__ unsigned long int
-__constant_ntohl(unsigned long int x)
+extern __inline__ void st_le16(volatile unsigned short *addr, const unsigned val)
 {
-	return (((x & 0x000000ffU) << 24) |
-		((x & 0x0000ff00U) <<  8) |
-		((x & 0x00ff0000U) >>  8) |
-		((x & 0xff000000U) >> 24));
+	__asm__ __volatile__ ("sthbrx %1,0,%2" : "=m" (*addr) : "r" (val), "r" (addr));
 }
 
-extern __inline__ unsigned short int
-__ntohs(unsigned short int x)
+extern __inline__ unsigned ld_le32(const volatile unsigned *addr)
 {
-	return (((x & 0x00ff) << 8) |
-		((x & 0xff00) >> 8));
+	unsigned val;
+
+	__asm__ __volatile__ ("lwbrx %0,0,%1" : "=r" (val) : "r" (addr), "m" (*addr));
+	return val;
 }
 
-extern __inline__ unsigned short int
-__constant_ntohs(unsigned short int x)
+extern __inline__ void st_le32(volatile unsigned *addr, const unsigned val)
 {
-	return (((x & 0x00ff) << 8) |
-		((x & 0xff00) >> 8));
+	__asm__ __volatile__ ("stwbrx %1,0,%2" : "=m" (*addr) : "r" (val), "r" (addr));
 }
 
-#define __htonl(x) __ntohl(x)
-#define __htons(x) __ntohs(x)
-#define __constant_htonl(x) __constant_ntohl(x)
-#define __constant_htons(x) __constant_ntohs(x)
+extern __inline__ unsigned long long ld_le64(const volatile unsigned long long *addr)
+{
+	unsigned char *taddr = (unsigned char *) addr;
+	unsigned long long val;
 
-#ifdef  __OPTIMIZE__
-#  define ntohl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_ntohl((x)) : \
- __ntohl((x)))
-#  define ntohs(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_ntohs((x)) : \
- __ntohs((x)))
-#  define htonl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_htonl((x)) : \
- __htonl((x)))
-#  define htons(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_htons((x)) : \
- __htons((x)))
+	__asm__ __volatile__ ("lwbrx %L0,0,%1" : "=r" (val) : "r" (taddr),   "m" (*addr));
+	__asm__ __volatile__ ("lwbrx  %0,0,%1" : "=r" (val) : "r" (taddr+4), "m" (*addr), "0" (val));
+	return val;
+}
+
+extern __inline__ void st_le64(volatile unsigned long long *addr, const unsigned long long val)
+{
+	unsigned char *taddr = (unsigned char *) addr;
+
+	__asm__ __volatile__ ("stwbrx %L1,0,%2" : "=m" (*addr) : "r" (val), "r" (taddr));
+	__asm__ __volatile__ ("stwbrx  %1,0,%2" : "=m" (*addr) : "r" (val), "r" (taddr+4));
+}
+
+static __inline__ __attribute_const__ __u16 ___arch__swab16(__u16 value)
+{
+	__u16 result;
+
+	__asm__("rlwimi %0,%2,8,16,23" : "=&r" (result) : "0" (value >> 8), "r" (value));
+	return result;
+}
+
+static __inline__ __attribute_const__ __u32 ___arch__swab32(__u32 value)
+{
+	__u32 result;
+
+	__asm__("rlwimi %0,%2,24,16,23" : "=&r" (result) : "0" (value>>24), "r" (value));
+	__asm__("rlwimi %0,%2,8,8,15"   : "=&r" (result) : "0" (result),    "r" (value));
+	__asm__("rlwimi %0,%2,24,0,7"   : "=&r" (result) : "0" (result),    "r" (value));
+
+	return result;
+}
+#define __arch__swab32(x) ___arch__swab32(x)
+#define __arch__swab16(x) ___arch__swab16(x)
+
+/* The same, but returns converted value from the location pointer by addr. */
+#define __arch__swab16p(addr) ld_le16(addr)
+#define __arch__swab32p(addr) ld_le32(addr)
+#define __arch__swab64p(addr) ld_le64(addr)
+
+/* The same, but do the conversion in situ, ie. put the value back to addr. */
+#define __arch__swab16s(addr) st_le16(addr,*addr)
+#define __arch__swab32s(addr) st_le32(addr,*addr)
+#define __arch__swab64s(addr) st_le64(addr,*addr)
+
+#endif /* __KERNEL__ */
+
+#if !defined(__STRICT_ANSI__) || defined(__KERNEL__)
+#  define __BYTEORDER_HAS_U64__
+#  define __SWAB_64_THRU_32__
 #endif
 
-#else
+#endif /* __GNUC__ */
 
-#define ntohl(x) (x)
-#define ntohs(x) (x)
-#define htonl(x) (x)
-#define htons(x) (x)
+#include <linux/byteorder/big_endian.h>
 
-#endif
-
-#endif /* !(_PPC_BYTEORDER_H) */
+#endif /* _PPC_BYTEORDER_H */

@@ -1,19 +1,24 @@
-/* $Id: s0box.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * s0box.c      low level stuff for Creatix S0BOX
+/* $Id: s0box.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       S0BOX specific stuff: Enrik Berkhan (enrik@starfleet.inka.de)
+ * low level stuff for Creatix S0BOX
  *
+ * Author       Enrik Berkhan
+ * Copyright    by Enrik Berkhan <enrik@starfleet.inka.de>
+ *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *s0box_revision = "$Revision: 1.1.1.1 $";
+const char *s0box_revision = "$Revision: 1.1.4.1 $";
 
 static inline void
 writereg(unsigned int padr, signed int addr, u_char off, u_char val) {
@@ -148,9 +153,9 @@ WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
 static void
 s0box_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
-#define MAXCOUNT 20
+#define MAXCOUNT 5
 	struct IsdnCardState *cs = dev_id;
-	u_char val, stat = 0;
+	u_char val;
 	int count = 0;
 
 	if (!cs) {
@@ -159,16 +164,12 @@ s0box_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_ISTA);
       Start_HSCX:
-	if (val) {
+	if (val)
 		hscx_int_main(cs, val);
-		stat |= 1;
-	}
 	val = readreg(cs->hw.teles3.cfg_reg, cs->hw.teles3.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val) {
+	if (val)
 		isac_interrupt(cs, val);
-		stat |= 2;
-	}
 	count++;
 	val = readreg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_ISTA);
 	if (val && count < MAXCOUNT) {
@@ -184,16 +185,12 @@ s0box_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	if (count >= MAXCOUNT)
 		printk(KERN_WARNING "S0Box: more than %d loops in s0box_interrupt\n", count);
-	if (stat & 1) {
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[0], HSCX_MASK, 0xFF);
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_MASK, 0xFF);
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[0], HSCX_MASK, 0x0);
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_MASK, 0x0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.isac, ISAC_MASK, 0x0);
-	}
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[0], HSCX_MASK, 0xFF);
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_MASK, 0xFF);
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.isac, ISAC_MASK, 0x0);
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[0], HSCX_MASK, 0x0);
+	writereg(cs->hw.teles3.cfg_reg, cs->hw.teles3.hscx[1], HSCX_MASK, 0x0);
 }
 
 void
@@ -211,9 +208,6 @@ S0Box_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_s0box(cs);
 			break;
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &s0box_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscxisac(cs, 3);
 			break;
@@ -223,8 +217,8 @@ S0Box_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-__initfunc(int
-setup_s0box(struct IsdnCard *card))
+int __init
+setup_s0box(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -266,6 +260,7 @@ setup_s0box(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &S0Box_card_msg;
+	cs->irq_func = &s0box_interrupt;
 	ISACVersion(cs, "S0Box:");
 	if (HscxVersion(cs, "S0Box:")) {
 		printk(KERN_WARNING

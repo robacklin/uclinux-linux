@@ -1,15 +1,15 @@
 /*
  *  linux/arch/h8300/kernel/setup.c
  *
- *  Yoshinori Sato <qzb04471@nifty.ne.jp>
- *
- *  Based on linux/arch/m68knommu/kernel/setup.c
- *
  *  Copyleft  ()) 2000       James D. Schettine {james@telos-systems.com}
- *  Copyright (C) 1999       Greg Ungerer (gerg@moreton.com.au)
- *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@rt-control.com>
+ *  Copyright (C) 1999,2000  Greg Ungerer (gerg@snapgear.com)
+ *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uClinux.org>
  *  Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
  *  Copyright (C) 1995       Hamish Macdonald
+ *  Copyright (C) 2000       Lineo Inc. (www.lineo.com) 
+ *  Copyright (C) 2001 	     Lineo, Inc. <www.lineo.com>
+ *
+ *  H8/300H porting Yoshinori Sato <ysato@users.sourceforge.jp>
  */
 
 /*
@@ -28,6 +28,8 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/major.h>
+#include <linux/bootmem.h>
+#include <linux/seq_file.h>
 
 #include <asm/setup.h>
 #include <asm/irq.h>
@@ -37,62 +39,127 @@
 #include <asm/pgtable.h>
 #endif
 
-extern int console_loglevel;
-#ifdef CONFIG_ROMKERNEL
-extern void *_vector,*_erom;
+#if defined(CONFIG_CPU_H8300H)
+#define CPU "H8/300H"
+#include <asm/regs306x.h>
+#endif
+#if defined(CONFIG_CPU_H8S)
+#define CPU "H8S"
+#include <asm/regs267x.h>
 #endif
 
-/*  conswitchp               = &fb_con;*/
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#endif
+#define STUBSIZE 0xc000;
 
 unsigned long rom_length;
 unsigned long memory_start;
 unsigned long memory_end;
 
-extern char _command_line[512];
-char saved_command_line[512];
-char console_tty[16]="/dev/ttyS0";
+struct task_struct *_current_task;
 
-static void parse_commandline(char *cmdline)
+char command_line[512];
+char saved_command_line[512];
+
+extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end, _erom;
+extern int _ramstart, _ramend;
+extern char _target_name[];
+extern int h8300_gpio_init(void);
+
+#if defined(CONFIG_BLK_DEV_INITRD)
+extern unsigned long initrd_start,initrd_end;
+#endif
+
+#if defined(CONFIG_GDB_EXEC) && defined(CONFIG_GDB_MAGICPRINT)
+/* printk with gdb service */
+static void gdb_console_output(struct console *c, char *msg, unsigned len)
 {
-	while(*cmdline) {
-		if (((*cmdline & 0xdf) == 'C') &&
-		    ((strncmp(cmdline,"CONSOLE=",8) == 0) ||
-                     (strncmp(cmdline,"console=",8) == 0))) {
-			int cnt;
-			char *dev=console_tty;
-			cmdline += 8;
-			while (*cmdline == ' ')
-				cmdline++ ;
-			for (cnt = 0; cnt < sizeof(console_tty)-1; cnt++) {
-				if (*cmdline == '\0') {
-					break ;
-				}
-				*dev++ = *cmdline++ ;
-			}
-			if (cnt>0) 
-				*dev = '\0';
-			break ;
-		}
+	for (; len > 0; len--) {
+		asm("mov.w %0,r2\n\t"
+                    "jsr @0xc4"::"r"(*msg++):"er2");
 	}
 }
 
-void setup_arch(char **cmdline_p,
-		unsigned long * memory_start_p, unsigned long * memory_end_p)
+static kdev_t gdb_console_device(struct console *c)
 {
-	extern int _stext, _etext;
-	extern int _sdata, _edata;
-	extern int _sbss, _ebss, _end;
-	extern int _ramstart, _ramend;
+    	/* TODO: this is totally bogus */
+	/* return MKDEV(SCI_MAJOR, SCI_MINOR_START + c->index); */
+	return 0;
+}
 
-	memory_start = &_end + 512;
-	memory_end = &_ramend - 4096; /* <- stack area */
+/*
+ *	Setup initial baud/bits/parity. We do two things here:
+ *	- construct a cflag setting for the first rs_open()
+ *	- initialize the serial port
+ *	Return non-zero if we didn't find a serial port.
+ */
+static int __init gdb_console_setup(struct console *co, char *options)
+{
+	return 0;
+}
 
-	printk("\x0F\r\n\nuClinux for H8/300H\n");
-	printk("H8/300H Porting by Yoshinori Sato\n");
+static struct console gdb_console = {
+	name:		"gdb",
+	write:		gdb_console_output,
+	device:		gdb_console_device,
+	setup:		gdb_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
+};
+#endif
+
+void __init setup_arch(char **cmdline_p)
+{
+	int bootmap_size;
+	unsigned int blkdev_length = 0;
+
+	memory_start = (unsigned long) &_ramstart;
+#if defined(CONFIG_ROMKERNEL)
+	rom_length = (unsigned long) &_erom;
+#endif
+
+#if defined(CONFIG_BLK_DEV_BLKMEM)
+	/* allow for ROMFS on the end of the kernel */
+	if (memcmp((void *)memory_start, "-rom1fs-", 8) == 0) {
+		blkdev_length = be32_to_cpu(((unsigned long *) (memory_start))[2]);
+#if defined(CONFIG_BLK_DEV_INITRD)
+		initrd_end = memory_start += blkdev_length
+#else
+		memory_start += blkdev_length;
+#endif
+	}
+#endif
+
+	memory_start = PAGE_ALIGN(memory_start);
+	memory_end = (unsigned long) &_ramend; /* by now the stack is part of the init task */
+#if defined(CONFIG_GDB_DEBUG)
+	memory_end -= STUBSIZE;
+#endif
+#if defined(CONFIG_BLKDEV_RESERVE)
+	/* get BLKDEV length */
+	blkdev_length = be32_to_cpu(((unsigned long *) (CONFIG_BLKDEV_RESERVE_ADDRESS))[2]);
+	/* BLKDEV before userarea */
+	if (memory_start < CONFIG_BLKDEV_RESERVE_ADDRESS + blkdev_length)
+		memory_start = CONFIG_BLKDEV_RESERVE_ADDRESS + blkdev_length;
+	/* BLKDEV after userarea */
+	if (memory_end > CONFIG_BLKDEV_RESERVE_ADDRESS)
+		memory_end = CONFIG_BLKDEV_RESERVE_ADDRESS;
+#endif
+
+	init_mm.start_code = (unsigned long) &_stext;
+	init_mm.end_code = (unsigned long) &_etext;
+	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.brk = (unsigned long) 0; 
+
+#if defined(CONFIG_GDB_EXEC) && defined(CONFIG_GDB_MAGICPRINT)
+	register_console(&gdb_console);
+#endif
+
+	printk("\r\nuClinux " CPU "\n");
+	printk("Target Hardware: %s\n", _target_name);
+	printk("H8/300 series support by Yoshinori Sato <ysato@users.sourceforge.jp>\n");
+
 	printk("Flat model support (C) 1998,1999 Kenneth Albanowski, D. Jeff Dionne\n");
+
+
 #ifdef DEBUG
 	printk("KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x "
 		"BSS=0x%06x-0x%06x\n", (int) &_stext, (int) &_etext,
@@ -104,55 +171,99 @@ void setup_arch(char **cmdline_p,
 		(int) memory_start, (int) memory_end,
 		(int) memory_end, (int) &_ramend);
 #endif
-	init_task.mm->start_code = (unsigned long) &_stext;
-	init_task.mm->end_code = (unsigned long) &_etext;
-	init_task.mm->end_data = (unsigned long) &_edata;
-	init_task.mm->brk = (unsigned long) &_end;
 
+#ifdef CONFIG_BLK_DEV_BLKMEM
 	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
+#endif
 
+#ifdef CONFIG_DEFAULT_CMDLINE
+	/* set from default command line */
+	if (*command_line == '\0')
+		strcpy(command_line,CONFIG_KERNEL_COMMAND);
+#endif
 	/* Keep a copy of command line */
-	*cmdline_p = _command_line;
+	*cmdline_p = &command_line[0];
+	memcpy(saved_command_line, command_line, sizeof(saved_command_line));
+	saved_command_line[sizeof(saved_command_line)-1] = 0;
 
 #ifdef DEBUG
 	if (strlen(*cmdline_p)) 
 		printk("Command line: '%s'\n", *cmdline_p);
-	else
-		printk("No Command line passed\n");
 #endif
-	parse_commandline(*cmdline_p);
 
-	*memory_start_p = memory_start;
-
-	*memory_end_p = memory_end;
-#ifdef CONFIG_ROMKERNEL
-	rom_length = (unsigned long)&_erom - (unsigned long)&_vector;
-#endif	
-#ifdef CONFIG_CONSOLE
-	conswitchp = 0;
-#endif
-  
+	/*
+	 * give all the memory to the bootmap allocator,  tell it to put the
+	 * boot mem_map at the start of memory
+	 */
+	bootmap_size = init_bootmem_node(
+			NODE_DATA(0),
+			memory_start >> PAGE_SHIFT, /* map goes here */
+			PAGE_OFFSET >> PAGE_SHIFT,	/* 0 on coldfire */
+			memory_end >> PAGE_SHIFT);
+	/*
+	 * free the usable memory,  we have to make sure we do not free
+	 * the bootmem bitmap so we then reserve it after freeing it :-)
+	 */
+	free_bootmem(memory_start, memory_end - memory_start);
+	reserve_bootmem(memory_start, bootmap_size);
+	/*
+	 * get kmalloc into gear
+	 */
+	paging_init();
+	/*
+ 	 * initalize gpio management
+	 */
+	h8300_gpio_init();
 #ifdef DEBUG
 	printk("Done setup_arch\n");
 #endif
-
 }
 
-int get_cpuinfo(char * buffer)
+/*
+ *	Get CPU information for use by the procfs.
+ */
+
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
-    char *cpu, *mmu, *fpu;
+    char *cpu;
+    int mode;
+    u_long clockfreq;
 
-    cpu = "H8/300H";
-    mmu = "none";
-    fpu = "none";
+    cpu = CPU;
+    mode = *(volatile unsigned char *)MDCR & 0x07;
 
-    return(sprintf(buffer, "CPU:\t\t%s\n"
-		   "MMU:\t\t%s\n"
-		   "FPU:\t\t%s\n"
+    clockfreq = CONFIG_CLK_FREQ;
+
+    seq_printf(m,  "CPU:\t\t%s (mode:%d)\n"
+		   "Clock:\t\t%lu.%1luMHz\n"
 		   "BogoMips:\t%lu.%02lu\n"
 		   "Calibration:\t%lu loops\n",
-		   cpu, mmu, fpu,
-		   loops_per_sec/500000,(loops_per_sec/5000)%100,
-		   loops_per_sec));
+	           cpu,mode,
+		   clockfreq/1000,clockfreq%1000,
+		   (loops_per_jiffy*HZ)/500000,((loops_per_jiffy*HZ)/5000)%100,
+		   (loops_per_jiffy*HZ));
 
+    return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? ((void *) 0x12345678) : NULL;
+}
+
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};

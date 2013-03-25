@@ -1,6 +1,6 @@
 #ifndef _AHA1740_H
 
-/* $Id: aha1740.h,v 1.1.1.1 1999-11-22 03:47:21 christ Exp $
+/* $Id$
  *
  * Header file for the adaptec 1740 driver for Linux
  *
@@ -170,27 +170,19 @@ int aha1740_proc_info(char *buffer, char **start, off_t offset,
 	#define NULL 0
 #endif
 
-extern struct proc_dir_entry proc_scsi_aha1740;
-
-#define AHA1740 {NULL,	NULL,				\
-                   &proc_scsi_aha1740,			\
-		   aha1740_proc_info,	                \
-		   "Adaptec 174x (EISA)",		\
-		   aha1740_detect,			\
-		   NULL,				\
-		   NULL, 				\
-		   aha1740_command,			\
-		   aha1740_queuecommand,		\
-		   aha1740_abort,			\
-		   aha1740_reset,			\
-		   NULL,				\
-		   aha1740_biosparam,                   \
-		   AHA1740_ECBS, 			\
-		   7, 					\
-		   AHA1740_SCATTER, 			\
-		   AHA1740_CMDLUN, 			\
-		   0, 					\
-		   0, 					\
-		   ENABLE_CLUSTERING}
+#define AHA1740 {  proc_name:      "aha1740",				\
+		   proc_info:      aha1740_proc_info,	                \
+		   name:           "Adaptec 174x (EISA)",		\
+		   detect:         aha1740_detect,			\
+		   command:        aha1740_command,			\
+		   queuecommand:   aha1740_queuecommand,		\
+		   abort:          aha1740_abort,			\
+		   reset:          aha1740_reset,			\
+		   bios_param:     aha1740_biosparam,                   \
+		   can_queue:      AHA1740_ECBS, 			\
+		   this_id:        7, 					\
+		   sg_tablesize:   AHA1740_SCATTER, 			\
+		   cmd_per_lun:    AHA1740_CMDLUN, 			\
+		   use_clustering: ENABLE_CLUSTERING}
 
 #endif

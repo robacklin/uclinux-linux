@@ -5,7 +5,7 @@
  */
 
 /*
- * This file handles the architecture-dependent parts of process handling..
+ * This file handles the architecture-dependent parts of process handling.
  */
 
 #include <linux/config.h>
@@ -13,11 +13,12 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/ldt.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/utsname.h>
@@ -26,80 +27,195 @@
 #include <linux/stat.h>
 #include <linux/mman.h>
 #include <linux/elfcore.h>
+#include <linux/reboot.h>
+#include <linux/tty.h>
+#include <linux/console.h>
 
 #include <asm/reg.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/pgtable.h>
+#include <asm/hwrpb.h>
+#include <asm/fpu.h>
 
-asmlinkage int sys_sethae(unsigned long hae, unsigned long a1,
-			  unsigned long a2, unsigned long a3,
-			  unsigned long a4, unsigned long a5,
-	struct pt_regs regs)
+#include "proto.h"
+#include "pci_impl.h"
+
+/*
+ * Initial task structure. Make this a per-architecture thing,
+ * because different architectures tend to have different
+ * alignment requirements and potentially different initial
+ * setup.
+ */
+
+unsigned long init_user_stack[1024] = { STACK_MAGIC, };
+static struct fs_struct init_fs = INIT_FS;
+static struct files_struct init_files = INIT_FILES;
+static struct signal_struct init_signals = INIT_SIGNALS;
+struct mm_struct init_mm = INIT_MM(init_mm);
+
+union task_union init_task_union __attribute__((section("init_task")))
+	 = { task: INIT_TASK(init_task_union.task) };
+
+/*
+ * No need to acquire the kernel lock, we're entirely local..
+ */
+asmlinkage int
+sys_sethae(unsigned long hae, unsigned long a1, unsigned long a2,
+	   unsigned long a3, unsigned long a4, unsigned long a5,
+	   struct pt_regs regs)
 {
 	(&regs)->hae = hae;
 	return 0;
 }
 
-asmlinkage int sys_idle(void)
+void
+cpu_idle(void)
 {
-	if (current->pid != 0)
-		return -EPERM;
-
-	/* endless idle loop with no priority at all */
+	/* An endless idle loop with no priority at all.  */
+	current->nice = 20;
 	current->counter = -100;
-	for (;;) {
+
+	while (1) {
+		/* FIXME -- EV6 and LCA45 know how to power down
+		   the CPU.  */
+
+		/* Although we are an idle CPU, we do not want to 
+		   get into the scheduler unnecessarily.  */
+		long oldval = xchg(&current->need_resched, -1UL);
+		if (!oldval)
+			while (current->need_resched < 0);
 		schedule();
+		check_pgt_cache();
 	}
 }
 
-#include <asm/hwrpb.h>
 
-static void swap_context(struct thread_struct * pcb)
-{
-        __asm__ __volatile__(
-                "bis %0,%0,$16\n\t"
-                "call_pal %1\n\t"
-                : /* no outputs */
-                : "r" (pcb), "i" (PAL_swpctx)
-                : "$0", "$1", "$16", "$22", "$23", "$24", "$25");
-}
+struct halt_info {
+	int mode;
+	char *restart_cmd;
+};
 
-void hard_reset_now(void)
+static void
+common_shutdown_1(void *generic_ptr)
 {
-#if defined(CONFIG_ALPHA_SRM_SETUP)
-	extern void reset_for_srm(void);	
-	extern struct hwrpb_struct *hwrpb;
-	extern struct thread_struct *original_pcb_ptr;
+	struct halt_info *how = (struct halt_info *)generic_ptr;
 	struct percpu_struct *cpup;
-	unsigned long flags;
+	unsigned long *pflags, flags;
+	int cpuid = smp_processor_id();
+
+	/* No point in taking interrupts anymore. */
+	__cli();
 
 	cpup = (struct percpu_struct *)
-	  ((unsigned long)hwrpb + hwrpb->processor_offset);
-	flags = cpup->flags;
-#if 1
-	printk("hard_reset_now: flags 0x%lx\n", flags);
+			((unsigned long)hwrpb + hwrpb->processor_offset
+			 + hwrpb->processor_size * cpuid);
+	pflags = &cpup->flags;
+	flags = *pflags;
+
+	/* Clear reason to "default"; clear "bootstrap in progress". */
+	flags &= ~0x00ff0001UL;
+
+#ifdef CONFIG_SMP
+	/* Secondaries halt here. */
+	if (cpuid != boot_cpuid) {
+		flags |= 0x00040000UL; /* "remain halted" */
+		*pflags = flags;
+		clear_bit(cpuid, &cpu_present_mask);
+		halt();
+	}
 #endif
-	flags &= ~0x0000000000ff0001UL; /* clear reason to "default" */
-	flags |=  0x0000000000020000UL; /* this is "cold bootstrap" */
-/*	flags |=  0x0000000000030000UL; *//* this is "warm bootstrap" */
-/*	flags |=  0x0000000000040000UL; *//* this is "remain halted" */
-	cpup->flags = flags;
-	mb();
-	reset_for_srm();
-	swap_context(original_pcb_ptr);
+
+	if (how->mode == LINUX_REBOOT_CMD_RESTART) {
+		if (!how->restart_cmd) {
+			flags |= 0x00020000UL; /* "cold bootstrap" */
+		} else {
+			/* For SRM, we could probably set environment
+			   variables to get this to work.  We'd have to
+			   delay this until after srm_paging_stop unless
+			   we ever got srm_fixup working.
+
+			   At the moment, SRM will use the last boot device,
+			   but the file and flags will be the defaults, when
+			   doing a "warm" bootstrap.  */
+			flags |= 0x00030000UL; /* "warm bootstrap" */
+		}
+	} else {
+		flags |= 0x00040000UL; /* "remain halted" */
+	}
+	*pflags = flags;
+
+#ifdef CONFIG_SMP
+	/* Wait for the secondaries to halt. */
+	clear_bit(boot_cpuid, &cpu_present_mask);
+	while (cpu_present_mask)
+		barrier();
 #endif
-#if defined(CONFIG_ALPHA_SRM) && defined(CONFIG_ALPHA_ALCOR)
-	/* who said DEC engineer's have no sense of humor? ;-)) */
-	*(int *) GRU_RESET = 0x0000dead;
-	mb();
+
+        /* If booted from SRM, reset some of the original environment. */
+	if (alpha_using_srm) {
+#ifdef CONFIG_DUMMY_CONSOLE
+		/* This has the effect of resetting the VGA video origin.  */
+		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
 #endif
+		pci_restore_srm_config();
+		set_hae(srm_hae);
+	}
+
+	if (alpha_mv.kill_arch)
+		alpha_mv.kill_arch(how->mode);
+
+	if (! alpha_using_srm && how->mode != LINUX_REBOOT_CMD_RESTART) {
+		/* Unfortunately, since MILO doesn't currently understand
+		   the hwrpb bits above, we can't reliably halt the 
+		   processor and keep it halted.  So just loop.  */
+		return;
+	}
+
+	if (alpha_using_srm)
+		srm_paging_stop();
+
 	halt();
 }
 
-void show_regs(struct pt_regs * regs)
+static void
+common_shutdown(int mode, char *restart_cmd)
 {
-	printk("\nps: %04lx pc: [<%016lx>]\n", regs->ps, regs->pc);
+	struct halt_info args;
+	args.mode = mode;
+	args.restart_cmd = restart_cmd;
+#ifdef CONFIG_SMP
+	smp_call_function(common_shutdown_1, &args, 1, 0);
+#endif
+	common_shutdown_1(&args);
+}
+
+void
+machine_restart(char *restart_cmd)
+{
+	common_shutdown(LINUX_REBOOT_CMD_RESTART, restart_cmd);
+}
+
+void
+machine_halt(void)
+{
+	common_shutdown(LINUX_REBOOT_CMD_HALT, NULL);
+}
+
+void
+machine_power_off(void)
+{
+	common_shutdown(LINUX_REBOOT_CMD_POWER_OFF, NULL);
+}
+
+void
+show_regs(struct pt_regs * regs)
+{
+	printk("\n");
+	printk("Pid: %d, comm: %20s\n", current->pid, current->comm);
+	printk("ps: %04lx pc: [<%016lx>] CPU %d    %s\n",
+	       regs->ps, regs->pc, smp_processor_id(), print_tainted());
 	printk("rp: [<%016lx>] sp: %p\n", regs->r26, regs+1);
 	printk(" r0: %016lx  r1: %016lx  r2: %016lx  r3: %016lx\n",
 	       regs->r0, regs->r1, regs->r2, regs->r3);
@@ -118,7 +234,8 @@ void show_regs(struct pt_regs * regs)
 /*
  * Re-start a thread when doing execve()
  */
-void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
+void
+start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 {
 	set_fs(USER_DS);
 	regs->pc = pc;
@@ -129,15 +246,22 @@ void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 /*
  * Free current thread data structures etc..
  */
-void exit_thread(void)
+void
+exit_thread(void)
 {
 }
 
-void flush_thread(void)
+void
+flush_thread(void)
 {
+	/* Arrange for each exec'ed process to start off with a clean slate
+	   with respect to the FPU.  This is all exceptions disabled.  */
+	current->thread.flags &= ~IEEE_SW_MASK;
+	wrfpcr(FPCR_DYN_NORMAL | ieee_swcr_to_fpcr(0));
 }
 
-void release_thread(struct task_struct *dead_task)
+void
+release_thread(struct task_struct *dead_task)
 {
 }
 
@@ -150,15 +274,22 @@ void release_thread(struct task_struct *dead_task)
  * Notice that "fork()" is implemented in terms of clone,
  * with parameters (SIGCHLD, 0).
  */
-int alpha_clone(unsigned long clone_flags, unsigned long usp,
-	struct switch_stack * swstack)
+int
+alpha_clone(unsigned long clone_flags, unsigned long usp,
+	    struct switch_stack * swstack)
 {
 	if (!usp)
 		usp = rdusp();
-	return do_fork(clone_flags, usp, (struct pt_regs *) (swstack+1));
+	return do_fork(clone_flags, usp, (struct pt_regs *) (swstack+1), 0);
 }
 
-extern void ret_from_sys_call(void);
+int
+alpha_vfork(struct switch_stack * swstack)
+{
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, rdusp(),
+			(struct pt_regs *) (swstack+1), 0);
+}
+
 /*
  * Copy an alpha thread..
  *
@@ -169,9 +300,15 @@ extern void ret_from_sys_call(void);
  * Use the passed "regs" pointer to determine how much space we need
  * for a kernel fork().
  */
-void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
-	struct task_struct * p, struct pt_regs * regs)
+
+int
+copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+	    unsigned long unused,
+	    struct task_struct * p, struct pt_regs * regs)
 {
+	extern void ret_from_sys_call(void);
+	extern void ret_from_fork(void);
+
 	struct pt_regs * childregs;
 	struct switch_stack * childstack, *stack;
 	unsigned long stack_offset;
@@ -179,28 +316,30 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack_offset = PAGE_SIZE - sizeof(struct pt_regs);
 	if (!(regs->ps & 8))
 		stack_offset = (PAGE_SIZE-1) & (unsigned long) regs;
-	childregs = (struct pt_regs *) (p->kernel_stack_page + stack_offset);
+	childregs = (struct pt_regs *) (stack_offset + PAGE_SIZE + (long)p);
 		
 	*childregs = *regs;
 	childregs->r0 = 0;
 	childregs->r19 = 0;
-	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.. */
+	childregs->r20 = 1;	/* OSF/1 has some strange fork() semantics.  */
 	regs->r20 = 0;
 	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
-	childstack->r26 = (unsigned long) ret_from_sys_call;
-	p->tss.usp = usp;
-	p->tss.ksp = (unsigned long) childstack;
-	p->tss.pal_flags = 1;	/* set FEN, clear everything else */
-	p->tss.flags = current->tss.flags;
-	p->mm->context = 0;
+	childstack->r26 = (unsigned long) ret_from_fork;
+	p->thread.usp = usp;
+	p->thread.ksp = (unsigned long) childstack;
+	p->thread.pal_flags = 1;	/* set FEN, clear everything else */
+	p->thread.flags = current->thread.flags;
+
+	return 0;
 }
 
 /*
- * fill in the user structure for a core dump..
+ * Fill in the user structure for an ECOFF core dump.
  */
-void dump_thread(struct pt_regs * pt, struct user * dump)
+void
+dump_thread(struct pt_regs * pt, struct user * dump)
 {
 	/* switch stack follows right below pt_regs: */
 	struct switch_stack * sw = ((struct switch_stack *) pt) - 1;
@@ -209,10 +348,12 @@ void dump_thread(struct pt_regs * pt, struct user * dump)
 	dump->start_code  = current->mm->start_code;
 	dump->start_data  = current->mm->start_data;
 	dump->start_stack = rdusp() & ~(PAGE_SIZE - 1);
-	dump->u_tsize = (current->mm->end_code - dump->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk + (PAGE_SIZE - 1) - dump->start_data) >> PAGE_SHIFT;
-	dump->u_ssize =
-	  (current->mm->start_stack - dump->start_stack + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	dump->u_tsize = ((current->mm->end_code - dump->start_code)
+			 >> PAGE_SHIFT);
+	dump->u_dsize = ((current->mm->brk + PAGE_SIZE-1 - dump->start_data)
+			 >> PAGE_SHIFT);
+	dump->u_ssize = (current->mm->start_stack - dump->start_stack
+			 + PAGE_SIZE-1) >> PAGE_SHIFT;
 
 	/*
 	 * We store the registers in an order/format that is
@@ -255,7 +396,57 @@ void dump_thread(struct pt_regs * pt, struct user * dump)
 	memcpy((char *)dump->regs + EF_SIZE, sw->fp, 32 * 8);
 }
 
-int dump_fpu (struct pt_regs * regs, elf_fpregset_t *r)
+/*
+ * Fill in the user structure for a ELF core dump.
+ */
+void
+dump_elf_thread(elf_gregset_t dest, struct pt_regs *pt,
+		struct task_struct *task)
+{
+	/* switch stack follows right below pt_regs: */
+	struct switch_stack * sw = ((struct switch_stack *) pt) - 1;
+
+	dest[ 0] = pt->r0;
+	dest[ 1] = pt->r1;
+	dest[ 2] = pt->r2;
+	dest[ 3] = pt->r3;
+	dest[ 4] = pt->r4;
+	dest[ 5] = pt->r5;
+	dest[ 6] = pt->r6;
+	dest[ 7] = pt->r7;
+	dest[ 8] = pt->r8;
+	dest[ 9] = sw->r9;
+	dest[10] = sw->r10;
+	dest[11] = sw->r11;
+	dest[12] = sw->r12;
+	dest[13] = sw->r13;
+	dest[14] = sw->r14;
+	dest[15] = sw->r15;
+	dest[16] = pt->r16;
+	dest[17] = pt->r17;
+	dest[18] = pt->r18;
+	dest[19] = pt->r19;
+	dest[20] = pt->r20;
+	dest[21] = pt->r21;
+	dest[22] = pt->r22;
+	dest[23] = pt->r23;
+	dest[24] = pt->r24;
+	dest[25] = pt->r25;
+	dest[26] = pt->r26;
+	dest[27] = pt->r27;
+	dest[28] = pt->r28;
+	dest[29] = pt->gp;
+	dest[30] = rdusp();
+	dest[31] = pt->pc;
+
+	/* Once upon a time this was the PS value.  Which is stupid
+	   since that is always 8 for usermode.  Usurped for the more
+	   useful value of the thread's UNIQUE field.  */
+	dest[32] = task->thread.unique;
+}
+
+int
+dump_fpu(struct pt_regs * regs, elf_fpregset_t *r)
 {
 	/* switch stack follows right below pt_regs: */
 	struct switch_stack * sw = ((struct switch_stack *) regs) - 1;
@@ -273,17 +464,53 @@ int dump_fpu (struct pt_regs * regs, elf_fpregset_t *r)
  *
  * Don't do this at home.
  */
-asmlinkage int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
-	unsigned long a3, unsigned long a4, unsigned long a5,
-	struct pt_regs regs)
+asmlinkage int
+sys_execve(char *ufilename, char **argv, char **envp,
+	   unsigned long a3, unsigned long a4, unsigned long a5,
+	   struct pt_regs regs)
 {
 	int error;
-	char * filename;
+	char *filename;
 
-	error = getname((char *) a0, &filename);
-	if (error)
-		return error;
-	error = do_execve(filename, (char **) a1, (char **) a2, &regs);
+	filename = getname(ufilename);
+	error = PTR_ERR(filename);
+	if (IS_ERR(filename))
+		goto out;
+	error = do_execve(filename, argv, envp, &regs);
 	putname(filename);
+out:
 	return error;
+}
+
+/*
+ * These bracket the sleeping functions..
+ */
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched	((unsigned long) scheduling_functions_start_here)
+#define last_sched	((unsigned long) scheduling_functions_end_here)
+
+unsigned long
+get_wchan(struct task_struct *p)
+{
+	unsigned long schedule_frame;
+	unsigned long pc;
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+	/*
+	 * This one depends on the frame size of schedule().  Do a
+	 * "disass schedule" in gdb to find the frame size.  Also, the
+	 * code assumes that sleep_on() follows immediately after
+	 * interruptible_sleep_on() and that add_timer() follows
+	 * immediately after interruptible_sleep().  Ugly, isn't it?
+	 * Maybe adding a wchan field to task_struct would be better,
+	 * after all...
+	 */
+
+	pc = thread_saved_pc(&p->thread);
+	if (pc >= first_sched && pc < last_sched) {
+		schedule_frame = ((unsigned long *)p->thread.ksp)[6];
+		return ((unsigned long *)schedule_frame)[12];
+	}
+	return pc;
 }

@@ -1,56 +1,35 @@
 /*
- * linux/arch/armnommu/kernel/entry-armv.S
+ *  linux/arch/armnommu/kernel/entry-armv.S [Kernel 2.4.x]
  *
- * Copyright (C) 1996 Russell King.
- * ARM700 fix by Matthew Godbolt (linux-user@willothewisp.demon.co.uk)
- *
- * Low-level vector interface routines
- *
- * Note:  there is a StrongARM bug in the STMIA rn, {regs}^ instruction
- * that causes it to save wrong values...  Be aware!
- *	
- * NET+ARM specific modifications subject to:
- *
- * Copyright (C) 2001 NETsilicon, Inc.
- * Copyright (C) 2001 Red Hat, Inc.
- *
- * This software is copyrighted by Red Hat. LICENSEE agrees that
- * it will not delete this copyright notice, trademarks or protective
- * notices from any copy made by LICENSEE.
- *
- * This software is provided "AS-IS" and any express or implied 
- * warranties or conditions, including but not limited to any
- * implied warranties of merchantability and fitness for a particular
- * purpose regarding this software. In no event shall Red Hat
- * be liable for any indirect, consequential, or incidental damages,
- * loss of profits or revenue, loss of use or data, or interruption
- * of business, whether the alleged damages are labeled in contract,
- * tort, or indemnity.
+ *  Copyright (C) 1996,1997,1998 Russell King.
+ *  ARM700 fix by Matthew Godbolt (linux-user@willothewisp.demon.co.uk)
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ *  Low-level vector interface routines
  *
- * author(s) : Joe deBlaquiere
+ *  Note:  there is a StrongARM bug in the STMIA rn, {regs}^ instruction that causes
+ *  it to save wrong values...  Be aware!
+ *
+ * added some NET+ARM code by Joe deBlaquiere  --rp
+ * added S3C3410X and S3C44B0X code by Thomas Eschenbacher <thomas.eschenbacher@gmx.de>
+ * added S3C4510 code by Mac Wang
+ * added S3C4530 code by Arcturus Networks Inc.
+ * added TI TMS320DM270 code by Chee Tim Loh <cheetim_loh@innomedia.com.sg>
+ * added workaround for issue in IRQ handling
+ *     (see http://www.arm.com/support/faqip/3677.html)
+ *     by Thomas Eschenbacher <thomas.eschenbacher@gmx.de>
+ * 
  */
-#include <linux/autoconf.h>
-#include <asm/assembler.h>
-#include <asm/errno.h>
-#include <asm/hardware.h>
-
-#ifdef	CONFIG_ARCH_NETARM
-#include <asm/arch/netarm_registers.h>
-#endif
-
-#define current current_set
+#include <linux/config.h>
+#include "entry-header.S"
 
 #ifdef IOC_BASE
 /* IOC / IOMD based hardware */
+#include <asm/hardware/iomd.h>
+
 		.equ	ioc_base_high, IOC_BASE & 0xff000000
 		.equ	ioc_base_low, IOC_BASE & 0x00ff0000
 		.macro	disable_fiq
@@ -61,43 +40,57 @@
 		strb	r12, [r12, #0x38]	@ Disable FIQ register
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
 		mov	r4, #ioc_base_high		@ point at IOC
 		.if	ioc_base_low
 		orr	r4, r4, #ioc_base_low
 		.endif
-		ldrb	\irqnr, [r4, #0x24]		@ get high priority first
-		adr	\base, irq_prio_h
-		teq	\irqnr, #0
+		ldrb	\irqstat, [r4, #IOMD_IRQREQB]	@ get high priority first
+		ldr	\base, =irq_prio_h
+		teq	\irqstat, #0
 #ifdef IOMD_BASE
-		ldreqb	\irqnr, [r4, #0x1f4]		@ get dma
-		adreq	\base, irq_prio_d
-		teqeq	\irqnr, #0
+		ldreqb	\irqstat, [r4, #IOMD_DMAREQ]	@ get dma
+		addeq	\base, \base, #256		@ irq_prio_h table size
+		teqeq	\irqstat, #0
+		bne	2406f
 #endif
-		ldreqb	\irqnr, [r4, #0x14]		@ get low priority
-		adreq	\base, irq_prio_l
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQA]	@ get low priority
+		addeq	\base, \base, #256		@ irq_prio_d table size
+		teqeq	\irqstat, #0
+#ifdef IOMD_IRQREQC
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQC]
+		addeq	\base, \base, #256		@ irq_prio_l table size
+		teqeq	\irqstat, #0
+#endif
+#ifdef IOMD_IRQREQD
+		ldreqb	\irqstat, [r4, #IOMD_IRQREQD]
+		addeq	\base, \base, #256		@ irq_prio_lc table size
+		teqeq	\irqstat, #0
+#endif
+2406:		ldrneb	\irqnr, [\base, \irqstat]	@ get IRQ number
 		.endm
 
 /*
- * Interrupt table (incorporates priority)
+ * Interrupt table (incorporates priority).  Please note that we
+ * rely on the order of these tables (see above code).
  */
 		.macro	irq_prio_table
-irq_prio_l:	.byte	 0, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 4, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	12, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
 #ifdef IOMD_BASE
 irq_prio_d:	.byte	 0,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
@@ -116,121 +109,949 @@ irq_prio_d:	.byte	 0,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
 #endif
-irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	12, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	14,14,14,14,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	15,15,15,15,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
-		.byte	13,13,13,13,10,10,10,10,11,11,11,11,10,10,10,10
+irq_prio_l:	.byte	 0, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 4, 0, 1, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 6, 6, 6, 6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 3, 3, 3
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+		.byte	 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+#ifdef IOMD_IRQREQC
+irq_prio_lc:	.byte	24,24,25,24,26,26,26,26,27,27,27,27,27,27,27,27
+		.byte	28,24,25,24,26,26,26,26,27,27,27,27,27,27,27,27
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	30,30,30,30,30,30,30,30,27,27,27,27,27,27,27,27
+		.byte	30,30,30,30,30,30,30,30,27,27,27,27,27,27,27,27
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	29,29,29,29,29,29,29,29,29,29,29,29,29,29,29,29
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+		.byte	31,31,31,31,31,31,31,31,31,31,31,31,31,31,31,31
+#endif
+#ifdef IOMD_IRQREQD
+irq_prio_ld:	.byte	40,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
+		.byte	44,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	46,46,46,46,46,46,46,46,43,43,43,43,43,43,43,43
+		.byte	46,46,46,46,46,46,46,46,43,43,43,43,43,43,43,43
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+		.byte	47,47,47,47,47,47,47,47,47,47,47,47,47,47,47,47
+#endif
 		.endm
 
 #elif defined(CONFIG_ARCH_EBSA110)
 
+#define IRQ_STAT		0xff000000	/* read */
+
 		.macro	disable_fiq
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
-		mov	r4, #0xf3000000
-		ldrb	\irqnr, [r4]			@ get interrupts
-		adr	\base, irq_prio_ebsa110
+		.macro	get_irqnr_and_base, irqnr, stat, base, tmp
+		mov	\base, #IRQ_STAT
+		ldrb	\stat, [\base]			@ get interrupts
+		mov	\irqnr, #0
+		tst	\stat, #15
+		addeq	\irqnr, \irqnr, #4
+		moveq	\stat, \stat, lsr #4
+		tst	\stat, #3
+		addeq	\irqnr, \irqnr, #2
+		moveq	\stat, \stat, lsr #2
+		tst	\stat, #1
+		addeq	\irqnr, \irqnr, #1
+		moveq	\stat, \stat, lsr #1
+		tst	\stat, #1			@ bit 0 should be set
 		.endm
 
 		.macro	irq_prio_table
-irq_prio_ebsa110:
-		.byte	 0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 4, 4, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 5, 5, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 5, 5, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-
-		.byte	 7, 0, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 4, 4, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 5, 5, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-		.byte	 5, 5, 1, 1, 2, 2, 2, 2, 3, 3, 1, 1, 2, 2, 2, 2
-
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
-		.byte	 6, 6, 6, 6, 2, 2, 2, 2, 3, 3, 6, 6, 2, 2, 2, 2
 		.endm
 
-#elif defined(CONFIG_ARCH_TRIO)
+#elif defined(CONFIG_ARCH_SHARK)
 
 		.macro	disable_fiq
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
-		ldr r4, =AIC_IVR
-		ldr	\irqnr, [r4]			@ get interrupts
-		bic	\irqnr, \irqnr, #0xffffffe0
-		adr	\base, irq_prio_trio
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	r4, #0xe0000000
+		orr	r4, r4, #0x20
+
+		mov	\irqstat, #0x0C
+		strb	\irqstat, [r4]			@outb(0x0C, 0x20) /* Poll command */
+		ldrb	\irqnr, [r4]			@irq = inb(0x20) & 7
+		and	\irqstat, \irqnr, #0x80
+		teq	\irqstat, #0
+		beq	43f
+		and	\irqnr, \irqnr, #7
+		teq	\irqnr, #2
+		bne	44f
+43:		mov	\irqstat, #0x0C
+		strb	\irqstat, [r4, #0x80]		@outb(0x0C, 0xA0) /* Poll command */
+		ldrb	\irqnr, [r4, #0x80]		@irq = (inb(0xA0) & 7) + 8
+		and	\irqstat, \irqnr, #0x80
+		teq	\irqstat, #0
+		beq	44f
+		and	\irqnr, \irqnr, #7
+		add	\irqnr, \irqnr, #8
+44:		teq	\irqstat, #0
 		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_FOOTBRIDGE)
+#include <asm/hardware/dec21285.h>
+
+		.macro	disable_fiq
+		.endm
+
+		.equ	dc21285_high, ARMCSR_BASE & 0xff000000
+		.equ	dc21285_low, ARMCSR_BASE & 0x00ffffff
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	r4, #dc21285_high
+		.if	dc21285_low
+		orr	r4, r4, #dc21285_low
+		.endif
+		ldr	\irqstat, [r4, #0x180]		@ get interrupts
+
+		mov	\irqnr, #IRQ_SDRAMPARITY
+		tst	\irqstat, #IRQ_MASK_SDRAMPARITY
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_UART_RX
+		movne	\irqnr, #IRQ_CONRX
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_DMA1
+		movne	\irqnr, #IRQ_DMA1
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_DMA2
+		movne	\irqnr, #IRQ_DMA2
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_IN0
+		movne	\irqnr, #IRQ_IN0
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_IN1
+		movne	\irqnr, #IRQ_IN1
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_IN2
+		movne	\irqnr, #IRQ_IN2
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_IN3
+		movne	\irqnr, #IRQ_IN3
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_PCI
+		movne	\irqnr, #IRQ_PCI
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_DOORBELLHOST
+		movne	\irqnr, #IRQ_DOORBELLHOST
+		bne     1001f
+	
+		tst	\irqstat, #IRQ_MASK_I2OINPOST
+		movne	\irqnr, #IRQ_I2OINPOST
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_TIMER1
+		movne	\irqnr, #IRQ_TIMER1
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_TIMER2
+		movne	\irqnr, #IRQ_TIMER2
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_TIMER3
+		movne	\irqnr, #IRQ_TIMER3
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_UART_TX
+		movne	\irqnr, #IRQ_CONTX
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_PCI_ABORT
+		movne	\irqnr, #IRQ_PCI_ABORT
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_PCI_SERR
+		movne	\irqnr, #IRQ_PCI_SERR
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_DISCARD_TIMER
+		movne	\irqnr, #IRQ_DISCARD_TIMER
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_PCI_DPERR
+		movne	\irqnr, #IRQ_PCI_DPERR
+		bne	1001f
+
+		tst	\irqstat, #IRQ_MASK_PCI_PERR
+		movne	\irqnr, #IRQ_PCI_PERR
+1001:
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_NEXUSPCI)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\irqstat, =INTCONT_BASE
+		ldr	\base, =soft_irq_mask
+		ldr	\irqstat, [\irqstat]		@ get interrupts
+		ldr	\base, [\base]
+		mov	\irqnr, #0
+		and	\irqstat, \irqstat, \base	@ mask out disabled ones
+1001:		tst	\irqstat, #1
+		addeq	\irqnr, \irqnr, #1
+		moveq	\irqstat, \irqstat, lsr #1
+		tsteq	\irqnr, #32
+		beq	1001b
+		teq	\irqnr, #32
+		.endm
+
+		.macro	irq_prio_table
+		.ltorg
+		.bss
+ENTRY(soft_irq_mask)
+		.word	0
+		.text
+		.endm
+
+#elif defined(CONFIG_ARCH_TBOX)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\irqstat, =0xffff7000
+		ldr	\irqstat, [\irqstat]		@ get interrupts
+		ldr	\base, =soft_irq_mask
+		ldr	\base, [\base]
+		mov	\irqnr, #0
+		and	\irqstat, \irqstat, \base	@ mask out disabled ones
+1001:		tst	\irqstat, #1
+		addeq	\irqnr, \irqnr, #1
+		moveq	\irqstat, \irqstat, lsr #1
+		tsteq	\irqnr, #32
+		beq	1001b
+		teq	\irqnr, #32
+		.endm
+
+		.macro	irq_prio_table
+		.ltorg
+		.bss
+ENTRY(soft_irq_mask)
+		.word	0
+		.text
+		.endm
+
+#elif defined(CONFIG_ARCH_SA1100)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	r4, #0xfa000000			@ ICIP = 0xfa050000
+		add	r4, r4, #0x00050000
+		ldr	\irqstat, [r4]			@ get irqs
+		ldr	\irqnr, [r4, #4]		@ ICMR = 0xfa050004
+		ands	\irqstat, \irqstat, \irqnr
+		mov	\irqnr, #0
+		beq	1001f
+		tst	\irqstat, #0xff
+		moveq	\irqstat, \irqstat, lsr #8
+		addeq	\irqnr, \irqnr, #8
+		tsteq	\irqstat, #0xff
+		moveq	\irqstat, \irqstat, lsr #8
+		addeq	\irqnr, \irqnr, #8
+		tsteq	\irqstat, #0xff
+		moveq	\irqstat, \irqstat, lsr #8
+		addeq	\irqnr, \irqnr, #8
+		tst	\irqstat, #0x0f
+		moveq	\irqstat, \irqstat, lsr #4
+		addeq	\irqnr, \irqnr, #4
+		tst	\irqstat, #0x03
+		moveq	\irqstat, \irqstat, lsr #2
+		addeq	\irqnr, \irqnr, #2
+		tst	\irqstat, #0x01
+		addeqs	\irqnr, \irqnr, #1
+1001:
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_L7200)
+	
+		.equ	irq_base_addr,	IO_BASE_2
+
+		.macro  disable_fiq
+		.endm
+ 
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov     \irqstat, #irq_base_addr		@ Virt addr IRQ regs
+		add	\irqstat, \irqstat, #0x00001000		@ Status reg
+		ldr     \irqstat, [\irqstat, #0]		@ get interrupts
+		mov     \irqnr, #0
+1001:		tst     \irqstat, #1
+		addeq   \irqnr, \irqnr, #1
+		moveq   \irqstat, \irqstat, lsr #1
+		tsteq   \irqnr, #32
+		beq     1001b
+		teq     \irqnr, #32
+		.endm
+
+		.macro  irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_INTEGRATOR)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+/* FIXME: should not be using soo many LDRs here */
+		ldr	\irqnr, =IO_ADDRESS(INTEGRATOR_IC_BASE)
+		ldr	\irqstat, [\irqnr, #IRQ_STATUS]		@ get masked status
+		ldr	\irqnr, =IO_ADDRESS(INTEGRATOR_HDR_BASE)
+		ldr	\irqnr, [\irqnr, #(INTEGRATOR_HDR_IC_OFFSET+IRQ_STATUS)]
+		orr	\irqstat, \irqstat, \irqnr, lsl #INTEGRATOR_CM_INT0
+
+		mov	\irqnr, #0
+1001:		tst	\irqstat, #1
+		bne	1002f
+		add	\irqnr, \irqnr, #1
+		mov	\irqstat, \irqstat, lsr #1
+		cmp	\irqnr, #22
+		bcc	1001b
+1002:		/* EQ will be set if we reach 22 */
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_CLPS711X)
+
+#include <asm/hardware/clps7111.h>
+
+		.macro	disable_fiq
+		.endm
+
+#if (INTSR2 - INTSR1) != (INTMR2 - INTMR1)
+#error INTSR stride != INTMR stride
+#endif
+
+		.macro	get_irqnr_and_base, irqnr, stat, base, mask
+		mov	\base, #CLPS7111_BASE
+		ldr	\stat, [\base, #INTSR1]
+		ldr	\mask, [\base, #INTMR1]
+		mov	\irqnr, #4
+		mov	\mask, \mask, lsl #16
+		and	\stat, \stat, \mask, lsr #16
+		movs	\stat, \stat, lsr #4
+		bne	1001f
+
+		add	\base, \base, #INTSR2 - INTSR1
+		ldr	\stat, [\base, #INTSR1]
+		ldr	\mask, [\base, #INTMR1]
+		mov	\irqnr, #16
+		mov	\mask, \mask, lsl #16
+		and	\stat, \stat, \mask, lsr #16
+
+1001:		tst	\stat, #255
+		addeq	\irqnr, \irqnr, #8
+		moveq	\stat, \stat, lsr #8
+		tst	\stat, #15
+		addeq	\irqnr, \irqnr, #4
+		moveq	\stat, \stat, lsr #4
+		tst	\stat, #3
+		addeq	\irqnr, \irqnr, #2
+		moveq	\stat, \stat, lsr #2
+		tst	\stat, #1
+		addeq	\irqnr, \irqnr, #1
+		moveq	\stat, \stat, lsr #1
+		tst	\stat, #1			@ bit 0 should be set
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_ANAKIN)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	\base, #IO_BASE
+		mov	\irqstat, #INTERRUPT_CONTROLLER
+		ldr	\tmp, =anakin_irq_mask
+		ldr	\irqstat, [\base, \irqstat]
+		ldr	\tmp, [\tmp]
+		ands	\irqstat, \irqstat, \tmp
+		ldrne	\tmp, =anakin_active_irqs
+		strne	\irqstat, [\tmp]
+		movne	\irqnr, #IRQ_ANAKIN
+		.endm
+
+		.macro	irq_prio_table
+		.ltorg
+		.bss
+ENTRY(anakin_irq_mask)
+		.word	0
+ENTRY(anakin_active_irqs)
+		.space	4
+		.text
+		.endm
+
+#elif defined(CONFIG_ARCH_CNXT)
+
+		.macro	disable_fiq
+		.endm
+
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+
+#ifdef CONFIG_ARCH_P52
+	
+		ldr	r4, =P52INT_STATUS_M	
+		ldr	\irqstat, [r4]
+
+
+		tst	\irqstat, #P52INT_MASK_TIMER_1 
+		movne	\irqnr, #P52INT_LVL_TIMER_1
+		bne	1001f
+	
+		tst	\irqstat, #P52INT_MASK_TIMER_2
+		movne	\irqnr, #P52INT_LVL_TIMER_2
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_TIMER_3
+		movne	\irqnr, #P52INT_LVL_TIMER_3
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_TIMER_4
+		movne	\irqnr, #P52INT_LVL_TIMER_4
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_USB 
+		movne	\irqnr, #P52INT_LVL_USB 
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_HOST
+		movne	\irqnr, #P52INT_LVL_HOST
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_HOST_ERR
+		movne	\irqnr, #P52INT_LVL_HOST_ERR
+		bne	1001f
+	
+		tst	\irqstat, #P52INT_MASK_DMA8 
+		movne	\irqnr, #P52INT_LVL_DMA8 
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DMA6
+		movne	\irqnr, #P52INT_LVL_DMA6
+		bne     1001f
+	
+		tst	\irqstat, #P52INT_MASK_DMA5
+		movne	\irqnr, #P52INT_LVL_DMA5
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DMA4
+		movne	\irqnr, #P52INT_LVL_DMA4
+		bne	1001f
+	
+		tst	\irqstat, #P52INT_MASK_DMA3
+		movne	\irqnr, #P52INT_LVL_DMA3
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DMA2
+		movne	\irqnr, #P52INT_LVL_DMA2
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DMA1
+		movne	\irqnr, #P52INT_LVL_DMA1
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DMA_ERR 
+		movne	\irqnr, #P52INT_LVL_DMA_ERR 
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_E2_ERR
+		movne	\irqnr, #P52INT_LVL_E2_ERR
+		bne	1001f
+       
+		tst	\irqstat, #P52INT_MASK_E1_ERR 
+		movne	\irqnr, #P52INT_LVL_E1_ERR 
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_DSL
+		movne	\irqnr, #P52INT_LVL_DSL
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_GPIO 
+		movne	\irqnr, #P52INT_LVL_GPIO 
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_COMMTX
+		movne	\irqnr, #P52INT_LVL_COMMTX
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_COMMRX
+		movne	\irqnr, #P52INT_LVL_COMMRX
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_SW1 
+		movne	\irqnr, #P52INT_LVL_SW1
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_SW2
+		movne	\irqnr, #P52INT_LVL_SW2
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_SW3
+		movne	\irqnr, #P52INT_LVL_SW3
+		bne	1001f
+
+		tst	\irqstat, #P52INT_MASK_SW4
+		movne	\irqnr, #P52INT_LVL_SW4
+
+	
+1001:
+
+#endif
+
+#ifdef CONFIG_ARCH_CX821XX
+	
+		ldr	r4, =CNXT_INT_STATUS_M	
+		ldr	\irqstat, [r4]
+
+
+		tst	\irqstat, #CNXT_INT_MASK_TIMER_1 
+		movne	\irqnr, #CNXT_INT_LVL_TIMER_1
+		bne	1001f
+	
+		tst	\irqstat, #CNXT_INT_MASK_TIMER_2
+		movne	\irqnr, #CNXT_INT_LVL_TIMER_2
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_TIMER_3
+		movne	\irqnr, #CNXT_INT_LVL_TIMER_3
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_TIMER_4
+		movne	\irqnr, #CNXT_INT_LVL_TIMER_4
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_USB 
+		movne	\irqnr, #CNXT_INT_LVL_USB 
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_HOST
+		movne	\irqnr, #CNXT_INT_LVL_HOST
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_HOST_ERR
+		movne	\irqnr, #CNXT_INT_LVL_HOST_ERR
+		bne	1001f
+	
+		tst	\irqstat, #CNXT_INT_MASK_DMA8 
+		movne	\irqnr, #CNXT_INT_LVL_DMA8 
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DMA6
+		movne	\irqnr, #CNXT_INT_LVL_DMA6
+		bne     1001f
+	
+		tst	\irqstat, #CNXT_INT_MASK_DMA5
+		movne	\irqnr, #CNXT_INT_LVL_DMA5
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DMA4
+		movne	\irqnr, #CNXT_INT_LVL_DMA4
+		bne	1001f
+	
+		tst	\irqstat, #CNXT_INT_MASK_DMA3
+		movne	\irqnr, #CNXT_INT_LVL_DMA3
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DMA2
+		movne	\irqnr, #CNXT_INT_LVL_DMA2
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DMA1
+		movne	\irqnr, #CNXT_INT_LVL_DMA1
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DMA_ERR 
+		movne	\irqnr, #CNXT_INT_LVL_DMA_ERR 
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_E2_ERR
+		movne	\irqnr, #CNXT_INT_LVL_E2_ERR
+		bne	1001f
+       
+		tst	\irqstat, #CNXT_INT_MASK_E1_ERR 
+		movne	\irqnr, #CNXT_INT_LVL_E1_ERR 
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_DSL
+		movne	\irqnr, #CNXT_INT_LVL_DSL
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_GPIO 
+		movne	\irqnr, #CNXT_INT_LVL_GPIO 
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_COMMTX
+		movne	\irqnr, #CNXT_INT_LVL_COMMTX
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_COMMRX
+		movne	\irqnr, #CNXT_INT_LVL_COMMRX
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_SW1 
+		movne	\irqnr, #CNXT_INT_LVL_SW1
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_SW2
+		movne	\irqnr, #CNXT_INT_LVL_SW2
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_SW3
+		movne	\irqnr, #CNXT_INT_LVL_SW3
+		bne	1001f
+
+		tst	\irqstat, #CNXT_INT_MASK_SW4
+		movne	\irqnr, #CNXT_INT_LVL_SW4
+
+	
+1001:
+
+#endif
+
+#ifdef CONFIG_ARCH_SPIPE
+		@
+		@ not been tested 
+		@	
+		ldr	r4, =0x350044
+		ldr	\irqnr, [r4]	
 		
-		.macro	irq_prio_table
-irq_prio_trio:
-		.byte   0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+		mov r5,#0
+icloopusr:
+		cmp r5,#31
+		ble icshftusr
+		b icendusr
+icshftusr:
+		mov r4,r6,lsr r5		@ shift untill we get one
+		and r0,r4,#1			@ int priority is in the status
+		cmp r0,#0
+		beq incicusr
+		b icendusr
+incicusr:
+		add r5,r5,#1
+		b icloopusr
+		
+icendusr:		 
+		mov	r0, r5
+#endif
+
 		.endm
 
+		.macro	irq_prio_table
+		.endm
+	
 #elif defined(CONFIG_ARCH_ATMEL)
 
 		.macro	disable_fiq
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
 		ldr	r4, =AIC_IVR
-		ldr	\irqnr, [r4]			@ get interrupts
-		bic	\irqnr, \irqnr, #0xffffffe0
-		ldr     r0, =AIC_IMR
-		ldr	r1, [r0]
-		mov 	r4, \irqnr
-		mov	r0, #1
-		ands 	r0, r1, r0, lsl r4
-		bne	1f	
-		mov 	\irqnr, #0
-1:
-		adr	\base, irq_prio_atmel
+		ldr	\irqnr, [r4]		@ignore value
+		ldr	r4, =AIC_ISR		@read interrupt nr.
+		ldr	\irqnr, [r4]
+		teq	\irqnr, #0
 		.endm
-		
+
 		.macro	irq_prio_table
-irq_prio_atmel:
-		.byte   0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
 		.endm
 
-#elif defined(CONFIG_ARCH_NETARM)
+#elif defined(CONFIG_ARCH_LPC)
+		.macro	disable_fiq
+		.endm
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+#if 0
+		ldr	r4, =VIC_AR
+		ldr	\irqnr, [r4]
+		ldr r4, =VIC_ISR
+		ldr \irqstat, [r4]
+		teq	\irqstat, #0
+#endif
+                ldr	r4, =VIC_ISR
+                ldr	r4, [r4]
+		mov     \irqstat, r4
 
+                mov     \irqnr, #0
+                tst     r4, #0x00000001
+                BNE     .+30*4*3+8
+
+                mov     \irqnr, #1
+                tst     r4, #0x00000002
+                BNE     .+29*4*3+8
+
+                mov     \irqnr, #2
+                tst     r4, #0x00000004
+                BNE     .+28*4*3+8
+
+                mov     \irqnr, #3
+                tst     r4, #0x00000008
+                BNE     .+27*4*3+8
+
+                mov     \irqnr, #4
+                tst     r4, #0x00000010
+                BNE     .+26*4*3+8
+
+                mov     \irqnr, #5
+                tst     r4, #0x00000020
+                BNE     .+25*4*3+8
+
+                mov     \irqnr, #6
+                tst     r4, #0x00000040
+                BNE     .+24*4*3+8
+
+                mov     \irqnr, #7
+                tst     r4, #0x00000080
+                BNE     .+23*4*3+8
+
+                mov     \irqnr, #8
+                tst     r4, #0x00000100
+                BNE     .+22*4*3+8
+
+                mov     \irqnr, #9
+                tst     r4, #0x00000200
+                BNE     .+21*4*3+8
+
+                mov     \irqnr, #10
+                tst     r4, #0x00000400
+                BNE     .+20*4*3+8
+
+                mov     \irqnr, #11
+                tst     r4, #0x00000800
+                BNE     .+19*4*3+8
+
+                mov     \irqnr, #12
+                tst     r4, #0x00001000
+                BNE     .+18*4*3+8
+
+                mov     \irqnr, #13
+                tst     r4, #0x00002000
+                BNE     .+17*4*3+8
+
+                mov     \irqnr, #14
+                tst     r4, #0x00004000
+                BNE     .+16*4*3+8
+
+                mov     \irqnr, #15
+                tst     r4, #0x00008000
+                BNE     .+15*4*3+8
+
+                mov     \irqnr, #16
+                tst     r4, #0x00010000
+                BNE     .+14*4*3+8
+
+                mov     \irqnr, #17
+                tst     r4, #0x00020000
+                BNE     .+13*4*3+8
+
+                mov     \irqnr, #18
+                tst     r4, #0x00040000
+                BNE     .+12*4*3+8
+
+                mov     \irqnr, #19
+                tst     r4, #0x00080000
+                BNE     .+11*4*3+8
+
+                mov     \irqnr, #20
+                tst     r4, #0x00100000
+                BNE     .+10*4*3+8
+
+                mov     \irqnr, #21
+                tst     r4, #0x00200000
+                BNE     .+9*4*3+8
+
+                mov     \irqnr, #22
+                tst     r4, #0x00400000
+                BNE     .+8*4*3+8
+
+                mov     \irqnr, #23
+                tst     r4, #0x00800000
+                BNE     .+7*4*3+8
+
+                mov     \irqnr, #24
+                tst     r4, #0x01000000
+                BNE     .+6*4*3+8
+
+                mov     \irqnr, #25
+                tst     r4, #0x02000000
+                BNE     .+5*4*3+8
+
+                mov     \irqnr, #26
+                tst     r4, #0x04000000
+                BNE     .+4*4*3+8
+
+                mov     \irqnr, #27
+                tst     r4, #0x08000000
+                BNE     .+3*4*3+8
+
+                mov     \irqnr, #28
+                tst     r4, #0x10000000
+                BNE     .+2*4*3+8
+
+                mov     \irqnr, #29
+                tst     r4, #0x20000000
+                BNE     .+1*4*3+8
+
+                mov     \irqnr, #30
+                tst     r4, #0x40000000
+                BNE     .+0*4*3+8
+
+                mov     \irqnr, #31
+
+
+		.endm
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_MACH_EB67XDIP)
 		.macro	disable_fiq
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
-		ldr 	\irqnr, =(NETARM_GEN_MODULE_BASE+NETARM_GEN_INTR_STATUS_EN)
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		@@ldr	\base, = 0xb7b00000
+		@@mov	\tmp, #'i'
+		@@strb	\tmp, [ \base, # 0 ]
+		
+		ldr	\base, =OKI_IRQ		@read interrupt nr.
+		ldr	\irqnr, [ \base, #OKI_IRN - OKI_IRQ]
+		teq	\irqnr, #0
+		ldreq	\tmp, [ \base, #OKI_IRQ - OKI_IRQ ]
+		teqeq	\tmp, #0
 
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_MACH_EB67XDIP)
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		@@ldr	\base, = 0xb7b00000
+		@@mov	\tmp, #'i'
+		@@strb	\tmp, [ \base, # 0 ]
+		
+		ldr	\base, =OKI_IRQ		@read interrupt nr.
+		ldr	\irqnr, [ \base, #OKI_IRN - OKI_IRQ]
+		teq	\irqnr, #0
+		ldreq	\tmp, [ \base, #OKI_IRQ - OKI_IRQ ]
+		teqeq	\tmp, #0
+
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_TA7S) || defined(CONFIG_ARCH_TA7V)
+#include <asm/arch/arch.h>
+
+		.macro	disable_fiq
+		mrs	r13, spsr
+		orr	r13, r13, #F_BIT
+		msr	spsr_c, r13
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, stat, base, temp
+		ldr 	\irqnr, =INT_IRQ_STATUS_REG
 
 		ldr	\base, [\irqnr, #0]	@ stash ISTATUS
 		mov	\irqnr, #0
-1:		
-		cmp	\base, #0		@ no flags set ??? 
-		beq	2f
-		tst	\base, #1		@ lsb set ??? 
+1001:		
+		cmp	\base, #0		@ no flags set?
+		beq	1002f			@ keep "eq" status when finishing!
+		tst	\base, #1		@ lsb set?
 		addeq	\irqnr, \irqnr, #1	@ if not, incr IRQ#
 		moveq	\base, \base, LSR #1	@ r = r >> 1 
-		beq	1b
-2:
-		cmp	\irqnr, #32		@ IRQ# too big ???
+		beq	1001b
+1002:
+		adr	\base, irq_prio_ta7
+		.endm
+		
+		.macro	irq_prio_table
+irq_prio_ta7:
+		.byte   0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+		.byte   16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+		.endm
+
+#elif defined(CONFIG_ARCH_NETARM)
+#include <asm/arch/netarm_gen_module.h>
+
+		.macro	disable_fiq
+		mrs	r13, spsr
+		orr	r13, r13, #F_BIT
+		msr	spsr_c, r13
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, stat, base, temp
+		ldr 	\irqnr, =(NETARM_GEN_MODULE_BASE+NETARM_GEN_INTR_STATUS_EN)
+
+		ldr	\base, [\irqnr, #0]	@ stash ISTATUS
+		mov	\irqnr, #0
+1001:		
+		cmp	\base, #0		@ no flags set?
+		beq	1002f			@ keep "eq" status when finishing!
+		tst	\base, #1		@ lsb set?
+		addeq	\irqnr, \irqnr, #1	@ if not, incr IRQ#
+		moveq	\base, \base, LSR #1	@ r = r >> 1 
+		beq	1001b
+
+		cmp	\irqnr, #32		@ IRQ# too big?
 		blge	_netarm_led_FAIL2
+1002:
 		adr	\base, irq_prio_netarm
 		.endm
 		
@@ -240,526 +1061,424 @@ irq_prio_netarm:
 		.byte   16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
 		.endm
 
-#elif defined(CONFIG_ARCH_GBA)
+#elif defined(CONFIG_CPU_S3C4510) || defined(CONFIG_CPU_S3C4530)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\base, =INTOSET_IRQ
+		ldr	\irqnr, [\base]
+		mov	\irqnr, \irqnr, lsr #2
+		teq	\irqnr, #NR_IRQS
+		.endm
+
+		.macro irq_prio_table
+		.endm
+
+#elif defined(CONFIG_CPU_S3C2500)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\base, =INTOFFSET_IRQ
+		ldr	\irqnr, [\base]
+		teq	\irqnr, #NR_IRQS
+		.endm
+
+		.macro irq_prio_table
+		.endm
+
+
+#elif defined(CONFIG_CPU_S3C3410)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		
+		ldr	\irqstat, =.LCintpnd	@ load address of interrupt pending
+		ldr	\irqstat, [\irqstat]	@ register INTPND
+		ldr	\irqnr, [\irqstat]	@ \irqnr = INTPND
+		add	\irqstat, \irqstat, #(S3C3410X_INTMSK-S3C3410X_INTPND)
+		ldr	\irqstat, [\irqstat]	@ \irqstat = INTMSK
+		and	\irqstat, \irqnr, \irqstat @ \irqstat = (INTPND & INTMSK)
+
+		mov     \irqnr, #0
+1001:
+		tst     \irqstat, #1
+		bne     1002f
+		add     \irqnr, \irqnr, #1
+		mov     \irqstat, \irqstat, lsr #1
+		cmp     \irqnr, #32
+		bcc     1001b
+1002:		/* EQ will be set if we reach 32 */
+		.endm
+		.macro irq_prio_table
+		.endm
+
+#elif defined(CONFIG_CPU_S3C44B0X)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\irqstat, =.LCint_ispr	 	@ load address of pending interrupt service register
+		ldr	\base, [\irqstat]	    	@ load address of ISPR
+		ldr	\irqstat, [\base]	    	@ \irqnr = INT_ISPR
+		mov     \irqnr, #0
+1001:
+		tst	\irqstat, #1
+		bne	1002f
+		add	\irqnr, \irqnr, #1
+		cmp	\irqnr, #26
+		movcc	\irqstat, \irqstat, lsr #1
+		bcc     1001b
+1002:		/* EQ will be set if we reach 26 or we have the number */
+		cmp	\irqnr, #S3C44B0X_INTERRUPT_EINT4567
+		bne	1004f
+		/* special case: external interrupts 4...7 */
+		/* loop over S3C44B0X_EXTINPND */
+		ldr	\irqstat, =.LCint_extispr
+		ldr	\base, [\irqstat]
+		ldr	\irqstat, [\base]
+		mov	\irqnr, #S3C44B0X_INTERRUPT_EINT4
+1003:
+		tst	\irqstat, #1
+		bne	1004f
+		add	\irqnr, \irqnr, #1
+		cmp	\irqnr, #5
+		movcc	\irqstat, \irqstat, lsr #1
+		bcc     1003b
+1004:
+		tst	\irqstat, #1			@ extra check, needed for return code
+							@ when jumping here through bne 1004f
+		.endm
+
+		.macro irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_WINBOND)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\base, =AIC_ISR
+		ldr	\irqstat, [\base]
+		mov	\irqnr, #1
+1001:
+		tst     \irqstat, #2
+		bne     1002f
+		add     \irqnr, \irqnr, #1
+		mov     \irqstat, \irqstat, lsr #1
+		cmp     \irqnr, #19
+		bcc     1001b
+1002:		/* EQ will be set if we reach 19 */
+		.endm
+
+		.macro irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_SWARM)
+
+		.macro  disable_fiq
+		.endm
+
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr     \irqstat, =SWARM_INT_IRQ_STATUS
+		ldr     \irqstat, [\irqstat]            @ get interrupts
+
+		mov     \irqnr, #0
+1001:
+		tst     \irqstat, #1
+		bne     1002f
+		add     \irqnr, \irqnr, #1
+		mov     \irqstat, \irqstat, lsr #1
+		cmp     \irqnr, #32
+		bcc     1001b
+1002:		/* EQ will be set if we reach 32 */
+		.endm
+
+		.macro  irq_prio_table
+irq_prio_swarm:
+		.byte   0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31
+		.endm
+
+#elif defined(CONFIG_ARCH_IPOD)
+
+#include <asm/arch/irqs.h>
+
+#define IDE_INT0_MASK	(1 << IDE_INT0_IRQ)
+#define SER0_MASK	(1 << SER0_IRQ)
+#define I2S_MASK	(1 << I2S_IRQ)
+#define SER1_MASK	(1 << SER1_IRQ)
+#define TIMER1_MASK	(1 << TIMER1_IRQ)
+#define GPIO_MASK	(1 << GPIO_IRQ)
+#define DMA_OUT_MASK	(1 << DMA_OUT_IRQ)
 
 		.macro	disable_fiq
+.ifdef NOTDEF
+		mrs	r13, spsr
+		orr	r13, r13, #F_BIT
+		msr	spsr_c, r13
+.endif
+		ldr	pc, cop_fiq_loc
+
+cop_fiq_loc:	.word	cop_fiq
+
 		.endm
 
-		.macro	get_irqnr_and_base, irqnr, base
-		ldr	r4, =0x04000200			/* Get IE/IF reg */
-		ldr	r0, [r4]
-		and	r0, r0, r0, lsr #16		/* IE & IF */
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
 
-		/* This is grossly inefficient, I dis-own it :-) */
-		mov	\irqnr, #0			/* default IRQ=0 */
-		tst	r0, #0x0001			/* VBLANK intr */
-		movne	\irqnr, #1
-		tst	r0, #0x0002			/* HBLANK intr */
-		movne	\irqnr, #2
-		tst	r0, #0x0004			/* YTRIG intr */
-		movne	\irqnr, #3
-		tst	r0, #0x0008			/* TIMER0 intr */
-		movne	\irqnr, #4
-		tst	r0, #0x0010			/* TIMER1 intr */
-		movne	\irqnr, #5
-		tst	r0, #0x0020			/* TIMER2 intr */
-		movne	\irqnr, #6
-		tst	r0, #0x0040			/* TIMER3 intr */
-		movne	\irqnr, #7
-		tst	r0, #0x0080			/* COMMS intr */
-		movne	\irqnr, #8
-		tst	r0, #0x0100			/* DMA0 intr */
-		movne	\irqnr, #9
-		tst	r0, #0x0200			/* DMA1 intr */
-		movne	\irqnr, #10
-		tst	r0, #0x0400			/* DMA2 intr */
-		movne	\irqnr, #11
-		tst	r0, #0x0800			/* DMA3 intr */
-		movne	\irqnr, #12
-		tst	r0, #0x1000			/* KEYPAD intr */
-		movne	\irqnr, #13
-		tst	r0, #0x2000			/* CART intr */
-		movne	\irqnr, #14
+		ldr 	\base, =(0xcf001000)
+		ldr	\irqstat, [\base]
 
-		adr	\base, irq_prio_gba
+#if 1
+		tst	\irqstat, #DMA_OUT_MASK
+		movne	\irqnr, #DMA_OUT_IRQ
+		bne	1001f
+
+		tst	\irqstat, #GPIO_MASK
+		movne	\irqnr, #GPIO_IRQ
+		bne	1001f
+
+		tst	\irqstat, #IDE_INT0_MASK
+		movne	\irqnr, #IDE_INT0_IRQ
+		bne	1001f
+
+		tst	\irqstat, #SER1_MASK
+		movne	\irqnr, #SER1_IRQ
+		bne	1001f
+
+		tst	\irqstat, #I2S_MASK
+		movne	\irqnr, #I2S_IRQ
+		bne	1001f
+
+		tst	\irqstat, #SER0_MASK
+		movne	\irqnr, #SER0_IRQ
+		bne	1001f
+
+		tst	\irqstat, #TIMER1_MASK
+		movne	\irqnr, #TIMER1_IRQ
+		bne	1001f
+
+1001:
+
+#else
+		mov     \irqnr, #0
+1001:
+		tst     \irqstat, #1
+		bne     1002f
+		add     \irqnr, \irqnr, #1
+		mov     \irqstat, \irqstat, lsr #1
+		cmp     \irqnr, #32
+		bcc     1001b
+1002:		/* EQ will be set if we reach 32 */
+
+#endif
 		.endm
-		
-		.macro	irq_prio_table
-irq_prio_gba:
-		.byte   0,0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18
+
+		.macro irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_VC547X) || defined(CONFIG_MACH_UC5471DSP) || defined(CONFIG_MACH_SJ5471ENG)
+#include <asm/arch/hardware.h>
+                .macro  disable_fiq
+                .endm
+
+                .macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+                ldr     \irqstat, =SRC_IRQ_REG
+                ldr     \irqstat, [\irqstat]            @ Get Source IRQ Reg
+                mov     \irqnr, #0                      @ Assume IRQ0_IRQ set
+1001:
+                tst     \irqstat, #1                    @ Is IRQ set?
+                bne     1002f                           @ Yes... exit with NEQ
+                add     \irqnr, \irqnr, #1              @ Assume next IRQ set
+                mov     \irqstat, \irqstat, lsr #1      @ Shift right one
+                cmp     \irqnr, #16                     @ Only 16 valid bits
+                bcc     1001b                           @ Exit EQ if past 15
+1002:
+                .endm
+
+                .macro  irq_prio_table
+                .endm
+
+#elif defined(CONFIG_ARCH_DM270)
+
+		.macro disable_fiq
+		.endm
+
+		.macro get_irqnr_and_base, irqnr, irqstat, base, tmp
+		ldr	\base, =DM270_INTC_IRQENTRY0    @ Assume default interrupt priority and
+		ldrh	\irqnr, [\base]                 @ Interrupt Entry Table is located within 64K-byte boundary
+		mov     \irqnr, \irqnr, lsr #2          @ at address 0 & size of each entry is 4
+		teq	\irqnr, #0
+		sub	\irqnr, \irqnr, #1		@ 1st entry is dummy
+		.endm
+
+		.macro irq_prio_table
+		.endm
+
+#elif defined( CONFIG_ARCH_POLDHU )
+
+/*
+ * The Poldhu has 23 interrupt sources, each represented by a status
+ * bit in uIRQStatus.  
+ */
+		.macro  disable_fiq
+		.endm
+
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov     \irqstat, #PERIPH_BASE
+		ldr     \irqstat, [\irqstat, #uIRQStatus - PERIPH_BASE]
+		movs	\irqnr, \irqstat, lsr #16             @ check high 
+		adrne	\base, irq_prio_poldhu_h	    @ 
+		bne	    1001f				                @ found high 
+		movs	\irqnr, \irqstat, lsr #8	            @ check middle
+		adrne	\base, irq_prio_poldhu_m
+		moveq	\irqnr, \irqstat
+		adreq	\base, irq_prio_poldhu_l	    @ get low
+		teq     \irqnr, #0                      @ clear Zero flag if interrupt present
+1001:
+		ldrneb  \irqnr, [\base, \irqnr]         @ determine in irq_nr
+		.endm
+                
+		.macro  irq_prio_table
+
+irq_prio_poldhu_l:
+		.byte	 0, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 6, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 7, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 6, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 5, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+		.byte	 4, 0, 1, 0, 2, 0, 1, 0, 3, 0, 1, 0, 2, 0, 1, 0
+
+irq_prio_poldhu_m:
+		.byte	 0, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	13, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	14, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	13, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	15, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	13, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	14, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	13, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+		.byte	12, 8, 9, 8,10, 8, 9, 8,11, 8, 9, 8,10, 8, 9, 8
+
+irq_prio_poldhu_h:
+		.byte	 0,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	22,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	23,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	22,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	21,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+		.byte	20,16,17,16,18,16,17,16,19,16,17,16,18,16,17,16
+
+		.endm
+
+#elif defined( CONFIG_ARCH_ISL3893 )
+
+/*
+ * The ISL3893 has 25 (NR_IRQS) interrupt sources, each represented by a status
+ * bit in aIRQStatus
+ * We walk from bit 0 up. The lowest interrupt numbers have priority over the
+ * higher ones.
+ */
+		.macro  disable_fiq
+		.endm
+
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov     \irqstat, #PERIPH_BASE
+		ldr     \irqstat, [\irqstat, #aIRQStatus]
+
+		mov     \irqnr, #0
+1001:
+		tst     \irqstat, #1
+		bne     1002f
+		add     \irqnr, \irqnr, #1
+		mov     \irqstat, \irqstat, lsr #1
+		cmp     \irqnr, #NR_IRQS
+		bcc     1001b
+1002:
+		.endm
+
+		.macro  irq_prio_table
 		.endm
 
 #else
 #error Unknown architecture
 #endif
 
-		.text
-
-@ Offsets into task structure
-@ ---------------------------
-@
-#define STATE		0
-#define COUNTER		4
-#define PRIORITY	8
-#define SIGNAL		12
-#define BLOCKED		16
-#define FLAGS		20
-#define ERRNO		24
-
-#define PF_TRACESYS	0x20
-
-@ Bad Abort numbers
-@ -----------------
-@
-#define BAD_PREFETCH	0
-#define BAD_DATA	1
-#define BAD_ADDREXCPTN	2
-#define BAD_IRQ		3
-#define BAD_UNDEFINSTR	4
-
-@ Number of syscalls accepted
-@
-#define NSYS_CALL	142
-
-@ OS version number used in SWIs
-@  RISC OS is 0
-@  RISC iX is 8
-@
-#define OS_NUMBER	9
-
-@
-@ Stack format (ensured by USER_* and SVC_*)
-@
-#define S_FRAME_SIZE	72
-#define S_OLD_R0	68
-#define S_PSR		64
-#define S_PC		60
-#define S_LR		56
-#define S_SP		52
-#define S_IP		48
-#define S_FP		44
-#define S_R10		40
-#define S_R9		36
-#define S_R8		32
-#define S_R7		28
-#define S_R6		24
-#define S_R5		20
-#define S_R4		16
-#define S_R3		12
-#define S_R2		8
-#define S_R1		4
-#define S_R0		0
-
-#include "../lib/constants.h"
-
-		.global	_ret_from_sys_call,ret_from_sys_call
-
 /*
- * Low-level interface code
- *
- * Trap initialisation
- *
- * Note - FIQ code has changed.  The default is a couple of words in 0x1c, 0x20
- * that call _unexp_fiq.  Nowever, we now copy the FIQ routine to 0x1c (removes
- * some excess cycles).
- *
- * What we need to put into 0-0x1c are ldrs to branch to 0xC0000000
- * (the kernel).
- * 0x1c onwards is reserved for FIQ, so I think that I will allocate 0xe0 
- * onwards for the actuall address to jump to.
- *
+ * Invalid mode handlers
  */
+__pabt_invalid:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
+		stmia	sp, {r0 - lr}			@ Save XXX r0 - lr
+		ldr	r4, .LCabt
+		mov	r1, #BAD_PREFETCH
+		b	1f
 
-/*
- * these go into 0x00
- */
-Lbranches:	swi	SYS_ERROR0
-		ldr	pc, Lbranches + 0xe4
-		ldr	pc, Lbranches + 0xe8
-		ldr	pc, Lbranches + 0xec
-		ldr	pc, Lbranches + 0xf0
-		ldr	pc, Lbranches + 0xf4
-		ldr	pc, Lbranches + 0xf8
-		ldr	pc, . + 4
-		.word	_unexp_fiq
-/*
- * this is put into 0xe0 and above
- */
-jump_addresses:	.word	0
-		.word	vector_undefinstr
-		.word	vector_swi
-		.word	vector_prefetch
-		.word	vector_data
-		.word	vector_addrexcptn
-		.word	vector_IRQ
-/*
- * initialise the trap system
- */
-		.global	_trap_init,trap_init
+__dabt_invalid:	sub	sp, sp, #S_FRAME_SIZE
+		stmia	sp, {r0 - lr}			@ Save SVC r0 - lr [lr *should* be intact]
+		ldr	r4, .LCabt
+		mov	r1, #BAD_DATA
+		b	1f
 
-trap_init:
-_trap_init:	stmfd	sp !,{r4 - r9, lr}		@ Save link register
-		mrs	r0, cpsr
-		bic	r0, r0, #31
-		orr	r0, r0, #0xd3
-		msr	cpsr, r0
-		mov	r0, #0xe0
-#ifdef CONFIG_ARCH_GBA
-		add	r0, r0, #0x03000000		@ SRAM for GBA
-#endif
-		adr	r1, jump_addresses
-		ldmia	r1, {r1 - r7}
-		stmia	r0, {r1 - r7}
-		mov	r0, #0				@ Lowest location
-#ifdef CONFIG_ARCH_GBA
-		add	r0, r0, #0x03000000		@ SRAM for GBA
-#endif
-		adr	r1, Lbranches
-		ldmia	r1, {r1 - r9}
-		stmia	r0, {r1 - r9}			@ Save all into page 0 ram
-		ldmfd	sp!, {r4 - r9, pc}
-/*
- * Undefined FIQs
- *	
- * Enter in FIQ mode, spsr = ANY CPSR, lr = ANY PC
- * MUST PRESERVE SVC SPSR, but need to switch to SVC mode to show our msg.
- * Basically to switch modes, we *HAVE* to clobber one register...  
- * brain damage alert!
- * I don't think that we can execute any code in here in any other mode than
- * FIQ...  Ok
- * you can switch to another mode, but you can't get out of that mode without
- * clobbering one register.
- *
- */
-_unexp_fiq:	disable_fiq
-		subs	pc, lr, #4
-/*
- * Interrupt entry dispatcher - dispatches it to the correct handler for the
- * processor mode
- *
- * Enter in IRQ mode, spsr = SVC/USR CPSR, lr = SVC/USR PC
- *
- */
-		.global vector_IRQ,vector_undefinstr,vector_data,vector_prefetch,vector_swi
+__irq_invalid:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate space on stack for frame
+		stmfd	sp, {r0 - lr}			@ Save r0 - lr
+		ldr	r4, .LCirq
+		mov	r1, #BAD_IRQ
+		b	1f
 
+__und_invalid:	sub	sp, sp, #S_FRAME_SIZE
+		stmia	sp, {r0 - lr}
+		ldr	r4, .LCund
+		mov	r1, #BAD_UNDEFINSTR		@ int reason
 
-LCirq:		.word	__temp_irq
-vector_IRQ:	@
-		@ save mode specific registers
-		@
-		ldr	r13, LCirq
-		sub	lr, lr, #4
-		str	lr, [r13]			@ save lr_IRQ
-		mrs	lr, spsr
-		str	lr, [r13, #4]			@ save spsr_IRQ
-		@
-		@ now branch to the relevent MODE handling routine
-		@
-		mrs	sp, cpsr			@ switch to SVC mode
-		bic	sp, sp, #31
-		orr	sp, sp, #0x13
-		msr	spsr, sp
-		and	lr, lr, #15
-		cmp	lr, #4
-		addlts	pc, pc, lr, lsl #2		@ Changes mode and branches
-		b	__irq_invalid			@  4 - 15
-		b	__irq_usr			@  0  (USR_26 / USR_32)
-		b	__irq_invalid			@  1  (FIQ_26 / FIQ_32)
-		b	__irq_invalid			@  2  (IRQ_26 / IRQ_32)
-		b	__irq_svc			@  3  (SVC_26 / SVC_32)
-/*
- * Undef instr entry dispatcher - dispatches it to the correct handler for
- * the processor mode
- *
- * Enter in UND mode, spsr = SVC/USR CPSR, lr = SVC/USR PC
- *
- */
-LCund:		.word	__temp_und
-vector_undefinstr:
-		@
-		@ save mode specific registers
-		@
-		ldr	r13, [pc, #LCund - . - 8]
-		str	lr, [r13]
-		mrs	lr, spsr
-		str	lr, [r13, #4]
-		@
-		@ now branch to the relevent MODE handling routine
-		@
-		mrs	sp, cpsr
-		bic	sp, sp, #31
-		orr	sp, sp, #0x13
-		msr	spsr, sp
-		and	lr, lr, #15
-		cmp	lr, #4
-		addlts	pc, pc, lr, lsl #2		@ Changes mode and branches
-		b	__und_invalid			@  4 - 15
-		b	__und_usr			@  0 (USR_26 / USR_32)
-		b	__und_invalid			@  1 (FIQ_26 / FIQ_32)
-		b	__und_invalid			@  2 (IRQ_26 / IRQ_32)
-		b	__und_svc			@  3 (SVC_26 / SVC_32)
-/*
- * Prefetch abort dispatcher - dispatches it to the correct handler for the
- * processor mode
- *
- * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
- *
- */
-LCabt:		.word	__temp_abt
-vector_prefetch:
-		@
-		@ save mode specific registers
-		@
-		sub	lr, lr, #4
-		ldr	r13, LCabt
-		str	lr, [r13]
-		mrs	lr, spsr
-		str	lr, [r13, #4]
-		@
-		@ now branch to the relevent MODE handling routine
-		@
-		mrs	sp, cpsr
-		bic	sp, sp, #31
-		orr	sp, sp, #0x13
-		msr	spsr, sp
-		and	lr, lr, #15
-		cmp	lr, #4
-		addlts	pc, pc, lr, lsl #2		@ Changes mode and branches
-		b	__pabt_invalid			@  4 - 15
-		b	__pabt_usr			@  0  (USR_26 / USR_32)
-		b	__pabt_invalid			@  1  (FIQ_26 / FIQ_32)
-		b	__pabt_invalid			@  2  (IRQ_26 / IRQ_32)
-		b	__pabt_invalid			@  3  (SVC_26 / SVC_32)
-/*
- * Data abort dispatcher - dispatches it to the correct handler for the
- * processor mode
- *
- * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
- *
- */
-vector_data:	@
-		@ save mode specific registers
-		@
-		sub	lr, lr, #8
-		ldr	r13, LCabt
-		str	lr, [r13]
-		mrs	lr, spsr
-		str	lr, [r13, #4]
-		@
-		@ now branch to the relevent MODE handling routine
-		@
-		mrs	sp, cpsr
-		bic	sp, sp, #31
-		orr	sp, sp, #0x13
-		msr	spsr, sp
-		and	lr, lr, #15
-		cmp	lr, #4
-		addlts	pc, pc, lr, lsl #2		@ Changes mode & branches
-		b	__dabt_invalid			@  4 - 15
-		b	__dabt_usr			@  0  (USR_26 / USR_32)
-		b	__dabt_invalid			@  1  (FIQ_26 / FIQ_32)
-		b	__dabt_invalid			@  2  (IRQ_26 / IRQ_32)
-		b	__dabt_svc			@  3  (SVC_26 / SVC_32)
-/*
- * SWI handler
- *
- * We now handle sys-call tracing, and the errno in the task structure.
- * Still have a problem with >4 arguments for functions.  Theres only
- * a couple of functions in the code that have 5 arguments, so Im not
- * too worried.
- */
+1:		zero_fp
+		ldmia	r4, {r5 - r7}			@ Get XXX pc, cpsr, old_r0
+		add	r4, sp, #S_PC
+		stmia	r4, {r5 - r7}			@ Save XXX pc, cpsr, old_r0
+		mov	r0, sp
+		and	r2, r6, #31			@ int mode
+		b	SYMBOL_NAME(bad_mode)
 
-#include "calls.S"
-
-LC1:		.word	current
-/*
- * Enter in SVC mode, spsr_all = OLD_USER_cpsr_all, R14 = OLD_USER_PC
- */
-vector_swi:	sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - r12}			@ Calling r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^			@ Calling sp, lr
-		mov	r7, r0
-		mrs	r6, spsr
-		mov	r5, lr
-		stmia	r8, {r5, r6, r7}		@ Save calling PC, CPSR, OLD_R0
-		mov	fp, #0
-		ldr	r6, [lr, #-4]!			@ get swi instruction
-		and	r5, r6, #0x0f000000
-		teq	r5, #0x0f000000
-		bne	Larm700bug
-		mrs	r5, cpsr			@ enable irqs
-		bic	r5, r5, #I_BIT
-		msr	cpsr, r5
-		bic	r6, r6, #0xff000000		@ mask off swi op code
-		eor	r6, r6, #OS_NUMBER << 20	@ check OS number
-Lretry:		cmp	r6, #NR_SYSCALLS		@ check upper syscall limit
-		bcs	Lswi_bad_call
-
-		ldr	r5, [pc, #LC1 - . - 8]
-		ldr	r5, [r5]
-		mov	ip, #0				@ zero errno
-		str	ip, [r5, #ERRNO]
-
-		ldr	ip, [r5, #FLAGS]		@ check for syscall tracing
-		tst	ip, #PF_TRACESYS
-		bne	Ltrace_this_syscall
-
-		adr	ip, _sys_call_table
-		mov	r9, sp				@ hack for routines needing > 4 values
-		str	r4, [sp, #-4]!			@ new-style: (r0 = arg1, r4 = arg5)
-		mov	lr, pc
-		ldr	pc, [ip, r6, lsl #2]		@ call sys routine
-		add	sp, sp, #4
-
-		ldr	ip, [r5, #ERRNO]		@ check errno
-		rsbs	ip, ip, #0
-		movne	r0, ip
-		str	r0, [sp, #S_R0]			@ returned r0
-		b	_ret_from_sys_call
-
-Ltrace_this_syscall:
-		ldr	r7, [sp, #S_IP]
-		mov	r0, #0
-		str	r0, [sp, #S_IP]
-		bl	syscall_trace			@ trace entry [IP must = 0]
-		str	r7, [sp, #S_IP]
-		ldmia	sp, {r0 - r3}			@ have to reload r0 - r3
-
-		adr	ip, _sys_call_table
-		mov	r9, sp				@ hack for routines needing > 4 values
-		str	r4, [sp, #-4]!			@ new-style: (r0 = arg1, r4 = arg5)
-		mov	lr, pc
-		ldr	pc, [ip, r6, lsl #2]		@ call sys routine
-		add	sp, sp, #4
-
-		ldr	ip, [r5, #ERRNO]
-		rsbs	ip, ip, #0
-		movne	r0, ip
-		str	r0, [sp, #S_R0]			@ returned r0
-
-		mov	r0, #1
-		str	r0, [sp, #S_IP]
-		bl	syscall_trace			@ trace exit [IP must != 0]
-		str	r7, [sp, #S_IP]
-		b	_ret_from_sys_call
-
-Lswi_bad_call:	tst	r6, #0x00f00000
-		bne	Lbad
-		cmp	r6, #(KSWI_SYS_BASE - KSWI_BASE) @ check for arm private syscalls
-		bcs	Larm_sys_call
-		bl	sys_ni_syscall
-		str	r0, [sp, #0]			@ returned r0
-		b	_ret_from_sys_call
-
-Lbad:		eor	r0, r6, #OS_NUMBER << 20	@ Put OS number back
-		mov	r1, sp
-		bl	deferred
-		ldmfd	sp, {r0 - r3}
-		b	_ret_from_sys_call
-
-Larm_sys_call:	bic	r0, r6, #0x000f0000
-		mov	r1, sp
-		bl	arm_syscall
-		b	_ret_from_sys_call
-
-@ r0 = syscall number
-@ r1 = syscall r0
-@ r5 = syscall r4
-@ ip = syscall table
-sys_syscall:	mov	r6, r0
-		eor	r6, r6, #OS_NUMBER << 20
-		cmp	r6, #NR_SYSCALLS		@ check range
-		movgt	r0, #-ENOSYS
-		movgt	pc, lr
-		add	sp, sp, #4			@ take of the save of our r4
-		ldmib	sp, {r0 - r4}			@ get our args
-		str	r4, [sp, #-4]!			@ Put our arg on the stack
-		ldr	pc, [ip, r6, lsl #2]
-
-Larm700bug:	str	lr, [r8]
-		ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
-		msr	spsr, r0
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		add	sp, sp, #S_PC
-		ldr	lr, [sp], #S_FRAME_SIZE - S_PC	@ Get PC and jump over PC, PSR, OLD_R0
-		movs	pc, lr
-
-		.globl	_sys_call_table,sys_call_table
-sys_call_table:
-_sys_call_table:
-#include "calls.S"
-
-/*
- * Undefined instruction handler
- */
-LC2:		.word	last_task_used_math
-		.word	current
-		.word	fp_enter
-
-__und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
-		stmia	sp, {r0 - r12}			@ Save r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^			@ Save user r0 - r12
-		ldr	r4, [pc, #LCund - . - 8]
-		ldmia	r4, {r5 - r7}
-		stmia	r8, {r5 - r7}			@ Save USR pc, cpsr, old_r0
-
-		adr	r1, LC2
-		ldmia	r1, {r1, r2, r4}
-		ldr	r1, [r1]
-		ldr	r2, [r2]
-		teq	r1, r2
-		blne	math_state_restore
-		adr	r9, _fpreturn
-		adr	lr, _fpundefinstr
-		ldr	pc, [r4]			@ Call FP module USR entry point
-
-		.global	_fpreturn,fpreturn
-		.global	_fpundefinstr,fpundefinstr
-fpundefinstr:
-_fpundefinstr:	mov	r0, lr				@ Called by FP module on undefined instr
-		mov	r1, sp
-		mrs	r4, cpsr			@ Enable interrupts
-		bic	r4, r4, #I_BIT
-		msr	cpsr, r4
-		bl	do_undefinstr
-fpreturn:
-_fpreturn:	b	_ret_from_sys_call		@ Normal FP exit
-
-__und_svc:	sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - r12}			@ save r0 - r12
-		mov	r6, lr
-		mov	fp, #0
-		ldr	r7, [pc, #LCund - . - 8]
-		ldmia	r7, {r7 - r9}
-		add	r5, sp, #S_FRAME_SIZE
-		add	r4, sp, #S_SP
-		stmia	r4, {r5 - r9}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
-
-		adr	r1, LC2
-		ldmia	r1, {r1, r2, r4}
-		ldr	r1, [r1]
-		ldr	r2, [r2]
-		teq	r1, r2
-		blne	math_state_restore
-		adr	r9, _fpreturnsvc
-		adr	lr, _fpundefinstrsvc
-		ldr	pc, [r4]			@ Call FP module SVC entry point
-
-		.globl	_fpreturnsvc,fpreturnsvc
-		.globl	_fpundefinstrsvc,fpundefinstrsvc
-
-fpundefinstrsvc:
-_fpundefinstrsvc:
-		mov	r0, r5				@ unsigned long pc
-		mov	r1, sp				@ struct pt_regs *regs
-		bl	do_undefinstr
-fpreturnsvc:
-_fpreturnsvc:	ldr	lr, [sp, #S_PSR]		@ Get SVC cpsr
-		msr	spsr, lr
-		ldmia	sp, {r0 - pc}^			@ Restore SVC registers
+#if defined CONFIG_FPE_NWFPE || defined CONFIG_FPE_FASTFPE
+		/* The FPE is always present */
+		.equ	fpe_not_present, 0
+#else
+wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
+		.word	0x0fef0fff
+		.word	0x0d000100			@ LDF [sp]/STF [sp]
+		.word	0x0d000100			@ LDF [fp]/STF [fp]
+		.word	0x0f000f00
 
 /* We get here if an undefined instruction happens and the floating
  * point emulator is not present.  If the offending instruction was
@@ -772,6 +1491,7 @@ fpe_not_present:
 		ldmia	r10, {r4, r5, r6, r7, r8}
 		ldr	r10, [sp, #S_PC]		@ Load PC
 		sub	r10, r10, #4
+		mask_pc	r10, r10
 		ldrt	r10, [r10]			@ get instruction
 		and	r5, r10, r5
 		teq	r5, r4				@ Is it WFS?
@@ -785,397 +1505,835 @@ fpe_not_present:
 		and	r4, r10, #255			@ get offset
 		and	r6, r10, #0x000f0000
 		tst	r10, #0x00800000		@ +/-
-		rsbeq	r4, r4, #0
 		ldr	r5, [sp, r6, lsr #14]		@ Load reg
+		rsbeq	r4, r4, #0
 		add	r5, r5, r4, lsl #2
 		str	r5, [sp, r6, lsr #14]		@ Save reg
 		mov	pc, r9
-
-wfs_mask_data:	.word	0x0e200110			@ WFS
-		.word	0x0fff0fff
-		.word	0x0d0d0100			@ LDF [sp]/STF [sp]
-		.word	0x0d0b0100			@ LDF [fp]/STF [fp]
-		.word	0x0f0f0f00
-
-
-LC3:		.word	_fp_save
-   	        .word	_fp_restore
-
-
-/*
- * Function to call when switching tasks to save FP state
- */
-		.global	_fpe_save,fpe_save
-fpe_save:
-_fpe_save:	ldr	r1, [pc, #LC3 - . - 8]
-		ldr	pc, [r1]
-
-/*
- * Function to call when switching tasks to restore FP state
- */
-		.global	_fpe_restore,fpe_restore
-fpe_restore:
-_fpe_restore:	ldr	r1, [pc, #LC3 - . - 4]
-		ldr	pc, [r1]
-
-__und_invalid:	sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - lr}
-		mov	r7, r0
-		ldr	r4, [pc, #LCund - . - 8]
-		ldmia	r4, {r5, r6}			@ Get UND/IRQ/FIQ/ABT pc, cpsr
-		add	r4, sp, #S_PC
-		stmia	r4, {r5, r6, r7}		@ Save UND/IRQ/FIQ/ABT pc, cpsr, old_r0
-		mov	r0, sp				@ struct pt_regs *regs
-		mov	r1, #BAD_UNDEFINSTR		@ int reason
-		and	r2, r6, #31			@ int mode
-		b	bad_mode			@ Does not ever return...
-/*
- * Prefetch abort handler
- */
-pabtmsg:	.ascii	"Pabt: %08lX\n\0"
-		.align
-__pabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
-		stmia	sp, {r0 - r12}			@ Save r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^			@ Save sp_usr lr_usr
-		ldr	r4, [pc, #LCabt - . - 8]
-		ldmia	r4, {r5 - r7}			@ Get USR pc, cpsr
-		stmia	r8, {r5 - r7}			@ Save USR pc, cpsr, old_r0
-
-		mrs	r7, cpsr			@ Enable interrupts if they were
-		bic	r7, r7, #I_BIT			@ previously
-		msr	cpsr, r7
-		mov	r0, r5				@ address (pc)
-		mov	r1, sp				@ regs
-		bl	do_PrefetchAbort		@ call abort handler
-		teq	r0, #0				@ Does this still apply???
-		bne	_ret_from_sys_call		@ Return from sys call
-#ifdef DEBUG_UNDEF
-		adr	r0, t
-		bl	_printk
 #endif
-		mov	r0, r5
-		mov	r1, sp
-		and	r2, r6, #31
-		bl	do_undefinstr
-		ldr	lr, [sp, #S_PSR]		@ Get USR cpsr
-		msr	spsr, lr
-		ldmia	sp, {r0 - pc}^			@ Restore USR registers
-
-__pabt_invalid:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
-		stmia	sp, {r0 - lr}			@ Save XXX r0 - lr
-		mov	r7, r0				@ OLD R0
-		ldr	r4, [pc, #LCabt - . - 8]
-		ldmia	r4, {r5 - r7}			@ Get XXX pc, cpsr
-		add	r4, sp, #S_PC
-		stmia	r4, {r5 - r7}			@ Save XXX pc, cpsr, old_r0
-		mov	r0, sp				@ Prefetch aborts are definitely *not*
-		mov	r1, #BAD_PREFETCH		@ allowed in non-user modes.  We cant
-		and	r2, r6, #31			@ recover from this problem.
-		b	bad_mode
-
-#ifdef DEBUG_UNDEF
-t:	.ascii "*** undef ***\r\n\0"
-	.align
-#endif
-/*
- * Address exception handler
- *
- * These aren't too critical.
- * (they're not supposed to happen, and won't happen in 32-bit mode).
- */
-
-vector_addrexcptn:
-		b	vector_addrexcptn
 
 /*
- * Interrupt (IRQ) handler (r13 points to irq temp save area)
- * MOD: if in user mode, then *no* kernel routine is running, so dont have to
- *      save svc lr
+ * SVC mode handlers
  */
-LC4:		.word	irqjump
-__irq_usr:	sub	sp, sp, #S_FRAME_SIZE
+		.align	5
+__dabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		stmia	sp, {r0 - r12}			@ save r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^
-		ldr	r4, [pc, #LCirq - . - 8]
-		ldmia	r4, {r5 - r7}			@ get saved PC, SPSR
-		stmia	r8, {r5 - r7}			@ save pc, psr, old_r0
-urepeat:	get_irqnr_and_base r6, r5
-#if defined(CONFIG_ARCH_TRIO)
-		teq	r6, #0x1f
-		bne	has_irq_usr
-		ldr	r4,=AIC_EOICR
-		eor	r6,r6,r6
-		str	r6,[r4]
-#elif defined(CONFIG_ARCH_ATMEL)
-		teq	r6, #0x0
-		bne	has_irq_usr
-		ldr	r4,=AIC_EOICR
-		eor	r6,r6,r6
-		str	r6,[r4]
-#else
-		teq	r6, #0
-		bne	has_irq_usr
-#endif
-		b	_ret_from_sys_call
-has_irq_usr:
-		ldrb	r0, [r5, r6]			@ Get IRQ number
-		ldr	r2, [pc, #LC4 - . - 8]
-		mov	r1, sp
+		ldr	r2, .LCabt
+		add	r0, sp, #S_FRAME_SIZE
+		ldmia	r2, {r2 - r4}			@ get pc, cpsr
+		add	r5, sp, #S_SP
+		mov	r1, lr
+		stmia	r5, {r0 - r4}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
+		mrs	r9, cpsr			@ Enable interrupts if they were
+		tst	r3, #I_BIT
+		biceq	r9, r9, #I_BIT			@ previously
+		mov	r0, r2
+/*
+ * This routine must not corrupt r9
+ */
+#ifdef MULTI_CPU
+		ldr	r2, .LCprocfns
 		mov	lr, pc
-		@
-		@ routine gets called with r0 = interrupt number, r1 = struct pt_regs *
-		@
-		ldr	pc, [r2, r0, lsl #2]
-		mov	r2, #0
-		teq	r0, #0				@ Check to see if it is a fast IRQ
-		beq	_ret_from_sys_call
-		ldr	r0, [sp, #S_PSR]		@ Get saved SPSR
-		msr	spsr, r0			@ restore SPSR
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		add	sp, sp, #S_PC
-		ldr	lr, [sp], #S_FRAME_SIZE - S_PC
-		movs	pc, lr
+		ldr	pc, [r2]			@ call processor specific code
+#else
+		bl	cpu_data_abort
+#endif
+		msr	cpsr_c, r9
+		mov	r2, sp
+		bl	SYMBOL_NAME(do_DataAbort)
+		mrs	r0, cpsr
+		bic	r0, r0, #MODE_MASK
+		orr	r0, r0, #I_BIT | MODE_SVC	@ preserve FIQ bit
+		msr	cpsr_c, r0
+		ldr	r0, [sp, #S_PSR]
+		msr	spsr, r0
+		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
 
-		irq_prio_table
-
-LC5:		.word	intr_count			@ -8
-		.word	bh_mask				@ -4
-		.word	bh_active			@ -0
-
+		.align	5
+		
 __irq_svc:	sub	sp, sp, #S_FRAME_SIZE
 		stmia	sp, {r0 - r12}			@ save r0 - r12
+		ldr	r7, .LCirq
+		add	r5, sp, #S_FRAME_SIZE
+		ldmia	r7, {r7 - r9}
+		add	r4, sp, #S_SP
 		mov	r6, lr
-		mov	fp, #0
-		ldr	r7, [pc, #LCirq - . - 8]
+		stmia	r4, {r5, r6, r7, r8, r9}	@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
+1:		get_irqnr_and_base r0, r6, r5, lr
+		movne	r1, sp
+		@
+		@ routine called with r0 = irq number, r1 = struct pt_regs *
+		@
+#ifdef CONFIG_ARCH_ATMEL
+                adrsvc  ne, lr, 2f
+                bne     do_IRQ
+2:		ldr     r0, =AIC_EOICR
+                str     r0, [r0]
+#else
+		adrsvc	ne, lr, 3f  	    	    	@ 1b
+		bne	do_IRQ
+#endif
+3:
+		ldr	r0, [sp, #S_PSR]		@ irqs are already disabled
+		msr	spsr, r0
+		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+
+		.align	5
+__und_svc:	sub	sp, sp, #S_FRAME_SIZE
+		stmia	sp, {r0 - r12}			@ save r0 - r12
+		ldr	r7, .LCund
+		mov	r6, lr
 		ldmia	r7, {r7 - r9}
 		add	r5, sp, #S_FRAME_SIZE
 		add	r4, sp, #S_SP
-		stmia	r4, {r5, r6, r7, r8, r9}	@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
-srepeat:	get_irqnr_and_base r6, r5
-#if defined(CONFIG_ARCH_TRIO)
-		teq	r6, #0x1f
-#elif defined(CONFIG_ARCH_ATMEL)
-		teq	r6, #0x0
-#else
-		teq	r6, #0
-#endif
-		beq	no_irq2
-		ldrb	r0, [r5, r6]			@ Get IRQ number
-		ldr	r2, [pc, #LC4 - . - 8]
-		mov	r1, sp
-		mov	lr, pc
-		@
-		@ routine gets called with r0 = interrupt number, r1 = struct pt_regs *
-		@
-		ldr	pc, [r2, r0, lsl #2]
-		teq	r0, #0				@ Check to see if it was a fast IRQ
-#ifndef CONFIG_ARCH_GBA
-		bne	srepeat
-#endif
-		ldr	r4, [pc, #LC5 - . - 8]
-		ldr	r5, [r4]
-		teq	r5, #0
-#ifndef CONFIG_ARCH_GBA
-		bne	srepeat
-#endif
-		ldr	r6, [pc, #LC5 - . - 4]
-		ldr	r7, [pc, #LC5 - . - 0]
-recheck_bh2:	ldr	r0, [r6]
-		ldr	r1, [r7]
-		tst	r0, r1
-#ifndef CONFIG_ARCH_GBA
-		beq	srepeat
-#endif
-		add	r0, r5, #1
-		str	r0, [r4]
-		mrs	r8, cpsr			@ Enable interrupts
-		bic	lr, r8, #I_BIT
-		msr	cpsr, lr
-		bl	do_bottom_half
-		msr	cpsr, r8			@ Restore interrupt state
-		str	r5, [r4]
-#ifndef CONFIG_ARCH_GBA
-		b	recheck_bh2
-#endif
-no_irq2:
-#if defined(CONFIG_ARCH_TRIO)
-		ldr	r4, =AIC_EOICR
-		eor	r6,r6,r6
-		str	r6,[r4]
-#elif defined(CONFIG_ARCH_ATMEL)
-		ldr	r4, =AIC_EOICR
-		eor	r6,r6,r6
-		str	r6,[r4]
-#endif
-		ldr	r0, [sp, #S_PSR]
-		msr	spsr, r0
-		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
+		stmia	r4, {r5 - r9}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
 
-__irq_invalid:	sub	sp, sp, #S_FRAME_SIZE	@ Allocate space on stack for frame
-		stmfd	sp, {r0 - lr}		@ Save r0 - lr
-		mov	r7, #-1
-		ldr	r4, [pc, #LCirq - . - 8]
-		ldmia	r4, {r5, r6}		@ get saved pc, psr
-		add	r4, sp, #S_PC
-		stmia	r4, {r5, r6, r7}
-		mov	fp, #0
-		mov	r0, sp
-		mov	r1, #BAD_IRQ
-		b	bad_mode
-/*
- * Data abort handler code
- */
-LCprocfns:	.word	processor
+		adrsvc	al, r9, 1f			@ r9  = normal FP return
+		bl	call_fpe			@ lr  = undefined instr return
 
-__dabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
+		mov	r0, r5				@ unsigned long pc
+		mov	r1, sp				@ struct pt_regs *regs
+		bl	SYMBOL_NAME(do_undefinstr)
+
+1:		mrs	r0, cpsr
+		bic	r0, r0, #MODE_MASK		@ preserve F-bit
+		orr	r0, r0, #I_BIT | MODE_SVC
+		msr	cpsr_c, r0
+		ldr	lr, [sp, #S_PSR]		@ Get SVC cpsr
+		msr	spsr, lr
+		ldmia	sp, {r0 - pc}^			@ Restore SVC registers
+
+		.align	5
+__pabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		stmia	sp, {r0 - r12}			@ save r0 - r12
-		add	r3, sp, #S_PC
-		stmdb	r3, {sp, lr}^
-		ldr	r0, [pc, #LCabt - . - 8]
-		ldmia	r0, {r0 - r2}			@ Get USR pc, cpsr
-		stmia	r3, {r0 - r2}			@ Save USR pc, cpsr, old_r0
-		mov	fp, #0
-		mrs	r2, cpsr			@ Enable interrupts if they were
-		bic	r2, r2, #I_BIT			@ previously
-		msr	cpsr, r2
-		ldr	r2, LCprocfns
-		mov	lr, pc
-		ldr	pc, [r2, #8]			@ call processor specific code
-		mov	r3, sp
-#ifdef NO_MM
-		cmp	r0, #0				@ check return status
-		bne	1f
-		ldr	r0, [sp, #S_PSR]
-		msr	spsr, r0
-		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
-1:
-#endif
-		bl	do_DataAbort
-		b	_ret_from_sys_call
-
-__dabt_svc:	sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - r12}			@ save r0 - r12
-		ldr	r2, [pc, #LCabt - . - 8]
+		ldr	r2, .LCabt
 		add	r0, sp, #S_FRAME_SIZE
+		ldmia	r2, {r2 - r4}			@ get pc, cpsr
 		add	r5, sp, #S_SP
 		mov	r1, lr
-		ldmia	r2, {r2 - r4}			@ get pc, cpsr
 		stmia	r5, {r0 - r4}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
+		mrs	r9, cpsr			@ Enable interrupts if they were
 		tst	r3, #I_BIT
-		mrseq	r0, cpsr			@ Enable interrupts if they were
-		biceq	r0, r0, #I_BIT			@ previously
-		msreq	cpsr, r0
-		mov	r0, r2
-		ldr	r2, LCprocfns
-		mov	lr, pc
-		ldr	pc, [r2, #8]			@ call processor specific code
-		mov	r3, sp
-#ifdef NO_MM
-		cmp	r0, #0				@ check return status
-		bne	1f
-		ldr	r0, [sp, #S_PSR]
-		msr	spsr, r0
-		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
-1:
-#endif
-		bl	do_DataAbort
+		biceq	r9, r9, #I_BIT			@ previously
+		msr	cpsr_c, r9
+		mov	r0, r2				@ address (pc)
+		mov	r1, sp				@ regs
+		bl	SYMBOL_NAME(do_PrefetchAbort)	@ call abort handler
+		mrs	r0, cpsr
+		bic	r0, r0, #MODE_MASK		@ preserve F-bit
+		orr	r0, r0, #I_BIT | MODE_SVC
+		msr	cpsr_c, r0
 		ldr	r0, [sp, #S_PSR]
 		msr	spsr, r0
 		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
 
-__dabt_invalid:	sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - lr}			@ Save SVC r0 - lr [lr *should* be intact]
-		mov	r7, r0
-		ldr	r4, [pc, #LCabt - . - 8]
-		ldmia	r4, {r5, r6}			@ Get SVC pc, cpsr
-		add	r4, sp, #S_PC
-		stmia	r4, {r5, r6, r7}		@ Save SVC pc, cpsr, old_r0
-		mov	r0, sp
-		mov	r1, #BAD_DATA
-		and	r2, r6, #31
-		b	bad_mode
+		.align	5
+.LCirq:		.word	__temp_irq
+.LCund:		.word	__temp_und
+.LCabt:		.word	__temp_abt
+#ifdef MULTI_CPU
+.LCprocfns:	.word	SYMBOL_NAME(processor)
+#endif
+.LCfp:		.word	SYMBOL_NAME(fp_enter)
+#ifdef CONFIG_CPU_S3C3410
+.LCintpnd:	.word 	S3C3410X_INTPND
+#endif
+#ifdef CONFIG_CPU_S3C44B0X
+.LCint_ispr:	.word 	S3C44B0X_I_ISPR
+.LCint_extispr: .word 	S3C44B0X_EXTINPND
+#endif
+		irq_prio_table
 
 /*
- * All exits to user mode from the kernel go through this code.
+ * User mode handlers
  */
+		.align	5
+__dabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
+		stmia	sp, {r0 - r12}			@ save r0 - r12
+		ldr	r4, .LCabt
+		add	r3, sp, #S_PC
+		ldmia	r4, {r0 - r2}			@ Get USR pc, cpsr
+		stmia	r3, {r0 - r2}			@ Save USR pc, cpsr, old_r0
+		stmdb	r3, {sp, lr}^
+		alignment_trap r4, r7, __temp_abt
+		zero_fp
+#ifdef MULTI_CPU
+		ldr	r2, .LCprocfns
+		mov	lr, pc
+		ldr	pc, [r2]			@ call processor specific code
+#else
+		bl	cpu_data_abort
+#endif
+		mrs	r2, cpsr
+		bic	r2, r2, #I_BIT | MODE_MASK	@ preserve F-bit
+		orr	r2, r2, #MODE_SVC
+		msr	cpsr_c, r2			@ Enable interrupts
+		mov	r2, sp
+		adrsvc	al, lr, ret_from_exception
+		b	SYMBOL_NAME(do_DataAbort)
 
-LC6:
-		.word	intr_count		@ -8
-		.word	bh_mask		@ -4
-		.word	bh_active		@ -0
-		.word	need_resched		@ +4
-		.word	current		@ +8
-		.word	init_task		@ +12
-
-Lreschedule:	bl	schedule
-
-ret_from_sys_call:
-_ret_from_sys_call:
-		adr	r9, LC6
-		ldmia	r9!, {r4, r6, r7}
-		ldr	r5, [r4]
-		teq	r5, #0
-		bne	Lret_no_check
-Lrecheck_bh:	ldr	r0, [r6]
-		ldr	r1, [r7]
-		tst	r0, r1
-		bne	Lhandle_bottom_half
-		ldr	r0, [sp, #S_PSR]
-		tst	r0, #3
-		bne	Lret_no_check
-		ldmia	r9, {r5, r6, r7}
-		ldr	r0, [r5]
-		teq	r0, #0
-		bne	Lreschedule
-		ldr	r0, [r6]
-		teq	r0, r7
-		beq	Lret_no_check
-
-		ldr	r1, [r0, #SIGNAL]
-		ldr	r0, [r0, #BLOCKED]
-		bics	r1, r1, r0
+		.align	5
+__irq_usr:	sub	sp, sp, #S_FRAME_SIZE
+		stmia	sp, {r0 - r12}			@ save r0 - r12
+		ldr	r4, .LCirq
+		add	r8, sp, #S_PC
+		ldmia	r4, {r5 - r7}			@ get saved PC, SPSR
+		stmia	r8, {r5 - r7}			@ save pc, psr, old_r0
+		stmdb	r8, {sp, lr}^
+		alignment_trap r4, r7, __temp_irq
+		zero_fp
+1:		get_irqnr_and_base r0, r6, r5, lr
 		movne	r1, sp
-		blne	do_signal
-Lret_no_check:	mrs	r0, cpsr			@ disable IRQs
-		orr	r0, r0, #I_BIT
-		msr	cpsr, r0
-		ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
-		msr	spsr, r0
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		add	sp, sp, #S_PC
-		ldr	lr, [sp], #S_FRAME_SIZE - S_PC	@ Get PC and jump over PC, PSR, OLD_R0
+		@
+		@ routine called with r0 = irq number, r1 = struct pt_regs *
+		@
+#ifdef CONFIG_ARCH_ATMEL
+		adrsvc  ne, lr, 2f
+		bne	do_IRQ
+
+2:		ldr     r0, =AIC_EOICR
+                str     r0, [r0]
+#else
+		adrsvc	ne, lr, 1b
+		bne	do_IRQ
+#endif
+		mov	why, #0
+		get_current_task tsk
+		b	ret_to_user
+
+		.align	5
+__und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
+		stmia	sp, {r0 - r12}			@ Save r0 - r12
+		ldr	r4, .LCund
+		add	r8, sp, #S_PC
+		ldmia	r4, {r5 - r7}
+		stmia	r8, {r5 - r7}			@ Save USR pc, cpsr, old_r0
+		stmdb	r8, {sp, lr}^			@ Save user sp, lr
+		alignment_trap r4, r7, __temp_und
+		zero_fp
+		adrsvc	al, r9, ret_from_exception	@ r9  = normal FP return
+		adrsvc	al, lr, fpundefinstr		@ lr  = undefined instr return
+
+call_fpe:	get_current_task r10
+		mov	r8, #1
+		strb	r8, [r10, #TSK_USED_MATH]	@ set current->used_math
+		ldr	r4, .LCfp
+		add	r10, r10, #TSS_FPESAVE		@ r10 = workspace
+		ldr	pc, [r4]			@ Call FP module USR entry point
+
+fpundefinstr:	mrs	r0, cpsr
+		bic	r0, r0, #MODE_MASK | I_BIT	@ preserve F-bit
+		orr	r0, r0, #MODE_SVC
+		msr	cpsr_c, r0			@ Enable interrupts
+		mov	r0, lr
+		mov	r1, sp
+		adrsvc	al, lr, ret_from_exception
+		b	SYMBOL_NAME(do_undefinstr)
+
+		.align	5
+__pabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
+		stmia	sp, {r0 - r12}			@ Save r0 - r12
+		ldr	r4, .LCabt
+		add	r8, sp, #S_PC
+		ldmia	r4, {r5 - r7}			@ Get USR pc, cpsr
+		stmia	r8, {r5 - r7}			@ Save USR pc, cpsr, old_r0
+		stmdb	r8, {sp, lr}^			@ Save sp_usr lr_usr
+		alignment_trap r4, r7, __temp_abt
+		zero_fp
+		mrs	r0, cpsr
+		bic	r0, r0, #MODE_MASK | I_BIT	@ preserve F-bit
+		orr	r0, r0, #MODE_SVC
+		msr	cpsr_c, r0			@ Enable interrupts
+		mov	r0, r5				@ address (pc)
+		mov	r1, sp				@ regs
+		bl	SYMBOL_NAME(do_PrefetchAbort)	@ call abort handler
+		/* fall through */
+/*
+ * This is the return code to user mode for abort handlers
+ */
+ENTRY(ret_from_exception)
+		get_current_task tsk
+		mov	why, #0
+		b	ret_to_user
+
+		.data
+ENTRY(fp_enter)
+		.word	fpe_not_present
+		.text
+/*
+ * Register switch for ARMv3 and ARMv4 processors
+ * r0 = previous, r1 = next, return previous.
+ * previous and next are guaranteed not to be the same.
+ */
+ENTRY(__switch_to)
+		stmfd	sp!, {r4 - sl, fp, lr}		@ Store most regs on stack
+		mrs	ip, cpsr
+		str	ip, [sp, #-4]!			@ Save cpsr_SVC
+		str	sp, [r0, #TSS_SAVE]		@ Save sp_SVC
+		ldr	sp, [r1, #TSS_SAVE]		@ Get saved sp_SVC
+#ifndef CONFIG_UCLINUX
+		ldr	r2, [r1, #TSS_DOMAIN]
+		mcr	p15, 0, r2, c3, c0		@ Set domain register
+#endif
+		ldr	ip, [sp], #4
+		msr	spsr, ip			@ Save tasks CPSR into SPSR for this return
+		ldmfd	sp!, {r4 - sl, fp, pc}^		@ Load all regs saved previously
+
+		.section ".text.init",#alloc,#execinstr
+/*
+ * Vector stubs.  NOTE that we only align 'vector_IRQ' to a cache line boundary,
+ * and we rely on each stub being exactly 48 (1.5 cache lines) in size.  This
+ * means that we only ever load two cache lines for this code, or one if we're
+ * lucky.  We also copy this code to 0x200 so that we can use branches in the
+ * vectors, rather than ldr's.
+ */
+		.align	5
+__stubs_start:
+/*
+ * Interrupt dispatcher
+ * Enter in IRQ mode, spsr = SVC/USR CPSR, lr = SVC/USR PC
+ */
+ENTRY(vector_IRQ)
+    		@
+		@ save mode specific registers
+		@
+		ldr	r13, .LCsirq
+		sub	lr, lr, #4
+		str	lr, [r13]			@ save lr_IRQ
+		mrs	lr, spsr
+		str	lr, [r13, #4]			@ save spsr_IRQ
+		@
+		@ check if we are not in a "interrupts disabled" section
+		@ see http://www.arm.com/support/faqip/3677.html
+		@ -> workaround #1
+		@
+		tst lr, #I_BIT
+		ldrne lr, [r13]
+		movnes pc, lr
+		@
+		@ now branch to the relevent MODE handling routine
+		@
+		mrs	r13, spsr			@ switch to SVC_32 mode
+		bic	r13, r13, #MODE_MASK		@ preserve F and T bits
+		orr	r13, r13, #MODE_SVC|I_BIT
+		msr	spsr_c, r13			@ switch to SVC_32 mode
+
+		and	lr, lr, #15
+		ldr	lr, [pc, lr, lsl #2]
+		movs	pc, lr				@ Changes mode and branches
+
+.LCtab_irq:	.word	__irq_usr			@  0  (USR_26 / USR_32)
+		.word	__irq_invalid			@  1  (FIQ_26 / FIQ_32)
+		.word	__irq_invalid			@  2  (IRQ_26 / IRQ_32)
+		.word	__irq_svc			@  3  (SVC_26 / SVC_32)
+		.word	__irq_invalid			@  4
+		.word	__irq_invalid			@  5
+		.word	__irq_invalid			@  6
+		.word	__irq_invalid			@  7
+		.word	__irq_invalid			@  8
+		.word	__irq_invalid			@  9
+		.word	__irq_invalid			@  a
+		.word	__irq_invalid			@  b
+		.word	__irq_invalid			@  c
+		.word	__irq_invalid			@  d
+		.word	__irq_invalid			@  e
+		.word	__irq_invalid			@  f
+
+		.align	5
+
+/*
+ * Data abort dispatcher - dispatches it to the correct handler for the processor mode
+ * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
+ */
+ENTRY(vector_data)
+    		@
+		@ save mode specific registers
+		@
+		ldr	r13, .LCsabt
+		sub	lr, lr, #8
+		str	lr, [r13]
+		mrs	lr, spsr
+		str	lr, [r13, #4]
+		@
+		@ now branch to the relevent MODE handling routine
+		@
+		mrs	r13, spsr
+		bic	r13, r13, #MODE_MASK		@ preserve F and T bits
+		orr	r13, r13, #I_BIT | MODE_SVC
+		msr	spsr_c, r13			@ switch to SVC_32 mode
+
+		and	lr, lr, #15
+		ldr	lr, [pc, lr, lsl #2]
+		movs	pc, lr				@ Changes mode and branches
+
+.LCtab_dabt:	.word	__dabt_usr			@  0  (USR_26 / USR_32)
+		.word	__dabt_invalid			@  1  (FIQ_26 / FIQ_32)
+		.word	__dabt_invalid			@  2  (IRQ_26 / IRQ_32)
+		.word	__dabt_svc			@  3  (SVC_26 / SVC_32)
+		.word	__dabt_invalid			@  4
+		.word	__dabt_invalid			@  5
+		.word	__dabt_invalid			@  6
+		.word	__dabt_invalid			@  7
+		.word	__dabt_invalid			@  8
+		.word	__dabt_invalid			@  9
+		.word	__dabt_invalid			@  a
+		.word	__dabt_invalid			@  b
+		.word	__dabt_invalid			@  c
+		.word	__dabt_invalid			@  d
+		.word	__dabt_invalid			@  e
+		.word	__dabt_invalid			@  f
+
+		.align	5
+
+/*
+ * Prefetch abort dispatcher - dispatches it to the correct handler for the processor mode
+ * Enter in ABT mode, spsr = USR CPSR, lr = USR PC
+ */
+ENTRY(vector_prefetch)
+		@
+		@ save mode specific registers
+		@
+		ldr	r13, .LCsabt
+		sub	lr, lr, #4
+		str	lr, [r13]			@ save lr_ABT
+		mrs	lr, spsr
+		str	lr, [r13, #4]			@ save spsr_ABT
+		@
+		@ now branch to the relevent MODE handling routine
+		@
+		mrs	r13, spsr
+		bic	r13, r13, #MODE_MASK		@ preserve F and T bits
+		orr	r13, r13, #I_BIT | MODE_SVC
+		msr	spsr_c, r13			@ switch to SVC_32 mode
+
+		ands	lr, lr, #15
+		ldr	lr, [pc, lr, lsl #2]
 		movs	pc, lr
 
-Lhandle_bottom_half:
-		add	r0, r5, #1
-		str	r0, [r4]
-		mrs	r8, cpsr
-		bic	lr, r8, #I_BIT
-		msr	cpsr, lr
-		bl	do_bottom_half
-		msr	cpsr, r8
-		str	r5, [r4]
-		b	Lrecheck_bh
+.LCtab_pabt:	.word	__pabt_usr			@  0 (USR_26 / USR_32)
+		.word	__pabt_invalid			@  1 (FIQ_26 / FIQ_32)
+		.word	__pabt_invalid			@  2 (IRQ_26 / IRQ_32)
+		.word	__pabt_svc			@  3 (SVC_26 / SVC_32)
+		.word	__pabt_invalid			@  4
+		.word	__pabt_invalid			@  5
+		.word	__pabt_invalid			@  6
+		.word	__pabt_invalid			@  7
+		.word	__pabt_invalid			@  8
+		.word	__pabt_invalid			@  9
+		.word	__pabt_invalid			@  a
+		.word	__pabt_invalid			@  b
+		.word	__pabt_invalid			@  c
+		.word	__pabt_invalid			@  d
+		.word	__pabt_invalid			@  e
+		.word	__pabt_invalid			@  f
 
-_fpnull:	mov	pc, lr
+		.align	5
+
+/*
+ * Undef instr entry dispatcher - dispatches it to the correct handler for the processor mode
+ * Enter in UND mode, spsr = SVC/USR CPSR, lr = SVC/USR PC
+ */
+ENTRY(vector_undefinstr)
+		@
+		@ save mode specific registers
+		@
+		ldr	r13, .LCsund
+		str	lr, [r13]			@ save lr_UND
+		mrs	lr, spsr
+		str	lr, [r13, #4]			@ save spsr_UND
+		@
+		@ now branch to the relevent MODE handling routine
+		@
+		mrs	r13, spsr
+		bic	r13, r13, #MODE_MASK		@ preserve F and T bits
+		orr	r13, r13, #I_BIT | MODE_SVC
+		msr	spsr_c, r13			@ switch to SVC_32 mode
+
+		and	lr, lr, #15
+		ldr	lr, [pc, lr, lsl #2]
+		movs	pc, lr				@ Changes mode and branches
+
+.LCtab_und:	.word	__und_usr			@  0 (USR_26 / USR_32)
+		.word	__und_invalid			@  1 (FIQ_26 / FIQ_32)
+		.word	__und_invalid			@  2 (IRQ_26 / IRQ_32)
+		.word	__und_svc			@  3 (SVC_26 / SVC_32)
+		.word	__und_invalid			@  4
+		.word	__und_invalid			@  5
+		.word	__und_invalid			@  6
+		.word	__und_invalid			@  7
+		.word	__und_invalid			@  8
+		.word	__und_invalid			@  9
+		.word	__und_invalid			@  a
+		.word	__und_invalid			@  b
+		.word	__und_invalid			@  c
+		.word	__und_invalid			@  d
+		.word	__und_invalid			@  e
+		.word	__und_invalid			@  f
+
+		.align	5
+
+/*=============================================================================
+ * Undefined FIQs
+ *-----------------------------------------------------------------------------
+ * Enter in FIQ mode, spsr = ANY CPSR, lr = ANY PC
+ * MUST PRESERVE SVC SPSR, but need to switch to SVC mode to show our msg.
+ * Basically to switch modes, we *HAVE* to clobber one register...  brain
+ * damage alert!  I don't think that we can execute any code in here in any
+ * other mode than FIQ...  Ok you can switch to another mode, but you can't
+ * get out of that mode without clobbering one register.
+ */
+ENTRY(vector_FIQ)
+    		disable_fiq
+		subs	pc, lr, #4
+
+/*=============================================================================
+ * Address exception handler
+ *-----------------------------------------------------------------------------
+ * These aren't too critical.
+ * (they're not supposed to happen, and won't happen in 32-bit data mode).
+ */
+
+ENTRY(vector_addrexcptn)
+		b	vector_addrexcptn
+
+/*
+ * We group all the following data together to optimise
+ * for CPUs with separate I & D caches.
+ */
+		.align	5
+
+.LCvswi:	.word	vector_swi
+
+.LCsirq:	.word	__temp_irq
+.LCsund:	.word	__temp_und
+.LCsabt:	.word	__temp_abt
+
+#if defined(CONFIG_CPU_S3C3410) || defined(CONFIG_CPU_S3C3410)
+.INTPRIO0:	.word	S3C3410X_INTPRI0
+#endif
+#if defined(CONFIG_CPU_S3C44B0X)
+.INTPRIO_M:  	.word	S3C44B0X_I_PSLV
+.INTPRIO_S:  	.word	S3C44B0X_I_PMST
+.INTCON:    	.word	S3C44B0X_INTCON
+#endif
+
+__stubs_end:
+#if defined(CONFIG_ARCH_VC547X)
+                /* Since C5471 normally has flash down at the
+                   low end of the memory map we won't be able
+                   to plug in our interrupt vectors at run time. */
+
+.LCvectors:     .word   0
+                .word   vector_undefinstr
+                .word   vector_swi
+                .word   vector_prefetch
+                .word   vector_data
+                .word   vector_addrexcptn
+                .word   vector_IRQ
+                .word   vector_FIQ
+
+ENTRY(__trap_init)
+                stmfd   sp !,{r4 - r9, lr}      @ Save link register
+
+                mrs     r0, cpsr
+                bic     r0, r0, #MODE_MASK  @ clear Thumb and mode bits
+                orr     r0, r0, #I_BIT|F_BIT|MODE_SVC  @ +SVC mode -IRQ/FIQ
+                msr     cpsr, r0
+                ldr     r0, =C5471_IRAM_START @ addr of RAM based vector table.
+                adr     r1, .LCvectors
+                ldmia   r1, {r1 - r8}    @ Read our ISR vectors
+                stmia   r0, {r1 - r8}    @ Write vectors in special RAM table.
+                ldmfd   sp!, {r4 - r9, pc}
+#else
+		/* Normal case:  lower memory is writable. */
+#if defined(CONFIG_ARCH_LPC)
+		.equ	__real_stubs_start, 0x200 + RAM_BASE
+.LCvectors:
+		swi	SYS_ERROR0
+		ldr pc, .vector_undef
+		ldr pc, .vector_swi
+		ldr pc, .vector_prefetch
+		ldr pc, .vector_data
+		ldr pc, .vector_reserve
+		ldr pc, .vector_IRQ
+		ldr pc, .vector_FIQ
+.vector_undef:		.word	(__real_stubs_start + (vector_undefinstr - __stubs_start))
+.vector_swi:		.word	vector_swi
+.vector_prefetch:	.word	(__real_stubs_start + (vector_prefetch - __stubs_start))
+.vector_data:		.word	(__real_stubs_start + (vector_data - __stubs_start))
+.vector_reserve:	.word	(__real_stubs_start + (vector_addrexcptn - __stubs_start))
+.vector_IRQ:		.word	(__real_stubs_start + (vector_IRQ - __stubs_start))
+.vector_FIQ:		.word	(__real_stubs_start + (vector_FIQ - __stubs_start))
+#else
+
+#if defined(CONFIG_MACH_UC5471DSP) || defined(CONFIG_MACH_SJ5471ENG)
+		.equ	__real_stubs_start, .LCvectors + 0x20
+#else
+		.equ	__real_stubs_start, .LCvectors + 0x200
+#endif
+
+.LCvectors:
+		swi	SYS_ERROR0
+		b	__real_stubs_start + (vector_undefinstr - __stubs_start)
+		ldr	pc, __real_stubs_start + (.LCvswi - __stubs_start)
+		b	__real_stubs_start + (vector_prefetch - __stubs_start)
+		b	__real_stubs_start + (vector_data - __stubs_start)
+		b	__real_stubs_start + (vector_addrexcptn - __stubs_start)
+		b	__real_stubs_start + (vector_IRQ - __stubs_start)
+		b	__real_stubs_start + (vector_FIQ - __stubs_start)
+		
+#ifdef CONFIG_CPU_S3C44B0X  	/* one jump for non-vectored mode */
+
+#define RELOC_VEC(x) (__real_stubs_start + ((x) - __stubs_start))
+
+/*
+ * We assume that there is a bootloader that has jump instructions at all
+ * exception vectors that lead to their position shifted to the start of
+ * RAM. Further on we assume that the following code gets linked to the
+ * start of RAM, so that all jumps match again.
+ */
+		/*
+		 * standard ARM exception vectors @ 0x00...0x1C
+		 * are already handled above.
+		 *
+		 * entries for the S3C44B0X vectorized interrupt mode
+		 * branching back to standard IRQ, for compatibility with
+		 * non-vectorized mode
+		 * (41 entries for 25 interrupt sources)
+		 */
+.LCvectors_44BOX_start:
+		b	RELOC_VEC(vector_IRQ)	/* 0x20 -  EINT0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x24 -  EINT1 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x28 -  EINT2 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x2C -  EINT3 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x30 -  EINT4/5/6/7 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x34 -  INT_TICK */
+		swi	SYS_ERROR0		/* 0x38 */
+		swi	SYS_ERROR0		/* 0x3C */
+		b	RELOC_VEC(vector_IRQ)	/* 0x40 -  INT_ZDMA0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x44 -  INT_ZDMA1 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x48 -  INT_BDMA0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x4C -  INT_BDMA1 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x50 -  INT_WDT */
+		b	RELOC_VEC(vector_IRQ)	/* 0x54 -  INT_UERR0/1 */
+		swi	SYS_ERROR0		/* 0x58 */
+		swi	SYS_ERROR0		/* 0x5C */
+		b	RELOC_VEC(vector_IRQ)	/* 0x60 -  INT_TIMER0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x64 -  INT_TIMER1 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x68 -  INT_TIMER2 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x6C -  INT_TIMER3 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x70 -  INT_TIMER4 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x74 -  INT_TIMER5 */
+		swi	SYS_ERROR0		/* 0x78 */
+		swi	SYS_ERROR0		/* 0x7C */
+		b	RELOC_VEC(vector_IRQ)	/* 0x80 -  INT_URXD0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x84 -  INT_URXD1 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x88 -  INT_IIC */
+		b	RELOC_VEC(vector_IRQ)	/* 0x8C -  INT_SIO */
+		b	RELOC_VEC(vector_IRQ)	/* 0x90 -  INT_UTXD0 */
+		b	RELOC_VEC(vector_IRQ)	/* 0x94 -  INT_UTXD1 */
+		swi	SYS_ERROR0		/* 0x98 */
+		swi	SYS_ERROR0		/* 0x9C */
+		b	RELOC_VEC(vector_IRQ)	/* 0xA0 -  INT_RTC */
+		swi	SYS_ERROR0		/* 0xA4 */
+		swi	SYS_ERROR0		/* 0xA8 */
+		swi	SYS_ERROR0		/* 0xAC */
+		swi	SYS_ERROR0		/* 0xB0 */
+		swi	SYS_ERROR0		/* 0xB4 */
+		swi	SYS_ERROR0		/* 0xB8 */
+		swi	SYS_ERROR0		/* 0xBC */
+		b	RELOC_VEC(vector_IRQ)	/* 0xC0 -  INT_ADC */
+.LCvectors_44BOX_end:
+#endif
+
+#ifdef CONFIG_CPU_S3C3410
+		/* 32 interrupt vectors @ 0x0000.0080 */
+		/* preset to the global default handler vector_IRQ */
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		b	__real_stubs_start + (vector_IRQ - __stubs_start) - 0x60
+		/* now the 32 fiq handlers */
+	        .word  0
+	        .word  0
+                .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+                .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+	        .word  0
+#endif
+#endif /* CONFIG_ARCH_LPC */
+
+ENTRY(__trap_init)
+		stmfd	sp!, {r4 - r9, lr}
+
+		mrs	r1, cpsr		@ code from 2.0.38
+		bic	r1, r1, #MODE_MASK	@ clear mode bits
+		orr	r1, r1, #I_BIT|F_BIT|MODE_SVC	@ set SVC mode, disable IRQ,FIQ
+		msr	cpsr, r1
+
+#ifdef CONFIG_CPU_S3C3410
+		/*
+		 * make sure that interrupt priority is not used. Otherwise
+		 * the IRQ and FIQ vector addresses are not writeable
+		 */
+		adr	r1, .INTPRIO0
+		ldr	r1, [r1]
+		ldr	r2, [r1]
+		and	r2, r2, #0x1FFFFFFF
+		str	r2, [r1]
+#endif /* CONFIG_CPU_S3C3410 */
+
+#ifdef CONFIG_CPU_S3C44B0X
+		/** @todo all this priority crap !!
+		 * make sure that interrupt priority is not used. Otherwise
+		 * the IRQ and FIQ vector addresses are not writeable
+		 */
+/*		adr	r1, .INTPRIO_M / .INTPRIO_S */
+/*		ldr	r1, [r1]    	    	    */
+/*		ldr	r2, [r1]    	    	    */
+/*		and	r2, r2, #0x1FFFFFFF 	    */
+/*		str	r2, [r1]    	    	    */
+		mov     r0, #0x0c000000
+#endif /* CONFIG_CPU_S3C44B0X */
+		
+#ifdef CONFIG_ARCH_LPC
+		mov r0, #RAM_BASE
+#endif
+
+		adr	r1, .LCvectors			@ set up the vectors
+		ldmia	r1, {r2, r3, r4, r5, r6, r7, r8, r9}
+		stmia	r0, {r2, r3, r4, r5, r6, r7, r8, r9}
+
+#ifdef CONFIG_ARCH_LPC
+		adr r1, .vector_undef
+		ldmia	r1, {r2 - r9}
+		mov	r0, #(RAM_BASE+32)
+		stmia	r0, {r2 - r9}
+#endif
+
+#ifdef CONFIG_CPU_S3C3410
+		/*
+		 * Enable the vector table based interrupt mode
+		 */
+		adr	r4, .INTPRIO0
+		ldr	r4, [r4]
+		ldr	r3, [r4]
+		orr	r3, r3, #0xE0000000	@ bit 31...29 must be set for this
+		str	r3, [r4]
+
+		mov 	r4, #(0x0080)		@ R4 = 0x0080 (RAM)
+		add	r1, r1, #(8*4)		@ R1 = start of vectors (ROM)
+		add	r2, r1, #(32*4)		@ R2 = end of vectors (ROM)
+2:		ldr	r3, [r1], #4
+		str	r3, [r4], #4
+		cmp	r1, r2
+		blt	2b
+#endif /* CONFIG_CPU_S3C3410 */
+
+#ifdef CONFIG_CPU_S3C44B0X
+		/*
+		 * Initialize the IRQ-Controller to use non-vectored mode
+		 * We will use the S3C44B0X_I_ISPR register to determine
+		 * the current interrupt to be serviced.
+		 */
+		adr	r5, .INTCON
+		ldr	r6, [r5]
+		/* non-vectored and enable FIQ/IRQ controlling */
+		/* mov	r3, #0x4 */
+		/* str	r3, [r6] */
+
+		/* copy code for vectorized interrupt mode */
+		adr	r1, .LCvectors_44BOX_start @ R1 = start of vectors (ROM)
+		adr	r2, .LCvectors_44BOX_end   @ R2 = end of vectors (ROM)
+		mov     r4, #0x0c000000
+		add 	r4, r4, #(0x20)            @ R4 = 0x0C000020 (RAM)
+2:		ldr	r3, [r1], #4
+		str	r3, [r4], #4
+		cmp	r1, r2
+		blt	2b
+
+		/* enable vectorized interrupt mode */
+		/* mov	r3, #0x0 */
+		/* str	r3, [r6] */
+#endif /* CONFIG_CPU_S3C44B0X */
+
+#ifdef CONFIG_ARCH_LPC
+		mov r0, #RAM_BASE
+#endif
+#if defined(CONFIG_MACH_UC5471DSP) || defined(CONFIG_MACH_SJ5471ENG)
+		add	r2, r0, #0x20			@ copy stubs to 0x20
+#else
+		add	r2, r0, #0x200			@ copy stubs to 0x200
+#endif
+		adr	r0, __stubs_start		@ copy stubs to 0x200
+		adr	r1, __stubs_end
+1:		ldr	r3, [r0], #4
+		str	r3, [r2], #4
+		cmp	r0, r1
+		blt	1b
+		LOADREGS(fd, sp!, {r4 - r9, pc})
+#endif /* defined(CONFIG_ARCH_VC547X) */
 
 		.data
 
-		.global	_fp_enter,fp_enter
-		.global	_fp_save,fp_save
-		.global	_fp_restore,fp_restore
-
-fp_enter:
-_fp_enter:	.word	fpe_not_present
-		.word	fpe_not_present
-fp_save:
-_fp_save:	.word	_fpnull
-fp_restore:
-_fp_restore:	.word	_fpnull
+/*
+ * Do not reorder these, and do not insert extra data between...
+ */
 
 __temp_irq:	.word	0				@ saved lr_irq
 		.word	0				@ saved spsr_irq
@@ -1186,3 +2344,10 @@ __temp_und:	.word	0				@ Saved lr_und
 __temp_abt:	.word	0				@ Saved lr_abt
 		.word	0				@ Saved spsr_abt
 		.word	-1				@ old_r0
+
+		.globl	SYMBOL_NAME(cr_alignment)
+		.globl	SYMBOL_NAME(cr_no_alignment)
+SYMBOL_NAME(cr_alignment):
+		.space	4
+SYMBOL_NAME(cr_no_alignment):
+		.space	4

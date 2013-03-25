@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -68,81 +68,29 @@
 #include <linux/version.h>
 #endif
 
+#include <linux/types.h>
+
 #include "sd.h"
 
 extern int inia100_detect(Scsi_Host_Template *);
+extern int inia100_release(struct Scsi_Host *);
 extern int inia100_command(Scsi_Cmnd *);
 extern int inia100_queue(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 extern int inia100_abort(Scsi_Cmnd *);
 extern int inia100_reset(Scsi_Cmnd *, unsigned int);
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1, 3, 0)
 extern int inia100_biosparam(Scsi_Disk *, kdev_t, int *);	/*for linux v2.0 */
-extern struct proc_dir_entry proc_scsi_inia100;
-#else
-extern int inia100_biosparam(Disk *, int, int *);	/*for linux v1.13 */
-#endif
 
-#define inia100_REVID "Initio INI-A100U2W SCSI device driver; Revision: 1.02a"
+#define inia100_REVID "Initio INI-A100U2W SCSI device driver; Revision: 1.02c"
 
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(1, 3, 0)
-#define INIA100	{ \
-		NULL, \
-		NULL, \
-		inia100_REVID, \
-		inia100_detect, \
-		NULL, \
-		NULL, \
-		inia100_command, \
-		inia100_queue, \
-		inia100_abort, \
-		inia100_reset, \
-		NULL, \
-		inia100_biosparam, \
-		1, \
-7, \
-SG_ALL, \
-1, \
-0, \
-0, \
-ENABLE_CLUSTERING \
-}
-
-#else
-
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2, 1, 75)
-#define INIA100	{ \
-		NULL, \
-		NULL, \
-		&proc_scsi_inia100, \
-		NULL, \
-		inia100_REVID, \
-		inia100_detect, \
-		NULL, \
-		NULL, \
-		inia100_command, \
-		inia100_queue, \
-		inia100_abort, \
-		inia100_reset, \
-		NULL, \
-		inia100_biosparam, \
-		1, \
-		7, \
-		0, \
-		1, \
-		0, \
-		0, \
-		ENABLE_CLUSTERING \
-}
-#else				/* Version >= 2.1.75 */
 #define INIA100	{ \
 	next:		NULL,						\
 	module:		NULL,						\
-	proc_dir:	&proc_scsi_inia100, \
+	proc_name:	"INIA100", \
 	proc_info:	NULL,				\
 	name:		inia100_REVID, \
 	detect:		inia100_detect, \
-	release:	NULL, \
+	release:	inia100_release, \
 	info:		NULL,					\
 	command:	inia100_command, \
 	queuecommand:	inia100_queue, \
@@ -164,8 +112,6 @@ ENABLE_CLUSTERING \
 	use_clustering:	ENABLE_CLUSTERING, \
  use_new_eh_code: 0 \
 }
-#endif
-#endif
 
 #define VIRT_TO_BUS(i)  (unsigned int) virt_to_bus((void *)(i))
 #define ULONG   unsigned long
@@ -178,11 +124,7 @@ ENABLE_CLUSTERING \
 #define UBYTE   unsigned char
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32     unsigned int
-#else
-#define U32     unsigned long
-#endif
+#define U32     u32
 
 #ifndef NULL
 #define NULL     0		/* zero          */
@@ -349,8 +291,8 @@ typedef struct orc_scb {	/* Scsi_Ctrl_Blk                */
 #define ORC_BUSDEVRST	0x01	/* SCSI Bus Device Reset  */
 
 /* Status of ORCSCB_Status */
-#define SCB_COMPLETE	0x00	/* SCB request completed  */
-#define SCB_POST	0x01	/* SCB is posted by the HOST      */
+#define ORCSCB_COMPLETE	0x00	/* SCB request completed  */
+#define ORCSCB_POST	0x01	/* SCB is posted by the HOST      */
 
 /* Bit Definition for ORCSCB_Flags */
 #define SCF_DISINT	0x01	/* Disable HOST interrupt */
@@ -441,14 +383,10 @@ typedef struct ORC_Ha_Ctrl_Struc {
 	UBYTE ActiveTags[16][16];	/* 50 */
 	ORC_TCS HCS_Tcs[16];	/* 28 */
 	U32 BitAllocFlag[MAX_CHANNELS][8];	/* Max STB is 256, So 256/32 */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t BitAllocFlagLock;
-#endif
 	Scsi_Cmnd *pSRB_head;
 	Scsi_Cmnd *pSRB_tail;
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t pSRB_lock;
-#endif
 } ORC_HCS;
 
 /* Bit Definition for HCS_Flags */

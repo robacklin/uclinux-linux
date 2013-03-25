@@ -1,27 +1,18 @@
 /*
  *	linux/mm/mprotect.c
  *
+ *  Copyright (c) 2000-2001 D Jeff Dionne <jeff@uClinux.org> ref uClinux 2.0
  *  (C) Copyright 1994 Linus Torvalds
  */
-
-/*
- * uClinux revisions for NO_MM
- * Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- * Copyright (C) 1999,2000  D. Jeff Dionne <jeff@uclinux.org>,
- *                          Rt-Control, Inc. /Lineo Inc.
- */  
-
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/shm.h>
-#include <linux/errno.h>
 #include <linux/mman.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
 
-asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
+#include <asm/uaccess.h>
+#include <asm/pgalloc.h>
+
+asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
 	return -ENOSYS;
 }

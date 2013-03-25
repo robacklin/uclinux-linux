@@ -5,7 +5,7 @@
 	See the skeleton.c file for further copyright information.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	The author may be reached as hamish@zot.apana.org.au
 
@@ -14,7 +14,7 @@
 
 */
 
-static const char *version =
+static const char version[] =
 	"seeq8005.c:v1.00 8/07/95 Hamish Coleman (hamish@zot.apana.org.au)\n";
 
 /*
@@ -30,6 +30,7 @@ static const char *version =
   	0.48	Receive working
 */
 
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -38,8 +39,10 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/init.h>
+#include <linux/delay.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -53,7 +56,7 @@ static const char *version =
 
 /* First, a few definitions that the brave might change. */
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int seeq8005_portlist[] =
+static unsigned int seeq8005_portlist[] __initdata =
    { 0x300, 0x320, 0x340, 0x360, 0};
 
 /* use 0 for production, 1 for verification, >2 for debug */
@@ -64,7 +67,7 @@ static unsigned int net_debug = NET_DEBUG;
 
 /* Information that need to be kept for each board. */
 struct net_local {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	unsigned short receive_ptr;		/* What address in packet memory do we expect a recv_pkt_header? */
 	long open_time;				/* Useless example local info. */
 };
@@ -76,38 +79,32 @@ struct net_local {
 
 /* Index to functions, as function prototypes. */
 
-extern int seeq8005_probe(struct device *dev);
+extern int seeq8005_probe(struct net_device *dev);
 
-static int seeq8005_probe1(struct device *dev, int ioaddr);
-static int seeq8005_open(struct device *dev);
-static int seeq8005_send_packet(struct sk_buff *skb, struct device *dev);
+static int seeq8005_probe1(struct net_device *dev, int ioaddr);
+static int seeq8005_open(struct net_device *dev);
+static void seeq8005_timeout(struct net_device *dev);
+static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void seeq8005_rx(struct device *dev);
-static int seeq8005_close(struct device *dev);
-static struct enet_statistics *seeq8005_get_stats(struct device *dev);
-static void set_multicast_list(struct device *dev);
+static void seeq8005_rx(struct net_device *dev);
+static int seeq8005_close(struct net_device *dev);
+static struct net_device_stats *seeq8005_get_stats(struct net_device *dev);
+static void set_multicast_list(struct net_device *dev);
 
 /* Example routines you must write ;->. */
 #define tx_done(dev)	(inw(SEEQ_STATUS) & SEEQSTAT_TX_ON)
-extern void hardware_send_packet(struct device *dev, char *buf, int length);
-extern void seeq8005_init(struct device *dev, int startp);
-inline void wait_for_buffer(struct device *dev);
+static void hardware_send_packet(struct net_device *dev, char *buf, int length);
+extern void seeq8005_init(struct net_device *dev, int startp);
+static inline void wait_for_buffer(struct net_device *dev);
 
 
 /* Check for a network adaptor of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
-   If dev->base_addr == 2, allocate space for the device and return success
-   (detachable devices only).
    */
-#ifdef HAVE_DEVLIST
-/* Support for a alternate probe manager, which will eliminate the
-   boilerplate below. */
-struct netdev_entry seeq8005_drv =
-{"seeq8005", seeq8005_probe1, SEEQ8005_IO_EXTENT, seeq8005_portlist};
-#else
-int
-seeq8005_probe(struct device *dev)
+
+int __init 
+seeq8005_probe(struct net_device *dev)
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -115,27 +112,22 @@ seeq8005_probe(struct device *dev)
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return seeq8005_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
-	for (i = 0; seeq8005_portlist[i]; i++) {
-		int ioaddr = seeq8005_portlist[i];
-		if (check_region(ioaddr, SEEQ8005_IO_EXTENT))
-			continue;
-		if (seeq8005_probe1(dev, ioaddr) == 0)
+	for (i = 0; seeq8005_portlist[i]; i++)
+		if (seeq8005_probe1(dev, seeq8005_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
 /* This is the real probe routine.  Linux has a history of friendly device
    probes on the ISA bus.  A good device probes avoids doing writes, and
    verifies that the correct device exists and functions.  */
 
-static int seeq8005_probe1(struct device *dev, int ioaddr)
+static int __init seeq8005_probe1(struct net_device *dev, int ioaddr)
 {
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	int i,j;
 	unsigned char SA_prom[32];
 	int old_cfg1;
@@ -143,33 +135,42 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 	int old_stat;
 	int old_dmaar;
 	int old_rear;
+	int retval;
+
+	if (!request_region(ioaddr, SEEQ8005_IO_EXTENT, "seeq8005"))
+		return -ENODEV;
 
 	if (net_debug>1)
 		printk("seeq8005: probing at 0x%x\n",ioaddr);
 
 	old_stat = inw(SEEQ_STATUS);					/* read status register */
-	if (old_stat == 0xffff)
-		return ENODEV;						/* assume that 0xffff == no device */
+	if (old_stat == 0xffff) {
+		retval = -ENODEV;
+		goto out;						/* assume that 0xffff == no device */
+	}
 	if ( (old_stat & 0x1800) != 0x1800 ) {				/* assume that unused bits are 1, as my manual says */
 		if (net_debug>1) {
 			printk("seeq8005: reserved stat bits != 0x1800\n");
 			printk("          == 0x%04x\n",old_stat);
 		}
-	 	return ENODEV;
+	 	retval = -ENODEV;
+		goto out;
 	}
 
 	old_rear = inw(SEEQ_REA);
 	if (old_rear == 0xffff) {
 		outw(0,SEEQ_REA);
 		if (inw(SEEQ_REA) == 0xffff) {				/* assume that 0xffff == no device */
-			return ENODEV;
+			retval = -ENODEV;
+			goto out;
 		}
 	} else if ((old_rear & 0xff00) != 0xff00) {			/* assume that unused bits are 1 */
 		if (net_debug>1) {
 			printk("seeq8005: unused rear bits != 0xff00\n");
 			printk("          == 0x%04x\n",old_rear);
 		}
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 	
 	old_cfg2 = inw(SEEQ_CFG2);					/* read CFG2 register */
@@ -187,8 +188,8 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 	outw( SEEQCMD_FIFO_WRITE | SEEQCMD_SET_ALL_OFF, SEEQ_CMD);	/* setup for reading PROM */
 	outw( 0, SEEQ_DMAAR);						/* set starting PROM address */
 	outw( SEEQCFG1_BUFFER_PROM, SEEQ_CFG1);				/* set buffer to look at PROM */
-	
-	
+
+
 	j=0;
 	for(i=0; i <32; i++) {
 		j+= SA_prom[i] = inw(SEEQ_BUFFER) & 0xff;
@@ -203,15 +204,13 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 		outw( old_stat, SEEQ_STATUS);
 		outw( old_dmaar, SEEQ_DMAAR);
 		outw( old_cfg1, SEEQ_CFG1);
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 #endif
 
 	outw( SEEQCFG2_RESET, SEEQ_CFG2);				/* reset the card */
-	SLOW_DOWN_IO;							/* have to wait 4us after a reset - should be fixed */
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;
+	udelay(5);
 	outw( SEEQCMD_SET_ALL_OFF, SEEQ_CMD);
 	
 	if (net_debug) {
@@ -248,10 +247,10 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 			outw(0x5a5a, SEEQ_BUFFER);
 		}
 		j=jiffies+HZ;
-		while ( ((inw(SEEQ_STATUS) & SEEQSTAT_FIFO_EMPTY) != SEEQSTAT_FIFO_EMPTY) && jiffies < j )
+		while ( ((inw(SEEQ_STATUS) & SEEQSTAT_FIFO_EMPTY) != SEEQSTAT_FIFO_EMPTY) && time_before(jiffies, j) )
 			mb();
 		outw( 0 , SEEQ_DMAAR);
-		while ( ((inw(SEEQ_STATUS) & SEEQSTAT_WINDOW_INT) != SEEQSTAT_WINDOW_INT) && jiffies < j+HZ)
+		while ( ((inw(SEEQ_STATUS) & SEEQSTAT_WINDOW_INT) != SEEQSTAT_WINDOW_INT) && time_before(jiffies, j+HZ))
 			mb();
 		if ( (inw(SEEQ_STATUS) & SEEQSTAT_WINDOW_INT) == SEEQSTAT_WINDOW_INT)
 			outw( SEEQCMD_WINDOW_INT_ACK | (inw(SEEQ_STATUS)& SEEQCMD_INT_MASK), SEEQ_CMD);
@@ -269,10 +268,6 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 	}
 #endif
 
-	/* Allocate a new 'dev' if needed. */
-	if (dev == NULL)
-		dev = init_etherdev(0, sizeof(struct net_local));
-
 	if (net_debug  &&  version_printed++ == 0)
 		printk(version);
 
@@ -288,11 +283,11 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 	if (dev->irq == 0xff)
 		;			/* Do nothing: a user-level program will set it. */
 	else if (dev->irq < 2) {	/* "Auto-IRQ" */
-		autoirq_setup(0);
+		unsigned long cookie = probe_irq_on();
 		
 		outw( SEEQCMD_RX_INT_EN | SEEQCMD_SET_RX_ON | SEEQCMD_SET_RX_OFF, SEEQ_CMD );
 
-		dev->irq = autoirq_report(0);
+		dev->irq = probe_irq_off(cookie);
 		
 		if (net_debug >= 2)
 			printk(" autoirq is %d\n", dev->irq);
@@ -304,17 +299,15 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 
 #if 0
 	{
-		 int irqval = request_irq(dev->irq, &seeq8005_interrupt, 0, "seeq8005", NULL);
+		 int irqval = request_irq(dev->irq, &seeq8005_interrupt, 0, "seeq8005", dev);
 		 if (irqval) {
 			 printk ("%s: unable to get IRQ %d (irqval=%d).\n", dev->name,
 					 dev->irq, irqval);
-			 return EAGAIN;
+			 retval = -EAGAIN;
+			 goto out;
 		 }
 	}
 #endif
-
-	/* Grab the region so we can find another board if autoIRQ fails. */
-	request_region(ioaddr, SEEQ8005_IO_EXTENT,"seeq8005");
 
 	/* Initialize the device structure. */
 	dev->priv = kmalloc(sizeof(struct net_local), GFP_KERNEL);
@@ -324,9 +317,11 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 
 	dev->open		= seeq8005_open;
 	dev->stop		= seeq8005_close;
-	dev->hard_start_xmit = seeq8005_send_packet;
-	dev->get_stats	= seeq8005_get_stats;
-	dev->set_multicast_list = &set_multicast_list;
+	dev->hard_start_xmit 	= seeq8005_send_packet;
+	dev->tx_timeout		= seeq8005_timeout;
+	dev->watchdog_timeo	= HZ/20;
+	dev->get_stats		= seeq8005_get_stats;
+	dev->set_multicast_list = set_multicast_list;
 
 	/* Fill in the fields of the device structure with ethernet values. */
 	ether_setup(dev);
@@ -334,6 +329,9 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
 	dev->flags &= ~IFF_MULTICAST;
 
 	return 0;
+out:
+	release_region(ioaddr, SEEQ8005_IO_EXTENT);
+	return retval;
 }
 
 
@@ -344,72 +342,61 @@ static int seeq8005_probe1(struct device *dev, int ioaddr)
    registers that "should" only need to be set once at boot, so that
    there is non-reboot way to recover if something goes wrong.
    */
-static int
-seeq8005_open(struct device *dev)
+static int seeq8005_open(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
 	{
-		 int irqval = request_irq(dev->irq, &seeq8005_interrupt, 0, "seeq8005", NULL);
+		 int irqval = request_irq(dev->irq, &seeq8005_interrupt, 0, "seeq8005", dev);
 		 if (irqval) {
 			 printk ("%s: unable to get IRQ %d (irqval=%d).\n", dev->name,
 					 dev->irq, irqval);
-			 return EAGAIN;
+			 return -EAGAIN;
 		 }
 	}
-	irq2dev_map[dev->irq] = dev;
 
 	/* Reset the hardware here.  Don't forget to set the station address. */
 	seeq8005_init(dev, 1);
 
 	lp->open_time = jiffies;
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	netif_start_queue(dev);
 	return 0;
 }
 
-static int
-seeq8005_send_packet(struct sk_buff *skb, struct device *dev)
+static void seeq8005_timeout(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
+		   tx_done(dev) ? "IRQ conflict" : "network cable problem");
+	/* Try to restart the adaptor. */
+	seeq8005_init(dev, 1);
+	dev->trans_start = jiffies;
+	netif_wake_queue(dev);
+}
 
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		printk("%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
-		/* Try to restart the adaptor. */
-		seeq8005_init(dev, 1);
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
+static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev)
+{
+	struct net_local *lp = (struct net_local *)dev->priv;
+	short length = skb->len;
+	unsigned char *buf;
+
+	if(length < ETH_ZLEN)
+	{
+		skb = skb_padto(skb, ETH_ZLEN);
+		if(skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
 	}
+	buf = skb->data;
 
-	/* If some higher layer thinks we've missed an tx-done interrupt
-	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	   itself. */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
-
-	/* Block a timer-based transmit from overlapping.  This could better be
-	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-		unsigned char *buf = skb->data;
-
-		hardware_send_packet(dev, buf, length); 
-		dev->trans_start = jiffies;
-	}
-	dev_kfree_skb (skb, FREE_WRITE);
-
+	/* Block a timer-based transmit from overlapping */
+	netif_stop_queue(dev);
+	
+	hardware_send_packet(dev, buf, length); 
+	dev->trans_start = jiffies;
+	lp->stats.tx_bytes += length;
+	dev_kfree_skb (skb);
 	/* You might need to clean up and record Tx statistics here. */
 
 	return 0;
@@ -417,21 +404,11 @@ seeq8005_send_packet(struct sk_buff *skb, struct device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void
-seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
+	struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
-
-	if (dev == NULL) {
-		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
-	}
-	
-	if (dev->interrupt)
-		printk ("%s: Re-entering the interrupt handler.\n", dev->name);
-	dev->interrupt = 1;
 
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
@@ -451,8 +428,7 @@ seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		if (status & SEEQSTAT_TX_INT) {
 			outw( SEEQCMD_TX_INT_ACK | (status & SEEQCMD_INT_MASK), SEEQ_CMD);
 			lp->stats.tx_packets++;
-			dev->tbusy = 0;
-			mark_bh(NET_BH);	/* Inform upper layers. */
+			netif_wake_queue(dev);	/* Inform upper layers. */
 		}
 		if (status & SEEQSTAT_RX_INT) {
 			/* Got a packet(s). */
@@ -464,13 +440,10 @@ seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if(net_debug>2) {
 		printk("%s: eoi\n",dev->name);
 	}
-	dev->interrupt = 0;
-	return;
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
-static void
-seeq8005_rx(struct device *dev)
+static void seeq8005_rx(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int boguscount = 10;
@@ -556,7 +529,9 @@ seeq8005_rx(struct device *dev)
 
 			skb->protocol=eth_type_trans(skb,dev);
 			netif_rx(skb);
+			dev->last_rx = jiffies;
 			lp->stats.rx_packets++;
+			lp->stats.rx_bytes += pkt_len;
 		}
 	} while ((--boguscount) && (pkt_hdr & SEEQPKTH_CHAIN));
 
@@ -567,23 +542,19 @@ seeq8005_rx(struct device *dev)
 }
 
 /* The inverse routine to net_open(). */
-static int
-seeq8005_close(struct device *dev)
+static int seeq8005_close(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 
 	lp->open_time = 0;
 
-	dev->tbusy = 1;
-	dev->start = 0;
-
+	netif_stop_queue(dev);
+	
 	/* Flush the Tx and disable Rx here. */
 	outw( SEEQCMD_SET_ALL_OFF, SEEQ_CMD);
 
-	free_irq(dev->irq, NULL);
-
-	irq2dev_map[dev->irq] = 0;
+	free_irq(dev->irq, dev);
 
 	/* Update the statistics here. */
 
@@ -593,8 +564,7 @@ seeq8005_close(struct device *dev)
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct enet_statistics *
-seeq8005_get_stats(struct device *dev)
+static struct net_device_stats *seeq8005_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
@@ -607,8 +577,7 @@ seeq8005_get_stats(struct device *dev)
    num_addrs > 0	Multicast mode, receive normal and MC packets, and do
 			best-effort filtering.
  */
-static void
-set_multicast_list(struct device *dev)
+static void set_multicast_list(struct net_device *dev)
 {
 /*
  * I _could_ do up to 6 addresses here, but won't (yet?)
@@ -630,17 +599,14 @@ set_multicast_list(struct device *dev)
 #endif
 }
 
-void seeq8005_init(struct device *dev, int startp)
+void seeq8005_init(struct net_device *dev, int startp)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 	int i;
 	
 	outw(SEEQCFG2_RESET, SEEQ_CFG2);	/* reset device */
-	SLOW_DOWN_IO;				/* have to wait 4us after a reset - should be fixed */
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;
+	udelay(5);
 	
 	outw( SEEQCMD_FIFO_WRITE | SEEQCMD_SET_ALL_OFF, SEEQ_CMD);
 	outw( 0, SEEQ_DMAAR);			/* load start address into both low and high byte */
@@ -649,7 +615,7 @@ void seeq8005_init(struct device *dev, int startp)
 	
 	for(i=0;i<6;i++) {			/* set Station address */
 		outb(dev->dev_addr[i], SEEQ_BUFFER);
-		SLOW_DOWN_IO;
+		udelay(2);
 	}
 	
 	outw( SEEQCFG1_BUFFER_TEA, SEEQ_CFG1);	/* set xmit end area pointer to 16K */
@@ -690,7 +656,7 @@ void seeq8005_init(struct device *dev, int startp)
 }	
 
 
-void hardware_send_packet(struct device * dev, char *buf, int length)
+static void hardware_send_packet(struct net_device * dev, char *buf, int length)
 {
 	int ioaddr = dev->base_addr;
 	int status = inw(SEEQ_STATUS);
@@ -720,7 +686,7 @@ void hardware_send_packet(struct device * dev, char *buf, int length)
 	
 	/* drain FIFO */
 	tmp = jiffies;
-	while ( (((status=inw(SEEQ_STATUS)) & SEEQSTAT_FIFO_EMPTY) == 0) && (jiffies < tmp + HZ))
+	while ( (((status=inw(SEEQ_STATUS)) & SEEQSTAT_FIFO_EMPTY) == 0) && (jiffies - tmp < HZ))
 		mb();
 	
 	/* doit ! */
@@ -735,20 +701,62 @@ void hardware_send_packet(struct device * dev, char *buf, int length)
  * This routine waits for the SEEQ chip to assert that the FIFO is ready
  * by checking for a window interrupt, and then clearing it
  */
-inline void wait_for_buffer(struct device * dev)
+inline void wait_for_buffer(struct net_device * dev)
 {
 	int ioaddr = dev->base_addr;
 	int tmp;
 	int status;
 	
 	tmp = jiffies + HZ;
-	while ( ( ((status=inw(SEEQ_STATUS)) & SEEQSTAT_WINDOW_INT) != SEEQSTAT_WINDOW_INT) && jiffies < tmp)
+	while ( ( ((status=inw(SEEQ_STATUS)) & SEEQSTAT_WINDOW_INT) != SEEQSTAT_WINDOW_INT) && time_before(jiffies, tmp))
 		mb();
 		
 	if ( (status & SEEQSTAT_WINDOW_INT) == SEEQSTAT_WINDOW_INT)
 		outw( SEEQCMD_WINDOW_INT_ACK | (status & SEEQCMD_INT_MASK), SEEQ_CMD);
 }
 	
+#ifdef MODULE
+
+static struct net_device dev_seeq = { init: seeq8005_probe };
+static int io = 0x320;
+static int irq = 10;
+MODULE_LICENSE("GPL");
+MODULE_PARM(io, "i");
+MODULE_PARM(irq, "i");
+MODULE_PARM_DESC(io, "SEEQ 8005 I/O base address");
+MODULE_PARM_DESC(irq, "SEEQ 8005 IRQ number");
+
+int init_module(void)
+{
+	dev_seeq.irq=irq;
+	dev_seeq.base_addr=io;
+	if (register_netdev(&dev_seeq) != 0)
+		return -EIO;
+	return 0;
+}
+
+void cleanup_module(void)
+{
+	/*
+	 *	No need to check MOD_IN_USE, as sys_delete_module() checks.
+	 */
+
+	unregister_netdev(&dev_seeq);
+
+	/*
+	 *	Free up the private structure, or leak memory :-)
+	 */
+
+	kfree(dev_seeq.priv);
+	dev_seeq.priv = NULL;	/* gets re-allocated by el1_probe1 */
+
+	/*
+	 *	If we don't do this, we can't re-insmod it later.
+	 */
+	release_region(dev_seeq.base_addr, SEEQ8005_IO_EXTENT);
+}
+
+#endif /* MODULE */
 
 /*
  * Local variables:

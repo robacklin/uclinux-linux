@@ -1,11 +1,11 @@
 #
-# Makefile for m68k-specific library files..
+# Makefile for H8/300-specific library files..
 #
 
 .S.o:
-	$(CC) $(AFLAGS) -D__ASSEMBLY__ -traditional -c $< -o $@
+	$(CC) $(AFLAGS) -D__ASSEMBLY__ -c $< -o $@
 
 L_TARGET = lib.a
-L_OBJS  = ashrdi3.o bzero.o checksum.o memcmp.o semaphore.o
+obj-y  = ashrdi3.o checksum.o memcpy.o memset.o
 
 include $(TOPDIR)/Rules.make

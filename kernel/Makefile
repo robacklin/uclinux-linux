@@ -7,19 +7,32 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.s:
-	$(CPP) -traditional $< -o $*.s
-
 O_TARGET := kernel.o
-O_OBJS    = sched.o dma.o fork.o exec_domain.o panic.o printk.o sys.o \
-	module.o exit.o signal.o itimer.o info.o time.o softirq.o \
-	resource.o sysctl.o
 
-ifeq ($(CONFIG_MODULES),y)
-OX_OBJS = ksyms.o
+export-objs = signal.o sys.o kmod.o context.o ksyms.o pm.o exec_domain.o printk.o dma.o
+
+obj-y     = sched.o fork.o exec_domain.o panic.o printk.o \
+	    module.o exit.o itimer.o info.o time.o softirq.o resource.o \
+	    sysctl.o acct.o capability.o ptrace.o timer.o user.o \
+	    signal.o sys.o kmod.o context.o
+
+ifndef CONFIG_ARM
+obj-y	 += dma.o
+endif
+
+OX_OBJS  += signal.o sys.o kmod.o context.o
+
+obj-$(CONFIG_UID16) += uid16.o
+obj-$(CONFIG_MODULES) += ksyms.o
+obj-$(CONFIG_PM) += pm.o
+
+ifneq ($(CONFIG_IA64),y)
+# According to Alan Modra <alan@linuxcare.com.au>, the -fno-omit-frame-pointer is
+# needed for x86 only.  Why this used to be enabled for all architectures is beyond
+# me.  I suspect most platforms don't need this, but until we know that for sure
+# I turn this off for IA-64 only.  Andreas Schwab says it's also needed on m68k
+# to get a correct value for the wait-channel (WCHAN in ps). --davidm
+CFLAGS_sched.o := $(PROFILING) -fno-omit-frame-pointer
 endif
 
 include $(TOPDIR)/Rules.make
-
-sched.o: sched.c
-	$(CC) $(CFLAGS) $(PROFILING) -fno-omit-frame-pointer -c $<

@@ -56,6 +56,7 @@
  * [including the GNU Public Licence.]
  */
 
+#ifdef __KERNEL__
 #ifndef HEADER_RC4_H
 #define HEADER_RC4_H
 
@@ -85,4 +86,7 @@ void RC4(RC4_KEY *key, unsigned long len, const unsigned char *indata,
 }
 #endif
 
+#endif
+#else /* __KERNEL__ */
+#include_next <openssl/rc4.h>
 #endif

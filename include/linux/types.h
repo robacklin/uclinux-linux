@@ -1,19 +1,15 @@
 #ifndef _LINUX_TYPES_H
 #define _LINUX_TYPES_H
 
-#if 0 /* This code gets erroneously triggered when cross 
-	 compiling in some cases, so turn it off.  */
-#ifdef __i386__
-#if defined(__KERNEL__) && !defined(STDC_HEADERS)
-#if ((__GNUC_MINOR__ >= 8) || (__GNUC_MAJOR >=3))
-#warning "This code is tested with gcc 2.7.2.x only. Using egcs/gcc 2.8.x needs"
-#warning "additional patches that have not been sufficiently tested to include by"
-#warning "default."
-#warning "See http://www.suse.de/~florian/kernel+egcs.html for more information"
-#error "Remove this if you have applied the gcc 2.8/egcs patches and wish to use them"
-#endif
-#endif
-#endif
+#ifdef	__KERNEL__
+#include <linux/config.h>
+
+#define BITS_TO_LONGS(bits) \
+	(((bits)+BITS_PER_LONG-1)/BITS_PER_LONG)
+#define DECLARE_BITMAP(name,bits) \
+	unsigned long name[BITS_TO_LONGS(bits)]
+#define CLEAR_BITMAP(name,bits) \
+	memset(name, 0, BITS_TO_LONGS(bits)*sizeof(unsigned long))
 #endif
 
 #include <linux/posix_types.h>
@@ -28,11 +24,31 @@ typedef __kernel_mode_t		mode_t;
 typedef __kernel_nlink_t	nlink_t;
 typedef __kernel_off_t		off_t;
 typedef __kernel_pid_t		pid_t;
+typedef __kernel_daddr_t	daddr_t;
+typedef __kernel_key_t		key_t;
+typedef __kernel_suseconds_t	suseconds_t;
+
+#ifdef __KERNEL__
+typedef __kernel_uid32_t	uid_t;
+typedef __kernel_gid32_t	gid_t;
+typedef __kernel_uid16_t        uid16_t;
+typedef __kernel_gid16_t        gid16_t;
+
+#ifdef CONFIG_UID16
+/* This is defined by include/asm-{arch}/posix_types.h */
+typedef __kernel_old_uid_t	old_uid_t;
+typedef __kernel_old_gid_t	old_gid_t;
+#endif /* CONFIG_UID16 */
+
+/* libc5 includes this file to define uid_t, thus uid_t can never change
+ * when it is included by non-kernel code
+ */
+#else
 typedef __kernel_uid_t		uid_t;
 typedef __kernel_gid_t		gid_t;
-typedef __kernel_daddr_t	daddr_t;
+#endif /* __KERNEL__ */
 
-#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
+#if defined(__GNUC__)
 typedef __kernel_loff_t		loff_t;
 #endif
 
@@ -81,6 +97,28 @@ typedef unsigned char		unchar;
 typedef unsigned short		ushort;
 typedef unsigned int		uint;
 typedef unsigned long		ulong;
+
+#ifndef __BIT_TYPES_DEFINED__
+#define __BIT_TYPES_DEFINED__
+
+typedef		__u8		u_int8_t;
+typedef		__s8		int8_t;
+typedef		__u16		u_int16_t;
+typedef		__s16		int16_t;
+typedef		__u32		u_int32_t;
+typedef		__s32		int32_t;
+
+#endif /* !(__BIT_TYPES_DEFINED__) */
+
+typedef		__u8		uint8_t;
+typedef		__u16		uint16_t;
+typedef		__u32		uint32_t;
+
+#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
+typedef		__u64		uint64_t;
+typedef		__u64		u_int64_t;
+typedef		__s64		int64_t;
+#endif
 
 #endif /* __KERNEL_STRICT_NAMES */
 

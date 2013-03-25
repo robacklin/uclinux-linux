@@ -1,6 +1,6 @@
 /* 
         paride.c  (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                              Under the terms of the GNU public license.
+                              Under the terms of the GNU General Public License.
 
 	This is the base module for the family of device drivers
         that support parallel port IDE devices.  
@@ -11,20 +11,24 @@
 
 	1.01	GRG 1998.05.03	Use spinlocks
 	1.02	GRG 1998.05.05  init_proto, release_proto, ktti
-	1.03    GRG 1998.08.15  eliminate compiler warning
-	1.04    GRG 1998.11.28  added support for FRIQ
-
+	1.03	GRG 1998.08.15  eliminate compiler warning
+	1.04    GRG 1998.11.28  added support for FRIQ 
+	1.05    TMW 2000.06.06  use parport_find_number instead of
+				parport_enumerate
+	1.06    TMW 2001.03.26  more sane parport-or-not resource management
 */
 
-#define PI_VERSION      "1.04"
+#define PI_VERSION      "1.06"
 
 #include <linux/module.h>
 #include <linux/config.h>
+#include <linux/kmod.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
-#include "spinlock.h"
+#include <linux/spinlock.h>
+#include <linux/wait.h>
 
 #ifdef CONFIG_PARPORT_MODULE
 #define CONFIG_PARPORT
@@ -40,7 +44,7 @@
 
 static struct pi_protocol	*protocols[MAX_PROTOS];
 
-/* spinlock_t	pi_spinlock = SPIN_LOCK_UNLOCKED; */
+static spinlock_t	pi_spinlock = SPIN_LOCK_UNLOCKED;
 
 void pi_write_regr( PIA *pi, int cont, int regr, int val)
 
@@ -67,7 +71,7 @@ void pi_read_block( PIA *pi, char * buf, int count)
 static void pi_wake_up( void *p)
 
 {       PIA  *pi = (PIA *) p;
-	long flags;
+	unsigned long flags;
 	void (*cont)(void) = NULL;
 
 	spin_lock_irqsave(&pi_spinlock,flags);
@@ -91,7 +95,7 @@ void pi_do_claimed( PIA *pi, void(*cont)(void))
 
 #ifdef CONFIG_PARPORT
 
-{	long flags;
+{	unsigned long flags;
 
 	spin_lock_irqsave(&pi_spinlock,flags); 
 
@@ -118,8 +122,8 @@ static void pi_claim( PIA *pi)
 	pi->claimed = 1;
 #ifdef CONFIG_PARPORT
         if (pi->pardev)
-          while (parport_claim((struct pardevice *)(pi->pardev)))
-            sleep_on(&(pi->parq));
+		wait_event (pi->parq,
+			    !parport_claim ((struct pardevice *)pi->pardev));
 #endif
 }
 
@@ -157,8 +161,10 @@ static void pi_unregister_parport( PIA *pi)
 void pi_release( PIA *pi)
 
 {	pi_unregister_parport(pi);
-	if ((!pi->pardev)&&(pi->reserved)) 
+#ifndef CONFIG_PARPORT
+	if (pi->reserved)
 		release_region(pi->port,pi->reserved);
+#endif /* !CONFIG_PARPORT */
 	pi->proto->release_proto(pi);
 }
 
@@ -231,29 +237,34 @@ void pi_unregister( PIP *pr)
 	MOD_DEC_USE_COUNT;
 }
 
-static void pi_register_parport( PIA *pi, int verbose)
+static int pi_register_parport( PIA *pi, int verbose)
 
 {
 #ifdef CONFIG_PARPORT
 
-	struct parport	*pp;
+	struct parport *port;
 
-	pp = parport_enumerate();
+	port = parport_find_base (pi->port);
+	if (!port)
+	  return 0;
 
-	while((pp)&&(pp->base != pi->port)) pp = pp->next;
+	pi->pardev = parport_register_device(port,
+					     pi->device,NULL,
+					     pi_wake_up,NULL,
+					     0,(void *)pi);
+	parport_put_port (port);
+	if (!pi->pardev)
+	  return 0;
 
-	if (!pp) return;
+	init_waitqueue_head(&pi->parq);
 
-	pi->pardev = (void *) parport_register_device(
-	      pp,pi->device,NULL,pi_wake_up,NULL,0,(void *)pi);
-
-	pi->parq = NULL;
-
-	if (verbose) printk("%s: 0x%x is %s\n",pi->device,pi->port,pp->name);
+	if (verbose) printk("%s: 0x%x is %s\n",pi->device,pi->port,
+			    port->name);
 	
-	pi->parname = pp->name;
-
+	pi->parname = (char *)port->name;
 #endif
+
+	return 1;
 }
 
 static int pi_probe_mode( PIA *pi, int max, char * scratch, int verbose)
@@ -265,7 +276,6 @@ static int pi_probe_mode( PIA *pi, int max, char * scratch, int verbose)
 		range = 3;
 		if (pi->mode >= pi->proto->epp_first) range = 8;
 		if ((range == 8) && (pi->port % 8)) return 0;
-		if ((!pi->pardev) && check_region(pi->port,range)) return 0;
 		pi->reserved = range;
 		return (!pi_test_proto(pi,scratch,verbose));
 	}
@@ -274,7 +284,6 @@ static int pi_probe_mode( PIA *pi, int max, char * scratch, int verbose)
 		range = 3;
 		if (pi->mode >= pi->proto->epp_first) range = 8;
 		if ((range == 8) && (pi->port % 8)) break;
-		if ((!pi->pardev) && check_region(pi->port,range)) break;
 		pi->reserved = range;
 		if (!pi_test_proto(pi,scratch,verbose)) best = pi->mode;
 	}
@@ -293,9 +302,8 @@ static int pi_probe_unit( PIA *pi, int unit, char * scratch, int verbose)
 		e = pi->proto->max_units; 
 	}
 
-	pi_register_parport(pi,verbose);
-
-	if ((!pi->pardev) && check_region(pi->port,3)) return 0;
+	if (!pi_register_parport(pi,verbose))
+	  return 0;
 
 	if (pi->proto->test_port) {
 		pi_claim(pi);
@@ -335,6 +343,9 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 
 	s = protocol; e = s+1;
 
+	if (!protocols[0])
+		request_module ("paride_protocol");
+
 	if (autoprobe) {
 		s = 0; 
 		e = MAX_PROTOS;
@@ -357,7 +368,7 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 
 		pi->parname = NULL;
 		pi->pardev = NULL;
-		pi->parq = NULL;
+		init_waitqueue_head(&pi->parq);
 		pi->claimed = 0;
 		pi->claim_cont = NULL;
 	        
@@ -382,8 +393,13 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 		return 0;
 	}
 
-	if (!pi->pardev)
-	   request_region(pi->port,pi->reserved,pi->device);
+#ifndef CONFIG_PARPORT
+	if (!request_region(pi->port,pi->reserved,pi->device))
+		{
+		printk(KERN_WARNING"paride: Unable to request region 0x%x\n", pi->port);
+		return 0;
+		}
+#endif /* !CONFIG_PARPORT */
 
 	if (pi->parname)
 	   printk("%s: Sharing %s at 0x%x\n",pi->device,
@@ -398,10 +414,16 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 
 int	init_module(void)
 
-{	int k;
+{
+	int k;
+	const char *indicate_pp = "";
+#ifdef CONFIG_PARPORT
+	indicate_pp = " (parport)";
+#endif
 
 	for (k=0;k<MAX_PROTOS;k++) protocols[k] = 0;
-	printk("paride: version %s installed\n",PI_VERSION);
+
+	printk("paride: version %s installed%s\n",PI_VERSION,indicate_pp);
 	return 0;
 }
 
@@ -519,3 +541,4 @@ void	paride_init( void )
 #endif
 
 /* end of paride.c */
+MODULE_LICENSE("GPL");

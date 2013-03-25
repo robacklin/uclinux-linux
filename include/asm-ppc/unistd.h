@@ -1,14 +1,10 @@
 #ifndef _ASM_PPC_UNISTD_H_
 #define _ASM_PPC_UNISTD_H_
 
-#define _NR(n) #n
-#define _lisc(n) "li 0," _NR(n)
-
 /*
  * This file contains the system call numbers.
  */
 
-#define __NR_setup		  0	/* used only by init, to get system going */
 #define __NR_exit		  1
 #define __NR_fork		  2
 #define __NR_read		  3
@@ -24,7 +20,7 @@
 #define __NR_time		 13
 #define __NR_mknod		 14
 #define __NR_chmod		 15
-#define __NR_chown		 16
+#define __NR_lchown		 16
 #define __NR_break		 17
 #define __NR_oldstat		 18
 #define __NR_lseek		 19
@@ -60,7 +56,7 @@
 #define __NR_geteuid		 49
 #define __NR_getegid		 50
 #define __NR_acct		 51
-#define __NR_phys		 52
+#define __NR_umount2		 52
 #define __NR_lock		 53
 #define __NR_ioctl		 54
 #define __NR_fcntl		 55
@@ -118,10 +114,10 @@
 #define __NR_lstat		107
 #define __NR_fstat		108
 #define __NR_olduname		109
-#define __NR_iopl		110
+/* 110 was __NR_iopl */
 #define __NR_vhangup		111
 #define __NR_idle		112
-#define __NR_vm86		113
+/* 113 was __NR_vm86 */
 #define __NR_wait4		114
 #define __NR_swapoff		115
 #define __NR_sysinfo		116
@@ -131,7 +127,7 @@
 #define __NR_clone		120
 #define __NR_setdomainname	121
 #define __NR_uname		122
-#define __NR_modify_ldt		123
+/* 123 was __NR_modify_ldt */
 #define __NR_adjtimex		124
 #define __NR_mprotect		125
 #define __NR_sigprocmask	126
@@ -156,220 +152,244 @@
 #define __NR_readv		145
 #define __NR_writev		146
 #define __NR_getsid		147
-
+#define __NR_fdatasync		148
+#define __NR__sysctl		149
 #define __NR_mlock		150
 #define __NR_munlock		151
 #define __NR_mlockall		152
 #define __NR_munlockall		153
+#define __NR_sched_setparam		154
+#define __NR_sched_getparam		155
+#define __NR_sched_setscheduler		156
+#define __NR_sched_getscheduler		157
+#define __NR_sched_yield		158
+#define __NR_sched_get_priority_max	159
+#define __NR_sched_get_priority_min	160
+#define __NR_sched_rr_get_interval	161
+#define __NR_nanosleep		162
+#define __NR_mremap		163
+#define __NR_setresuid		164
+#define __NR_getresuid		165
+#define __NR_query_module	166
+#define __NR_poll		167
+#define __NR_nfsservctl		168
+#define __NR_setresgid		169
+#define __NR_getresgid		170
+#define __NR_prctl		171
+#define __NR_rt_sigreturn	172
+#define __NR_rt_sigaction	173
+#define __NR_rt_sigprocmask	174
+#define __NR_rt_sigpending	175
+#define __NR_rt_sigtimedwait	176
+#define __NR_rt_sigqueueinfo	177
+#define __NR_rt_sigsuspend	178
+#define __NR_pread		179
+#define __NR_pwrite		180
+#define __NR_chown		181
+#define __NR_getcwd		182
+#define __NR_capget		183
+#define __NR_capset		184
+#define __NR_sigaltstack	185
+#define __NR_sendfile		186
+#define __NR_getpmsg		187	/* some people actually want streams */
+#define __NR_putpmsg		188	/* some people actually want streams */
+#define __NR_vfork		189
+#define __NR_ugetrlimit		190	/* SuS compliant getrlimit */
+#define __NR_readahead		191
+#define __NR_mmap2		192
+#define __NR_truncate64		193
+#define __NR_ftruncate64	194
+#define __NR_stat64		195
+#define __NR_lstat64		196
+#define __NR_fstat64		197
+#define __NR_pciconfig_read	198
+#define __NR_pciconfig_write	199
+#define __NR_pciconfig_iobase	200
+#define __NR_multiplexer	201
+#define __NR_getdents64		202
+#define __NR_pivot_root		203
+#define __NR_fcntl64		204
+#define __NR_madvise		205
+#define __NR_mincore		206
+#define __NR_gettid		207
+#define __NR_tkill		208
+#define __NR_setxattr		209
+#define __NR_lsetxattr		210
+#define __NR_fsetxattr		211
+#define __NR_getxattr		212
+#define __NR_lgetxattr		213
+#define __NR_fgetxattr		214
+#define __NR_listxattr		215
+#define __NR_llistxattr		216
+#define __NR_flistxattr		217
+#define __NR_removexattr	218
+#define __NR_lremovexattr	219
+#define __NR_fremovexattr	220
+#if 0
+#define __NR_futex		221
+#define __NR_sched_setaffinity	222
+#define __NR_sched_getaffinity	223
+#define __NR_security		224
+#define __NR_tuxcall		225
+#define __NR_sendfile64		226
+#define __NR_io_setup		227
+#define __NR_io_destroy		228
+#define __NR_io_getevents	229
+#define __NR_io_submit		230
+#define __NR_io_cancel		231
+#define __NR_set_tid_address	232
+#define __NR_fadvise64		233
+#define __NR_exit_group		234
+#define __NR_lookup_dcookie	235
+#define __NR_epoll_create	236
+#define __NR_epoll_ctl		237
+#define __NR_epoll_wait		238
+#define __NR_remap_file_pages	239
+#define __NR_timer_create	240
+#define __NR_timer_settime	241
+#define __NR_timer_gettime	242
+#define __NR_timer_getoverrun	243
+#define __NR_timer_delete	244
+#define __NR_clock_settime	245
+#define __NR_clock_gettime	246
+#define __NR_clock_getres	247
+#define __NR_clock_nanosleep	248
+#endif
+#define __NR_swapcontext	249
 
+#define __NR(n)	#n
 
-#define _syscall0(type,name) \
-type name(void) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval);\
+/* On powerpc a system call basically clobbers the same registers like a
+ * function call, with the exception of LR (which is needed for the
+ * "sc; bnslr" sequence) and CR (where only CR0.SO is clobbered to signal
+ * an error return status).
+ */
+
+#define __syscall_nr(nr, type, name, args...)				\
+	unsigned long __sc_ret, __sc_err;				\
+	{								\
+		register unsigned long __sc_0  __asm__ ("r0");		\
+		register unsigned long __sc_3  __asm__ ("r3");		\
+		register unsigned long __sc_4  __asm__ ("r4");		\
+		register unsigned long __sc_5  __asm__ ("r5");		\
+		register unsigned long __sc_6  __asm__ ("r6");		\
+		register unsigned long __sc_7  __asm__ ("r7");		\
+									\
+		__sc_loadargs_##nr(name, args);				\
+		__asm__ __volatile__					\
+			("sc           \n\t"				\
+			 "mfcr %0      "				\
+			: "=&r" (__sc_0),				\
+			  "=&r" (__sc_3),  "=&r" (__sc_4),		\
+			  "=&r" (__sc_5),  "=&r" (__sc_6),		\
+			  "=&r" (__sc_7)				\
+			: __sc_asm_input_##nr				\
+			: "cr0", "ctr", "memory",			\
+			  "r8", "r9", "r10","r11", "r12");		\
+		__sc_ret = __sc_3;					\
+		__sc_err = __sc_0;					\
+	}								\
+	if (__sc_err & 0x10000000)					\
+	{								\
+		errno = __sc_ret;					\
+		__sc_ret = -1;						\
+	}								\
+	return (type) __sc_ret
+
+#define __sc_loadargs_0(name, dummy...)					\
+	__sc_0 = __NR_##name
+#define __sc_loadargs_1(name, arg1)					\
+	__sc_loadargs_0(name);						\
+	__sc_3 = (unsigned long) (arg1)
+#define __sc_loadargs_2(name, arg1, arg2)				\
+	__sc_loadargs_1(name, arg1);					\
+	__sc_4 = (unsigned long) (arg2)
+#define __sc_loadargs_3(name, arg1, arg2, arg3)				\
+	__sc_loadargs_2(name, arg1, arg2);				\
+	__sc_5 = (unsigned long) (arg3)
+#define __sc_loadargs_4(name, arg1, arg2, arg3, arg4)			\
+	__sc_loadargs_3(name, arg1, arg2, arg3);			\
+	__sc_6 = (unsigned long) (arg4)
+#define __sc_loadargs_5(name, arg1, arg2, arg3, arg4, arg5)		\
+	__sc_loadargs_4(name, arg1, arg2, arg3, arg4);			\
+	__sc_7 = (unsigned long) (arg5)
+
+#define __sc_asm_input_0 "0" (__sc_0)
+#define __sc_asm_input_1 __sc_asm_input_0, "1" (__sc_3)
+#define __sc_asm_input_2 __sc_asm_input_1, "2" (__sc_4)
+#define __sc_asm_input_3 __sc_asm_input_2, "3" (__sc_5)
+#define __sc_asm_input_4 __sc_asm_input_3, "4" (__sc_6)
+#define __sc_asm_input_5 __sc_asm_input_4, "5" (__sc_7)
+
+#define _syscall0(type,name)						\
+type name(void)								\
+{									\
+	__syscall_nr(0, type, name);					\
 }
 
-#define _syscall1(type,name,type1,arg1) \
-type name(type1 arg1) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval); \
+#define _syscall1(type,name,type1,arg1)					\
+type name(type1 arg1)							\
+{									\
+	__syscall_nr(1, type, name, arg1);				\
 }
 
-#define _syscall2(type,name,type1,arg1,type2,arg2) \
-type name(type1 arg1,type2 arg2) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval); \
+#define _syscall2(type,name,type1,arg1,type2,arg2)			\
+type name(type1 arg1, type2 arg2)					\
+{									\
+	__syscall_nr(2, type, name, arg1, arg2);			\
 }
 
-
-#define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3) \
-type name(type1 arg1,type2 arg2, type3 arg3) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval); \
+#define _syscall3(type,name,type1,arg1,type2,arg2,type3,arg3)		\
+type name(type1 arg1, type2 arg2, type3 arg3)				\
+{									\
+	__syscall_nr(3, type, name, arg1, arg2, arg3);			\
 }
 
 #define _syscall4(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4) \
-type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval); \
+type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4)		\
+{									\
+	__syscall_nr(4, type, name, arg1, arg2, arg3, arg4);		\
 }
 
-#define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4, \
-	  type5,arg5) \
-type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5) \
-{ \
-    long retval; \
-    __asm__  ( \
-	      "li 0, %0 \n\t" \
-	      "sc \n\t" \
-	      "mr 31,3 \n\t" \
-	      "bns 10f \n\t" \
-	      "mr 0,3 \n\t" \
-	      "lis 3,errno@ha \n\t" \
-	      "stw 0,errno@l(3) \n\t" \
-	      "li 3,-1 \n\t" \
-	      "10: \n\t" \
-	      : \
-	      : "i" (__NR_##name) \
-	      : "0", "31", "3", "cc", "memory" \
-	      );  \
-    return(retval); \
+#define _syscall5(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5) \
+type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
+{									\
+	__syscall_nr(5, type, name, arg1, arg2, arg3, arg4, arg5);	\
 }
+
 
 #ifdef __KERNEL_SYSCALLS__
+
 /*
- * we need this inline - forking from kernel space will result
- * in NO COPY ON WRITE (!!!), until an execve is executed. This
- * is no problem, but for the stack. This is handled by not letting
- * main() use the stack at all after fork(). Thus, no function
- * calls - which means inline code for fork too, as otherwise we
- * would use the stack upon exit from 'fork()'.
- *
- * Actually only pause and fork are needed inline, so that there
- * won't be any messing with the stack from main(), but we define
- * some others too.
+ * Forking from kernel space will result in the child getting a new,
+ * empty kernel stack area.  Thus the child cannot access automatic
+ * variables set in the parent unless they are in registers, and the
+ * procedure where the fork was done cannot return to its caller in
+ * the child.
  */
 
 /*
-   some of these had problems getting the right arguments (namely sys_clone())
-   when they were inline so I made them non-inline until we get problems with gcc
-   worked out.  I need to check with Linus to find out which he wants inline now
-   since the above comment was written a long time ago.
-
-   Once I understand the macro language better this should go away.
-             -- Cort
+ * System call prototypes.
  */
-
 #define __NR__exit __NR_exit
-static /*__inline__*/ _syscall0(int,setup) 
-static __inline__ _syscall0(int,idle) 
-static /*__inline__*/ _syscall0(int,fork)
-static __inline__ _syscall0(int,pause)
-static __inline__ _syscall0(int,sync)
-static __inline__ _syscall0(pid_t,setsid)
-static __inline__ _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-static /*__inline__*/ _syscall1(int,dup,int,fd)
-static /*__inline__*/ _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-static __inline__ _syscall3(int,open,const char *,file,int,flag,int,mode)
-static /*__inline__*/ _syscall1(int,close,int,fd)
-static /*__inline__*/ _syscall1(int,_exit,int,exitcode)
-static __inline__ _syscall2(int,clone,unsigned long,flags,char *,esp)
-static __inline__ _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
+static inline _syscall0(int,pause)
+static inline _syscall0(int,sync)
+static inline _syscall0(pid_t,setsid)
+static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
+static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
+static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
+static inline _syscall1(int,dup,int,fd)
+static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
+static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
+static inline _syscall1(int,close,int,fd)
+static inline _syscall1(void,_exit,int,exitcode)
+static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
+static inline _syscall1(int,delete_module,const char *,name)
 
-static __inline__ pid_t wait(int * wait_stat) 
+static inline pid_t wait(int * wait_stat)
 {
 	return waitpid(-1,wait_stat,0);
 }
-
-/*
-   This is the mechanism for creating a new kernel thread.
-   For the time being it only behaves the same as clone().
-   It should be changed very soon to work properly and cleanly.  This
-   gets us going for now, though.
-     -- Cort
- */
-static __inline__ long kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-  long retval;
-  __asm__  (
-	"li 0, 120 \n\t"        /* __NR_clone */
-	"li 3, %5 \n\t"         /* load flags as arg to clone */
-	/*"mr 1,7 \n\t"*/		/* save kernel stack */
-	"sc \n\t"		/* syscall */
-	/*"cmp 0,1,7 \n\t"*/	/* if kernel stack changes -- child */
-	"cmpi	0,3,0 \n\t"
-	"bne 1f \n\t"		/* return if parent */
-	/* this is in child */
-	"li 3, %3 \n\t"		/* child -- load args and call fn */
-	"mtlr %4 \n\t"		
-	"blrl \n\t"
-	"li 0, %2 \n\t"		/* exit after child exits */
-        "li 3, 0 \n\t"
-	"sc \n\t"
-	/* parent */
-	"1: \n\t"
-	:"=3" (retval)
-	:"i" (__NR_clone), "i" (__NR_exit),
-	 "r" (arg), "r" (fn), "g" (CLONE_VM|flags) 
-	:"cc", "1", "0", "3", "7", "31", "memory" );
-  return retval;
-}
-
 
 #endif /* __KERNEL_SYSCALLS__ */
 

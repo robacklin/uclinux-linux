@@ -17,7 +17,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
@@ -26,6 +26,7 @@
 #include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/shglcore.h>
+#include <asm/virtconvert.h>
 
 #ifndef NO_MM
 
@@ -303,7 +304,7 @@ unsigned long mm_vtop (unsigned long vaddr)
 	{
 		if (voff < offset + boot_info.memory[i].size) {
 #ifdef DEBUGPV
-			printk ("VTOP(%lx)=%lx\n", vaddr,
+			printk ("virt_to_phys(%lx)=%lx\n", vaddr,
 				boot_info.memory[i].addr + voff - offset);
 #endif
 			return boot_info.memory[i].addr + voff - offset;
@@ -383,7 +384,7 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  if (mmusr & MMU_R_040)
 	    return (mmusr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
 
-	  panic ("VTOP040: bad virtual address %08lx (%lx)", vaddr, mmusr);
+	  panic ("virt_to_phys040: bad virtual address %08lx (%lx)", vaddr, mmusr);
 	} else {
 	  volatile unsigned short temp;
 	  unsigned short mmusr;
@@ -396,9 +397,9 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  mmusr = temp;
 
 	  if (mmusr & (MMU_I|MMU_B|MMU_L))
-	    panic ("VTOP030: bad virtual address %08lx (%x)", vaddr, mmusr);
+	    panic ("virt_to_phys030: bad virtual address %08lx (%x)", vaddr, mmusr);
 
-	  descaddr = (unsigned long *)PTOV(descaddr);
+	  descaddr = (unsigned long *)phys_to_virt(descaddr);
 
 	  switch (mmusr & MMU_NUM) {
 	  case 1:
@@ -408,12 +409,12 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  case 3:
 	    return (*descaddr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
 	  default:
-	    panic ("VTOP: bad levels (%u) for virtual address %08lx", 
+	    panic ("virt_to_phys: bad levels (%u) for virtual address %08lx", 
 		   mmusr & MMU_NUM, vaddr);
 	  }
 	}
 
-	panic ("VTOP: bad virtual address %08lx", vaddr);
+	panic ("virt_to_phys: bad virtual address %08lx", vaddr);
 }
 
 unsigned long mm_ptov (unsigned long paddr)
@@ -427,7 +428,7 @@ unsigned long mm_ptov (unsigned long paddr)
 		    paddr < (boot_info.memory[i].addr
 			     + boot_info.memory[i].size)) {
 #ifdef DEBUGPV
-			printk ("PTOV(%lx)=%lx\n", paddr,
+			printk ("phys_to_virt(%lx)=%lx\n", paddr,
 				(paddr - boot_info.memory[i].addr) + offset);
 #endif
 			return (paddr - boot_info.memory[i].addr) + offset;
@@ -695,11 +696,6 @@ void cache_push_v (unsigned long vaddr, int len)
 #undef pushv040
 #undef pushv060
 
-unsigned long mm_phys_to_virt (unsigned long addr)
-{
-    return PTOV (addr);
-}
-
 int mm_end_of_chunk (unsigned long addr, int len)
 {
 	int i;
@@ -810,7 +806,7 @@ unsigned long kernel_map(unsigned long paddr, unsigned long size,
 				memset( ktablep, 0, sizeof(long)*PTRS_PER_PTE);
 			}
 
-			ktable = VTOP(ktablep);
+			ktable = virt_to_phys(ktablep);
 
 			/*
 			 * initialize section of the page table mapping
@@ -936,21 +932,6 @@ void kernel_set_cachemode( unsigned long address, unsigned long size,
 #else /* !NO_MM */
 
 /*
- * The following two routines map from a physical address to a kernel
- * virtual address and vice versa.
- */
-unsigned long mm_vtop (unsigned long vaddr)
-{
-	return vaddr;
-}
-
-unsigned long mm_ptov (unsigned long paddr)
-{
-	return paddr;
-}
-
-
-/*
  * 040: Hit every page containing an address in the range paddr..paddr+len-1.
  * (Low order bits of the ea of a CINVP/CPUSHP are "don't care"s).
  * Hit every page until there is a page or less to go. Hit the next page,
@@ -1043,11 +1024,6 @@ void cache_push_v (unsigned long vaddr, int len)
 	cache_invalidate_lines(vaddr, len);
 }
 
-unsigned long mm_phys_to_virt (unsigned long addr)
-{
-    return PTOV (addr);
-}
-
 /* Map some physical address range into the kernel address space. The
  * code is copied and adapted from map_chunk().
  */
@@ -1059,17 +1035,10 @@ unsigned long kernel_map(unsigned long paddr, unsigned long size,
 }
 
 
-void kernel_set_cachemode( unsigned long address, unsigned long size,
-						   unsigned cmode )
-{
-}
-
-#ifdef MAGIC_ROM_PTR
-
 int is_in_rom(unsigned long addr)
 {
 
-#if defined(CONFIG_COLDFIRE) || defined (CONFIG_MWI)
+#if defined(CONFIG_COLDFIRE) || defined(CONFIG_UCDIMM)
 	{
 		extern unsigned long    _ramstart, _ramend;
 
@@ -1080,15 +1049,6 @@ int is_in_rom(unsigned long addr)
 #endif
 
 #if defined(CONFIG_PILOT) || defined(CONFIG_UCSIMM)
-#if !defined(CONFIG_PILOT_INCROMFS) && defined(CONFIG_RAMKERNEL)
-	{
-		extern unsigned long    _ramstart, _ramend;
-
-		/* Anything not in operational RAM is returned as in rom! */
-		if (addr < _ramstart || addr >= (unsigned long) &_ramend)
-			return(1);
-	}
-#endif
 	if (addr >= 0x10c00000)
 		return 1;
 #endif
@@ -1098,7 +1058,7 @@ int is_in_rom(unsigned long addr)
 		return 1;
 #endif
 
-#ifdef CONFIG_SHGLCORE
+#ifdef CONFIG_M68332
 	extern char _etext;
 	
  #ifdef SHGLCORE_ROM_BANK_0_ADDR
@@ -1123,17 +1083,7 @@ int is_in_rom(unsigned long addr)
  #endif
 #endif
 
-/* 2002-05-21 gc: */
-#ifdef CONFIG_SM2010
-	if (addr >= 0x00e00000 && addr < 0x00e800000)
-		return 1;
-	else
-		return 0;
-#endif
-
 	return(0); /* default case, not in ROM */
 }
 
-#endif
-
-#endif
+#endif /* NO_MM */

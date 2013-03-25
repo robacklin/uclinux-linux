@@ -1,153 +1,65 @@
 #ifndef __ASM_SYSTEM_H
 #define __ASM_SYSTEM_H
 
+#include <linux/config.h>
+#include <linux/kernel.h>
+#include <linux/init.h>
 #include <asm/segment.h>
+#include <linux/bitops.h> /* for LOCK_PREFIX */
 
-/*
- * Entry into gdt where to find first TSS. GDT layout:
- *   0 - null
- *   1 - not used
- *   2 - kernel code segment
- *   3 - kernel data segment
- *   4 - user code segment
- *   5 - user data segment
- * ...
- *   8 - TSS #0
- *   9 - LDT #0
- *  10 - TSS #1
- *  11 - LDT #1
- */
-#define FIRST_TSS_ENTRY 8
-#define FIRST_LDT_ENTRY (FIRST_TSS_ENTRY+1)
-#define _TSS(n) ((((unsigned long) n)<<4)+(FIRST_TSS_ENTRY<<3))
-#define _LDT(n) ((((unsigned long) n)<<4)+(FIRST_LDT_ENTRY<<3))
-#define load_TR(n) __asm__("ltr %%ax": /* no output */ :"a" (_TSS(n)))
-#define load_ldt(n) __asm__("lldt %%ax": /* no output */ :"a" (_LDT(n)))
-#define store_TR(n) \
-__asm__("str %%ax\n\t" \
-	"subl %2,%%eax\n\t" \
-	"shrl $4,%%eax" \
-	:"=a" (n) \
-	:"0" (0),"i" (FIRST_TSS_ENTRY<<3))
+#ifdef __KERNEL__
 
-/* This special macro can be used to load a debugging register */
+struct task_struct;	/* one of the stranger aspects of C forward declarations.. */
+extern void FASTCALL(__switch_to(struct task_struct *prev, struct task_struct *next));
 
-#define loaddebug(tsk,register) \
-		__asm__("movl %0,%%edx\n\t" \
-			"movl %%edx,%%db" #register "\n\t" \
-			: /* no output */ \
-			:"m" (tsk->debugreg[register]) \
-			:"dx");
-
-
-/*
- *	switch_to(n) should switch tasks to task nr n, first
- * checking that n isn't the current task, in which case it does nothing.
- * This also clears the TS-flag if the task we switched to has used
- * the math co-processor latest.
- *
- * It also reloads the debug regs if necessary..
- */
-
- 
-#ifdef __SMP__
-	/*
-	 *	Keep the lock depth straight. If we switch on an interrupt from
-	 *	kernel->user task we need to lose a depth, and if we switch the
-	 *	other way we need to gain a depth. Same layer switches come out
-	 *	the same.
-	 *
-	 *	We spot a switch in user mode because the kernel counter is the
-	 *	same as the interrupt counter depth. (We never switch during the
-	 *	message/invalidate IPI).
-	 *
-	 *	We fsave/fwait so that an exception goes off at the right time
-	 *	(as a call from the fsave or fwait in effect) rather than to
-	 *	the wrong process.
-	 */
-
-#define switch_to(prev,next) do { \
-	cli();\
-	if(prev->flags&PF_USEDFPU) \
-	{ \
-		__asm__ __volatile__("fnsave %0":"=m" (prev->tss.i387.hard)); \
-		__asm__ __volatile__("fwait"); \
-		prev->flags&=~PF_USEDFPU;	 \
-	} \
-	prev->lock_depth=syscall_count; \
-	kernel_counter+=next->lock_depth-prev->lock_depth; \
-	syscall_count=next->lock_depth; \
-__asm__("pushl %%edx\n\t" \
-	"movl "SYMBOL_NAME_STR(apic_reg)",%%edx\n\t" \
-	"movl 0x20(%%edx), %%edx\n\t" \
-	"shrl $22,%%edx\n\t" \
-	"and  $0x3C,%%edx\n\t" \
-	"movl %%ecx,"SYMBOL_NAME_STR(current_set)"(,%%edx)\n\t" \
-	"popl %%edx\n\t" \
-	"ljmp %0\n\t" \
-	"sti\n\t" \
-	: /* no output */ \
-	:"m" (*(((char *)&next->tss.tr)-4)), \
-	 "c" (next)); \
-	/* Now maybe reload the debug registers */ \
-	if(prev->debugreg[7]){ \
-		loaddebug(prev,0); \
-		loaddebug(prev,1); \
-		loaddebug(prev,2); \
-		loaddebug(prev,3); \
-		loaddebug(prev,6); \
-	} \
+#define prepare_to_switch()	do { } while(0)
+#define switch_to(prev,next,last) do {					\
+	asm volatile("pushl %%esi\n\t"					\
+		     "pushl %%edi\n\t"					\
+		     "pushl %%ebp\n\t"					\
+		     "movl %%esp,%0\n\t"	/* save ESP */		\
+		     "movl %3,%%esp\n\t"	/* restore ESP */	\
+		     "movl $1f,%1\n\t"		/* save EIP */		\
+		     "pushl %4\n\t"		/* restore EIP */	\
+		     "jmp __switch_to\n"				\
+		     "1:\t"						\
+		     "popl %%ebp\n\t"					\
+		     "popl %%edi\n\t"					\
+		     "popl %%esi\n\t"					\
+		     :"=m" (prev->thread.esp),"=m" (prev->thread.eip),	\
+		      "=b" (last)					\
+		     :"m" (next->thread.esp),"m" (next->thread.eip),	\
+		      "a" (prev), "d" (next),				\
+		      "b" (prev));					\
 } while (0)
 
-#else
-#define switch_to(prev,next) do { \
-__asm__("movl %2,"SYMBOL_NAME_STR(current_set)"\n\t" \
-	"ljmp %0\n\t" \
-	"cmpl %1,"SYMBOL_NAME_STR(last_task_used_math)"\n\t" \
-	"jne 1f\n\t" \
-	"clts\n" \
-	"1:" \
-	: /* no outputs */ \
-	:"m" (*(((char *)&next->tss.tr)-4)), \
-	 "r" (prev), "r" (next)); \
-	/* Now maybe reload the debug registers */ \
-	if(prev->debugreg[7]){ \
-		loaddebug(prev,0); \
-		loaddebug(prev,1); \
-		loaddebug(prev,2); \
-		loaddebug(prev,3); \
-		loaddebug(prev,6); \
-	} \
-} while (0)
-#endif
-
-#define _set_base(addr,base) \
-__asm__("movw %%dx,%0\n\t" \
+#define _set_base(addr,base) do { unsigned long __pr; \
+__asm__ __volatile__ ("movw %%dx,%1\n\t" \
 	"rorl $16,%%edx\n\t" \
-	"movb %%dl,%1\n\t" \
-	"movb %%dh,%2" \
-	: /* no output */ \
+	"movb %%dl,%2\n\t" \
+	"movb %%dh,%3" \
+	:"=&d" (__pr) \
 	:"m" (*((addr)+2)), \
 	 "m" (*((addr)+4)), \
 	 "m" (*((addr)+7)), \
-	 "d" (base) \
-	:"dx")
+         "0" (base) \
+        ); } while(0)
 
-#define _set_limit(addr,limit) \
-__asm__("movw %%dx,%0\n\t" \
+#define _set_limit(addr,limit) do { unsigned long __lr; \
+__asm__ __volatile__ ("movw %%dx,%1\n\t" \
 	"rorl $16,%%edx\n\t" \
-	"movb %1,%%dh\n\t" \
+	"movb %2,%%dh\n\t" \
 	"andb $0xf0,%%dh\n\t" \
 	"orb %%dh,%%dl\n\t" \
-	"movb %%dl,%1" \
-	: /* no output */ \
+	"movb %%dl,%2" \
+	:"=&d" (__lr) \
 	:"m" (*(addr)), \
 	 "m" (*((addr)+6)), \
-	 "d" (limit) \
-	:"dx")
+	 "0" (limit) \
+        ); } while(0)
 
-#define set_base(ldt,base) _set_base( ((char *)&(ldt)) , base )
-#define set_limit(ldt,limit) _set_limit( ((char *)&(ldt)) , (limit-1)>>12 )
+#define set_base(ldt,base) _set_base( ((char *)&(ldt)) , (base) )
+#define set_limit(ldt,limit) _set_limit( ((char *)&(ldt)) , ((limit)-1)>>12 )
 
 static inline unsigned long _get_base(char * addr)
 {
@@ -165,6 +77,57 @@ static inline unsigned long _get_base(char * addr)
 
 #define get_base(ldt) _get_base( ((char *)&(ldt)) )
 
+/*
+ * Load a segment. Fall back on loading the zero
+ * segment if something goes wrong..
+ */
+#define loadsegment(seg,value)			\
+	asm volatile("\n"			\
+		"1:\t"				\
+		"mov %0,%%" #seg "\n"		\
+		"2:\n"				\
+		".section .fixup,\"ax\"\n"	\
+		"3:\t"				\
+		"pushl $0\n\t"			\
+		"popl %%" #seg "\n\t"		\
+		"jmp 2b\n"			\
+		".previous\n"			\
+		".section __ex_table,\"a\"\n\t"	\
+		".align 4\n\t"			\
+		".long 1b,3b\n"			\
+		".previous"			\
+		: :"m" (value))
+
+/*
+ * Clear and set 'TS' bit respectively
+ */
+#define clts() __asm__ __volatile__ ("clts")
+#define read_cr0() ({ \
+	unsigned int __dummy; \
+	__asm__( \
+		"movl %%cr0,%0\n\t" \
+		:"=r" (__dummy)); \
+	__dummy; \
+})
+#define write_cr0(x) \
+	__asm__("movl %0,%%cr0": :"r" (x));
+
+#define read_cr4() ({ \
+	unsigned int __dummy; \
+	__asm__( \
+		"movl %%cr4,%0\n\t" \
+		:"=r" (__dummy)); \
+	__dummy; \
+})
+#define write_cr4(x) \
+	__asm__("movl %0,%%cr4": :"r" (x));
+#define stts() write_cr0(8 | read_cr0())
+
+#endif	/* __KERNEL__ */
+
+#define wbinvd() \
+	__asm__ __volatile__ ("wbinvd": : :"memory");
+
 static inline unsigned long get_limit(unsigned long segment)
 {
 	unsigned long __limit;
@@ -175,43 +138,90 @@ static inline unsigned long get_limit(unsigned long segment)
 
 #define nop() __asm__ __volatile__ ("nop")
 
-/*
- * Clear and set 'TS' bit respectively
- */
-#define clts() __asm__ __volatile__ ("clts")
-#define stts() \
-__asm__ __volatile__ ( \
-	"movl %%cr0,%%eax\n\t" \
-	"orl $8,%%eax\n\t" \
-	"movl %%eax,%%cr0" \
-	: /* no outputs */ \
-	: /* no inputs */ \
-	:"ax")
+#define xchg(ptr,v) ((__typeof__(*(ptr)))__xchg((unsigned long)(v),(ptr),sizeof(*(ptr))))
 
-
-#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
 #define tas(ptr) (xchg((ptr),1))
 
 struct __xchg_dummy { unsigned long a[100]; };
 #define __xg(x) ((struct __xchg_dummy *)(x))
 
-static inline unsigned long __xchg(unsigned long x, void * ptr, int size)
+
+/*
+ * The semantics of XCHGCMP8B are a bit strange, this is why
+ * there is a loop and the loading of %%eax and %%edx has to
+ * be inside. This inlines well in most cases, the cached
+ * cost is around ~38 cycles. (in the future we might want
+ * to do an SIMD/3DNOW!/MMX/FPU 64-bit store here, but that
+ * might have an implicit FPU-save as a cost, so it's not
+ * clear which path to go.)
+ *
+ * chmxchg8b must be used with the lock prefix here to allow
+ * the instruction to be executed atomically, see page 3-102
+ * of the instruction set reference 24319102.pdf. We need
+ * the reader side to see the coherent 64bit value.
+ */
+static inline void __set_64bit (unsigned long long * ptr,
+		unsigned int low, unsigned int high)
+{
+	__asm__ __volatile__ (
+		"\n1:\t"
+		"movl (%0), %%eax\n\t"
+		"movl 4(%0), %%edx\n\t"
+		"lock cmpxchg8b (%0)\n\t"
+		"jnz 1b"
+		: /* no outputs */
+		:	"D"(ptr),
+			"b"(low),
+			"c"(high)
+		:	"ax","dx","memory");
+}
+
+static inline void __set_64bit_constant (unsigned long long *ptr,
+						 unsigned long long value)
+{
+	__set_64bit(ptr,(unsigned int)(value), (unsigned int)((value)>>32ULL));
+}
+#define ll_low(x)	*(((unsigned int*)&(x))+0)
+#define ll_high(x)	*(((unsigned int*)&(x))+1)
+
+static inline void __set_64bit_var (unsigned long long *ptr,
+			 unsigned long long value)
+{
+	__set_64bit(ptr,ll_low(value), ll_high(value));
+}
+
+#define set_64bit(ptr,value) \
+(__builtin_constant_p(value) ? \
+ __set_64bit_constant(ptr, value) : \
+ __set_64bit_var(ptr, value) )
+
+#define _set_64bit(ptr,value) \
+(__builtin_constant_p(value) ? \
+ __set_64bit(ptr, (unsigned int)(value), (unsigned int)((value)>>32ULL) ) : \
+ __set_64bit(ptr, ll_low(value), ll_high(value)) )
+
+/*
+ * Note: no "lock" prefix even on SMP: xchg always implies lock anyway
+ * Note 2: xchg has side effect, so that attribute volatile is necessary,
+ *	  but generally the primitive is invalid, *ptr is output argument. --ANK
+ */
+static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
 {
 	switch (size) {
 		case 1:
-			__asm__("xchgb %b0,%1"
+			__asm__ __volatile__("xchgb %b0,%1"
 				:"=q" (x)
 				:"m" (*__xg(ptr)), "0" (x)
 				:"memory");
 			break;
 		case 2:
-			__asm__("xchgw %w0,%1"
+			__asm__ __volatile__("xchgw %w0,%1"
 				:"=r" (x)
 				:"m" (*__xg(ptr)), "0" (x)
 				:"memory");
 			break;
 		case 4:
-			__asm__("xchgl %0,%1"
+			__asm__ __volatile__("xchgl %0,%1"
 				:"=r" (x)
 				:"m" (*__xg(ptr)), "0" (x)
 				:"memory");
@@ -220,74 +230,143 @@ static inline unsigned long __xchg(unsigned long x, void * ptr, int size)
 	return x;
 }
 
-#define mb()  __asm__ __volatile__ (""   : : :"memory")
-#define sti() __asm__ __volatile__ ("sti": : :"memory")
-#define cli() __asm__ __volatile__ ("cli": : :"memory")
-
-#define save_flags(x) \
-__asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */ :"memory")
-
-#define restore_flags(x) \
-__asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory")
-
-#define iret() __asm__ __volatile__ ("iret": : :"memory")
-
-#define _set_gate(gate_addr,type,dpl,addr) \
-__asm__ __volatile__ ("movw %%dx,%%ax\n\t" \
-	"movw %2,%%dx\n\t" \
-	"movl %%eax,%0\n\t" \
-	"movl %%edx,%1" \
-	:"=m" (*((long *) (gate_addr))), \
-	 "=m" (*(1+(long *) (gate_addr))) \
-	:"i" ((short) (0x8000+(dpl<<13)+(type<<8))), \
-	 "d" ((char *) (addr)),"a" (KERNEL_CS << 16) \
-	:"ax","dx")
-
-#define set_intr_gate(n,addr) \
-	_set_gate(&idt[n],14,0,addr)
-
-#define set_trap_gate(n,addr) \
-	_set_gate(&idt[n],15,0,addr)
-
-#define set_system_gate(n,addr) \
-	_set_gate(&idt[n],15,3,addr)
-
-#define set_call_gate(a,addr) \
-	_set_gate(a,12,3,addr)
-
-#define _set_seg_desc(gate_addr,type,dpl,base,limit) {\
-	*((gate_addr)+1) = ((base) & 0xff000000) | \
-		(((base) & 0x00ff0000)>>16) | \
-		((limit) & 0xf0000) | \
-		((dpl)<<13) | \
-		(0x00408000) | \
-		((type)<<8); \
-	*(gate_addr) = (((base) & 0x0000ffff)<<16) | \
-		((limit) & 0x0ffff); }
-
-#define _set_tssldt_desc(n,addr,limit,type) \
-__asm__ __volatile__ ("movw $" #limit ",%1\n\t" \
-	"movw %%ax,%2\n\t" \
-	"rorl $16,%%eax\n\t" \
-	"movb %%al,%3\n\t" \
-	"movb $" type ",%4\n\t" \
-	"movb $0x00,%5\n\t" \
-	"movb %%ah,%6\n\t" \
-	"rorl $16,%%eax" \
-	: /* no output */ \
-	:"a" (addr+__PAGE_OFFSET), "m" (*(n)), "m" (*(n+2)), "m" (*(n+4)), \
-	 "m" (*(n+5)), "m" (*(n+6)), "m" (*(n+7)) \
-	)
-
-#define set_tss_desc(n,addr) _set_tssldt_desc(((char *) (n)),((int)(addr)),235,"0x89")
-#define set_ldt_desc(n,addr,size) \
-	_set_tssldt_desc(((char *) (n)),((int)(addr)),((size << 3) - 1),"0x82")
-
 /*
- * This is the ldt that every process will get unless we need
- * something other than this.
+ * Atomic compare and exchange.  Compare OLD with MEM, if identical,
+ * store NEW in MEM.  Return the initial value in MEM.  Success is
+ * indicated by comparing RETURN with OLD.
  */
-extern struct desc_struct default_ldt;
+
+#ifdef CONFIG_X86_CMPXCHG
+#define __HAVE_ARCH_CMPXCHG 1
+#endif
+
+static inline unsigned long __cmpxchg(volatile void *ptr, unsigned long old,
+				      unsigned long new, int size)
+{
+	unsigned long prev;
+	switch (size) {
+	case 1:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgb %b1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	case 2:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgw %w1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	case 4:
+		__asm__ __volatile__(LOCK_PREFIX "cmpxchgl %1,%2"
+				     : "=a"(prev)
+				     : "q"(new), "m"(*__xg(ptr)), "0"(old)
+				     : "memory");
+		return prev;
+	}
+	return old;
+}
+
+#define cmpxchg(ptr,o,n)\
+	((__typeof__(*(ptr)))__cmpxchg((ptr),(unsigned long)(o),\
+					(unsigned long)(n),sizeof(*(ptr))))
+    
+/*
+ * Force strict CPU ordering.
+ * And yes, this is required on UP too when we're talking
+ * to devices.
+ *
+ * For now, "wmb()" doesn't actually do anything, as all
+ * Intel CPU's follow what Intel calls a *Processor Order*,
+ * in which all writes are seen in the program order even
+ * outside the CPU.
+ *
+ * I expect future Intel CPU's to have a weaker ordering,
+ * but I'd also expect them to finally get their act together
+ * and add some real memory barriers if so.
+ *
+ * Some non intel clones support out of order store. wmb() ceases to be a
+ * nop for these.
+ */
+ 
+#define mb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
+#define rmb()	mb()
+
+#ifdef CONFIG_X86_OOSTORE
+#define wmb() 	__asm__ __volatile__ ("lock; addl $0,0(%%esp)": : :"memory")
+#else
+#define wmb()	__asm__ __volatile__ ("": : :"memory")
+#endif
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#define set_mb(var, value) do { (void) xchg(&var, value); } while (0)
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#define set_mb(var, value) do { var = value; barrier(); } while (0)
+#endif
+
+#define set_wmb(var, value) do { var = value; wmb(); } while (0)
+
+#ifdef CONFIG_INTLAT
+
+#include <asm/intlat.h>
+
+#else   /* CONFIG_INTLAT_ */
+
+/* interrupt control.. */
+#define __save_flags(x)		__asm__ __volatile__("pushfl ; popl %0":"=g" (x): /* no input */)
+#define __restore_flags(x) 	__asm__ __volatile__("pushl %0 ; popfl": /* no output */ :"g" (x):"memory", "cc")
+#define __cli() 		__asm__ __volatile__("cli": : :"memory")
+#define __sti()			__asm__ __volatile__("sti": : :"memory")
+/* used in the idle loop; sti takes one instruction cycle to complete */
+#define safe_halt()		__asm__ __volatile__("sti; hlt": : :"memory")
+
+#define __save_and_cli(x)	do { __save_flags(x); __cli(); } while(0);
+#define __save_and_sti(x)	do { __save_flags(x); __sti(); } while(0);
+
+/* For spinlocks etc */
+#if 0
+#define local_irq_save(x)	__asm__ __volatile__("pushfl ; popl %0 ; cli":"=g" (x): /* no input */ :"memory")
+#define local_irq_set(x)	__asm__ __volatile__("pushfl ; popl %0 ; sti":"=g" (x): /* no input */ :"memory")
+#else
+#define local_irq_save(x)	__save_and_cli(x)
+#define local_irq_set(x)	__save_and_sti(x)
+#endif
+
+#define local_irq_restore(x)	__restore_flags(x)
+#define local_irq_disable()	__cli()
+#define local_irq_enable()	__sti()
+
+#endif		/* CONFIG_INTLAT */
+
+#ifdef CONFIG_SMP
+
+extern void __global_cli(void);
+extern void __global_sti(void);
+extern unsigned long __global_save_flags(void);
+extern void __global_restore_flags(unsigned long);
+#define cli() __global_cli()
+#define sti() __global_sti()
+#define save_flags(x) ((x)=__global_save_flags())
+#define restore_flags(x) __global_restore_flags(x)
+#define save_and_cli(x) do { save_flags(x); cli(); } while(0);
+#define save_and_sti(x) do { save_flags(x); sti(); } while(0);
+
+#else
+
+#define cli() __cli()
+#define sti() __sti()
+#define save_flags(x) __save_flags(x)
+#define restore_flags(x) __restore_flags(x)
+#define save_and_cli(x) __save_and_cli(x)
+#define save_and_sti(x) __save_and_sti(x)
+
+#endif
 
 /*
  * disable hlt during certain critical i/o operations
@@ -296,39 +375,11 @@ extern struct desc_struct default_ldt;
 void disable_hlt(void);
 void enable_hlt(void);
 
-static __inline__ unsigned long long rdmsr(unsigned int msr)
-{
-	unsigned long long ret;
-        __asm__ __volatile__("rdmsr"
-			    : "=A" (ret)
-			    : "c" (msr));
-        return ret;
-}
+extern unsigned long dmi_broken;
+extern int is_sony_vaio_laptop;
 
-static __inline__ void wrmsr(unsigned int msr,unsigned long long val)
-{
-        __asm__ __volatile__("wrmsr"
-			    : /* no Outputs */
-			    : "c" (msr), "A" (val));
-}
-
-
-static __inline__ unsigned long long rdtsc(void)
-{
-	unsigned long long ret;
-        __asm__ __volatile__("rdtsc"
-			    : "=A" (ret)
-			    : /* no inputs */);
-        return ret;
-}
-
-static __inline__ unsigned long long rdpmc(unsigned int counter)
-{
-	unsigned long long ret;
-        __asm__ __volatile__("rdpmc"
-			    : "=A" (ret)
-			    : "c" (counter));
-        return ret;
-}
+#define BROKEN_ACPI_Sx		0x0001
+#define BROKEN_INIT_AFTER_S1	0x0002
+#define BROKEN_PNP_BIOS		0x0004
 
 #endif

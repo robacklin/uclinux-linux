@@ -12,31 +12,39 @@ typedef unsigned int	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
 typedef unsigned int	__kernel_nlink_t;
 typedef long		__kernel_off_t;
+typedef long		__kernel_loff_t;
 typedef int		__kernel_pid_t;
+typedef int		__kernel_ipc_pid_t;
 typedef unsigned int	__kernel_uid_t;
 typedef unsigned int	__kernel_gid_t;
 typedef unsigned long	__kernel_size_t;
 typedef long		__kernel_ssize_t;
 typedef long		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
+typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
 typedef unsigned long	__kernel_sigset_t;	/* at least 32 bits */
-
-#ifdef __GNUC__
-typedef long long	__kernel_loff_t;
-#endif
+typedef unsigned short	__kernel_uid16_t;
+typedef unsigned short	__kernel_gid16_t;
 
 typedef struct {
 	int	val[2];
 } __kernel_fsid_t;
 
+typedef __kernel_uid_t __kernel_old_uid_t;
+typedef __kernel_gid_t __kernel_old_gid_t;
+typedef __kernel_uid_t __kernel_uid32_t;
+typedef __kernel_gid_t __kernel_gid32_t;
+
+#ifdef __KERNEL__
+
 #ifndef __GNUC__
 
 #define	__FD_SET(d, set)	((set)->fds_bits[__FDELT(d)] |= __FDMASK(d))
 #define	__FD_CLR(d, set)	((set)->fds_bits[__FDELT(d)] &= ~__FDMASK(d))
-#define	__FD_ISSET(d, set)	((set)->fds_bits[__FDELT(d)] & __FDMASK(d))
+#define	__FD_ISSET(d, set)	(((set)->fds_bits[__FDELT(d)] & __FDMASK(d)) != 0)
 #define	__FD_ZERO(set)	\
   ((void) memset ((__ptr_t) (set), 0, sizeof (__kernel_fd_set)))
 
@@ -106,5 +114,7 @@ static __inline__ void __FD_ZERO(__kernel_fd_set *p)
 }
 
 #endif /* __GNUC__ */
+
+#endif /* __KERNEL__ */
 
 #endif /* _ALPHA_POSIX_TYPES_H */

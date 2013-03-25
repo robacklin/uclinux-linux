@@ -3,36 +3,110 @@
 #
 # create a compressed vmlinuz image from the original vmlinux
 #
-# With this config, max compressed image size = 640k
-# Uncompressed image size = 1.3M (text+data)
+# Note! SYSTEM, ZTEXTADDR, ZBSSADDR and ZRELADDR are now exported
+# from arch/arm/boot/Makefile
+#
 
+HEAD		 = head.o
+OBJS		 = misc.o
 
-HEAD = head.o
-SYSTEM = $(TOPDIR)/vmlinux
-OBJS = $(HEAD) misc.o $(COMPRESSED_EXTRA)
+CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC) -msoft-float -D__linux__
 
-CFLAGS = -O2 -DSTDC_HEADERS $(CFLAGS_PROC)
-ARFLAGS = rc
+FONTC		 = $(TOPDIR)/drivers/video/font_acorn_8x8.c
+ZLDFLAGS	 = -p -X -T $(LINUX).lds
 
-all:		vmlinux
+ifeq ($(CONFIG_CPU_BIG_ENDIAN),y)
+  CFLAGS += -mbig-endian
+  ZLDFLAGS += -EB
+  PIGOFLAGS += -EB
+endif
 
-vmlinux:	piggy.o $(OBJS)
-		$(LD) $(ZLINKFLAGS) -o vmlinux $(OBJS) piggy.o
+#
+# Architecture dependencies
+#
+ifeq ($(CONFIG_ARCH_ACORN),y)
+OBJS		+= ll_char_wr.o font.o
+ZLDFLAGS	+= -defsym params=$(PARAMS_PHYS)
+endif
 
-head.o: 	head.S
-		$(CC) -traditional -DLOADADDR=$(ZRELADDR) -c head.S
+ifeq ($(CONFIG_ARCH_NETWINDER),y)
+OBJS		+= head-netwinder.o
+endif
 
-piggy.o:	$(SYSTEM) xtract piggyback
-		./xtract $(SYSTEM) | gzip -9 | ./piggyback > $@
+ifeq ($(CONFIG_ARCH_SHARK),y)
+OBJS		+= head-shark.o ofw-shark.o
+endif
 
-# rules for extracting & piggybacking the kernel
+ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
+OBJS		+= head-integrator.o
+endif
 
-xtract: 	xtract.c
-		$(HOSTCC) $(HOSTCFLAGS) -o xtract xtract.c
+ifeq ($(CONFIG_ARCH_FTVPCI),y)
+OBJS		+= head-ftvpci.o
+endif
 
-piggyback:	piggyback.c
-		$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
+ifeq ($(CONFIG_ARCH_L7200),y)
+OBJS		+= head-l7200.o
+endif
 
-clean:
-		rm -f xtract piggyback vmlinux core
+ifeq ($(CONFIG_ARCH_CLPS7500),y)
+HEAD		= head-clps7500.o
+endif
 
+ifeq ($(CONFIG_ARCH_P720T),y)
+# Borrow this code from SA1100
+OBJS		+= head-sa1100.o
+endif
+
+ifeq ($(CONFIG_ARCH_SA1100),y)
+OBJS		+= head-sa1100.o setup-sa1100.o
+ifeq ($(CONFIG_SA1100_NANOENGINE),y)
+  OBJS += hw-bse.o
+endif
+endif
+
+ifeq ($(CONFIG_ARCH_INL),y)
+HEAD		= head-isil.o
+endif
+
+ifeq ($(CONFIG_ARCH_VC547X),y)
+HEAD		= 
+OBJS		=
+endif
+
+SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/LOAD_ADDR/$(ZRELADDR)/;
+
+ifneq ($(ZBSSADDR),)
+SEDFLAGS	+= s/BSS_START/$(ZBSSADDR)/
+else
+SEDFLAGS	+= s/BSS_START/ALIGN(4)/
+endif
+
+all:		$(LINUX)
+
+$(LINUX):	$(HEAD) $(OBJS) piggy.o $(LINUX).lds
+		$(LD) $(ZLDFLAGS) $(HEAD) $(OBJS) piggy.o -o $(LINUX)
+
+$(HEAD): 	$(HEAD:.o=.S)
+		$(CC) $(AFLAGS) -traditional -c $(HEAD:.o=.S)
+
+piggy.o:	$(SYSTEM)
+		$(OBJCOPY) -O binary -R .note -R .comment -S $(SYSTEM) piggy
+		gzip $(GZFLAGS) < piggy > linux.gz
+		$(LD) -r $(PIGOFLAGS) -o $@ -b binary linux.gz
+		rm -f piggy #piggy.gz
+
+font.o:		$(FONTC)
+		$(CC) $(CFLAGS) -Dstatic= -c -o $@ $(FONTC)
+
+$(LINUX).lds:	vmlinux.lds.in
+		@sed "$(SEDFLAGS)" < vmlinux.lds.in > $@
+
+clean:;		rm -f $(LINUX) core piggy* $(LINUX).lds
+
+.PHONY:	$(LINUX).lds clean
+
+misc.o: misc.c $(TOPDIR)/include/asm/arch/uncompress.h $(TOPDIR)/lib/inflate.c
+
+%.o: %.S
+	$(CC) $(AFLAGS) $(EXTRA_AFLAGS) $(AFLAGS_$@) -c -o $@ $<

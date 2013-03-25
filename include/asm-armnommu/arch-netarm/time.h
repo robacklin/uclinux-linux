@@ -27,26 +27,24 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * author(s) : Joe deBlaquiere
+ * 
  */
 
 #include	<asm/arch/netarm_registers.h>
 
 /* patched into do_gettimeoffset() - which uses microseconds */
+/* defined in arch/armnommu/mach-netarm/time.c          --rp */
 
-extern __inline__ unsigned long gettimeoffset (void)
-{
-	volatile unsigned int *timer_status = 
-		(volatile unsigned int *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_TIMER2_STATUS) ;
+extern unsigned long netarm_gettimeoffset (void);
+extern void netarm_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
-	/* convert milliseconds to microseconds */
-	return  ( NETARM_GEN_TIMER_MSEC_P(*timer_status) * 1000 ) ;
-}
+extern int setup_arm_irq(int, struct irqaction *);
+
 
 /*
  * No need to reset the timer at every irq - timer rolls itself
  */
-extern __inline__ int reset_timer()
+extern __inline__ int reset_timer(void)
 {
 #if 0
 	setup_timer();
@@ -60,10 +58,12 @@ extern __inline__ int reset_timer()
 #define update_rtc()
 
 /*
- * Set up timer interrupt, and return the current time in seconds.
+ * Set up timer interrupt, and the current time in seconds.
  */
 
-extern __inline__ unsigned long setup_timer (void)
+extern void netarm_dump_int_stats(void);
+
+extern __inline__ void setup_timer(void)
 {
 	volatile unsigned int *timer_control = 
 		(volatile unsigned int *)(NETARM_GEN_MODULE_BASE + 
@@ -79,11 +79,16 @@ extern __inline__ unsigned long setup_timer (void)
 		NETARM_GEN_TCTL_USE_IRQ | NETARM_GEN_TCTL_INIT_COUNT(0) ;
 #endif
 
-	printk("setup_timer : T2 CTL = %08X\n", ((unsigned long)*timer_control));
-	
-	/* probably need to store time in NVRAM at shutdown and restore old */
-	/* but for now we just pick a time... 				    */
+	printk("setup_timer : T2 CTL = %08lX\n", ((unsigned long)*timer_control));
 
-	return mktime(2000, 1, 7, 0, 0, 0);
+	/* store in kernel's function pointer --rp */
+	gettimeoffset = netarm_gettimeoffset;	
+	/* set up the timer interrupt */
+	timer_irq.handler = netarm_timer_interrupt;
+
+/*	netarm_dump_int_stats();*/
+	printk("setting up timer IRQ\n");
+	setup_arm_irq(IRQ_TIMER2, &timer_irq);
+/*	netarm_dump_int_stats();*/
 }
 

@@ -1,6 +1,6 @@
 /*  Generic MTRR (Memory Type Range Register) ioctls.
 
-    Copyright (C) 1997  Richard Gooch
+    Copyright (C) 1997-1999  Richard Gooch
 
     This library is free software; you can redistribute it and/or
     modify it under the terms of the GNU Library General Public
@@ -19,12 +19,41 @@
     Richard Gooch may be reached by email at  rgooch@atnf.csiro.au
     The postal address is:
       Richard Gooch, c/o ATNF, P. O. Box 76, Epping, N.S.W., 2121, Australia.
-
-    modified by Mathias Fr"ohlich, Jan, 1998
-    <frohlich@na.uni-tuebingen.de>
 */
 #ifndef _LINUX_MTRR_H
 #define _LINUX_MTRR_H
+
+#include <linux/config.h>
+#include <linux/ioctl.h>
+
+#define	MTRR_IOCTL_BASE	'M'
+
+struct mtrr_sentry
+{
+    unsigned long base;    /*  Base address     */
+    unsigned long size;    /*  Size of region   */
+    unsigned int type;     /*  Type of region   */
+};
+
+struct mtrr_gentry
+{
+    unsigned int regnum;   /*  Register number  */
+    unsigned long base;    /*  Base address     */
+    unsigned long size;    /*  Size of region   */
+    unsigned int type;     /*  Type of region   */
+};
+
+/*  These are the various ioctls  */
+#define MTRRIOC_ADD_ENTRY        _IOW(MTRR_IOCTL_BASE,  0, struct mtrr_sentry)
+#define MTRRIOC_SET_ENTRY        _IOW(MTRR_IOCTL_BASE,  1, struct mtrr_sentry)
+#define MTRRIOC_DEL_ENTRY        _IOW(MTRR_IOCTL_BASE,  2, struct mtrr_sentry)
+#define MTRRIOC_GET_ENTRY        _IOWR(MTRR_IOCTL_BASE, 3, struct mtrr_gentry)
+#define MTRRIOC_KILL_ENTRY       _IOW(MTRR_IOCTL_BASE,  4, struct mtrr_sentry)
+#define MTRRIOC_ADD_PAGE_ENTRY   _IOW(MTRR_IOCTL_BASE,  5, struct mtrr_sentry)
+#define MTRRIOC_SET_PAGE_ENTRY   _IOW(MTRR_IOCTL_BASE,  6, struct mtrr_sentry)
+#define MTRRIOC_DEL_PAGE_ENTRY   _IOW(MTRR_IOCTL_BASE,  7, struct mtrr_sentry)
+#define MTRRIOC_GET_PAGE_ENTRY   _IOWR(MTRR_IOCTL_BASE, 8, struct mtrr_gentry)
+#define MTRRIOC_KILL_PAGE_ENTRY  _IOW(MTRR_IOCTL_BASE,  9, struct mtrr_sentry)
 
 /*  These are the region types  */
 #define MTRR_TYPE_UNCACHABLE 0
@@ -36,30 +65,63 @@
 #define MTRR_TYPE_WRBACK     6
 #define MTRR_NUM_TYPES       7
 
-static char *attrib_to_str (int x) __attribute__ ((unused));
-
-static char *attrib_to_str (int x)
+#ifdef MTRR_NEED_STRINGS
+static char *mtrr_strings[MTRR_NUM_TYPES] =
 {
-	switch (x) {
-	case 0: return "uncachable";
-	case 1: return "write-combining";
-	case 4: return "write-through";
-	case 5: return "write-protect";
-	case 6: return "write-back";
-	default: return "?";
-	}
-}   /*  End Function attrib_to_str  */
+    "uncachable",               /* 0 */
+    "write-combining",          /* 1 */
+    "?",                        /* 2 */
+    "?",                        /* 3 */
+    "write-through",            /* 4 */
+    "write-protect",            /* 5 */
+    "write-back",               /* 6 */
+};
+#endif
 
 #ifdef __KERNEL__
 
-#ifdef CONFIG_MTRR
+/*  The following functions are for use by other drivers  */
+# ifdef CONFIG_MTRR
+extern int mtrr_add (unsigned long base, unsigned long size,
+		     unsigned int type, char increment);
+extern int mtrr_add_page (unsigned long base, unsigned long size,
+		     unsigned int type, char increment);
+extern int mtrr_del (int reg, unsigned long base, unsigned long size);
+extern int mtrr_del_page (int reg, unsigned long base, unsigned long size);
+extern void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi);
+#  else
+static __inline__ int mtrr_add (unsigned long base, unsigned long size,
+				unsigned int type, char increment)
+{
+    return -ENODEV;
+}
+static __inline__ int mtrr_add_page (unsigned long base, unsigned long size,
+				unsigned int type, char increment)
+{
+    return -ENODEV;
+}
+static __inline__ int mtrr_del (int reg, unsigned long base,
+				unsigned long size)
+{
+    return -ENODEV;
+}
+static __inline__ int mtrr_del_page (int reg, unsigned long base,
+				unsigned long size)
+{
+    return -ENODEV;
+}
 
-extern void check_mtrr_config(void);
-extern void init_mtrr_config(void);
-/* extern void set_mtrr_config(void); */
+static __inline__ void mtrr_centaur_report_mcr(int mcr, u32 lo, u32 hi) {;}
 
-#endif /* CONFIG_MTRR */
+#  endif
 
-#endif /* __KERNEL__ */
+/*  The following functions are for initialisation: don't use them!  */
+extern int mtrr_init (void);
+#  if defined(CONFIG_SMP) && defined(CONFIG_MTRR)
+extern void mtrr_init_boot_cpu (void);
+extern void mtrr_init_secondary_cpu (void);
+#  endif
 
-#endif /* _LINUX_MTRR_H */
+#endif
+
+#endif  /*  _LINUX_MTRR_H  */

@@ -7,28 +7,23 @@
  * Do not include any C declarations in this file - it is included by
  * assembler source.
  */
+#ifndef __ASSEMBLY__
+#error "Only include this from assembly code"
+#endif
+
+#include <asm/proc/ptrace.h>
+#include <asm/proc/assembler.h>
 
 /*
- * LOADREGS: multiple register load (ldm) with pc in register list
- *		(takes account of ARM6 not using ^)
- *
- * RETINSTR: return instruction: adds the 's' in at the end of the
- *		instruction if this is not an ARM6
- *
- * SAVEIRQS: save IRQ state (not required on ARM2/ARM3 - done
- *		implicitly
- *
- * RESTOREIRQS: restore IRQ state (not required on ARM2/ARM3 - done
- *		implicitly with ldm ... ^ or movs.
- *
- * These next two need thinking about - can't easily use stack... (see system.S)
- * DISABLEIRQS: disable IRQS in SVC mode
- *
- * ENABLEIRQS: enable IRQS in SVC mode
- *
- * USERMODE: switch to USER mode
- *
- * SVCMODE: switch to SVC mode
+ * Endian independent macros for shifting bytes within registers.
  */
+#ifndef __ARMEB__
+#define pull            lsr
+#define push            lsl
+#define byte(x)         (x*8)
+#else
+#define pull            lsl
+#define push            lsr
+#define byte(x)         ((3-x)*8)
+#endif
 
-#include <asm/proc/assembler.h>

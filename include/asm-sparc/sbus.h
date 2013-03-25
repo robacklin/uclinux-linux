@@ -1,4 +1,4 @@
-/* $Id: sbus.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: sbus.h,v 1.22 2000/02/18 13:50:50 davem Exp $
  * sbus.h:  Defines for the Sun SBus.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -7,8 +7,11 @@
 #ifndef _SPARC_SBUS_H
 #define _SPARC_SBUS_H
 
+#include <linux/ioport.h>
+
 #include <asm/oplib.h>
 #include <asm/iommu.h>
+#include <asm/scatterlist.h>
 
 /* We scan which devices are on the SBus using the PROM node device
  * tree.  SBus devices are described in two different ways.  You can
@@ -24,69 +27,109 @@
  * numbers + offsets, and vice versa.
  */
 
-extern inline unsigned long sbus_devaddr(int slotnum, unsigned long offset)
+extern __inline__ unsigned long sbus_devaddr(int slotnum, unsigned long offset)
 {
   return (unsigned long) (SUN_SBUS_BVADDR+((slotnum)<<25)+(offset));
 }
 
-extern inline int sbus_dev_slot(unsigned long dev_addr)
+extern __inline__ int sbus_dev_slot(unsigned long dev_addr)
 {
   return (int) (((dev_addr)-SUN_SBUS_BVADDR)>>25);
 }
 
-extern inline unsigned long sbus_dev_offset(unsigned long dev_addr)
-{
-  return (unsigned long) (((dev_addr)-SUN_SBUS_BVADDR)&SBUS_OFF_MASK);
-}
-
-struct linux_sbus;
+struct sbus_bus;
 
 /* Linux SBUS device tables */
-struct linux_sbus_device {
-  struct linux_sbus_device *next;      /* next device on this SBus or null */
-  struct linux_sbus_device *child;     /* For ledma and espdma on sun4m */
-  struct linux_sbus *my_bus;           /* Back ptr to sbus */
-  int prom_node;                       /* PROM device tree node for this device */
-  char prom_name[64];                  /* PROM device name */
-  char linux_name[64];                 /* Name used internally by Linux */
+struct sbus_dev {
+	struct sbus_bus	*bus;       /* Back ptr to sbus */
+	struct sbus_dev	*next;      /* next device on this SBus or null */
+	struct sbus_dev	*child;     /* For ledma and espdma on sun4m */
+	struct sbus_dev	*parent;    /* Parent device if not toplevel */
+	int prom_node;              /* PROM device tree node for this device */
+	char prom_name[64];         /* PROM device name */
+	int slot;
 
-  struct linux_prom_registers reg_addrs[PROMREG_MAX];
-  int num_registers;
+	struct resource resource[PROMREG_MAX];
 
-  struct linux_prom_irqs irqs[PROMINTR_MAX];
-  int num_irqs;
+	struct linux_prom_registers reg_addrs[PROMREG_MAX];
+	int num_registers, ranges_applied;
 
-  unsigned long sbus_addr;             /* Absolute base address for device. */
-  unsigned long sbus_vaddrs[PROMVADDR_MAX];
-  unsigned long num_vaddrs;
-  unsigned long offset;                /* Offset given by PROM */
-  int slot;
+	struct linux_prom_ranges device_ranges[PROMREG_MAX];
+	int num_device_ranges;
+
+	unsigned int irqs[4];
+	int num_irqs;
 };
 
 /* This struct describes the SBus(s) found on this machine. */
-struct linux_sbus {
-	struct linux_sbus *next;             /* next SBus, if more than one SBus */
-	struct linux_sbus_device *devices;   /* Link to devices on this SBus */
-	struct iommu_struct *iommu;          /* IOMMU for this sbus if applicable */
-	int prom_node;                       /* PROM device tree node for this SBus */
-	char prom_name[64];                  /* Usually "sbus" */
-	int clock_freq;
+struct sbus_bus {
+	void			*iommu;		/* Opaque IOMMU cookie */
+	struct sbus_dev		*devices;	/* Link to devices on this SBus */
+	struct sbus_bus		*next;		/* next SBus, if more than one SBus */
+	int			prom_node;	/* PROM device tree node for this SBus */
+	char			prom_name[64];  /* Usually "sbus" or "sbi" */
+	int			clock_freq;
+
+	struct linux_prom_ranges sbus_ranges[PROMREG_MAX];
+	int num_sbus_ranges;
+
+	int devid;
+	int board;
 };
 
-extern struct linux_sbus *SBus_chain;
+extern struct sbus_bus *sbus_root;
 
-extern inline int
-sbus_is_slave(struct linux_sbus_device *dev)
+extern __inline__ int
+sbus_is_slave(struct sbus_dev *dev)
 {
-	/* Have to write this for sun4c's */
+	/* XXX Have to write this for sun4c's */
 	return 0;
 }
 
 /* Device probing routines could find these handy */
 #define for_each_sbus(bus) \
-        for((bus) = SBus_chain; (bus); (bus)=(bus)->next)
+        for((bus) = sbus_root; (bus); (bus)=(bus)->next)
 
 #define for_each_sbusdev(device, bus) \
         for((device) = (bus)->devices; (device); (device)=(device)->next)
+        
+#define for_all_sbusdev(device, bus) \
+	for ((bus) = sbus_root; (bus); (bus) = (bus)->next) \
+		for ((device) = (bus)->devices; (device); (device) = (device)->next)
+
+/* Driver DVMA interfaces. */
+#define sbus_can_dma_64bit(sdev)	(0) /* actually, sparc_cpu_model==sun4d */
+#define sbus_can_burst64(sdev)		(0) /* actually, sparc_cpu_model==sun4d */
+extern void sbus_set_sbus64(struct sbus_dev *, int);
+
+/* These yield IOMMU mappings in consistent mode. */
+extern void *sbus_alloc_consistent(struct sbus_dev *, long, u32 *dma_addrp);
+extern void sbus_free_consistent(struct sbus_dev *, long, void *, u32);
+
+#define SBUS_DMA_BIDIRECTIONAL	0
+#define SBUS_DMA_TODEVICE	1
+#define SBUS_DMA_FROMDEVICE	2
+#define	SBUS_DMA_NONE		3
+
+/* All the rest use streaming mode mappings. */
+extern dma_addr_t sbus_map_single(struct sbus_dev *, void *, size_t, int);
+extern void sbus_unmap_single(struct sbus_dev *, dma_addr_t, size_t, int);
+extern int sbus_map_sg(struct sbus_dev *, struct scatterlist *, int, int);
+extern void sbus_unmap_sg(struct sbus_dev *, struct scatterlist *, int, int);
+
+/* Finally, allow explicit synchronization of streamable mappings. */
+extern void sbus_dma_sync_single(struct sbus_dev *, dma_addr_t, size_t, int);
+extern void sbus_dma_sync_sg(struct sbus_dev *, struct scatterlist *, int, int);
+
+/* Eric Brower (ebrower@usa.net)
+ * Translate SBus interrupt levels to ino values--
+ * this is used when converting sbus "interrupts" OBP 
+ * node values to "intr" node values, and is platform 
+ * dependent.  If only we could call OBP with 
+ * "sbus-intr>cpu (sbint -- ino)" from kernel...
+ * See .../drivers/sbus/sbus.c for details.
+ */
+BTFIXUPDEF_CALL(unsigned int, sbint_to_irq, struct sbus_dev *sdev, unsigned int)
+#define sbint_to_irq(sdev, sbint) BTFIXUP_CALL(sbint_to_irq)(sdev, sbint)
 
 #endif /* !(_SPARC_SBUS_H) */

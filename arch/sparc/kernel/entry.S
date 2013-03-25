@@ -1,7 +1,11 @@
-/* $Id: entry.S,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: entry.S,v 1.170 2001/11/13 00:57:05 davem Exp $
  * arch/sparc/kernel/entry.S:  Sparc trap low-level entry points.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1996 Eddie C. Dost   (ecd@skynet.be)
+ * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
+ * Copyright (C) 1996-1999 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
+ * Copyright (C) 1997 Anton Blanchard (anton@progsoc.uts.edu.au)
  */
 
 #include <linux/config.h>
@@ -18,12 +22,29 @@
 #include <asm/vaddrs.h>
 #include <asm/memreg.h>
 #include <asm/page.h>
+#ifdef CONFIG_SUN4
+#include <asm/pgtsun4.h>
+#else
+#include <asm/pgtsun4c.h>
+#endif
 #include <asm/winmacro.h>
 #include <asm/signal.h>
+#include <asm/obio.h>
+#include <asm/mxcc.h>
 
 #include <asm/asmmacro.h>
 
-#define NR_SYSCALLS 255      /* Each OS is different... */
+#define curptr      g6
+
+#define NR_SYSCALLS 256      /* Each OS is different... */
+
+/* These are just handy. */
+#define _SV	save	%sp, -STACKFRAME_SZ, %sp
+#define _RS     restore 
+
+#define FLUSH_ALL_KERNEL_WINDOWS \
+	_SV; _SV; _SV; _SV; _SV; _SV; _SV; \
+	_RS; _RS; _RS; _RS; _RS; _RS; _RS;
 
 /* First, KGDB low level things.  This is a rewrite
  * of the routines found in the sparc-stub.c asm() statement
@@ -48,7 +69,6 @@ in_trap_handler:
 C_LABEL(trap_low):
 	rd	%wim, %l3
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	sethi	%hi(in_trap_handler), %l4
 	ld	[%lo(in_trap_handler) + %l4], %l5
@@ -58,11 +78,11 @@ C_LABEL(trap_low):
 	/* Make sure kgdb sees the same state we just saved. */
 	LOAD_PT_GLOBALS(sp)
 	LOAD_PT_INS(sp)
-	ld	[%sp + REGWIN_SZ + PT_Y], %l4
-	ld	[%sp + REGWIN_SZ + PT_WIM], %l3
-	ld	[%sp + REGWIN_SZ + PT_PSR], %l0
-	ld	[%sp + REGWIN_SZ + PT_PC], %l1
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l2
+	ld	[%sp + STACKFRAME_SZ + PT_Y], %l4
+	ld	[%sp + STACKFRAME_SZ + PT_WIM], %l3
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %l0
+	ld	[%sp + STACKFRAME_SZ + PT_PC], %l1
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l2
 	rd	%tbr, %l5	/* Never changes... */
 
 	/* Make kgdb exception frame. */	
@@ -77,17 +97,18 @@ C_LABEL(trap_low):
 	/* We are increasing PIL, so two writes. */
 	or	%l0, PSR_PIL, %l0
 	wr	%l0, 0, %psr
+	WRITE_PAUSE
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
 
 	call	C_LABEL(handle_exception)
-	 add	%sp, REGWIN_SZ, %o0	! Pass address of registers
+	 add	%sp, STACKFRAME_SZ, %o0	! Pass address of registers
 
 	/* Load new kgdb register set. */
 	LOAD_KGDB_GLOBALS(sp)
 	LOAD_KGDB_INS(sp)
-	LOAD_KGDB_SREGS(sp, l0, l2)
-	wr	%l0, 0x0, %y
+	LOAD_KGDB_SREGS(sp, l4, l0, l3, l5, l1, l2)
+	wr      %l4, 0x0, %y
 
 	sethi	%hi(in_trap_handler), %l4
 	ld	[%lo(in_trap_handler) + %l4], %l5
@@ -102,54 +123,32 @@ C_LABEL(trap_low):
 	STORE_PT_INS(sp)
 	STORE_PT_GLOBALS(sp)
 	STORE_PT_YREG(sp, g2)
-	STORE_PT_PRIV(sp, l1, l2, l3)
+	STORE_PT_PRIV(sp, l0, l1, l2)
 
 	RESTORE_ALL
 
 
 #ifdef CONFIG_BLK_DEV_FD
-#ifdef TRACE_FLOPPY_HARDINT
-/* Useful tracing */
-	.data
-	.align	4
-	.globl	C_LABEL(floppy_hardint_trace)
-C_LABEL(floppy_hardint_trace):
-	.skip	32
-	.globl	C_LABEL(floppy_hardint_index)
-C_LABEL(floppy_hardint_index):
-	.word	0
-#endif
-
 	.text
 	.align	4
 	.globl	C_LABEL(floppy_hardint)
 C_LABEL(floppy_hardint):
-	/* Can only use regs %l3->%l7:
+	/*
+	 * This code cannot touch registers %l0 %l1 and %l2
+	 * because SAVE_ALL depends on their values. It depends
+	 * on %l3 also, but we regenerate it before a call.
+	 * Other registers are:
 	 * %l3 -- base address of fdc registers
 	 * %l4 -- pdma_vaddr
 	 * %l5 -- scratch for ld/st address
 	 * %l6 -- pdma_size
-	 * %l7 -- floppy_softint
+	 * %l7 -- scratch [floppy byte, ld/st address, aux. data]
 	 */
 
-#ifdef TRACE_FLOPPY_HARDINT
-        sethi   %hi(C_LABEL(floppy_hardint_trace)), %l5
-        or      %l5, %lo(C_LABEL(floppy_hardint_trace)), %l5
-        ld      [%l5 + 32], %l7
-        add     %l7, 1, %l7
-        and     %l7, 31, %l7
-        st      %l7, [%l5 + 32]
-        sub     %l7, 1, %l7
-        and     %l7, 31, %l7
-        add     %l7, %l5, %l5
-	or	%g0, 0xf, %l7
-	stb	%l7, [%l5]
-#endif
-
 	/* Do we have work to do? */
-	sethi	%hi(C_LABEL(doing_pdma)), %l4
-	ld	[%l4 + %lo(C_LABEL(doing_pdma))], %l4
-	cmp	%l4, 0
+	sethi	%hi(C_LABEL(doing_pdma)), %l7
+	ld	[%l7 + %lo(C_LABEL(doing_pdma))], %l7
+	cmp	%l7, 0
 	be	floppy_dosoftint
 	 nop
 
@@ -163,21 +162,7 @@ C_LABEL(floppy_hardint):
 	sethi	%hi(C_LABEL(pdma_size)), %l5	! bytes to go
 	ld	[%l5 + %lo(C_LABEL(pdma_size))], %l6
 next_byte:
-#ifdef TRACE_FLOPPY_HARDINT
-	sethi	%hi(C_LABEL(floppy_hardint_trace)), %l5
-	or	%l5, %lo(C_LABEL(floppy_hardint_trace)), %l5
-	ld	[%l5 + 32], %l7
-	add	%l7, 1, %l7
-	and	%l7, 31, %l7
-	st	%l7, [%l5 + 32]
-	sub	%l7, 1, %l7
-	and	%l7, 31, %l7
-	add	%l7, %l5, %l5
-	ldub	[%l3], %l7
-	stb	%l7, [%l5]
-#else
   	ldub	[%l3], %l7
-#endif
 
 	andcc	%l7, 0x80, %g0		! Does fifo still have data
 	bz	floppy_fifo_emptied	! fifo has been emptied...
@@ -212,24 +197,24 @@ floppy_tdone:
 	sethi	%hi(C_LABEL(pdma_size)), %l5
 	st	%l6, [%l5 + %lo(C_LABEL(pdma_size))]
 	/* Flip terminal count pin */
-	set	C_LABEL(auxio_register), %l4
-	ld	[%l4], %l4
+	set	C_LABEL(auxio_register), %l7
+	ld	[%l7], %l7
 
 	set	C_LABEL(sparc_cpu_model), %l5
 	ld	[%l5], %l5
 	subcc   %l5, 1, %g0		/* enum { sun4c = 1 }; */
 	be	1f
-	 ldub	[%l4], %l5
+	 ldub	[%l7], %l5
 
 	or	%l5, 0xc2, %l5
-	stb	%l5, [%l4]
+	stb	%l5, [%l7]
 	andn    %l5, 0x02, %l5
 	b	2f
 	 nop
 
 1:
 	or      %l5, 0xf4, %l5
-	stb     %l5, [%l4]
+	stb     %l5, [%l7]
 	andn    %l5, 0x04, %l5
 
 2:
@@ -237,12 +222,12 @@ floppy_tdone:
 	WRITE_PAUSE
 	WRITE_PAUSE
 
-	stb     %l5, [%l4]
+	stb     %l5, [%l7]
 
 	/* Prevent recursion */
-	sethi	%hi(C_LABEL(doing_pdma)), %l4
+	sethi	%hi(C_LABEL(doing_pdma)), %l7
 	b	floppy_dosoftint
-	 st	%g0, [%l4 + %lo(C_LABEL(doing_pdma))]
+	 st	%g0, [%l7 + %lo(C_LABEL(doing_pdma))]
 
 	/* We emptied the FIFO, but we haven't read everything
 	 * as of yet.  Store the current transfer address and
@@ -268,26 +253,26 @@ floppy_overrun:
 	sethi	%hi(C_LABEL(pdma_size)), %l5
 	st	%l6, [%l5 + %lo(C_LABEL(pdma_size))]
 	/* Prevent recursion */
-	sethi	%hi(C_LABEL(doing_pdma)), %l4
-	st	%g0, [%l4 + %lo(C_LABEL(doing_pdma))]
+	sethi	%hi(C_LABEL(doing_pdma)), %l7
+	st	%g0, [%l7 + %lo(C_LABEL(doing_pdma))]
 
 	/* fall through... */
 floppy_dosoftint:
 	rd	%wim, %l3
 	SAVE_ALL
-	ENTER_IRQ
 
 	/* Set all IRQs off. */
 	or	%l0, PSR_PIL, %l4
 	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
 	wr	%l4, PSR_ET, %psr
 	WRITE_PAUSE
 
-	mov	11, %o0			! floppy irq level
-	call	C_LABEL(floppy_interrupt)
-	 add	%sp, REGWIN_SZ, %o1	! struct pt_regs *regs
+	mov	11, %o0			! floppy irq level (unused anyway)
+	mov	%g0, %o1		! devid is not used in fast interrupts
+	call	C_LABEL(sparc_floppy_irq)
+	 add	%sp, STACKFRAME_SZ, %o2	! struct pt_regs *regs
 
-	LEAVE_IRQ
 	RESTORE_ALL
 	
 #endif /* (CONFIG_BLK_DEV_FD) */
@@ -296,7 +281,6 @@ floppy_dosoftint:
 	.globl	bad_trap_handler
 bad_trap_handler:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
@@ -314,104 +298,196 @@ bad_trap_handler:
  */
 
 	.align	4
-	.globl	real_irq_entry
+	.globl	real_irq_entry, patch_handler_irq
 real_irq_entry:
 	SAVE_ALL
-#ifdef __SMP__
-	cmp	%l7, 9
-	bne	1f
-	 nop
 
-	GET_PROCESSOR_MID(l4, l5)
-	set	C_LABEL(sun4m_interrupts), %l5
-	ld	[%l5], %l5
-	sethi	%hi(0x02000000), %l6
-	sll	%l4, 12, %l4
-	add	%l5, %l4, %l5
-	ld	[%l5], %l4
-	andcc	%l4, %l6, %g0
-	be	1f
-	 nop
+#ifdef CONFIG_SMP
+	.globl	patchme_maybe_smp_msg
 
-	b	linux_trap_ipi9_sun4m
+	cmp	%l7, 12
+patchme_maybe_smp_msg:
+	bgu	maybe_smp4m_msg
 	 nop
-
-1:
 #endif
-	ENTER_IRQ
 
-#ifdef __SMP__
-	cmp	%l7, 13
-	bne	1f
-	 nop
+real_irq_continue:
+	or	%l0, PSR_PIL, %g2
+	wr	%g2, 0x0, %psr
+	WRITE_PAUSE
+	wr	%g2, PSR_ET, %psr
+	WRITE_PAUSE
+	mov	%l7, %o0		! irq level
+patch_handler_irq:
+	call	C_LABEL(handler_irq)
+	 add	%sp, STACKFRAME_SZ, %o1	! pt_regs ptr
+	or	%l0, PSR_PIL, %g2	! restore PIL after handler_irq
+	wr	%g2, PSR_ET, %psr	! keep ET up
+	WRITE_PAUSE
 
-	/* This is where we catch the level 13 reschedule soft-IRQ. */
+	RESTORE_ALL
+
+#ifdef CONFIG_SMP
+	/* SMP per-cpu ticker interrupts are handled specially. */
+smp4m_ticker:
+	bne	real_irq_continue+4
+	 or	%l0, PSR_PIL, %g2
+	wr	%g2, 0x0, %psr
+	WRITE_PAUSE
+	wr	%g2, PSR_ET, %psr
+	WRITE_PAUSE
+	call	C_LABEL(smp4m_percpu_timer_interrupt)
+	 add	%sp, STACKFRAME_SZ, %o0
+	wr	%l0, PSR_ET, %psr
+	WRITE_PAUSE
+	RESTORE_ALL
+
+	/* Here is where we check for possible SMP IPI passed to us
+	 * on some level other than 15 which is the NMI and only used
+	 * for cross calls.  That has a separate entry point below.
+	 */
+maybe_smp4m_msg:
 	GET_PROCESSOR_MID(o3, o2)
 	set	C_LABEL(sun4m_interrupts), %l5
 	ld	[%l5], %o5
-	sethi	%hi(0x20000000), %o4
+	sethi	%hi(0x60000000), %o4
 	sll	%o3, 12, %o3
-	add	%o5, %o3, %o5
-	ld	[%o5], %o1		! read processor irq pending reg
+	ld	[%o5 + %o3], %o1
 	andcc	%o1, %o4, %g0
-	be	1f
-	 nop
-
-	b	linux_trap_ipi13_sun4m
-	 nop
-
-1:	
-
-#endif
-
-	/* start atomic operation with respect to software interrupts */
-	sethi	%hi(C_LABEL(intr_count)), %l4
-	ld	[%l4 + %lo(C_LABEL(intr_count))], %l5
-	add	%l5, 0x1, %l5
-	st	%l5, [%l4 + %lo(C_LABEL(intr_count))]
-
-	/* Enable traps w/IRQs off, so we can call c-code properly.
-	 * Note how we are increasing PIL so we need to do two writes
-	 * to work around a MicroSPARC bug of sorts.
-	 */
+	be,a	smp4m_ticker
+	 cmp	%l7, 14
+	cmp	%l7, 13
+	add	%o5, %o3, %o5
+	bne,a	1f
+	 sethi	%hi(0x40000000), %o2
+	sethi	%hi(0x20000000), %o2
+1:
+	st	%o2, [%o5 + 0x4]
+	WRITE_PAUSE
+	ld	[%o5], %g0
+	WRITE_PAUSE
 	or	%l0, PSR_PIL, %l4
-
 	wr	%l4, 0x0, %psr
 	WRITE_PAUSE
 	wr	%l4, PSR_ET, %psr
 	WRITE_PAUSE
-
-	mov	%l7, %o0		! irq level
-	call	C_LABEL(handler_irq)
-	 add	%sp, REGWIN_SZ, %o1	! pt_regs ptr
-
-rie_checkbh:
-	sethi	%hi(C_LABEL(intr_count)), %l4
-	ld	[%l4 + %lo(C_LABEL(intr_count))], %l5
-	subcc	%l5, 0x1, %l5
-	bne	2f	/* IRQ within IRQ, get out of here... */
+	cmp	%l7, 13
+	bne	2f
 	 nop
-
-	sethi	%hi(C_LABEL(bh_active)), %l3
-	ld	[%l3 + %lo(C_LABEL(bh_active))], %g2
-	sethi	%hi(C_LABEL(bh_mask)), %l3
-	ld	[%l3 + %lo(C_LABEL(bh_mask))], %g3
-	andcc	%g2, %g3, %g0
-	be	2f
-	 nop
-
-	call	C_LABEL(do_bottom_half)	
-	 nop
-
-	/* Try again... */
-	b	rie_checkbh
-	 nop
-	
+	call	C_LABEL(smp_reschedule_irq)
+	 add	%o7, 8, %o7
 2:
-	st	%l5, [%l4 + %lo(C_LABEL(intr_count))]
-
-	LEAVE_IRQ
+	call	C_LABEL(smp_stop_cpu_irq)
+	 nop
 	RESTORE_ALL
+
+	.align	4
+	.globl	linux_trap_ipi15_sun4m
+linux_trap_ipi15_sun4m:
+	SAVE_ALL
+	sethi	%hi(0x80000000), %o2
+	GET_PROCESSOR_MID(o0, o1)
+	set	C_LABEL(sun4m_interrupts), %l5
+	ld	[%l5], %o5
+	sll	%o0, 12, %o0
+	add	%o5, %o0, %o5
+	ld	[%o5], %o3
+	andcc	%o3, %o2, %g0
+	be	1f			! Must be an NMI async memory error
+	 st	%o2, [%o5 + 4]
+	WRITE_PAUSE
+	ld	[%o5], %g0
+	WRITE_PAUSE
+	or	%l0, PSR_PIL, %l4
+	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
+	wr	%l4, PSR_ET, %psr
+	WRITE_PAUSE
+	call	C_LABEL(smp4m_cross_call_irq)
+	 nop
+	b	ret_trap_lockless_ipi
+	 clr	%l6
+1:
+	/* NMI async memory error handling. */
+	sethi	%hi(0x80000000), %l4
+	sethi	%hi(0x4000), %o3
+	sub	%o5, %o0, %o5
+	add	%o5, %o3, %l5
+	st	%l4, [%l5 + 0xc]
+	WRITE_PAUSE
+	ld	[%l5], %g0
+	WRITE_PAUSE
+	or	%l0, PSR_PIL, %l4
+	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
+	wr	%l4, PSR_ET, %psr
+	WRITE_PAUSE
+	call	C_LABEL(sun4m_nmi)
+	 nop
+	st	%l4, [%l5 + 0x8]
+	WRITE_PAUSE
+	ld	[%l5], %g0
+	WRITE_PAUSE
+	RESTORE_ALL
+
+	.globl	smp4d_ticker
+	/* SMP per-cpu ticker interrupts are handled specially. */
+smp4d_ticker:
+	SAVE_ALL
+	or	%l0, PSR_PIL, %g2
+	sethi	%hi(CC_ICLR), %o0
+	sethi	%hi(1 << 14), %o1
+	or	%o0, %lo(CC_ICLR), %o0
+	stha	%o1, [%o0] ASI_M_MXCC	/* Clear PIL 14 in MXCC's ICLR */
+	wr	%g2, 0x0, %psr
+	WRITE_PAUSE
+	wr	%g2, PSR_ET, %psr
+	WRITE_PAUSE
+	call	C_LABEL(smp4d_percpu_timer_interrupt)
+	 add	%sp, STACKFRAME_SZ, %o0
+	wr	%l0, PSR_ET, %psr
+	WRITE_PAUSE
+	RESTORE_ALL
+
+	.align	4
+	.globl	linux_trap_ipi15_sun4d
+linux_trap_ipi15_sun4d:
+	SAVE_ALL
+	sethi	%hi(CC_BASE), %o4
+	sethi	%hi(MXCC_ERR_ME|MXCC_ERR_PEW|MXCC_ERR_ASE|MXCC_ERR_PEE), %o2
+	or	%o4, (CC_EREG - CC_BASE), %o0
+	ldda	[%o0] ASI_M_MXCC, %o0
+	andcc	%o0, %o2, %g0
+	bne	1f
+	 sethi	%hi(BB_STAT2), %o2
+	lduba	[%o2] ASI_M_CTL, %o2
+	andcc	%o2, BB_STAT2_MASK, %g0
+	bne	2f
+	 or	%o4, (CC_ICLR - CC_BASE), %o0
+	sethi	%hi(1 << 15), %o1
+	stha	%o1, [%o0] ASI_M_MXCC	/* Clear PIL 15 in MXCC's ICLR */
+	or	%l0, PSR_PIL, %l4
+	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
+	wr	%l4, PSR_ET, %psr
+	WRITE_PAUSE
+	call	C_LABEL(smp4d_cross_call_irq)
+	 nop
+	b	ret_trap_lockless_ipi
+	 clr	%l6
+
+1:	/* MXCC error */
+2:	/* BB error */
+	/* Disable PIL 15 */
+	set	CC_IMSK, %l4
+	lduha	[%l4] ASI_M_MXCC, %l5
+	sethi	%hi(1 << 15), %l7
+	or	%l5, %l7, %l5
+	stha	%l5, [%l4] ASI_M_MXCC
+	/* FIXME */
+1:	b,a	1b
+
+#endif /* CONFIG_SMP */
 
 	/* This routine handles illegal instructions and privileged
 	 * instruction attempts from user code.
@@ -419,13 +495,18 @@ rie_checkbh:
 	.align	4
 	.globl	bad_instruction
 bad_instruction:
+	sethi	%hi(0xc1f80000), %l4
+	ld	[%l1], %l5
+	sethi	%hi(0x81d80000), %l7
+	and	%l5, %l4, %l5
+	cmp	%l5, %l7
+	be	1f
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(do_illegal_instruction)
@@ -433,16 +514,19 @@ bad_instruction:
 
 	RESTORE_ALL
 
+1:	/* unimplemented flush - just skip */
+	jmpl	%l2, %g0
+	 rett	%l2 + 4
+
 	.align	4
 	.globl	priv_instruction
 priv_instruction:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(do_priv_instruction)
@@ -450,22 +534,34 @@ priv_instruction:
 
 	RESTORE_ALL
 
-	/* This routine handles unaligned data accesses.
-	 */
+	/* This routine handles unaligned data accesses. */
 	.align	4
 	.globl	mna_handler
 mna_handler:
+	andcc	%l0, PSR_PS, %g0
+	be	mna_fromuser
+	 nop
+
 	SAVE_ALL
-	ENTER_SYSCALL
+
+	wr	%l0, PSR_ET, %psr
+	WRITE_PAUSE
+
+	ld	[%l1], %o1
+	call	C_LABEL(kernel_unaligned_trap)
+	 add	%sp, STACKFRAME_SZ, %o0
+
+	RESTORE_ALL
+
+mna_fromuser:
+	SAVE_ALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
-	mov	%l1, %o1
-	mov	%l2, %o2
-	call	C_LABEL(do_memaccess_unaligned)
-	 mov	%l0, %o3
+	ld	[%l1], %o1
+	call	C_LABEL(user_unaligned_trap)
+	 add	%sp, STACKFRAME_SZ, %o0
 
 	RESTORE_ALL
 
@@ -474,12 +570,11 @@ mna_handler:
 	.globl	fpd_trap_handler
 fpd_trap_handler:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(do_fpd_trap)
@@ -514,12 +609,11 @@ fpe_trap_handler:
 
 2:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(do_fpe_trap)
@@ -532,12 +626,11 @@ fpe_trap_handler:
 	.globl	do_tag_overflow
 do_tag_overflow:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_tag_overflow)
@@ -550,12 +643,11 @@ do_tag_overflow:
 	.globl	do_watchpoint
 do_watchpoint:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_watchpoint)
@@ -568,12 +660,11 @@ do_watchpoint:
 	.globl	do_reg_access
 do_reg_access:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_reg_access)
@@ -586,33 +677,14 @@ do_reg_access:
 	.globl	do_cp_disabled
 do_cp_disabled:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_cp_disabled)
-	 mov	%l0, %o3
-
-	RESTORE_ALL
-
-	/* This routine handles Unimplemented FLUSH Exceptions. */
-	.align	4
-	.globl	do_bad_flush
-do_bad_flush:
-	SAVE_ALL
-	ENTER_SYSCALL
-
-	wr	%l0, PSR_ET, %psr		! re-enable traps
-	WRITE_PAUSE
-
-	add	%sp, REGWIN_SZ, %o0
-	mov	%l1, %o1
-	mov	%l2, %o2
-	call	C_LABEL(handle_bad_flush)
 	 mov	%l0, %o3
 
 	RESTORE_ALL
@@ -622,12 +694,11 @@ do_bad_flush:
 	.globl	do_cp_exception
 do_cp_exception:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_cp_exception)
@@ -640,12 +711,11 @@ do_cp_exception:
 	.globl	do_hw_divzero
 do_hw_divzero:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr		! re-enable traps
 	WRITE_PAUSE
 
-	add	%sp, REGWIN_SZ, %o0
+	add	%sp, STACKFRAME_SZ, %o0
 	mov	%l1, %o1
 	mov	%l2, %o2
 	call	C_LABEL(handle_hw_divzero)
@@ -657,7 +727,6 @@ do_hw_divzero:
 	.globl	do_flush_windows
 do_flush_windows:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
@@ -670,22 +739,25 @@ do_flush_windows:
 	 nop
 
 	/* Advance over the trap instruction. */
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l1
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1
 	add	%l1, 0x4, %l2
-	st	%l1, [%sp + REGWIN_SZ + PT_PC]
-	st	%l2, [%sp + REGWIN_SZ + PT_NPC]
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
 	RESTORE_ALL
 
+	.globl	flush_patch_one
+
 	/* We get these for debugging routines using __builtin_return_address() */
 dfw_kernel:
+flush_patch_one:
 	FLUSH_ALL_KERNEL_WINDOWS
 
 	/* Advance over the trap instruction. */
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l1
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1
 	add	%l1, 0x4, %l2
-	st	%l1, [%sp + REGWIN_SZ + PT_PC]
-	st	%l2, [%sp + REGWIN_SZ + PT_NPC]
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
 	RESTORE_ALL
 
@@ -711,7 +783,7 @@ getcc_trap_handler:
 setcc_trap_handler:
 	sll	%g1, 0x14, %l4
 	set	PSR_ICC, %l5
-	andn	%l0, %l5, %l0	! clear ICC bits in current %psr
+	andn	%l0, %l5, %l0	! clear ICC bits in %psr
 	and	%l4, %l5, %l4	! clear non-ICC bits in user value
 	or	%l4, %l0, %l4	! or them in... mix mix mix
 
@@ -725,7 +797,6 @@ setcc_trap_handler:
 	.globl	linux_trap_nmi_sun4c
 linux_trap_nmi_sun4c:
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	/* Ugh, we need to clear the IRQ line.  This is now
 	 * a very sun4c specific trap handler...
@@ -755,172 +826,341 @@ linux_trap_nmi_sun4c:
 	sub	%o0, 0x4, %o0
 	lda	[%o0] ASI_CONTROL, %o3	! async error
 	call	C_LABEL(sparc_lvl15_nmi)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
 	RESTORE_ALL
 
-#ifdef __SMP__
+	.align	4
+	.globl	C_LABEL(invalid_segment_patch1_ff)
+	.globl	C_LABEL(invalid_segment_patch2_ff)
+C_LABEL(invalid_segment_patch1_ff):	cmp	%l4, 0xff
+C_LABEL(invalid_segment_patch2_ff):	mov	0xff, %l3
 
 	.align	4
-	.globl	linux_trap_ipi9_sun4m
-linux_trap_ipi9_sun4m:
-	sethi	%hi(0x02000000), %o2
-	GET_PROCESSOR_MID(o0, o1)
-	set	C_LABEL(sun4m_interrupts), %l5
-	ld	[%l5], %o5
-	sll	%o0, 12, %o0
-	add	%o5, %o0, %o5
-	st	%o2, [%o5 + 4]
-	WRITE_PAUSE
-
-	ld	[%o5], %g0
-	WRITE_PAUSE
-
-	/* IRQ's off else we deadlock. */
-	or	%l0, PSR_PIL, %l4
-	wr	%l4, 0x0, %psr
-	WRITE_PAUSE
-
-	wr	%l4, PSR_ET, %psr
-	WRITE_PAUSE
-
-	call	C_LABEL(smp_message_irq)
-	 nop
-
-	RESTORE_ALL_FASTIRQ
+	.globl	C_LABEL(invalid_segment_patch1_1ff)
+	.globl	C_LABEL(invalid_segment_patch2_1ff)
+C_LABEL(invalid_segment_patch1_1ff):	cmp	%l4, 0x1ff
+C_LABEL(invalid_segment_patch2_1ff):	mov	0x1ff, %l3
 
 	.align	4
-	.globl	linux_trap_ipi13_sun4m
-linux_trap_ipi13_sun4m:
-	/* NOTE: real_irq_entry saved state and grabbed klock already. */
-
-	/* start atomic operation with respect to software interrupts */
-	sethi	%hi(C_LABEL(intr_count)), %l4
-	ld	[%l4 + %lo(C_LABEL(intr_count))], %l5
-	add	%l5, 0x1, %l5
-	st	%l5, [%l4 + %lo(C_LABEL(intr_count))]
-
-	sethi	%hi(0x20000000), %o2
-	GET_PROCESSOR_MID(o0, o1)
-	set	C_LABEL(sun4m_interrupts), %l5
-	ld	[%l5], %o5
-	sll	%o0, 12, %o0
-	add	%o5, %o0, %o5
-	st	%o2, [%o5 + 4]
-	WRITE_PAUSE
-
-	ld	[%o5], %g0
-	WRITE_PAUSE
-
-	/* IRQ's off else we deadlock. */
-	or	%l0, PSR_PIL, %l4
-	wr	%l4, 0x0, %psr
-	WRITE_PAUSE
-
-	wr	%l4, PSR_ET, %psr
-	WRITE_PAUSE
-
-	call	C_LABEL(smp_reschedule_irq)
-	 nop
-
-	sethi	%hi(C_LABEL(intr_count)), %l4
-	ld	[%l4 + %lo(C_LABEL(intr_count))], %l5
-	sub	%l5, 0x1, %l5
-	st	%l5, [%l4 + %lo(C_LABEL(intr_count))]
-
-	LEAVE_IRQ
-	RESTORE_ALL
+	.globl	C_LABEL(num_context_patch1_16), C_LABEL(num_context_patch2_16)
+C_LABEL(num_context_patch1_16):		mov	0x10, %l7
+C_LABEL(num_context_patch2_16):		mov	0x10, %l7
 
 	.align	4
-	.globl	linux_trap_ipi15_sun4m
-linux_trap_ipi15_sun4m:
-	SAVE_ALL
+	.globl	C_LABEL(vac_linesize_patch_32)
+C_LABEL(vac_linesize_patch_32):		subcc	%l7, 32, %l7
 
-	/* First check for hard NMI memory error. */
-	sethi	%hi(0xf0000000), %o2
-	set	C_LABEL(sun4m_interrupts), %l5
-	set	0x4000, %o3
-	ld	[%l5], %l5
-	add	%l5, %o3, %l5
-	ld	[%l5], %l6
-	andcc	%o2, %l6, %o2
-	be	1f
-	 nop
+	.align	4
+	.globl	C_LABEL(vac_hwflush_patch1_on), C_LABEL(vac_hwflush_patch2_on)
 
-	/* Asynchronous fault, why you little ?!#&%@... */
-	sethi	%hi(0x80000000), %o2
-	st	%o2, [%l5 + 0xc]
-	WRITE_PAUSE
-	ld	[%l5], %g0
-	WRITE_PAUSE
-
-	/* All interrupts are off... now safe to enable traps
-	 * and call C-code.
-	 */	
-	or	%l0, PSR_PIL, %l4	! I am very paranoid...
-	wr	%l4, 0x0, %psr
-	WRITE_PAUSE
-	wr	%l4, PSR_ET, %psr
-	WRITE_PAUSE
-	call	C_LABEL(sun4m_nmi)
-	 nop
-
-	sethi	%hi(0x80000000), %o2
-	st	%o2, [%l5 + 0x8]
-	WRITE_PAUSE
-	ld	[%l5], %g0
-	WRITE_PAUSE
-
-	RESTORE_ALL_FASTIRQ
-
-1:
-	sethi	%hi(0x80000000), %o2
-	GET_PROCESSOR_MID(o0, o1)
-	set	C_LABEL(sun4m_interrupts), %l5
-	ld	[%l5], %o5
-	sll	%o0, 12, %o0
-	add	%o5, %o0, %o5
-	st	%o2, [%o5 + 4]
-	WRITE_PAUSE
-
-	ld	[%o5], %g0
-	WRITE_PAUSE
-
-	/* IRQ's off else we deadlock. */
-	or	%l0, PSR_PIL, %l4
-	wr	%l4, 0x0, %psr
-	WRITE_PAUSE
-
-	wr	%l4, PSR_ET, %psr
-	WRITE_PAUSE
-
-	call	C_LABEL(smp_message_irq)
-	 nop
-
-	RESTORE_ALL_FASTIRQ
-
+/*
+ * Ugly, but we cant use hardware flushing on the sun4 and we'd require
+ * two instructions (Anton)
+ */
+#ifdef CONFIG_SUN4
+C_LABEL(vac_hwflush_patch1_on):		nop
+#else
+C_LABEL(vac_hwflush_patch1_on):		addcc	%l7, -PAGE_SIZE, %l7
 #endif
+
+C_LABEL(vac_hwflush_patch2_on):		sta	%g0, [%l3 + %l7] ASI_HWFLUSHSEG
+
+	.globl	C_LABEL(invalid_segment_patch1), C_LABEL(invalid_segment_patch2)
+	.globl	C_LABEL(num_context_patch1), C_LABEL(num_context_patch2)
+	.globl	C_LABEL(vac_linesize_patch), C_LABEL(vac_hwflush_patch1)
+	.globl	C_LABEL(vac_hwflush_patch2)
 
 	.align	4
 	.globl	sun4c_fault
-sun4c_fault:
-	SAVE_ALL
-	ENTER_SYSCALL
 
-	/* XXX This needs to be scheduled better */
+! %l0 = %psr
+! %l1 = %pc
+! %l2 = %npc
+! %l3 = %wim
+! %l7 = 1 for textfault
+! We want error in %l5, vaddr in %l6
+sun4c_fault:
+#ifdef CONFIG_SUN4
+	sethi	%hi(C_LABEL(sun4c_memerr_reg)), %l4
+	ld	[%l4+%lo(C_LABEL(sun4c_memerr_reg))], %l4  ! memerr ctrl reg addr
+	ld	[%l4], %l6		! memerr ctrl reg
+	ld	[%l4 + 4], %l5		! memerr vaddr reg
+	andcc	%l6, 0x80, %g0		! check for error type
+	st	%g0, [%l4 + 4]		! clear the error
+	be	0f			! normal error
+	 sethi	%hi(AC_BUS_ERROR), %l4	! bus err reg addr
+
+	call	C_LABEL(prom_halt)	! something weird happened
+					! what exactly did happen?
+					! what should we do here?
+
+0:	or	%l4, %lo(AC_BUS_ERROR), %l4	! bus err reg addr
+	lduba	[%l4] ASI_CONTROL, %l6	! bus err reg
+
+	cmp    %l7, 1			! text fault?
+	be	1f			! yes
+	 nop
+
+	ld     [%l1], %l4		! load instruction that caused fault
+	srl	%l4, 21, %l4
+	andcc	%l4, 1, %g0		! store instruction?
+
+	be	1f			! no
+	 sethi	%hi(SUN4C_SYNC_BADWRITE), %l4 ! yep
+					! %lo(SUN4C_SYNC_BADWRITE) = 0
+	or	%l4, %l6, %l6		! set write bit to emulate sun4c
+1:
+#else
 	sethi	%hi(AC_SYNC_ERR), %l4
-	add	%l4, 0x4, %l5		! AC_SYNC_VA in %l5
-	lda	[%l5] ASI_CONTROL, %o3		/* Address */
-	lda	[%l4] ASI_CONTROL, %l6
-	srl	%l6, 15, %l6
-	and	%l6, 1, %o2	/* Write? */
+	add	%l4, 0x4, %l6			! AC_SYNC_VA in %l6
+	lda	[%l6] ASI_CONTROL, %l5		! Address
+	lda	[%l4] ASI_CONTROL, %l6		! Error, retained for a bit
+#endif
+
+	andn	%l5, 0xfff, %l5			! Encode all info into l7
+	srl	%l6, 14, %l4
+
+	and	%l4, 2, %l4
+	or	%l5, %l4, %l4
+
+	or	%l4, %l7, %l7			! l7 = [addr,write,txtfault]
+
+	andcc	%l0, PSR_PS, %g0
+	be	sun4c_fault_fromuser
+	 andcc	%l7, 1, %g0			! Text fault?
+
+	be	1f
+	 sethi	%hi(KERNBASE), %l4
+
+	mov	%l1, %l5			! PC
+
+1:
+	cmp	%l5, %l4
+	blu	sun4c_fault_fromuser
+	 sethi	%hi(~((1 << SUN4C_REAL_PGDIR_SHIFT) - 1)), %l4
+
+	/* If the kernel references a bum kernel pointer, or a pte which
+	 * points to a non existant page in ram, we will run this code
+	 * _forever_ and lock up the machine!!!!! So we must check for
+	 * this condition, the AC_SYNC_ERR bits are what we must examine.
+	 * Also a parity error would make this happen as well.  So we just
+	 * check that we are in fact servicing a tlb miss and not some
+	 * other type of fault for the kernel.
+	 */
+	andcc	%l6, 0x80, %g0
+	be	sun4c_fault_fromuser
+	 and	%l5, %l4, %l5
+
+	/* Test for NULL pte_t * in vmalloc area. */
+	sethi   %hi(VMALLOC_START), %l4
+	cmp     %l5, %l4
+	blu,a   C_LABEL(invalid_segment_patch1)
+	 lduXa	[%l5] ASI_SEGMAP, %l4
+
+	sethi   %hi(C_LABEL(swapper_pg_dir)), %l4
+	srl     %l5, SUN4C_PGDIR_SHIFT, %l6
+	or      %l4, %lo(C_LABEL(swapper_pg_dir)), %l4
+	sll     %l6, 2, %l6
+	ld      [%l4 + %l6], %l4
+#ifdef CONFIG_SUN4
+	sethi	%hi(PAGE_MASK), %l6
+	andcc	%l4, %l6, %g0
+#else
+	andcc   %l4, PAGE_MASK, %g0
+#endif
+	be      sun4c_fault_fromuser
+	 lduXa  [%l5] ASI_SEGMAP, %l4
+
+C_LABEL(invalid_segment_patch1):
+	cmp	%l4, 0x7f
+	bne	1f
+	 sethi	%hi(C_LABEL(sun4c_kfree_ring)), %l4
+	or	%l4, %lo(C_LABEL(sun4c_kfree_ring)), %l4
+	ld	[%l4 + 0x18], %l3
+	deccc	%l3			! do we have a free entry?
+	bcs,a	2f			! no, unmap one.
+	 sethi	%hi(C_LABEL(sun4c_kernel_ring)), %l4
+
+	st	%l3, [%l4 + 0x18]	! sun4c_kfree_ring.num_entries--
+
+	ld	[%l4 + 0x00], %l6	! entry = sun4c_kfree_ring.ringhd.next
+	st	%l5, [%l6 + 0x08]	! entry->vaddr = address
+
+	ld	[%l6 + 0x00], %l3	! next = entry->next
+	ld	[%l6 + 0x04], %l7	! entry->prev
+
+	st	%l7, [%l3 + 0x04]	! next->prev = entry->prev
+	st	%l3, [%l7 + 0x00]	! entry->prev->next = next
+
+	sethi	%hi(C_LABEL(sun4c_kernel_ring)), %l4
+	or	%l4, %lo(C_LABEL(sun4c_kernel_ring)), %l4
+					! head = &sun4c_kernel_ring.ringhd
+
+	ld	[%l4 + 0x00], %l7	! head->next
+
+	st	%l4, [%l6 + 0x04]	! entry->prev = head
+	st	%l7, [%l6 + 0x00]	! entry->next = head->next
+	st	%l6, [%l7 + 0x04]	! head->next->prev = entry
+
+	st	%l6, [%l4 + 0x00]	! head->next = entry
+
+	ld	[%l4 + 0x18], %l3
+	inc	%l3			! sun4c_kernel_ring.num_entries++
+	st	%l3, [%l4 + 0x18]
+	b	4f
+	 ld	[%l6 + 0x08], %l5
+
+2:
+	or	%l4, %lo(C_LABEL(sun4c_kernel_ring)), %l4
+					! head = &sun4c_kernel_ring.ringhd
+
+	ld	[%l4 + 0x04], %l6	! entry = head->prev
+
+	ld	[%l6 + 0x08], %l3	! tmp = entry->vaddr
+
+	! Flush segment from the cache.
+#ifdef CONFIG_SUN4
+	sethi	%hi((128 * 1024)), %l7
+#else
+	sethi	%hi((64 * 1024)), %l7
+#endif
+9:
+C_LABEL(vac_hwflush_patch1):
+C_LABEL(vac_linesize_patch):
+	subcc	%l7, 16, %l7
+	bne	9b
+C_LABEL(vac_hwflush_patch2):
+	 sta	%g0, [%l3 + %l7] ASI_FLUSHSEG
+
+	st	%l5, [%l6 + 0x08]	! entry->vaddr = address
+
+	ld	[%l6 + 0x00], %l5	! next = entry->next
+	ld	[%l6 + 0x04], %l7	! entry->prev
+
+	st	%l7, [%l5 + 0x04]	! next->prev = entry->prev
+	st	%l5, [%l7 + 0x00]	! entry->prev->next = next
+	st	%l4, [%l6 + 0x04]	! entry->prev = head
+
+	ld	[%l4 + 0x00], %l7	! head->next
+
+	st	%l7, [%l6 + 0x00]	! entry->next = head->next
+	st	%l6, [%l7 + 0x04]	! head->next->prev = entry
+	st	%l6, [%l4 + 0x00]	! head->next = entry
+
+	mov	%l3, %l5		! address = tmp
+
+4:
+C_LABEL(num_context_patch1):
+	mov	0x08, %l7
+
+	ld	[%l6 + 0x08], %l4
+	ldub	[%l6 + 0x0c], %l3
+	or	%l4, %l3, %l4		! encode new vaddr/pseg into l4
+
+	sethi	%hi(AC_CONTEXT), %l3
+	lduba	[%l3] ASI_CONTROL, %l6
+
+	/* Invalidate old mapping, instantiate new mapping,
+	 * for each context.  Registers l6/l7 are live across
+	 * this loop.
+	 */
+3:	deccc	%l7
+	sethi	%hi(AC_CONTEXT), %l3
+	stba	%l7, [%l3] ASI_CONTROL
+C_LABEL(invalid_segment_patch2):
+	mov	0x7f, %l3
+	stXa	%l3, [%l5] ASI_SEGMAP
+	andn	%l4, 0x1ff, %l3
+	bne	3b
+	 stXa	%l4, [%l3] ASI_SEGMAP
+
+	sethi	%hi(AC_CONTEXT), %l3
+	stba	%l6, [%l3] ASI_CONTROL
+
+	andn	%l4, 0x1ff, %l5
+
+1:
+	sethi	%hi(VMALLOC_START), %l4
+	cmp	%l5, %l4
+
+	bgeu	1f
+	 mov	1 << (SUN4C_REAL_PGDIR_SHIFT - PAGE_SHIFT), %l7
+
+	sethi	%hi(KERNBASE), %l6
+
+	sub	%l5, %l6, %l4
+	srl	%l4, PAGE_SHIFT, %l4
+	sethi	%hi((SUN4C_PAGE_KERNEL & 0xf4000000)), %l3
+	or	%l3, %l4, %l3
+
+	sethi	%hi(PAGE_SIZE), %l4
+
+2:
+	sta	%l3, [%l5] ASI_PTE
+	deccc	%l7
+	inc	%l3
+	bne	2b
+	 add	%l5, %l4, %l5
+
+	b	7f
+	 sethi	%hi(C_LABEL(sun4c_kernel_faults)), %l4
+
+1:
+	srl	%l5, SUN4C_PGDIR_SHIFT, %l3
+	sethi	%hi(C_LABEL(swapper_pg_dir)), %l4
+	or	%l4, %lo(C_LABEL(swapper_pg_dir)), %l4
+	sll	%l3, 2, %l3
+	ld	[%l4 + %l3], %l4
+#ifndef CONFIG_SUN4
+	and	%l4, PAGE_MASK, %l4
+#else
+	sethi	%hi(PAGE_MASK), %l6
+	and	%l4, %l6, %l4
+#endif
+
+	srl	%l5, (PAGE_SHIFT - 2), %l6
+	and	%l6, ((SUN4C_PTRS_PER_PTE - 1) << 2), %l6
+	add	%l6, %l4, %l6
+
+	sethi	%hi(PAGE_SIZE), %l4
+
+2:
+	ld	[%l6], %l3
+	deccc	%l7
+	sta	%l3, [%l5] ASI_PTE
+	add	%l6, 0x4, %l6
+	bne	2b
+	 add	%l5, %l4, %l5
+
+	sethi	%hi(C_LABEL(sun4c_kernel_faults)), %l4
+7:
+	ld	[%l4 + %lo(C_LABEL(sun4c_kernel_faults))], %l3
+	inc	%l3
+	st	%l3, [%l4 + %lo(C_LABEL(sun4c_kernel_faults))]
+
+	/* Restore condition codes */
+	wr	%l0, 0x0, %psr
+	WRITE_PAUSE
+	jmp	%l1
+	 rett	%l2
+
+sun4c_fault_fromuser:
+	SAVE_ALL
+	 nop
+	
+	mov	%l7, %o1		! Decode the info from %l7
+	mov	%l7, %o2
+	and	%o1, 1, %o1		! arg2 = text_faultp
+	mov	%l7, %o3
+	and	%o2, 2, %o2		! arg3 = writep
+	andn	%o3, 0xfff, %o3		! arg4 = faulting address
 
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
 
-	mov	%l7, %o1			/* Text fault? */
-	call	C_LABEL(do_sparc_fault)
-	 add	%sp, REGWIN_SZ, %o0		/* pt_regs */
+	call	C_LABEL(do_sun4c_fault)
+	 add	%sp, STACKFRAME_SZ, %o0	! arg1 = pt_regs ptr
 
 	RESTORE_ALL
 
@@ -942,7 +1182,6 @@ C_LABEL(srmmu_fault):
 	or	%l6, %l7, %l7			! l7 = [addr,write,txtfault]
 
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	mov	%l7, %o1
 	mov	%l7, %o2
@@ -955,54 +1194,56 @@ C_LABEL(srmmu_fault):
 	WRITE_PAUSE
 
 	call	C_LABEL(do_sparc_fault)
-	 add	%sp, REGWIN_SZ, %o0	! arg1 = pt_regs ptr
+	 add	%sp, STACKFRAME_SZ, %o0	! arg1 = pt_regs ptr
 
 	RESTORE_ALL
 
+#ifdef CONFIG_SUNOS_EMUL
 	/* SunOS uses syscall zero as the 'indirect syscall' it looks
 	 * like indir_syscall(scall_num, arg0, arg1, arg2...);  etc.
 	 * This is complete brain damage.
 	 */
 	.globl	C_LABEL(sunos_indir)
 C_LABEL(sunos_indir):
-	ld	[%sp + REGWIN_SZ + PT_I0], %g1
-	cmp	%g1, NR_SYSCALLS
+	mov	%o7, %l4
+	cmp	%o0, NR_SYSCALLS
 	blu,a	1f
-	 sll	%g1, 0x2, %g1
+	 sll	%o0, 0x2, %o0
 
-	set	C_LABEL(sunos_nosys), %l6
+	sethi	%hi(C_LABEL(sunos_nosys)), %l6
 	b	2f
-	 nop
+	 or	%l6, %lo(C_LABEL(sunos_nosys)), %l6
 
 1:
 	set	C_LABEL(sunos_sys_table), %l7
-	ld	[%l7 + %g1], %l6
+	ld	[%l7 + %o0], %l6
 
 2:	
-	ld	[%sp + REGWIN_SZ + PT_I1], %o0
-	ld	[%sp + REGWIN_SZ + PT_I2], %o1
-	ld	[%sp + REGWIN_SZ + PT_I3], %o2
-	mov	%o7, %l5
-	ld	[%sp + REGWIN_SZ + PT_I4], %o3
+	mov	%o1, %o0
+	mov	%o2, %o1
+	mov	%o3, %o2
+	mov	%o4, %o3
+	mov	%o5, %o4
 	call	%l6
-	 ld	[%sp + REGWIN_SZ + PT_I5], %o4
+	 mov	%l4, %o7
+#endif
 
-	jmp	%l5 + 0x8		/* so stupid... */
-	 nop
-
-	/* Note how we really return to ret_syscall because we share the
-	 * register window with our caller.
-	 */
+	.align	4
+	.globl	C_LABEL(sys_nis_syscall)
+C_LABEL(sys_nis_syscall):
+	mov	%o7, %l5
+	add	%sp, STACKFRAME_SZ, %o0		! pt_regs *regs arg
+	call	C_LABEL(c_sys_nis_syscall)
+	 mov	%l5, %o7
 
 	.align 4
 	.globl	C_LABEL(sys_ptrace)
 C_LABEL(sys_ptrace):
 	call	C_LABEL(do_ptrace)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1016,33 +1257,43 @@ C_LABEL(sys_ptrace):
 	.globl	C_LABEL(sys_execve)
 C_LABEL(sys_execve):
 	mov	%o7, %l5
+	add	%sp, STACKFRAME_SZ, %o0		! pt_regs *regs arg
 	call	C_LABEL(sparc_execve)
-	 add	%sp, REGWIN_SZ, %o0		! pt_regs *regs arg
-
-	jmp	%l5 + 0x8
-	 nop
+	 mov	%l5, %o7
 
 	.align	4
 	.globl	C_LABEL(sys_pipe)
 C_LABEL(sys_pipe):
 	mov	%o7, %l5
-
+	add	%sp, STACKFRAME_SZ, %o0		! pt_regs *regs arg
 	call	C_LABEL(sparc_pipe)
-	 add	%sp, REGWIN_SZ, %o0		! pt_regs *regs arg
+	 mov	%l5, %o7
 
-	jmp	%l5 + 0x8
-	 nop
+	.align	4
+	.globl	C_LABEL(sys_sigaltstack)
+C_LABEL(sys_sigaltstack):
+	mov	%o7, %l5
+	mov	%fp, %o2
+	call	C_LABEL(do_sigaltstack)
+	 mov	%l5, %o7
+
+	.align	4
+	.globl	C_LABEL(sys_sigstack)
+C_LABEL(sys_sigstack):
+	mov	%o7, %l5
+	mov	%fp, %o2
+	call	C_LABEL(do_sys_sigstack)
+	 mov	%l5, %o7
 
 	.align	4
 	.globl	C_LABEL(sys_sigpause)
 C_LABEL(sys_sigpause):
-	ld	[%sp + REGWIN_SZ + PT_I0], %o0
+	/* Note: %o0 already has correct value... */
 	call	C_LABEL(do_sigpause)
-	 add	%sp, REGWIN_SZ, %o1
+	 add	%sp, STACKFRAME_SZ, %o1
 
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1057,11 +1308,29 @@ C_LABEL(sys_sigpause):
 	.globl	C_LABEL(sys_sigsuspend)
 C_LABEL(sys_sigsuspend):
 	call	C_LABEL(do_sigsuspend)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
+	be	1f
+	 nop
+
+	call	C_LABEL(syscall_trace)
+	 nop
+
+1:
+	/* We are returning to a signal handler. */
+	RESTORE_ALL
+
+	.align	4
+	.globl	C_LABEL(sys_rt_sigsuspend)
+C_LABEL(sys_rt_sigsuspend):
+	/* Note: %o0, %o1 already have correct value... */
+	call	C_LABEL(do_rt_sigsuspend)
+	 add	%sp, STACKFRAME_SZ, %o2
+
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1076,11 +1345,10 @@ C_LABEL(sys_sigsuspend):
 	.globl	C_LABEL(sys_sigreturn)
 C_LABEL(sys_sigreturn):
 	call	C_LABEL(do_sigreturn)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
 	be	1f
 	 nop
 
@@ -1093,279 +1361,297 @@ C_LABEL(sys_sigreturn):
 	 */
 	RESTORE_ALL
 
+	.align	4
+	.globl	C_LABEL(sys_rt_sigreturn)
+C_LABEL(sys_rt_sigreturn):
+	call	C_LABEL(do_rt_sigreturn)
+	 add	%sp, STACKFRAME_SZ, %o0
+
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	andcc	%l5, 0x02, %g0
+	be	1f
+	 nop
+
+	call	C_LABEL(syscall_trace)
+	 nop
+
+1:
+	/* We are returning to a signal handler. */
+	RESTORE_ALL
+
 	/* Now that we have a real sys_clone, sys_fork() is
 	 * implemented in terms of it.  Our _real_ implementation
-	 * of SunOS vfork() will use sys_clone() instead.
+	 * of SunOS vfork() will use sys_vfork().
+	 *
+	 * XXX These three should be consolidated into mostly shared
+	 * XXX code just like on sparc64... -DaveM
 	 */
 	.align	4
-	.globl	C_LABEL(sys_fork), C_LABEL(sys_vfork)
-C_LABEL(sys_vfork):
+	.globl	C_LABEL(sys_fork), flush_patch_two
 C_LABEL(sys_fork):
 	mov	%o7, %l5
-
-	/* Save the kernel state as of now. */
+flush_patch_two:
 	FLUSH_ALL_KERNEL_WINDOWS;
-	STORE_WINDOW(sp)
-	LOAD_CURRENT(g6, g5)
 	rd	%psr, %g4
-	rd	%wim, %g5
-	std	%g4, [%g6 + THREAD_FORK_KPSR]
-
+	WRITE_PAUSE
 	mov	SIGCHLD, %o0			! arg0:	clone flags
-	ld	[%sp + REGWIN_SZ + PT_FP], %o1	! arg1:	usp
+	rd	%wim, %g5
+	WRITE_PAUSE
+	mov	%fp, %o1			! arg1:	usp
+	std	%g4, [%curptr + AOFF_task_thread + AOFF_thread_fork_kpsr]
+	add	%sp, STACKFRAME_SZ, %o2		! arg2:	pt_regs ptr
+	mov	0, %o3
 	call	C_LABEL(do_fork)
-	 add	%sp, REGWIN_SZ, %o2		! arg2:	pt_regs ptr
-
-	jmp	%l5 + 0x8
-	 nop
+	 mov	%l5, %o7
 	
 	/* Whee, kernel threads! */
-	.globl	C_LABEL(sys_clone)
+	.globl	C_LABEL(sys_clone), flush_patch_three
 C_LABEL(sys_clone):
 	mov	%o7, %l5
-
-	/* Save the kernel state as of now. */
+flush_patch_three:
 	FLUSH_ALL_KERNEL_WINDOWS;
-	STORE_WINDOW(sp)
-	LOAD_CURRENT(g6, g5)
 	rd	%psr, %g4
-	rd	%wim, %g5
-	std	%g4, [%g6 + THREAD_FORK_KPSR]
+	WRITE_PAUSE
 
-	ldd	[%sp + REGWIN_SZ + PT_I0], %o0	! arg0,1: flags,usp
+	/* arg0,1: flags,usp  -- loaded already */
 	cmp	%o1, 0x0			! Is new_usp NULL?
+	rd	%wim, %g5
+	WRITE_PAUSE
 	be,a	1f
-	 ld	[%sp + REGWIN_SZ + PT_FP], %o1	! yes, use current usp
+	 mov	%fp, %o1			! yes, use callers usp
+	andn	%o1, 7, %o1			! no, align to 8 bytes
 1:
+	std	%g4, [%curptr + AOFF_task_thread + AOFF_thread_fork_kpsr]
+	add	%sp, STACKFRAME_SZ, %o2		! arg2:	pt_regs ptr
+	mov	0, %o3
 	call	C_LABEL(do_fork)
-	 add	%sp, REGWIN_SZ, %o2		! arg2:	pt_regs ptr
+	 mov	%l5, %o7
 
-	jmp	%l5 + 0x8
+	/* Whee, real vfork! */
+	.globl	C_LABEL(sys_vfork), flush_patch_four
+C_LABEL(sys_vfork):
+flush_patch_four:
+	FLUSH_ALL_KERNEL_WINDOWS;
+	rd	%psr, %g4
+	WRITE_PAUSE
+	rd	%wim, %g5
+	WRITE_PAUSE
+	std	%g4, [%curptr + AOFF_task_thread + AOFF_thread_fork_kpsr]
+	sethi	%hi(0x4000 | 0x0100 | SIGCHLD), %o0
+	mov	%fp, %o1
+	or	%o0, %lo(0x4000 | 0x0100 | SIGCHLD), %o0
+	sethi	%hi(C_LABEL(do_fork)), %l1
+	mov	0, %o3
+	jmpl	%l1 + %lo(C_LABEL(do_fork)), %g0
+	 add	%sp, STACKFRAME_SZ, %o2
+
+        .align  4
+linux_sparc_ni_syscall:
+	sethi   %hi(C_LABEL(sys_ni_syscall)), %l7
+	b       syscall_is_too_hard
+	 or     %l7, %lo(C_LABEL(sys_ni_syscall)), %l7
+
+linux_fast_syscall:
+	andn	%l7, 3, %l7
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov 	%i2, %o2
+	jmpl	%l7 + %g0, %g0
+	 mov	%i3, %o3
+
+linux_syscall_trace:
+	call	C_LABEL(syscall_trace)
 	 nop
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov	%i2, %o2
+	mov	%i3, %o3
+	b	2f
+	 mov	%i4, %o4
+
+	.globl	C_LABEL(ret_from_fork)
+C_LABEL(ret_from_fork):
+	call	schedule_tail
+	 mov	%g3, %o0
+	b	C_LABEL(ret_sys_call)
+	 ld	[%sp + STACKFRAME_SZ + PT_I0], %o0
 
 	/* Linux native and SunOS system calls enter here... */
 	.align	4
 	.globl	linux_sparc_syscall
 linux_sparc_syscall:
-	/* While we are here trying to optimize our lives
-	 * away, handle the easy bogus cases like a
-	 * ni_syscall or sysnum > NR_SYSCALLS etc.
-	 * In the cases where we cannot optimize the
-	 * call inline we don't really lose anything
-	 * performance wise because we are doing here
-	 * things which we did anyway in the original
-	 * routine.  The only added complexity is a
-	 * bit test, compare, and branch to decide
-	 * if we need to save process state or not.
-	 */
-
-	/* XXX TODO: When we have ptrace working test
-	 * XXX       test for PF_TRACESYS in task flags.
-	 */
-
 	/* Direct access to user regs, must faster. */
 	cmp	%g1, NR_SYSCALLS
-	blu,a	1f
+	bgeu	linux_sparc_ni_syscall
 	 sll	%g1, 2, %l4
-
-	set	C_LABEL(sys_ni_syscall), %l7
-	b	syscall_is_too_hard
-	 nop
-
-1:
 	ld	[%l7 + %l4], %l7
-
-	/* If bit-1 is set, this is a "fast" syscall.
-	 * This is the _complete_ overhead of this optimization,
-	 * and we save ourselves a load, so it evens out to nothing.
-	 */
-	andcc	%l7, 0x1, %g0
-	be	syscall_is_too_hard
-	 andn	%l7, 0x1, %l7
-
-	jmpl	%l7, %g0
-	 nop
+	andcc	%l7, 1, %g0
+	bne	linux_fast_syscall
+	 /* Just do first insn from SAVE_ALL in the delay slot */
 
 	.globl	syscall_is_too_hard
 syscall_is_too_hard:
-	rd	%wim, %l3
-	SAVE_ALL
-	ENTER_SYSCALL
+	SAVE_ALL_HEAD
+	 rd	%wim, %l3
 
 	wr	%l0, PSR_ET, %psr
-	WRITE_PAUSE
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov	%i2, %o2
 
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
-	be	2f
-	 nop
-
-	call	C_LABEL(syscall_trace)
-	 nop
-
+	ld	[%curptr + AOFF_task_ptrace], %l5
+	mov	%i3, %o3
+	andcc	%l5, 0x02, %g0
+	mov	%i4, %o4
+	bne	linux_syscall_trace
+	 mov	%i0, %l5
 2:
-	ldd	[%sp + REGWIN_SZ + PT_I0], %o0
-	st	%o0, [%sp + REGWIN_SZ + PT_G0]	! for restarting syscalls
-	ldd	[%sp + REGWIN_SZ + PT_I2], %o2
 	call	%l7
-	 ldd	[%sp + REGWIN_SZ + PT_I4], %o4
+	 mov	%i5, %o5
 
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
 
 	.globl	C_LABEL(ret_sys_call)
 C_LABEL(ret_sys_call):
-	ld	[%sp + REGWIN_SZ + PT_I0], %o0
-	set	PSR_C, %l6
+	ld	[%curptr + AOFF_task_ptrace], %l6
 	cmp	%o0, -ENOIOCTLCMD
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %g3
+	set	PSR_C, %g2
 	bgeu	1f
-	 ld	[%sp + REGWIN_SZ + PT_PSR], %l5
+	 andcc	%l6, 0x02, %l6	
 
-	/* System call success, clear Carry condition code. */		
-	andn	%l5, %l6, %l5
-	b	2f
-	 st	%l5, [%sp + REGWIN_SZ + PT_PSR]	
-
+	/* System call success, clear Carry condition code. */
+	andn	%g3, %g2, %g3
+	clr	%l6
+	st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]	
+	bne	linux_syscall_trace2
+	 ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1 /* pc = npc */
+	add	%l1, 0x4, %l2			/* npc = npc+4 */
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	b	ret_trap_entry
+	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 1:
 	/* System call failure, set Carry condition code.
 	 * Also, get abs(errno) to return to the process.
 	 */
 	sub	%g0, %o0, %o0
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
-	or	%l5, %l6, %l5
-	st	%l5, [%sp + REGWIN_SZ + PT_PSR]
-
-2:
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + 0x14], %l5
-	andcc	%l5, 0x20, %g0
-	be	3f
-	 nop
-
-	call	C_LABEL(syscall_trace)
-	 nop
-
-	/* Advance the pc and npc over the trap instruction. */
-3:
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l1	/* pc  = npc   */
+	or	%g3, %g2, %g3
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
+	mov	1, %l6
+	st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]
+	bne	linux_syscall_trace2
+	 ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1 /* pc = npc */
 	add	%l1, 0x4, %l2			/* npc = npc+4 */
-	st	%l1, [%sp + REGWIN_SZ + PT_PC]
-	st	%l2, [%sp + REGWIN_SZ + PT_NPC]
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	b	ret_trap_entry
+	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
-	RESTORE_ALL
+linux_syscall_trace2:
+	call	C_LABEL(syscall_trace)
+	 add	%l1, 0x4, %l2			/* npc = npc+4 */
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	b	ret_trap_entry
+	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
-	/* Solaris system calls enter here... */
+
+	/*
+	 * Solaris system calls and indirect system calls enter here.
+         *
+	 * I have named the solaris indirect syscalls like that because
+	 * it seems like Solaris has some fast path syscalls that can
+	 * be handled as indirect system calls. - mig
+	 */
+
+linux_syscall_for_solaris:
+	sethi	%hi(sys_call_table), %l7
+	b	linux_sparc_syscall
+	 or	%l7, %lo(sys_call_table), %l7
+	
 	.align	4
 	.globl	solaris_syscall
 solaris_syscall:
-	/* While we are here trying to optimize our lives
-	 * away, handle the easy bogus cases like a
-	 * ni_syscall or sysnum > NR_SYSCALLS etc.
-	 * In the cases where we cannot optimize the
-	 * call inline we don't really lose anything
-	 * performance wise because we are doing here
-	 * things which we did anyway in the original
-	 * routine.  The only added complexity is a
-	 * bit test, compare, and branch to decide
-	 * if we need to save process state or not.
-	 */
-
-	/* XXX TODO: When we have ptrace working test
-	 * XXX       test for PF_TRACESYS in task flags.
-	 */
-
-	/* Direct access to user regs, must faster. */
-	cmp	%g1, NR_SYSCALLS
-	blu,a	1f
-	 sll	%g1, 2, %l4
-
-	set	C_LABEL(sys_ni_syscall), %l7
-	b	solaris_is_too_hard
-	 nop
-
-1:
-	ld	[%l7 + %l4], %l7
-
-	/* If bit-1 is set, this is a "fast" syscall.
-	 * This is the _complete_ overhead of this optimization,
-	 * and we save ourselves a load, so it evens out to nothing.
-	 */
-	andcc	%l7, 0x1, %g0
-	be	solaris_is_too_hard
-	 andn	%l7, 0x1, %l7
-
-	jmpl	%l7, %g0
-	 nop
-
-	.globl	solaris_is_too_hard
-solaris_is_too_hard:
-	rd	%wim, %l3
-	SAVE_ALL
-	ENTER_SYSCALL
+	cmp	%g1,59
+	be	linux_syscall_for_solaris
+	 cmp	%g1,2
+	be	linux_syscall_for_solaris
+	 cmp    %g1,42
+	be      linux_syscall_for_solaris
+	 cmp	%g1,119
+	be,a	linux_syscall_for_solaris
+	 mov	2, %g1
+1:	
+	SAVE_ALL_HEAD
+	 rd	%wim, %l3
 
 	wr	%l0, PSR_ET, %psr
-	WRITE_PAUSE
+	nop
+	nop
+	mov	%i0, %l5
 
-2:
-	ldd	[%sp + REGWIN_SZ + PT_I0], %o0
-	st	%o0, [%sp + REGWIN_SZ + PT_G0]	! for restarting syscalls
-	ldd	[%sp + REGWIN_SZ + PT_I2], %o2
-	call	%l7
-	 ldd	[%sp + REGWIN_SZ + PT_I4], %o4
+	call	C_LABEL(do_solaris_syscall)
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
-	set	PSR_C, %l6
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
+	set	PSR_C, %g2
 	cmp	%o0, -ENOIOCTLCMD
 	bgeu	1f
-	 ld	[%sp + REGWIN_SZ + PT_PSR], %l5
+	 ld	[%sp + STACKFRAME_SZ + PT_PSR], %g3
 
 	/* System call success, clear Carry condition code. */		
-	andn	%l5, %l6, %l5
+	andn	%g3, %g2, %g3
+	clr	%l6
 	b	2f
-	 st	%l5, [%sp + REGWIN_SZ + PT_PSR]	
+	 st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]	
 
 1:
 	/* System call failure, set Carry condition code.
 	 * Also, get abs(errno) to return to the process.
 	 */
 	sub	%g0, %o0, %o0
-	sethi	%hi(C_LABEL(solaris_xlatb_rorl)), %o3
-	or	%o3, %lo(C_LABEL(solaris_xlatb_rorl)), %o3
-	sll	%o0, 2, %o0
-	ld	[%o3 + %o0], %o0
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
-	or	%l5, %l6, %l5
-	st	%l5, [%sp + REGWIN_SZ + PT_PSR]
+	mov	1, %l6
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
+	or	%g3, %g2, %g3
+	st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]
 
-	/* Advance the pc and npc over the trap instruction. */
+	/* Advance the pc and npc over the trap instruction.
+	 * If the npc is unaligned (has a 1 in the lower byte), it means
+	 * the kernel does not want us to play magic (ie, skipping over
+	 * traps).  Mainly when the Solaris code wants to set some PC and
+	 * nPC (setcontext).
+	 */
 2:
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l1	/* pc  = npc   */
-	add	%l1, 0x4, %l2			/* npc = npc+4 */
-	st	%l1, [%sp + REGWIN_SZ + PT_PC]
-	st	%l2, [%sp + REGWIN_SZ + PT_NPC]
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1	/* pc  = npc   */
+	andcc	%l1, 1, %g0
+	bne	1f
+	 add	%l1, 0x4, %l2			/* npc = npc+4 */
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	b	ret_trap_entry
+	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
-	RESTORE_ALL
+	/* kernel knows what it is doing, fixup npc and continue */
+1:
+	sub	%l1, 1, %l1
+ 	b	ret_trap_entry	
+	 st	%l1, [%sp + STACKFRAME_SZ + PT_NPC]
+
+#ifndef CONFIG_SUNOS_EMUL
+	.align	4
+	.globl	sunos_syscall
+sunos_syscall:
+	SAVE_ALL_HEAD
+	 rd	%wim, %l3
+	wr	%l0, PSR_ET, %psr
+	nop
+	nop
+	mov	%i0, %l5
+	call	C_LABEL(do_sunos_syscall)
+	 add	%sp, STACKFRAME_SZ, %o0
+#endif
 
 	/* {net, open}bsd system calls enter here... */
 	.align	4
 	.globl	bsd_syscall
 bsd_syscall:
-	/* While we are here trying to optimize our lives
-	 * away, handle the easy bogus cases like a
-	 * ni_syscall or sysnum > NR_SYSCALLS etc.
-	 * In the cases where we cannot optimize the
-	 * call inline we don't really lose anything
-	 * performance wise because we are doing here
-	 * things which we did anyway in the original
-	 * routine.  The only added complexity is a
-	 * bit test, compare, and branch to decide
-	 * if we need to save process state or not.
-	 */
-
-	/* XXX TODO: When we have ptrace working test
-	 * XXX       test for PF_TRACESYS in task flags.
-	 */
-
 	/* Direct access to user regs, must faster. */
 	cmp	%g1, NR_SYSCALLS
 	blu,a	1f
@@ -1378,43 +1664,35 @@ bsd_syscall:
 1:
 	ld	[%l7 + %l4], %l7
 
-	/* If bit-1 is set, this is a "fast" syscall.
-	 * This is the _complete_ overhead of this optimization,
-	 * and we save ourselves a load, so it evens out to nothing.
-	 */
-	andcc	%l7, 0x1, %g0
-	be	bsd_is_too_hard
-	 andn	%l7, 0x1, %l7
-
-	jmpl	%l7, %g0
-	 nop
-
 	.globl	bsd_is_too_hard
 bsd_is_too_hard:
 	rd	%wim, %l3
 	SAVE_ALL
-	ENTER_SYSCALL
 
 	wr	%l0, PSR_ET, %psr
 	WRITE_PAUSE
 
 2:
-	ldd	[%sp + REGWIN_SZ + PT_I0], %o0
-	st	%o0, [%sp + REGWIN_SZ + PT_G0]	! for restarting syscalls
-	ldd	[%sp + REGWIN_SZ + PT_I2], %o2
+	mov	%i0, %o0
+	mov	%i1, %o1
+	mov	%i2, %o2
+	mov	%i0, %l5
+	mov	%i3, %o3
+	mov	%i4, %o4
 	call	%l7
-	 ldd	[%sp + REGWIN_SZ + PT_I4], %o4
+	 mov	%i5, %o5
 
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
-	set	PSR_C, %l6
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
+	set	PSR_C, %g2
 	cmp	%o0, -ENOIOCTLCMD
 	bgeu	1f
-	 ld	[%sp + REGWIN_SZ + PT_PSR], %l5
+	 ld	[%sp + STACKFRAME_SZ + PT_PSR], %g3
 
 	/* System call success, clear Carry condition code. */		
-	andn	%l5, %l6, %l5
+	andn	%g3, %g2, %g3
+	clr	%l6
 	b	2f
-	 st	%l5, [%sp + REGWIN_SZ + PT_PSR]	
+	 st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]	
 
 1:
 	/* System call failure, set Carry condition code.
@@ -1427,18 +1705,18 @@ bsd_is_too_hard:
 	sll	%o0, 2, %o0
 	ld	[%o3 + %o0], %o0
 #endif
-	st	%o0, [%sp + REGWIN_SZ + PT_I0]
-	or	%l5, %l6, %l5
-	st	%l5, [%sp + REGWIN_SZ + PT_PSR]
+	mov	1, %l6
+	st	%o0, [%sp + STACKFRAME_SZ + PT_I0]
+	or	%g3, %g2, %g3
+	st	%g3, [%sp + STACKFRAME_SZ + PT_PSR]
 
 	/* Advance the pc and npc over the trap instruction. */
 2:
-	ld	[%sp + REGWIN_SZ + PT_NPC], %l1	/* pc  = npc   */
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %l1	/* pc  = npc   */
 	add	%l1, 0x4, %l2			/* npc = npc+4 */
-	st	%l1, [%sp + REGWIN_SZ + PT_PC]
-	st	%l2, [%sp + REGWIN_SZ + PT_NPC]
-
-	RESTORE_ALL
+	st	%l1, [%sp + STACKFRAME_SZ + PT_PC]
+	b	ret_trap_entry
+	 st	%l2, [%sp + STACKFRAME_SZ + PT_NPC]
 
 /* Saving and restoring the FPU state is best done from lowlevel code.
  *
@@ -1524,30 +1802,160 @@ C_LABEL(fpload):
 	retl
 	 nop
 
+	.globl	C_LABEL(ndelay)
+C_LABEL(ndelay):
+	save	%sp, -STACKFRAME_SZ, %sp
+	mov	%i0, %o0
+	call	.umul
+	 mov	5, %o1
+	ba	delay_continue
+	 nop
+
 	.globl	C_LABEL(udelay)
 C_LABEL(udelay):
-	save	%sp, -REGWIN_SZ, %sp
+	save	%sp, -STACKFRAME_SZ, %sp
 	mov	%i0, %o0
 	sethi	%hi(0x10c6), %o1
 	call	.umul
 	 or	%o1, %lo(0x10c6), %o1
-#ifndef __SMP__
-	sethi	%hi(C_LABEL(loops_per_sec)), %o3
+delay_continue:
+#ifndef CONFIG_SMP
+	sethi	%hi(C_LABEL(loops_per_jiffy)), %o3
 	call	.umul
-	 ld	[%o3 + %lo(C_LABEL(loops_per_sec))], %o1
+	 ld	[%o3 + %lo(C_LABEL(loops_per_jiffy))], %o1
 #else
-	GET_PROCESSOR_OFFSET(o4)
+	GET_PROCESSOR_OFFSET(o4, o2)
 	set	C_LABEL(cpu_data), %o3
 	call	.umul
 	 ld	[%o3 + %o4], %o1
 #endif
+	call	.umul
+	 mov	100, %o0
 
-	cmp	%o1, 0x0
+	cmp	%o0, 0x0
 1:
 	bne	1b
-	 subcc	%o1, 1, %o1
+	 subcc	%o0, 1, %o0
 	
 	ret
 	restore
+
+	/* Handle a software breakpoint */
+	/* We have to inform parent that child has stopped */
+	.align 4
+	.globl breakpoint_trap
+breakpoint_trap:
+	rd	%wim,%l3
+	SAVE_ALL
+	wr 	%l0, PSR_ET, %psr
+	WRITE_PAUSE
+
+	st	%i0, [%sp + STACKFRAME_SZ + PT_G0] ! for restarting syscalls
+	call	C_LABEL(sparc_breakpoint)
+	 add	%sp, STACKFRAME_SZ, %o0
+
+	RESTORE_ALL
+
+	.align	4
+	.globl	C_LABEL(__handle_exception), flush_patch_exception
+C_LABEL(__handle_exception):
+flush_patch_exception:
+	FLUSH_ALL_KERNEL_WINDOWS;
+	ldd	[%o0], %o6
+	jmpl	%o7 + 0xc, %g0			! see asm-sparc/processor.h
+	 mov	1, %g1				! signal EFAULT condition
+
+	.align	4
+	.globl	C_LABEL(kill_user_windows), kuw_patch1_7win
+	.globl	kuw_patch1
+kuw_patch1_7win:	sll	%o3, 6, %o3
+
+	/* No matter how much overhead this routine has in the worst
+	 * case scenerio, it is several times better than taking the
+	 * traps with the old method of just doing flush_user_windows().
+	 */
+C_LABEL(kill_user_windows):
+	ld	[%g6 + AOFF_task_thread + AOFF_thread_uwinmask], %o0	! get current umask
+	orcc	%g0, %o0, %g0			! if no bits set, we are done
+	be	3f				! nothing to do
+	 rd	%psr, %o5			! must clear interrupts
+	or	%o5, PSR_PIL, %o4		! or else that could change
+	wr	%o4, 0x0, %psr			! the uwinmask state
+	WRITE_PAUSE				! burn them cycles
+1:
+	ld	[%g6 + AOFF_task_thread + AOFF_thread_uwinmask], %o0	! get consistant state
+	orcc	%g0, %o0, %g0			! did an interrupt come in?
+	be	4f				! yep, we are done
+	 rd	%wim, %o3			! get current wim
+	srl	%o3, 1, %o4			! simulate a save
+kuw_patch1:
+	sll	%o3, 7, %o3			! compute next wim
+	or	%o4, %o3, %o3			! result
+	andncc	%o0, %o3, %o0			! clean this bit in umask
+	bne	kuw_patch1			! not done yet
+	 srl	%o3, 1, %o4			! begin another save simulation
+	wr	%o3, 0x0, %wim			! set the new wim
+	st	%g0, [%g6 + AOFF_task_thread + AOFF_thread_uwinmask]	! clear uwinmask
+4:
+	wr	%o5, 0x0, %psr			! re-enable interrupts
+	WRITE_PAUSE				! burn baby burn
+3:
+	retl					! return
+	 st	%g0, [%g6 + AOFF_task_thread + AOFF_thread_w_saved]	! no windows saved
+
+	.align	4
+	.globl	C_LABEL(restore_current)
+C_LABEL(restore_current):
+	LOAD_CURRENT(g6, o0)
+	retl
+	 nop
+
+#ifdef CONFIG_PCI
+#include <asm/pcic.h>
+
+	.align	4
+	.globl	linux_trap_ipi15_pcic
+linux_trap_ipi15_pcic:
+	rd	%wim, %l3
+	SAVE_ALL
+
+	/*
+	 * First deactivate NMI
+	 * or we cannot drop ET, cannot get window spill traps.
+	 * The busy loop is necessary because the PIO error
+	 * sometimes does not go away quickly and we trap again.
+	 */
+	sethi	%hi(C_LABEL(pcic_regs)), %o1
+	ld	[%o1 + %lo(C_LABEL(pcic_regs))], %o2
+
+	! Get pending status for printouts later.
+	ld	[%o2 + PCI_SYS_INT_PENDING], %o0
+
+	mov	PCI_SYS_INT_PENDING_CLEAR_ALL, %o1
+	stb	%o1, [%o2 + PCI_SYS_INT_PENDING_CLEAR]
+1:
+	ld	[%o2 + PCI_SYS_INT_PENDING], %o1
+	andcc	%o1, ((PCI_SYS_INT_PENDING_PIO|PCI_SYS_INT_PENDING_PCI)>>24), %g0
+	bne	1b
+	 nop
+
+	or	%l0, PSR_PIL, %l4
+	wr	%l4, 0x0, %psr
+	WRITE_PAUSE
+	wr	%l4, PSR_ET, %psr
+	WRITE_PAUSE
+
+	call	C_LABEL(pcic_nmi)
+	 add	%sp, STACKFRAME_SZ, %o1	! struct pt_regs *regs
+	RESTORE_ALL
+
+	.globl	C_LABEL(pcic_nmi_trap_patch)
+C_LABEL(pcic_nmi_trap_patch):
+	sethi	%hi(linux_trap_ipi15_pcic), %l3
+	jmpl	%l3 + %lo(linux_trap_ipi15_pcic), %g0
+	 rd	%psr, %l0
+	.word	0
+
+#endif /* CONFIG_PCI */
 
 /* End of entry.S */

@@ -1,4 +1,3 @@
-
 /*
  * eata_set_info
  * buffer : pointer to the data that has been written to the hostfile
@@ -25,7 +24,6 @@ int eata_pio_set_info(char *buffer, int length, struct Scsi_Host *HBA_ptr)
 int eata_pio_proc_info(char *buffer, char **start, off_t offset, int length, 
 		       int hostno, int inout)
 {
-
     Scsi_Device *scd;
     struct Scsi_Host *HBA_ptr;
     static u8 buff[512];
@@ -82,14 +80,12 @@ int eata_pio_proc_info(char *buffer, char **start, off_t offset, int length,
     if (pos > offset + length)
 	goto stop_output;
     
-    scd = scsi_devices;
-    
-    size = sprintf(buffer+len,"Attached devices: %s\n", (scd)?"":"none");
+    size = sprintf(buffer+len,"Attached devices: %s\n", 
+		   (HBA_ptr->host_queue)?"":"none");
     len += size; 
     pos = begin + len;
     
-    while (scd) {
-	if (scd->host == HBA_ptr) {
+    for(scd = HBA_ptr->host_queue; scd; scd = scd->next) {
 	    proc_print_scsidevice(scd, buffer, &size, len);
 	    len += size; 
 	    pos = begin + len;
@@ -100,8 +96,6 @@ int eata_pio_proc_info(char *buffer, char **start, off_t offset, int length,
 	    }
 	    if (pos > offset + length)
 		goto stop_output;
-	}
-	scd = scd->next;
     }
     
  stop_output:
@@ -132,4 +126,3 @@ int eata_pio_proc_info(char *buffer, char **start, off_t offset, int length,
  * tab-width: 8
  * End:
  */
-

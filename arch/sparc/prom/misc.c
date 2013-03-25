@@ -1,4 +1,4 @@
-/* $Id: misc.c,v 1.1.1.1 1999-11-22 03:47:42 christ Exp $
+/* $Id: misc.c,v 1.18 2000/08/26 02:38:03 anton Exp $
  * misc.c:  Miscellaneous prom functions that don't belong
  *          anywhere else.
  *
@@ -6,34 +6,48 @@
  */
 
 #include <linux/config.h>
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
 #include <asm/openprom.h>
 #include <asm/oplib.h>
+#include <asm/auxio.h>
+
+extern void restore_current(void);
+
+spinlock_t prom_lock = SPIN_LOCK_UNLOCKED;
 
 /* Reset and reboot the machine with the command 'bcommand'. */
 void
 prom_reboot(char *bcommand)
 {
+	unsigned long flags;
+	spin_lock_irqsave(&prom_lock, flags);
 	(*(romvec->pv_reboot))(bcommand);
 	/* Never get here. */
-	return;
+	restore_current();
+	spin_unlock_irqrestore(&prom_lock, flags);
 }
 
 /* Forth evaluate the expression contained in 'fstring'. */
 void
 prom_feval(char *fstring)
 {
-	if(!fstring || fstring[0] == 0) return;
+	unsigned long flags;
+	if(!fstring || fstring[0] == 0)
+		return;
+	spin_lock_irqsave(&prom_lock, flags);
 	if(prom_vers == PROM_V0)
 		(*(romvec->pv_fortheval.v0_eval))(strlen(fstring), fstring);
 	else
 		(*(romvec->pv_fortheval.v2_eval))(fstring);
-	return;
+	restore_current();
+	spin_unlock_irqrestore(&prom_lock, flags);
 }
 
 /* We want to do this more nicely some day. */
-#if CONFIG_SUN_CONSOLE
-extern void console_restore_palette(void);
-extern void set_palette(void);
+#ifdef CONFIG_SUN_CONSOLE
+extern void (*prom_palette)(int);
 extern int serial_console;
 #endif
 
@@ -41,36 +55,47 @@ extern int serial_console;
  * prom command.
  */
 void
-prom_halt(void)
+prom_cmdline(void)
 {
 	extern void kernel_enter_debugger(void);
 	extern void install_obp_ticker(void);
 	extern void install_linux_ticker(void);
+	unsigned long flags;
     
 	kernel_enter_debugger();
-#if CONFIG_SUN_CONSOLE
-	if(!serial_console)
-		console_restore_palette ();
+#ifdef CONFIG_SUN_CONSOLE
+	if(!serial_console && prom_palette)
+		prom_palette (1);
 #endif
 	install_obp_ticker();
+	spin_lock_irqsave(&prom_lock, flags);
 	(*(romvec->pv_abort))();
+	restore_current();
+	spin_unlock_irqrestore(&prom_lock, flags);
 	install_linux_ticker();
-#if CONFIG_SUN_CONSOLE
-	if(!serial_console)
-		set_palette ();
+#ifdef CONFIG_SUN_AUXIO
+	set_auxio(AUXIO_LED, 0);
 #endif
-	return;
+#ifdef CONFIG_SUN_CONSOLE
+	if(!serial_console && prom_palette)
+		prom_palette (0);
+#endif
 }
 
 /* Drop into the prom, but completely terminate the program.
  * No chance of continuing.
  */
 void
-prom_die(void)
+prom_halt(void)
 {
+	unsigned long flags;
+again:
+	spin_lock_irqsave(&prom_lock, flags);
 	(*(romvec->pv_halt))();
 	/* Never get here. */
-	return;
+	restore_current();
+	spin_unlock_irqrestore(&prom_lock, flags);
+	goto again; /* PROM is out to get me -DaveM */
 }
 
 typedef void (*sfunc_t)(void);
@@ -79,13 +104,8 @@ typedef void (*sfunc_t)(void);
 void
 prom_setsync(sfunc_t funcp)
 {
-#if CONFIG_AP1000
-  printk("not doing setsync\n");
-  return;
-#endif
 	if(!funcp) return;
 	*romvec->pv_synchook = funcp;
-	return;
 }
 
 /* Get the idprom and stuff it into buffer 'idbuf'.  Returns the
@@ -93,7 +113,7 @@ prom_setsync(sfunc_t funcp)
  * has space for.  Returns 0xff on error.
  */
 unsigned char
-prom_getidp(char *idbuf, int num_bytes)
+prom_get_idprom(char *idbuf, int num_bytes)
 {
 	int len;
 

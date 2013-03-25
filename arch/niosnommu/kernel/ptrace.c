@@ -1,3 +1,4 @@
+//vic FIXME - bad struct member: signal
 /* ptrace.c: Sparc process tracing support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caipfs.rutgers.edu)
@@ -42,8 +43,8 @@ static inline void pt_succ_return(struct pt_regs *regs, unsigned long value)
 static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 				   struct task_struct *tsk)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
 
 	if(offset >= 1024)
 		offset -= 1024; /* whee... */
@@ -99,7 +100,7 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I6];
 		break;
 	case 924:
-		if(tsk->tss.flags & 0x80000000)
+		if(tsk->thread.flags & 0x80000000)
 			regs->u_regs[UREG_I0] = cregs->u_regs[UREG_G1];
 		else
 			regs->u_regs[UREG_I0] = 0;
@@ -135,8 +136,8 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 static inline void write_sunos_user(struct pt_regs *regs, unsigned long offset,
 				    struct task_struct *tsk)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
 	unsigned long value = regs->u_regs[UREG_I3];
 
 	if(offset >= 1024)
@@ -222,12 +223,12 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 #endif
 	if(request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED) {
+		if (current->flags & PT_PTRACED) {
 			pt_error_return(regs, EPERM);
 			return;
 		}
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->flags |= PT_PTRACED;
 		pt_succ_return(regs, 0);
 		return;
 	}
@@ -260,11 +261,11 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			return;
 		}
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED) {
+		if (child->flags & PT_PTRACED) {
 			pt_error_return(regs, EPERM);
 			return;
 		}
-		child->flags |= PF_PTRACED;
+		child->flags |= PT_PTRACED;
 		if(child->p_pptr != current) {
 			REMOVE_LINKS(child);
 			child->p_pptr = current;
@@ -274,7 +275,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		pt_succ_return(regs, 0);
 		return;
 	}
-	if(!(child->flags & PF_PTRACED)) {
+	if(!(child->flags & PT_PTRACED)) {
 		pt_error_return(regs, ESRCH);
 		return;
 	}
@@ -341,7 +342,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_GETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
+		struct pt_regs *cregs = child->thread.kregs;
 		int rval;
 
 		rval = verify_area(VERIFY_WRITE, pregs, sizeof(struct pt_regs) - 4);
@@ -361,7 +362,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 
 	case PTRACE_SETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
+		struct pt_regs *cregs = child->thread.kregs;
 		unsigned long psr;
 		int rval, i;
 
@@ -404,13 +405,13 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		rval = verify_area(VERIFY_WRITE, fps, sizeof(struct fps));
 		if(rval) { pt_error_return(regs, rval); return; }
 		for(i = 0; i < 32; i++)
-			fps->regs[i] = child->tss.float_regs[i];
-		fps->fsr = child->tss.fsr;
-		fps->fpqd = child->tss.fpqdepth;
+			fps->regs[i] = child->thread.float_regs[i];
+		fps->fsr = child->thread.fsr;
+		fps->fpqd = child->thread.fpqdepth;
 		fps->flags = fps->extra = 0;
 		for(i = 0; i < 16; i++) {
-			fps->fpq[i].insnaddr = child->tss.fpqueue[i].insn_addr;
-			fps->fpq[i].insn = child->tss.fpqueue[i].insn;
+			fps->fpq[i].insnaddr = child->thread.fpqueue[i].insn_addr;
+			fps->fpq[i].insn = child->thread.fpqueue[i].insn;
 		}
 		pt_succ_return(regs, 0);
 		return;
@@ -433,12 +434,12 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 		rval = verify_area(VERIFY_READ, fps, sizeof(struct fps));
 		if(rval) { pt_error_return(regs, rval); return; }
 		for(i = 0; i < 32; i++)
-			child->tss.float_regs[i] = fps->regs[i];
-		child->tss.fsr = fps->fsr;
-		child->tss.fpqdepth = fps->fpqd;
+			child->thread.float_regs[i] = fps->regs[i];
+		child->thread.fsr = fps->fsr;
+		child->thread.fpqdepth = fps->fpqd;
 		for(i = 0; i < 16; i++) {
-			child->tss.fpqueue[i].insn_addr = fps->fpq[i].insnaddr;
-			child->tss.fpqueue[i].insn = fps->fpq[i].insn;
+			child->thread.fpqueue[i].insn_addr = fps->fpq[i].insnaddr;
+			child->thread.fpqueue[i].insn = fps->fpq[i].insn;
 		}
 		pt_succ_return(regs, 0);
 		return;
@@ -502,13 +503,13 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			return;
 		}
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->flags |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->flags &= ~PT_TRACESYS;
 		child->exit_code = data;
 		if((addr != 1) & !(addr & 3)) {
-			child->tss.kregs->pc = addr;
-			child->tss.kregs->npc = addr + 4;
+			child->thread.kregs->pc = addr;
+			child->thread.kregs->npc = addr + 4;
 		}
 		wake_up_process(child);
 		pt_succ_return(regs, 0);
@@ -536,7 +537,7 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 			pt_error_return(regs, EIO);
 			return;
 		}
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		child->flags &= ~(PT_PTRACED|PT_TRACESYS);
 		wake_up_process(child);
 		child->exit_code = data;
 		REMOVE_LINKS(child);
@@ -555,17 +556,27 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 #endif /* 0 */
 }
 
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure the single step bit is not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	//vic - FIXME - ptrace not really implemented anyway
+}
+
 asmlinkage void syscall_trace(void)
 {
 #ifdef DEBUG_PTRACE
 	printk("%s [%d]: syscall_trace\n", current->comm, current->pid);
 #endif
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->flags & (PT_PTRACED|PT_TRACESYS))
+			!= (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
-	current->tss.flags ^= 0x80000000;
+	current->thread.flags ^= 0x80000000;
 	notify_parent(current, SIGTRAP);
 	schedule();
 	/*
@@ -573,7 +584,8 @@ asmlinkage void syscall_trace(void)
 	 * for normal use.  strace only continues with a signal if the
 	 * stopping signal is not SIGTRAP.  -brl
 	 */
-	if (current->exit_code)
-		current->signal |= (1 << (current->exit_code - 1));
+//vic FIXME - is this ever used ? - needs work to update signals
+//vic	if (current->exit_code)
+//vic		current->signal |= (1 << (current->exit_code - 1));
 	current->exit_code = 0;
 }

@@ -1,58 +1,16 @@
-#ifndef _M68K_SYSTEM_H
-#define _M68K_SYSTEM_H
+#ifndef _M68KNOMMU_SYSTEM_H
+#define _M68KNOMMU_SYSTEM_H
 
 #include <linux/config.h> /* get configuration macros */
 #include <linux/linkage.h>
 #include <asm/segment.h>
-
-#ifdef CONFIG_M68328
-#include <asm/MC68328.h>
-#endif
-
-#ifdef CONFIG_M68360
-#include <asm/m68360.h>
-#endif
-
-#ifdef CONFIG_M68EZ328
-#include <asm/MC68EZ328.h>
-#endif
-
-extern inline unsigned long rdusp(void) {
+#include <asm/entry.h>
 #ifdef CONFIG_COLDFIRE
-	extern unsigned int	sw_usp;
-	return(sw_usp);
-#else
-  	unsigned long usp;
-	__asm__ __volatile__("move %/usp,%0"
-			     : "=a" (usp));
-	return usp;
+#include <asm/mcfsim.h>
+#include <asm/coldfire.h>
 #endif
-}
 
-extern inline void wrusp(unsigned long usp) {
-#ifdef CONFIG_COLDFIRE
-	extern unsigned int	sw_usp;
-	sw_usp = usp;
-#else
-	__asm__ __volatile__("move %0,%/usp"
-			     :
-			     : "a" (usp));
-#endif
-}
-
-extern inline unsigned long rda5(void) {
-  	unsigned long a5;
-
-	__asm__ __volatile__("movel %/a5,%0"
-			     : "=a" (a5));
-	return a5;
-}
-
-extern inline void wra5(unsigned long a5) {
-	__asm__ __volatile__("movel %0,%/a5"
-			     :
-			     : "a" (a5));
-}
+#define prepare_to_switch()	do { } while(0)
 
 /*
  * switch_to(n) should switch tasks to task ptr, first checking that
@@ -81,36 +39,29 @@ extern inline void wra5(unsigned long a5) {
  * the mm structures are shared in d2 (to avoid atc flushing).
  */
 asmlinkage void resume(void);
-#define switch_to(prev, next) {						\
-  __asm__ __volatile__(	"movel	%3, %%d2\n\t"				\
-  			"movel	%2, %%d1\n\t"				\
-			"movel	%0, %%d0\n\t"				\
-			"movel	%1, %%a1\n\t"				\
-			"movel	%%d0, %%a0\n\t"				\
-			"jbsr " SYMBOL_NAME_STR(resume) "\n\t" 		\
-		       :						\
-		       : "a" (prev),					\
-			 "a" (next),					\
-			 "i" ((int)&((struct task_struct *)0)->tss),	\
-		         "g" ((char)((prev)->mm == (next)->mm)) 	\
-		       : "cc", "d0", "d1", "d2", "d3", "d4", "d5", "a0", "a1");\
+#define switch_to(prev,next,last) { \
+  void *_last;										\
+  __asm__ __volatile__(								\
+  			"movel	%1, %%a0\n\t"					\
+			"movel	%2, %%a1\n\t"					\
+			"jbsr " SYMBOL_NAME_STR(resume) "\n\t" 	\
+			"movel	%%d1, %0\n\t"					\
+		       : "=d" (_last)						\
+		       : "d" (prev),						\
+			     "d" (next)							\
+		       : "cc", "d0", "d1", "d2", "d3", "d4", "d5", "a0", "a1");	\
+  (last) = _last; 									\
 }
 
-#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
-#define tas(ptr) (xchg((ptr),1))
-
-struct __xchg_dummy { unsigned long a[100]; };
-#define __xg(x) ((volatile struct __xchg_dummy *)(x))
-
 #ifdef CONFIG_COLDFIRE
-#define sti() __asm__ __volatile__ ( \
+#define __sti() __asm__ __volatile__ ( \
 	"move %/sr,%%d0\n\t" \
 	"andi.l #0xf8ff,%%d0\n\t" \
 	"move %%d0,%/sr\n" \
 	: /* no outputs */ \
 	: \
         : "cc", "%d0", "memory")
-#define cli() __asm__ __volatile__ ( \
+#define __cli() __asm__ __volatile__ ( \
 	"move %/sr,%%d0\n\t" \
 	"ori.l  #0x0700,%%d0\n\t" \
 	"move %%d0,%/sr\n" \
@@ -118,25 +69,61 @@ struct __xchg_dummy { unsigned long a[100]; };
 	: \
 	: "cc", "%d0", "memory")
 #else
-#if defined(CONFIG_ATARI) && !defined(CONFIG_AMIGA) && !defined(CONFIG_MAC)
-/* block out HSYNC on the atari */
-#define sti() __asm__ __volatile__ ("andiw #0xfbff,%/sr": : : "memory")
-#else /* portable version */
-#define sti() __asm__ __volatile__ ("andiw #0xf8ff,%/sr": : : "memory")
-#endif /* machine compilation types */ 
-#define cli() __asm__ __volatile__ ("oriw  #0x0700,%/sr": : : "memory")
+
+/* portable version */ /* FIXME - see entry.h*/
+#define ALLOWINT 0xf8ff
+
+#define __sti() asm volatile ("andiw %0,%%sr": : "i" (ALLOWINT) : "memory")
+#define __cli() asm volatile ("oriw  #0x0700,%%sr": : : "memory")
 #endif
 
-#define nop() __asm__ __volatile__ ("nop"::)
-#define mb()  __asm__ __volatile__ (""   : : :"memory")
-
-#define save_flags(x) \
-__asm__ __volatile__("movew %/sr,%0":"=d" (x) : /* no input */ :"memory")
-
-#define restore_flags(x) \
-__asm__ __volatile__("movew %0,%/sr": /* no outputs */ :"d" (x) : "memory")
+#define __save_flags(x) asm volatile ("movew %%sr,%0":"=d" (x) : : "memory")
+#define __restore_flags(x) asm volatile ("movew %0,%%sr": :"d" (x) : "memory")
+#define	__save_and_cli(flags) do { save_flags(flags); cli(); } while(0) 
+#define	__save_and_sti(flags) do { save_flags(flags); sti(); } while(0) 
 
 #define iret() __asm__ __volatile__ ("rte": : :"memory", "sp", "cc")
+
+/* For spinlocks etc */
+#define local_irq_save(x)	__save_and_cli(x)
+#define local_irq_set(x)	__save_and_sti(x)
+#define local_irq_restore(x)	__restore_flags(x)
+#define local_irq_disable()	__cli()
+#define local_irq_enable()	__sti()
+
+#define cli()			__cli()
+#define sti()			__sti()
+#define save_flags(x)		__save_flags(x)
+#define restore_flags(x)	__restore_flags(x)
+#define save_and_cli(x)	__save_and_cli(x)
+#define save_and_set(x)	__save_and_sti(x)
+
+/*
+ * Force strict CPU ordering.
+ * Not really required on m68k...
+ */
+#define nop()  asm volatile ("nop"::)
+#define mb()   asm volatile (""   : : :"memory")
+#define rmb()  asm volatile (""   : : :"memory")
+#define wmb()  asm volatile (""   : : :"memory")
+#define set_mb(var, value)     do { var = value; mb(); } while (0)
+#define set_wmb(var, value)    do { var = value; wmb(); } while (0)
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#endif
+
+#define xchg(ptr,x) ((__typeof__(*(ptr)))__xchg((unsigned long)(x),(ptr),sizeof(*(ptr))))
+#define tas(ptr) (xchg((ptr),1))
+
+struct __xchg_dummy { unsigned long a[100]; };
+#define __xg(x) ((volatile struct __xchg_dummy *)(x))
 
 #ifndef CONFIG_RMW_INSNS
 static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int size)
@@ -202,7 +189,9 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 }
 #endif
 
-#if defined (CONFIG_M68332) || defined (CONFIG_CPU32)
+
+
+#ifdef CONFIG_M68332
 #define HARD_RESET_NOW() ({		\
         cli();				\
         asm("				\
@@ -219,7 +208,8 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 })
 #endif
 
-#if defined( CONFIG_M68328 ) || defined( CONFIG_M68EZ328 )
+#if defined( CONFIG_M68328 ) || defined( CONFIG_M68EZ328 ) || \
+	defined (CONFIG_M68360) || defined( CONFIG_M68VZ328 )
 #define HARD_RESET_NOW() ({		\
         cli();				\
         asm("				\
@@ -232,18 +222,9 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
 })
 #endif
 
-#if defined(CONFIG_M68360)
-/* Stop the processor doing anything */
-/* TODO: enable the watchdog and kick it in the timer ISR. */
-#define HARD_RESET_NOW() ({             \
-        cli();                          \
-        while(1);                       \
-        })
-#endif
-
-#ifdef CONFIG_COLDFIRE
-#if defined(CONFIG_FLASH_SNAPGEAR) || defined(CONFIG_HW_FEITH)
-#ifdef CONFIG_M5272
+#if defined(CONFIG_COLDFIRE)
+#if defined(CONFIG_M5272) && (defined(CONFIG_NETtel) || \
+	defined(CONFIG_GILBARCONAP) || defined(CONFIG_SE1100) || defined(CONFIG_HW_FEITH))
 /*
  *	Need to account for broken early mask of 5272 silicon. So don't
  *	jump through the original start address. Jump strait into the
@@ -255,7 +236,26 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
         jmp 0xf0000400;			\
         ");				\
 })
-#else
+/*
+ * HARD_RESET_NOW() for senTec COBRA5272:
+ *
+ * ATTENTION!
+ * This seems to be a dirty workaround for the reboot!
+ * We currently just jump to the startcode of colilo.
+ * 
+ * If you are using dBUG, you will have to ajust the jmp
+ * destination. Look for the address of _asm_startmeup, and
+ * put it in the jump statement!
+ * 
+ */
+#elif defined(CONFIG_COBRA5272)
+#define HARD_RESET_NOW() ({      \
+   asm("           \
+         jmp 0xffe00400;             \
+       ");          \
+})
+
+#elif defined(CONFIG_NETtel) || defined(CONFIG_eLIA) || defined(CONFIG_DISKtel) || defined(CONFIG_SECUREEDGEMP3) || defined(CONFIG_CLEOPATRA)
 #define HARD_RESET_NOW() ({		\
         asm("				\
 	movew #0x2700, %sr;		\
@@ -268,50 +268,88 @@ static inline unsigned long __xchg(unsigned long x, volatile void * ptr, int siz
         jmp (%a0);			\
         ");				\
 })
-#endif	/* CONFIG_M5272 */
-
-#elif defined(CONFIG_COBRA5272)
-/* 
- * HARD_RESET_NOW() for senTec COBRA5272:
- *
- * ATTENTION!
- * This seems to be a dirty workaround for the reboot!
- * We currently just jump to the startcode of colilo.
- * 
- * If you are using dBUG, you will have to ajust the jmp
- * destination. Look for the address of _asm_startmeup, and
- * put it in the jump statementi!
- * 
- */
-#define HARD_RESET_NOW() ({      \
-   asm("           \
-         jmp 0xffe00400;             \
-       ");          \
-})
-/* end HARDRESET_NOW() for senTec COBRA5272. */
-#else
+#elif defined(CONFIG_M5272) && defined(CONFIG_SIGNAL_MCP751)
 #define HARD_RESET_NOW() ({		\
         asm("				\
 	movew #0x2700, %sr;		\
-        moveal #0x4, %a0;		\
-        moveal (%a0), %a0;		\
-        jmp (%a0);			\
+	jmp 0xff000400;			\
         ");				\
 })
-#endif	/* CONFIG_FLASH_SNAPGEAR */
 
-#endif	/* CONFIG_COLDFIRE */
-
-#ifdef CONFIG_M68000
-/* 2002-05-14 gc: */
+#elif defined(CONFIG_BOARD_MOD5272)
 #define HARD_RESET_NOW() ({		\
-        asm volatile("	                \
+	asm("				\
 	movew #0x2700, %sr;		\
-        moveal #0x4, %a0;		\
-        moveal (%a0), %a0;		\
-        jmp (%a0);			\
-        ");				\
+	jmp 0xffc00008;			\
+	");				\
 })
-#endif /* CONFIG_M68000 */
 
-#endif /* _M68K_SYSTEM_H */
+#elif defined(CONFIG_SED_SIOSIII)
+	/*
+	 * The SIOS III has a bit in memory, that when set, resets the SIOS III.
+	 * This routine sets that bit. It gets the address of the bit by
+	 * looking at the chip select register. This way, I only need to
+	 * hardcode which chip select the reset bit is on, not the address.
+	 */
+#define HARD_RESET_NOW() \
+({						\
+	unsigned short csar;			\
+	unsigned long csarl;			\
+	unsigned long volatile *reset;		\
+	asm("move.w	#0x2700, %sr");		\
+	csar = *((volatile unsigned short *)(MCF_MBAR + MCFSIM_CSAR2));	\
+	csarl = csar;				\
+	csarl = csarl << 16;			\
+	reset = (unsigned long volatile *)csarl;\
+	while(1)				\
+	*reset = (0x00000001 << 6);\
+})
+#elif defined(CONFIG_M5282)
+	/*
+	 * The MCF5282 has a bit (SOFTRST) in memory (Reset Control Register RCR),
+	 * that when set, resets the MCF5282.
+	 */
+#define HARD_RESET_NOW() \
+({						\
+	unsigned char volatile *reset;		\
+	asm("move.w	#0x2700, %sr");		\
+	reset = ((volatile unsigned short *)(MCF_IPSBAR + 0x110000));	\
+	while(1)				\
+	*reset |= (0x01 << 7);\
+})
+
+#elif defined(CONFIG_M5208)
+	/*
+	 * The MCF5208 has a bit (SOFTRST) in memory (Reset Control Register RCR),
+	 * that when set, resets the MCF5208.
+	 */
+#define HARD_RESET_NOW() \
+({						\
+	unsigned char volatile *reset;		\
+	asm("move.w	#0x2700, %sr");		\
+	reset = ((volatile unsigned short *)(MCF_IPSBAR + 0xA0000));	\
+	while(1)				\
+	*reset |= (0x03 << 6);\
+})
+#elif defined(CONFIG_M5235) // did not use MCF_IPSBAR define
+#define HARD_RESET_NOW() ({		\
+	asm("				\
+	movew #0x2700, %sr;		\
+	movel #0x01000000, %sp;		\
+	moveal #0x40110000, %a0;	\
+	moveb #0x80, (%a0);		\
+	");				\
+})
+#else
+#define HARD_RESET_NOW() ({		\
+	asm("				\
+	movew #0x2700, %sr;		\
+	moveal #0x4, %a0;		\
+	moveal (%a0), %a0;		\
+	jmp (%a0);			\
+	");				\
+})
+#endif
+#endif
+
+#endif /* _M68KNOMMU_SYSTEM_H */

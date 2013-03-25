@@ -8,20 +8,19 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
-# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@lineo.ca>
+# Copyright (c) 2000,2001  Lineo, Inc. <jeff@uClinux.org> 
+# Copyright (c) 1998,1999  D. Jeff Dionne <jeff@uclinux.org>
 # Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
 # Copyright (C) 1994 by Hamish Macdonald
 #
 
-ifndef CROSS_COMPILE
-CROSS_COMPILE = m68k-coff-
-endif
+GCC_DIR = $(shell $(CC) -print-search-dirs | grep install: | sed 's/install://')
 
-LIBGCC = `$(CC) -v 2>&1 | grep specs | sed -e "s/Reading specs from //" | sed -e s/specs/m68000\\\/libgcc.a/`
+INCGCC = $(GCC_DIR)/include
+LIBGCC = $(GCC_DIR)/m68000/libgcc.a
 
-CFLAGS := $(CFLAGS) -pipe -DNO_MM -DNO_FPU -m68000 -D__COFF__ -DMAGIC_ROM_PTR -DNO_FORGET -DUTS_SYSNAME='"uClinux"'
-AFLAGS := $(AFLAGS) -pipe -DNO_MM -DNO_FPU -m68000 -D__COFF__ -DMAGIC_ROM_PTR -DUTS_SYSNAME='"uClinux"' -Wa,--bitwise-or
+CFLAGS := -fno-builtin -DNO_CACHE $(CFLAGS) -pipe -DNO_MM -DNO_FPU -DNO_CACHE -m68000 -D__ELF__ -DMAGIC_ROM_PTR -DNO_FORGET -DUTS_SYSNAME=\"uClinux\" -D__linux__
+AFLAGS := $(AFLAGS) -pipe -DNO_MM -DNO_FPU -DNO_CACHE -m68000 -D__ELF__ -DMAGIC_ROM_PTR -DUTS_SYSNAME=\"uClinux\" -Wa,--bitwise-or
 
 LINKFLAGS = -T arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/$(MODEL).ld
 
@@ -29,8 +28,10 @@ HEAD := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/crt0_$(MODEL).o
 
 SUBDIRS := arch/$(ARCH)/kernel arch/$(ARCH)/mm arch/$(ARCH)/lib \
            arch/$(ARCH)/platform/$(PLATFORM) $(SUBDIRS)
-ARCHIVES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o \
-            arch/$(ARCH)/platform/$(PLATFORM)/platform.o $(ARCHIVES)
+
+CORE_FILES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o \
+              arch/$(ARCH)/platform/$(PLATFORM)/platform.o $(CORE_FILES)
+
 LIBS += arch/$(ARCH)/lib/lib.a $(LIBGCC)
 
 ifdef CONFIG_FRAMEBUFFER
@@ -65,6 +66,7 @@ linux.trg linux.rom: linux.bin
 
 archclean:
 	@$(MAKEBOOT) clean
+	rm -f arch/$(ARCH)/platform/$(PLATFORM)/m68k_defs.h
 	rm -f linux.text linux.data linux.bin linux.rom linux.trg
 	rm -f linux.s19 romfs.s19
 	rm -f linux.img romdisk.img

@@ -1,7 +1,7 @@
 /*
  *  linux/arch/$(ARCH)/platform/$(PLATFORM)/config.c
  *
- *  Copyright (c) 2000 Michael Leslie <mleslie@lineo.com>
+ *  Copyright (c) 2000 Michael Leslie <mleslie@ArcturusNetworks.com>
  *  Copyright (C) 1993 Hamish Macdonald
  *  Copyright (C) 1999 D. Jeff Dionne <jeff@uclinux.org>
  *
@@ -24,81 +24,96 @@
 #include <asm/irq.h>
 #include <asm/machdep.h>
 
+#ifdef CONFIG_UCQUICC
+#include "uCquicc/bootstd.h"
+#endif
+
+#ifdef CONFIG_PILOT
+#include "PalmV/romfs.h"
+#endif
+
 #include <asm/m68360.h>
-#include<asm/quicc_cpm.h>
+void M68360_init_IRQ(void);
 
 extern QUICC *pquicc;
-//extern unsigned long int system_clock;
+
+/* TODO  DON"T Hard Code this */
+/* calculate properly using the right PLL and prescaller */
+// unsigned int system_clock = 33000000l;
+extern unsigned long int system_clock; //In kernel setup.c
 
 
-extern void register_console(void (*proc)(const char *));
+//extern void register_console(void (*proc)(const char *));
 
-extern void config_quicc_irq(void);
-
-int quicc_pit_div_counter;
-void (*standard_timer_routine)(int, void *, struct pt_regs*);
-void quicc_timer_ISR(int irq, void *dummy, struct pt_regs *regs);
+extern void config_M68360_irq(void);
 
 
-void quicc_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
+void BSP_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
 {
-    unsigned short pitr;
-    unsigned short count;
-    unsigned short picr = 0;
-    picr = picr | (QUICC_SIM_PIT_INT_LVL << 0x08);
+  unsigned char prescaler;
+  unsigned short tgcr_save;
+  int return_value;
 
-    pquicc->sim_picr= picr | QUICC_SIM_PIT_INT_VEC;
-    pitr = pquicc->sim_pitr;
-    pitr = pitr & QUICC_PITR_SWP;   // Isolate the SWT prescale bit as to not
-                                    // change it
-    pquicc->sim_pitr = pitr;    // Stop the PIT.
-    //count = QUICC_PIT_SPCLK/(4*HZ);
-    count = (OSCILLATOR/128)/(4*HZ);
-    if(count == 0)
-        count = 1;
-    if(count > QUICC_PIT_MAX_COUNT)
-    {
-        count = count/QUICC_PIT_DIVIDE;
-        quicc_pit_div_counter=0;
-        standard_timer_routine = timer_routine;
-        request_irq(QUICC_SIM_PIT_INT_VEC | IRQ_MACHSPEC, quicc_timer_ISR,
-                IRQ_FLG_LOCK, "timer", NULL);
-    }
-    else
-    {
-        request_irq(QUICC_SIM_PIT_INT_VEC | IRQ_MACHSPEC, timer_routine,
-                IRQ_FLG_LOCK, "timer", NULL);
-    }
-    pitr = pitr | count;
-    pquicc->sim_pitr = pitr;
-}
-// Use this routine if the pit needs to be divided in software
-void quicc_timer_ISR(int irq, void *dummy, struct pt_regs *regs)
-{
-    ++quicc_pit_div_counter;
-    quicc_pit_div_counter &= (QUICC_PIT_DIVIDE-1);
-    if(quicc_pit_div_counter == 0)
-        standard_timer_routine(irq, dummy, regs);
-}
+#if 0
+  /* Restart mode, Enable int, 32KHz, Enable timer */
+  TCTL = TCTL_OM | TCTL_IRQEN | TCTL_CLKSOURCE_32KHZ | TCTL_TEN;
+  /* Set prescaler (Divide 32KHz by 32)*/
+  TPRER = 31;
+  /* Set compare register  32Khz / 32 / 10 = 100 */
+  TCMP = 10;                                                              
 
-
-void quicc_tick(void)
-{
-#if defined(CONFIG_M68360_SIM_WDT)
-#else
-    //Kick the watchdog timer so it does not reset the system.
-    //Note: if interrupts are stopped for longer than 4 seconds, the system
-    // will reset.
-        quicc_kick_wdt();
+  request_irq(IRQ_MACHSPEC | 1, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
 #endif
+
+  /* General purpose quicc timers: MC68360UM p7-20 */
+
+  /* Set up timer 1 (in [1..4]) to do 100Hz */
+  tgcr_save = pquicc->timer_tgcr & 0xfff0;
+  pquicc->timer_tgcr  = tgcr_save; /* stop and reset timer 1 */
+  /* pquicc->timer_tgcr |= 0x4444; */ /* halt timers when FREEZE (ie bdm freeze) */
+
+  prescaler = 8;
+  pquicc->timer_tmr1 = 0x001a | /* or=1, frr=1, iclk=01b */
+                           (unsigned short)((prescaler - 1) << 8);
+    
+  pquicc->timer_tcn1 = 0x0000; /* initial count */
+  /* calculate interval for 100Hz based on the _system_clock: */
+  pquicc->timer_trr1 = (system_clock/ prescaler) / HZ; /* reference count */
+
+  pquicc->timer_ter1 = 0x0003; /* clear timer events */
+
+  /* enable timer 1 interrupt in CIMR */
+//  request_irq(IRQ_MACHSPEC | CPMVEC_TIMER1, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
+  //return_value = request_irq( CPMVEC_TIMER1, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
+  return_value = request_irq(CPMVEC_TIMER1 , timer_routine, IRQ_FLG_LOCK,
+          "Timer", NULL);
+
+  /* Start timer 1: */
+  tgcr_save = (pquicc->timer_tgcr & 0xfff0) | 0x0001;
+  pquicc->timer_tgcr  = tgcr_save;
 }
 
-unsigned long quicc_gettimeoffset (void)
+
+void BSP_tick(void)
+{
+  /* Reset Timer1 */
+  /* TSTAT &= 0; */
+
+  pquicc->timer_ter1 = 0x0002; /* clear timer event */  
+}
+
+unsigned long BSP_gettimeoffset (void)
 {
   return 0;
 }
 
-int quicc_hwclk(int op, struct hwclk_time *t)
+void BSP_gettod (int *yearp, int *monp, int *dayp,
+		   int *hourp, int *minp, int *secp)
+{
+	*yearp = *monp = *dayp = *hourp = *minp = *secp = 0;
+}
+
+int BSP_hwclk(int op, struct hwclk_time *t)
 {
   if (!op) {
     /* read */
@@ -108,7 +123,7 @@ int quicc_hwclk(int op, struct hwclk_time *t)
   return 0;
 }
 
-int quicc_set_clock_mmss (unsigned long nowtime)
+int BSP_set_clock_mmss (unsigned long nowtime)
 {
 #if 0
   short real_seconds = nowtime % 60, real_minutes = (nowtime / 60) % 60;
@@ -121,39 +136,74 @@ int quicc_set_clock_mmss (unsigned long nowtime)
   return 0;
 }
 
-void quicc_reset (void)
+void BSP_reset (void)
 {
   cli();
-  panic("Quicc Reset.\n");
-  while(1);
+/*   asm volatile (" */
+/*     moveal #0x10c00000, %a0; */
+/*     moveb #0, 0xFFFFF300; */
+/*     moveal 0(%a0), %sp; */
+/*     moveal 4(%a0), %a0; */
+/*     jmp (%a0); */
+/*     "); */
+
+  asm volatile ("
+    moveal #_start, %a0;
+    moveb #0, 0xFFFFF300;
+    moveal 0(%a0), %sp;
+    moveal 4(%a0), %a0;
+    jmp (%a0);
+    ");
+
+
 }
 
 unsigned char *scc1_hwaddr;
-//static int errno;
+static int errno;
+
+#if defined (CONFIG_UCQUICC)
+_bsc0(char *, getserialnum)
+_bsc1(unsigned char *, gethwaddr, int, a)
+_bsc1(char *, getbenv, char *, a)
+#endif
+
 
 void config_BSP(char *command, int len)
 {
+  unsigned char *p;
+/* #if defined (CONFIG_M68360_SMC_UART) */
+/*   extern void console_print_68360(const char * b); */
+/*   register_console(console_print_68360); */
+/* #endif   */
+
   printk("\n68360 QUICC support (C) 2000 Lineo Inc.\n");
-#if defined(CONFIG_SED_SIOS)
-  printk("SIOS support (C) 2002 SED Systems, a division of Calian Ltd.\n");
-#endif
+
+#if defined(CONFIG_UCQUICC) && 0
+  printk("uCquicc serial string [%s]\n",getserialnum());
+  p = scc1_hwaddr = gethwaddr(0);
+  printk("uCquicc hwaddr %.2x:%.2x:%.2x:%.2x:%.2x:%.2x\n",
+         p[0], p[1], p[2], p[3], p[4], p[5]);
+
+  p = getbenv("APPEND");
+  if (p)
+    strcpy(p,command);
+  else
+    command[0] = 0;
+#else
   scc1_hwaddr = "\00\01\02\03\04\05";
-
-  mach_sched_init      = quicc_sched_init;
-  mach_tick            = quicc_tick;
-  mach_gettimeoffset   = quicc_gettimeoffset;
-  mach_hwclk           = NULL;
-  mach_mksound         = NULL;
-  mach_reset           = quicc_reset;
-  mach_debug_init      = NULL;
-#if defined(CONFIG_DS1743)
-  {
-	  extern int ds1743_set_clock_mmss(unsigned long);
-	  extern void ds1743_gettod(int *, int *, int *, int *, int *, int *);
-	  mach_set_clock_mmss = ds1743_set_clock_mmss;
-	  mach_gettod = ds1743_gettod;
-  }
 #endif
+ 
+  mach_sched_init      = BSP_sched_init;
+  mach_tick            = BSP_tick;
+  mach_gettimeoffset   = BSP_gettimeoffset;
+  mach_gettod          = BSP_gettod;
+  mach_hwclk           = NULL;
+  mach_set_clock_mmss  = NULL;
+//  mach_mksound         = NULL;
+  mach_reset           = BSP_reset;
+  //Kendrick's Change
+  mach_trap_init        = M68360_init_IRQ;
+ // mach_debug_init      = NULL;
 
-  config_quicc_irq();
+  config_M68360_irq();
 }

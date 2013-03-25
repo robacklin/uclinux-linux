@@ -8,10 +8,12 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := netrom.o
-O_OBJS	 := af_netrom.o sysctl_net_netrom.o nr_dev.o nr_in.o nr_out.o nr_route.o nr_subr.o nr_timer.o nr_loopback.o
-M_OBJS   := $(O_TARGET)
+
+obj-y	 := af_netrom.o nr_dev.o nr_in.o nr_loopback.o nr_out.o nr_route.o \
+	    nr_subr.o nr_timer.o
+obj-m    := $(O_TARGET)
+
+obj-$(CONFIG_SYSCTL) += sysctl_net_netrom.o
 
 include $(TOPDIR)/Rules.make
 
-tar:
-		tar -cvf /dev/f1 .

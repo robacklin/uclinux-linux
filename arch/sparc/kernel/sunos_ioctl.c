@@ -1,11 +1,11 @@
-/* $Id: sunos_ioctl.c,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: sunos_ioctl.c,v 1.34 2000/09/03 14:10:56 anton Exp $
  * sunos_ioctl.c: The Linux Operating system: SunOS ioctl compatibility.
  * 
  * Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #include <linux/sched.h>
 #include <linux/errno.h>
@@ -19,6 +19,9 @@
 #include <linux/if_arp.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
+#include <linux/file.h>
 #include <asm/kbio.h>
 
 #if 0
@@ -26,85 +29,114 @@ extern char sunkbd_type;
 extern char sunkbd_layout;
 #endif
 
+/* NR_OPEN is now larger and dynamic in recent kernels. */
+#define SUNOS_NR_OPEN	256
+
 extern asmlinkage int sys_ioctl(unsigned int, unsigned int, unsigned long);
 extern asmlinkage int sys_setsid(void);
 
 asmlinkage int sunos_ioctl (int fd, unsigned long cmd, unsigned long arg)
 {
-	struct file *filp;
-	int foo;
+	int ret = -EBADF;
 
-	if (fd >= NR_OPEN || !(filp = current->files->fd [fd]))
-		return -EBADF;
+	if (fd >= SUNOS_NR_OPEN || !fcheck(fd))
+		goto out;
 
 	/* First handle an easy compat. case for tty ldisc. */
 	if(cmd == TIOCSETD) {
-		int *p, ntty = N_TTY, old_fs;
+		int *p, ntty = N_TTY, tmp;
+		mm_segment_t oldfs;
 
 		p = (int *) arg;
-		foo = verify_area(VERIFY_WRITE, p, sizeof(int));
-		if(foo) return foo;
-		if(*p == 2) {
-			old_fs = get_fs();
+		ret = -EFAULT;
+		if(get_user(tmp, p))
+			goto out;
+		if(tmp == 2) {
+			oldfs = get_fs();
 			set_fs(KERNEL_DS);
-			foo = sys_ioctl(fd, cmd, (int) &ntty);
-			set_fs(old_fs);
-			return (foo == -EINVAL ? -EOPNOTSUPP : foo);
+			ret = sys_ioctl(fd, cmd, (int) &ntty);
+			set_fs(oldfs);
+			ret = (ret == -EINVAL ? -EOPNOTSUPP : ret);
+			goto out;
 		}
 	}
 
 	/* Binary compatibility is good American knowhow fuckin' up. */
-	if(cmd == TIOCNOTTY)
-		return sys_setsid();
+	if(cmd == TIOCNOTTY) {
+		ret = sys_setsid();
+		goto out;
+	}
 
 	/* SunOS networking ioctls. */
 	switch (cmd) {
 	case _IOW('r', 10, struct rtentry):
-		return sys_ioctl(fd, SIOCADDRT, arg);
+		ret = sys_ioctl(fd, SIOCADDRT, arg);
+		goto out;
 	case _IOW('r', 11, struct rtentry):
-		return sys_ioctl(fd, SIOCDELRT, arg);
+		ret = sys_ioctl(fd, SIOCDELRT, arg);
+		goto out;
 	case _IOW('i', 12, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFADDR, arg);
-	case _IORW('i', 13, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFADDR, arg);
+		ret = sys_ioctl(fd, SIOCSIFADDR, arg);
+		goto out;
+	case _IOWR('i', 13, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFADDR, arg);
+		goto out;
 	case _IOW('i', 14, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFDSTADDR, arg);
-	case _IORW('i', 15, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFDSTADDR, arg);
+		ret = sys_ioctl(fd, SIOCSIFDSTADDR, arg);
+		goto out;
+	case _IOWR('i', 15, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFDSTADDR, arg);
+		goto out;
 	case _IOW('i', 16, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFFLAGS, arg);
-	case _IORW('i', 17, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFFLAGS, arg);
+		ret = sys_ioctl(fd, SIOCSIFFLAGS, arg);
+		goto out;
+	case _IOWR('i', 17, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFFLAGS, arg);
+		goto out;
 	case _IOW('i', 18, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFMEM, arg);
-	case _IORW('i', 19, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFMEM, arg);
-	case _IORW('i', 20, struct ifconf):
-		return sys_ioctl(fd, SIOCGIFCONF, arg);
+		ret = sys_ioctl(fd, SIOCSIFMEM, arg);
+		goto out;
+	case _IOWR('i', 19, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFMEM, arg);
+		goto out;
+	case _IOWR('i', 20, struct ifconf):
+		ret = sys_ioctl(fd, SIOCGIFCONF, arg);
+		goto out;
 	case _IOW('i', 21, struct ifreq): /* SIOCSIFMTU */
-		return sys_ioctl(fd, SIOCSIFMTU, arg);
-	case _IORW('i', 22, struct ifreq): /* SIOCGIFMTU */
-		return sys_ioctl(fd, SIOCGIFMTU, arg);
+		ret = sys_ioctl(fd, SIOCSIFMTU, arg);
+		goto out;
+	case _IOWR('i', 22, struct ifreq): /* SIOCGIFMTU */
+		ret = sys_ioctl(fd, SIOCGIFMTU, arg);
+		goto out;
 
-	case _IORW('i', 23, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFBRDADDR, arg);
+	case _IOWR('i', 23, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFBRDADDR, arg);
+		goto out;
 	case _IOW('i', 24, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFBRDADDR, arg);
-	case _IORW('i', 25, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFNETMASK, arg);
+		ret = sys_ioctl(fd, SIOCSIFBRDADDR, arg);
+		goto out;
+	case _IOWR('i', 25, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFNETMASK, arg);
+		goto out;
 	case _IOW('i', 26, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFNETMASK, arg);
-	case _IORW('i', 27, struct ifreq):
-		return sys_ioctl(fd, SIOCGIFMETRIC, arg);
+		ret = sys_ioctl(fd, SIOCSIFNETMASK, arg);
+		goto out;
+	case _IOWR('i', 27, struct ifreq):
+		ret = sys_ioctl(fd, SIOCGIFMETRIC, arg);
+		goto out;
 	case _IOW('i', 28, struct ifreq):
-		return sys_ioctl(fd, SIOCSIFMETRIC, arg);
+		ret = sys_ioctl(fd, SIOCSIFMETRIC, arg);
+		goto out;
 
 	case _IOW('i', 30, struct arpreq):
-		return sys_ioctl(fd, SIOCSARP, arg);
-	case _IOW('i', 31, struct arpreq):
-		return sys_ioctl(fd, SIOCGARP, arg);
+		ret = sys_ioctl(fd, SIOCSARP, arg);
+		goto out;
+	case _IOWR('i', 31, struct arpreq):
+		ret = sys_ioctl(fd, SIOCGARP, arg);
+		goto out;
 	case _IOW('i', 32, struct arpreq):
-		return sys_ioctl(fd, SIOCGARP, arg);
+		ret = sys_ioctl(fd, SIOCDARP, arg);
+		goto out;
 
 	case _IOW('i', 40, struct ifreq): /* SIOCUPPER */
 	case _IOW('i', 41, struct ifreq): /* SIOCLOWER */
@@ -113,12 +145,15 @@ asmlinkage int sunos_ioctl (int fd, unsigned long cmd, unsigned long arg)
 	case _IOW('i', 46, struct ifreq): /* SIOCSSDSTATS */
 	case _IOW('i', 47, struct ifreq): /* SIOCSSESTATS */
 	case _IOW('i', 48, struct ifreq): /* SIOCSPROMISC */
-		return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
+		goto out;
 
 	case _IOW('i', 49, struct ifreq):
-		return sys_ioctl(fd, SIOCADDMULTI, arg);
+		ret = sys_ioctl(fd, SIOCADDMULTI, arg);
+		goto out;
 	case _IOW('i', 50, struct ifreq):
-		return sys_ioctl(fd, SIOCDELMULTI, arg);
+		ret = sys_ioctl(fd, SIOCDELMULTI, arg);
+		goto out;
 
 	/* FDDI interface ioctls, unsupported. */
 		
@@ -132,61 +167,66 @@ asmlinkage int sunos_ioctl (int fd, unsigned long cmd, unsigned long arg)
 	case _IOW('i', 58, struct ifreq): /* SIOCFDGNETMAP */
 	case _IOW('i', 59, struct ifreq): /* SIOCFDGIOCTL */
 		printk("FDDI ioctl, returning EOPNOTSUPP\n");
-		return -EOPNOTSUPP;
+		ret = -EOPNOTSUPP;
+		goto out;
+
 	case _IOW('t', 125, int):
 		/* More stupid tty sunos ioctls, just
 		 * say it worked.
 		 */
-		return 0;
+		ret = 0;
+		goto out;
 	/* Non posix grp */
 	case _IOW('t', 118, int): {
-		int oldval, *ptr;
+		int oldval, newval, *ptr;
 
 		cmd = TIOCSPGRP;
 		ptr = (int *) arg;
-		oldval = verify_area(VERIFY_WRITE, ptr, sizeof(int));
-		if(oldval)
-			return oldval;
-		oldval = *ptr;
-		foo = sys_ioctl(fd, cmd, arg);
-		if(*ptr == -1) {
-			*ptr = oldval;
-			foo = -EIO;
+		ret = -EFAULT;
+		if(get_user(oldval, ptr))
+			goto out;
+		ret = sys_ioctl(fd, cmd, arg);
+		__get_user(newval, ptr);
+		if(newval == -1) {
+			__put_user(oldval, ptr);
+			ret = -EIO;
 		}
-		if(foo == -ENOTTY)
-			foo = -EIO;
-		return foo;
+		if(ret == -ENOTTY)
+			ret = -EIO;
+		goto out;
 	}
 
 	case _IOR('t', 119, int): {
-		int oldval, *ptr;
+		int oldval, newval, *ptr;
 
 		cmd = TIOCGPGRP;
 		ptr = (int *) arg;
-		oldval = verify_area(VERIFY_WRITE, ptr, sizeof(int));
-		if(oldval)
-			return oldval;
-		oldval = *ptr;
-		foo = sys_ioctl(fd, cmd, arg);
-		if(*ptr == -1) {
-			*ptr = oldval;
-			foo = -EIO;
+		ret = -EFAULT;
+		if(get_user(oldval, ptr))
+			goto out;
+		ret = sys_ioctl(fd, cmd, arg);
+		__get_user(newval, ptr);
+		if(newval == -1) {
+			__put_user(oldval, ptr);
+			ret = -EIO;
 		}
-		if(foo == -ENOTTY)
-			foo = -EIO;
-		return foo;
+		if(ret == -ENOTTY)
+			ret = -EIO;
+		goto out;
 	}
 	}
 
 #if 0
-	if (cmd & 0xff00 == ('k' << 8)){
+	if ((cmd & 0xff00) == ('k' << 8)) {
 		printk ("[[KBIO: %8.8x\n", (unsigned int) cmd);
 	}
 #endif
 
-	foo = sys_ioctl(fd, cmd, arg);
+	ret = sys_ioctl(fd, cmd, arg);
 	/* so stupid... */
-	return (foo == -EINVAL ? -EOPNOTSUPP : foo);
+	ret = (ret == -EINVAL ? -EOPNOTSUPP : ret);
+out:
+	return ret;
 }
 
 

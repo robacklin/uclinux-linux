@@ -2,7 +2,7 @@
  *
  * linux/fs/autofs/waitq.c
  *
- *  Copyright 1997 Transmeta Corporation -- All Rights Reserved
+ *  Copyright 1997-1998 Transmeta Corporation -- All Rights Reserved
  *
  * This file is part of the Linux kernel and is made available under
  * the terms of the GNU General Public License, version 2, or at your
@@ -10,7 +10,7 @@
  *
  * ------------------------------------------------------------------------- */
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/signal.h>
 #include <linux/file.h>
@@ -18,7 +18,10 @@
 
 /* We make this a static variable rather than a part of the superblock; it
    is better if we don't reassign numbers easily even across filesystems */
-static int autofs_next_wait_queue = 1;
+static autofs_wqt_t autofs_next_wait_queue = 1;
+
+/* These are the signals we allow interrupting a pending mount */
+#define SHUTDOWN_SIGS	(sigmask(SIGKILL) | sigmask(SIGINT) | sigmask(SIGQUIT))
 
 void autofs_catatonic_mode(struct autofs_sb_info *sbi)
 {
@@ -37,35 +40,41 @@ void autofs_catatonic_mode(struct autofs_sb_info *sbi)
 		wake_up(&wq->queue);
 		wq = nwq;
 	}
-	fput(sbi->pipe, sbi->pipe->f_inode);	/* Close the pipe */
+	fput(sbi->pipe);	/* Close the pipe */
+	autofs_hash_dputall(&sbi->dirhash); /* Remove all dentry pointers */
 }
 
 static int autofs_write(struct file *file, const void *addr, int bytes)
 {
-	unsigned short fs;
-	unsigned long old_signal;
+	unsigned long sigpipe, flags;
+	mm_segment_t fs;
 	const char *data = (const char *)addr;
-	int written = 0;
+	ssize_t wr = 0;
 
 	/** WARNING: this is not safe for writing more than PIPE_BUF bytes! **/
+
+	sigpipe = sigismember(&current->pending.signal, SIGPIPE);
 
 	/* Save pointer to user space and point back to kernel space */
 	fs = get_fs();
 	set_fs(KERNEL_DS);
 
-	old_signal = current->signal;
-
-	while ( bytes && (written = file->f_op->write(file->f_inode,file,data,bytes)) > 0 ) {
-		data += written;
-		bytes -= written;
+	while (bytes &&
+	       (wr = file->f_op->write(file,data,bytes,&file->f_pos)) > 0) {
+		data += wr;
+		bytes -= wr;
 	}
 
-	if ( written == -EPIPE && !(old_signal & (1 << (SIGPIPE-1))) ) {
-		/* Keep the currently executing process from receiving a
-		   SIGPIPE unless it was already supposed to get one */
-		current->signal &= ~(1 << (SIGPIPE-1));
-	}
 	set_fs(fs);
+
+	/* Keep the currently executing process from receiving a
+	   SIGPIPE unless it was already supposed to get one */
+	if (wr == -EPIPE && !sigpipe) {
+		spin_lock_irqsave(&current->sigmask_lock, flags);
+		sigdelset(&current->pending.signal, SIGPIPE);
+		recalc_sigpending(current);
+		spin_unlock_irqrestore(&current->sigmask_lock, flags);
+	}
 
 	return (bytes > 0);
 }
@@ -90,15 +99,23 @@ static void autofs_notify_daemon(struct autofs_sb_info *sbi, struct autofs_wait_
 		autofs_catatonic_mode(sbi);
 }
 
-int autofs_wait(struct autofs_sb_info *sbi, autofs_hash_t hash, const char *name, int len)
+int autofs_wait(struct autofs_sb_info *sbi, struct qstr *name)
 {
 	struct autofs_wait_queue *wq;
 	int status;
 
+	/* In catatonic mode, we don't wait for nobody */
+	if ( sbi->catatonic )
+		return -ENOENT;
+	
+	/* We shouldn't be able to get here, but just in case */
+	if ( name->len > NAME_MAX )
+		return -ENOENT;
+
 	for ( wq = sbi->queues ; wq ; wq = wq->next ) {
-		if ( wq->hash == hash &&
-		     wq->len == len &&
-		     wq->name && !memcmp(wq->name,name,len) )
+		if ( wq->hash == name->hash &&
+		     wq->len == name->len &&
+		     wq->name && !memcmp(wq->name,name->name,name->len) )
 			break;
 	}
 	
@@ -108,17 +125,17 @@ int autofs_wait(struct autofs_sb_info *sbi, autofs_hash_t hash, const char *name
 		if ( !wq )
 			return -ENOMEM;
 
-		wq->name = kmalloc(len,GFP_KERNEL);
+		wq->name = kmalloc(name->len,GFP_KERNEL);
 		if ( !wq->name ) {
 			kfree(wq);
 			return -ENOMEM;
 		}
 		wq->wait_queue_token = autofs_next_wait_queue++;
-		init_waitqueue(&wq->queue);
-		wq->hash = hash;
-		wq->len = len;
+		init_waitqueue_head(&wq->queue);
+		wq->hash = name->hash;
+		wq->len = name->len;
 		wq->status = -EINTR; /* Status return if interrupted */
-		memcpy(wq->name, name, len);
+		memcpy(wq->name, name->name, name->len);
 		wq->next = sbi->queues;
 		sbi->queues = wq;
 
@@ -128,9 +145,34 @@ int autofs_wait(struct autofs_sb_info *sbi, autofs_hash_t hash, const char *name
 	} else
 		wq->wait_ctr++;
 
+	/* wq->name is NULL if and only if the lock is already released */
+
+	if ( sbi->catatonic ) {
+		/* We might have slept, so check again for catatonic mode */
+		wq->status = -ENOENT;
+		if ( wq->name ) {
+			kfree(wq->name);
+			wq->name = NULL;
+		}
+	}
+
 	if ( wq->name ) {
-		/* wq->name is NULL if and only if the lock is released */
+		/* Block all but "shutdown" signals while waiting */
+		sigset_t oldset;
+		unsigned long irqflags;
+
+		spin_lock_irqsave(&current->sigmask_lock, irqflags);
+		oldset = current->blocked;
+		siginitsetinv(&current->blocked, SHUTDOWN_SIGS & ~oldset.sig[0]);
+		recalc_sigpending(current);
+		spin_unlock_irqrestore(&current->sigmask_lock, irqflags);
+
 		interruptible_sleep_on(&wq->queue);
+
+		spin_lock_irqsave(&current->sigmask_lock, irqflags);
+		current->blocked = oldset;
+		recalc_sigpending(current);
+		spin_unlock_irqrestore(&current->sigmask_lock, irqflags);
 	} else {
 		DPRINTK(("autofs_wait: skipped sleeping\n"));
 	}
@@ -144,7 +186,7 @@ int autofs_wait(struct autofs_sb_info *sbi, autofs_hash_t hash, const char *name
 }
 
 
-int autofs_wait_release(struct autofs_sb_info *sbi, unsigned long wait_queue_token, int status)
+int autofs_wait_release(struct autofs_sb_info *sbi, autofs_wqt_t wait_queue_token, int status)
 {
 	struct autofs_wait_queue *wq, **wql;
 

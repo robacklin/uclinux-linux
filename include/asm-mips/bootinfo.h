@@ -1,252 +1,230 @@
 /*
- * bootinfo.h -- Definition of the Linux/MIPS boot information structure
- *
- * Copyright (C) 1994 by Waldorf Electronics
- * Written by Ralf Baechle and Andreas Busse
- *
- * Based on Linux/68k linux/include/linux/bootstrap.h
- * Copyright (C) 1992 by Greg Harp
- *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
+ * License.  See the file COPYING in the main directory of this archive
  * for more details.
- */
-#ifndef __ASM_MIPS_BOOTINFO_H
-#define __ASM_MIPS_BOOTINFO_H
-
-/*
- * Valid machtype values
- */
-#define MACH_UNKNOWN		0		/* whatever...               */
-#define MACH_DESKSTATION_RPC44  1               /* Deskstation rPC44         */
-#define MACH_DESKSTATION_TYNE	2		/* Deskstation Tyne          */
-#define MACH_ACER_PICA_61	3		/* Acer PICA-61 (PICA1)      */
-#define MACH_MIPS_MAGNUM_4000	4		/* Mips Magnum 4000 "RC4030" */
-#define MACH_OLIVETTI_M700      5               /* Olivetti M700 */
-#define MACH_LAST               5
-
-#define MACH_NAMES { "unknown", "Deskstation rPC44", "Deskstation Tyne", \
-	"Acer PICA 61", "Mips Magnum 4000", "Olivetti M700" }
-
-/*
- * Valid cputype values
- */
-#define CPU_UNKNOWN		0
-#define CPU_R2000		1
-#define CPU_R3000		2
-#define CPU_R3000A		3
-#define CPU_R3041		4
-#define CPU_R3051		5
-#define CPU_R3052		6
-#define CPU_R3081		7
-#define CPU_R3081E		8
-#define CPU_R4000PC		9
-#define CPU_R4000SC		10
-#define CPU_R4000MC		11
-#define CPU_R4200		12
-#define CPU_R4400PC		13
-#define CPU_R4400SC		14
-#define CPU_R4400MC		15
-#define CPU_R4600		16
-#define CPU_R6000		17
-#define CPU_R6000A		18
-#define CPU_R8000		19
-#define CPU_R10000		20
-#define CPU_LAST                20
-
-#define CPU_NAMES { "unknown", "R2000", "R3000", "R3000A", "R3041", "R3051", \
-        "R3052", "R3081", "R3081E", "R4000PC", "R4000SC", "R4000MC",         \
-        "R4200", "R4400PC", "R4400SC", "R4400MC", "R4600", "R6000",          \
-        "R6000A", "R8000", "R10000" }
-
-#define CL_SIZE      (80)
-
-#ifndef __LANGUAGE_ASSEMBLY__
-
-/*
- * Some machine parameters passed by MILO. Note that bootinfo
- * *must* be in the data segment since the kernel clears the
- * bss segment directly after startup.
- */
-
-struct drive_info_struct {
-	char dummy[32];
-	};
-
-struct bootinfo {
-	/*
-	 * machine type
-	 */
-	unsigned long machtype;
-
-	/*
-	 * system CPU & FPU
-	 */
-	unsigned long cputype;
-
-	/*
-	 * Installed RAM
-	 */
-	unsigned long memlower;
-	unsigned long memupper;
-
-	/*
-	 * Cache Sizes (0xffffffff = unknown)
-	 */
-	unsigned long icache_size;
-	unsigned long icache_linesize;
-	unsigned long dcache_size;
-	unsigned long dcache_linesize;
-	unsigned long scache_size;
-	unsigned long scache_linesize;
-
-	/*
-	 * TLB Info
-	 */
-	unsigned long tlb_entries;
-
-	/*
-	 * DMA buffer size (Deskstation only)
-	 */
-	unsigned long dma_cache_size;
-	unsigned long dma_cache_base;
-
-	/*
-	 * Ramdisk Info
-	 */
-	unsigned long ramdisk_flags;		/* ramdisk flags */
-	unsigned long ramdisk_base;		/* address of the ram disk in mem */
-
-	/*
-	 * Boot flags for the kernel
-	 */
-	unsigned long mount_root_rdonly;
-	struct drive_info_struct drive_info;
-
-	/*
-	 * Video ram info (not in tty.h)
-	 */
-	unsigned long vram_base;		/* video ram base address */
-      
-	char command_line[CL_SIZE];		/* kernel command line parameters */
-  
-};
-
-#if 0
-/*
- * New style bootinfo
  *
- * Add new tags only at the end of the enum; *never* remove any tags
- * or you'll break compatibility!
+ * Copyright (C) 1995, 1996 by Ralf Baechle, Andreas Busse,
+ *                             Stoned Elipot and Paul M. Antoine.
  */
-enum bi_tag {	
-	/*
-	 * not a real tag
-	 */
-	dummy,
+#ifndef _ASM_BOOTINFO_H
+#define _ASM_BOOTINFO_H
 
-	/*
-	 * machine type
-	 */
-	machtype,
+#include <linux/types.h>
 
-	/*
-	 * system CPU & FPU
-	 */
-	cputype,
+/*
+ * Values for machgroup
+ */
+#define MACH_GROUP_UNKNOWN      0 /* whatever...                            */
+#define MACH_GROUP_JAZZ     	1 /* Jazz                                   */
+#define MACH_GROUP_DEC          2 /* Digital Equipment                      */
+#define MACH_GROUP_ARC		3 /* Wreckstation Tyne, rPC44, possibly other */
+#define MACH_GROUP_SNI_RM	4 /* Siemens Nixdorf RM series              */
+#define MACH_GROUP_ACN		5
+#define MACH_GROUP_SGI          6 /* Silicon Graphics                       */
+#define MACH_GROUP_COBALT       7 /* Cobalt servers		 	    */
+#define MACH_GROUP_NEC_DDB	8 /* NEC DDB                                */
+#define MACH_GROUP_BAGET	9 /* Baget                                  */
+#define MACH_GROUP_COSINE      10 /* CoSine Orion                           */
+#define MACH_GROUP_GALILEO     11 /* Galileo Eval Boards                    */
+#define MACH_GROUP_MOMENCO     12 /* Momentum Boards                        */
+#define MACH_GROUP_ITE         13 /* ITE Semi Eval Boards                   */
+#define MACH_GROUP_PHILIPS     14
+#define MACH_GROUP_GLOBESPAN   15 /* Globespan PVR Referrence Board         */
+#define MACH_GROUP_SIBYTE      16 /* Sibyte Eval Boards                     */
+#define MACH_GROUP_TOSHIBA     17 /* Toshiba Reference Systems TSBREF       */
+#define MACH_GROUP_ALCHEMY     18 /* Alchemy Semi Eval Boards               */
+#define MACH_GROUP_NEC_VR41XX  19 /* NEC Vr41xx based boards/gadgets        */
+#define MACH_GROUP_HP_LJ       20 /* Hewlett Packard LaserJet               */
+#define MACH_GROUP_LASAT       21
+#define MACH_GROUP_TITAN       22 /* PMC-Sierra Titan 			    */
 
-	/*
-	 * Installed RAM
-	 */
-	memlower,
-	memupper,
+/*
+ * Valid machtype values for group unknown (low order halfword of mips_machtype)
+ */
+#define MACH_UNKNOWN		0	/* whatever...			*/
 
-	/*
-	 * Cache Sizes (0xffffffff = unknown)
-	 */
-	icache_size,
-	icache_linesize,
-	dcache_size,
-	dcache_linesize,
-	scache_size,
-	scache_linesize,
+/*
+ * Valid machtype values for group JAZZ
+ */
+#define MACH_ACER_PICA_61	0	/* Acer PICA-61 (PICA1)		*/
+#define MACH_MIPS_MAGNUM_4000	1	/* Mips Magnum 4000 "RC4030"	*/
+#define MACH_OLIVETTI_M700      2	/* Olivetti M700-10 (-15 ??)    */
 
-	/*
-	 * TLB Info
-	 */
-	tlb_entries,
+/*
+ * Valid machtype for group DEC
+ */
+#define MACH_DSUNKNOWN		0
+#define MACH_DS23100		1	/* DECstation 2100 or 3100	*/
+#define MACH_DS5100		2	/* DECsystem 5100		*/
+#define MACH_DS5000_200		3	/* DECstation 5000/200		*/
+#define MACH_DS5000_1XX		4	/* DECstation 5000/120, 125, 133, 150 */
+#define MACH_DS5000_XX		5	/* DECstation 5000/20, 25, 33, 50 */
+#define MACH_DS5000_2X0		6	/* DECstation 5000/240, 260	*/
+#define MACH_DS5400		7	/* DECsystem 5400		*/
+#define MACH_DS5500		8	/* DECsystem 5500		*/
+#define MACH_DS5800		9	/* DECsystem 5800		*/
+#define MACH_DS5900		10	/* DECsystem 5900		*/
 
-	/*
-	 * DMA buffer size (Deskstation only)
-	 */
-	dma_cache_size,
-	dma_cache_base,
+/*
+ * Valid machtype for group ARC
+ */
+#define MACH_DESKSTATION_RPC44  0	/* Deskstation rPC44 */
+#define MACH_DESKSTATION_TYNE	1	/* Deskstation Tyne */
 
-	/*
-	 * Ramdisk Info
-	 */
-	ramdisk_size,		/* ramdisk size in 1024 byte blocks */
-	ramdisk_base,		/* address of the ram disk in mem */
+/*
+ * Valid machtype for group SNI_RM
+ */
+#define MACH_SNI_RM200_PCI	0	/* RM200/RM300/RM400 PCI series */
 
-	/*
-	 * Boot flags for the kernel
-	 */
-	mount_root_rdonly,
-	drive_info,
+/*
+ * Valid machtype for group ACN
+ */
+#define MACH_ACN_MIPS_BOARD	0       /* ACN MIPS single board        */
 
-	/*
-	 * Video ram info (not in tty.h)
-	 */
-	vram_base,		/* video ram base address */
-      
-	command_line		/* kernel command line parameters */
-  
+/*
+ * Valid machtype for group SGI
+ */
+#define MACH_SGI_IP22		0	/* Indy, Indigo2, Challenge S */
+#define MACH_SGI_IP27		1	/* Origin 200, Origin 2000, Onyx 2 */
+#define MACH_SGI_IP28		2	/* Indigo2 Impact */
+#define MACH_SGI_IP32		3	/* O2 */
+
+/*
+ * Valid machtype for group COBALT
+ */
+#define MACH_COBALT_27		0	/* Proto "27" hardware */
+
+/*
+ * Valid machtype for group NEC DDB
+ */
+#define MACH_NEC_DDB5074	0	/* NEC DDB Vrc-5074 */
+#define MACH_NEC_DDB5476	1	/* NEC DDB Vrc-5476 */
+#define MACH_NEC_DDB5477	2	/* NEC DDB Vrc-5477 */
+#define MACH_NEC_ROCKHOPPER	3	/* Rockhopper base board */
+#define MACH_NEC_ROCKHOPPERII	4	/* Rockhopper II base board */
+
+/*
+ * Valid machtype for group BAGET
+ */
+#define MACH_BAGET201		0	/* BT23-201 */
+#define MACH_BAGET202		1	/* BT23-202 */
+
+/*
+ * Cosine boards.
+ */
+#define MACH_COSINE_ORION	0
+
+/*
+ * Valid machtype for group GALILEO
+ */
+#define MACH_EV96100		0	/* EV96100 */
+#define MACH_EV64120A		1	/* EV64120A */
+
+/*
+ * Valid machtype for group MOMENCO
+ */
+#define MACH_MOMENCO_OCELOT		0
+#define MACH_MOMENCO_OCELOT_G		1
+#define MACH_MOMENCO_OCELOT_C		2
+#define MACH_MOMENCO_JAGUAR_ATX		3
+
+/*
+ * Valid machtype for group ITE
+ */
+#define MACH_QED_4N_S01B	0	/* ITE8172 based eval board */
+
+/*
+ * Valid machtype for group Globespan
+ */
+#define MACH_IVR		0	/* IVR eval board */
+
+/*
+ * Valid machtype for group PHILIPS
+ */
+#define MACH_PHILIPS_NINO	0	/* Nino */
+#define MACH_PHILIPS_VELO	1	/* Velo */
+
+/*
+ * Valid machtype for group SIBYTE
+ */
+#define MACH_SWARM              0
+
+/*
+ * Valid machtypes for group Toshiba
+ */
+#define MACH_PALLAS		0
+#define MACH_TOPAS		1
+#define MACH_JMR		2
+#define MACH_TOSHIBA_JMR3927	3	/* JMR-TX3927 CPU/IO board */
+#define MACH_TOSHIBA_RBTX4927	4
+#define MACH_TOSHIBA_RBTX4937	5
+#define GROUP_TOSHIBA_NAMES	{ "Pallas", "TopasCE", "JMR", "JMR TX3927", \
+				  "RBTX4927", "RBTX4937" }
+
+/*
+ * Valid machtype for group LASAT
+ */
+#define MACH_LASAT_100		0	/* Masquerade II/SP100/SP50/SP25 */
+#define MACH_LASAT_200		1	/* Masquerade PRO/SP200 */
+
+/*
+ * Valid machtype for group Alchemy
+ */
+#define MACH_PB1000		0	/* Au1000-based eval board */
+#define MACH_PB1100		1	/* Au1100-based eval board */
+#define MACH_PB1500		2	/* Au1500-based eval board */
+#define MACH_DB1000		3       /* Au1000-based eval board */
+#define MACH_DB1100		4       /* Au1100-based eval board */
+#define MACH_DB1500		5       /* Au1500-based eval board */
+#define MACH_XXS1500		6       /* Au1500-based eval board */
+#define MACH_MTX1		7	/* 4G MTX-1 Au1500-based board */
+#define MACH_CSB250		8	/* Cogent Au1500 */
+#define MACH_PB1550     	9       /* Au1550-based eval board */
+
+/*
+ * Valid machtype for group NEC_VR41XX
+ */
+#define MACH_NEC_OSPREY		0	/* Osprey eval board */
+#define MACH_NEC_EAGLE		1	/* NEC Eagle/Hawk board */
+#define MACH_ZAO_CAPCELLA	2	/* ZAO Networks Capcella */
+#define MACH_VICTOR_MPC30X	3	/* Victor MP-C303/304 */
+#define MACH_IBM_WORKPAD	4	/* IBM WorkPad z50 */
+#define MACH_CASIO_E55		5	/* CASIO CASSIOPEIA E-10/15/55/65 */
+#define MACH_TANBAC_TB0226	6	/* TANBAC TB0226 (MBASE) */
+#define MACH_TANBAC_TB0229	7	/* TANBAC TB0229 (VR4131DIMM) */
+
+/*
+ * Valid machtype for group TITAN
+ */
+#define	MACH_TITAN_YOSEMITE	1 	/* PMC-Sierra Yosemite */
+
+#define CL_SIZE			(256)
+
+const char *get_system_type(void);
+
+extern unsigned long mips_machtype;
+extern unsigned long mips_machgroup;
+
+#define BOOT_MEM_MAP_MAX	32
+#define BOOT_MEM_RAM		1
+#define BOOT_MEM_ROM_DATA	2
+#define BOOT_MEM_RESERVED	3
+
+/*
+ * A memory map that's built upon what was determined
+ * or specified on the command line.
+ */
+struct boot_mem_map {
+	int nr_map;
+	struct {
+		phys_t addr;	/* start of memory segment */
+		phys_t size;	/* size of memory segment */
+		long type;		/* type of memory segment */
+	} map[BOOT_MEM_MAP_MAX];
 };
 
-typedef struct {
-	bi_tag		tag;
-	unsigned long	size;
-} tag;
-#endif
+extern struct boot_mem_map boot_mem_map;
 
-extern struct bootinfo boot_info;
+extern void add_memory_region(phys_t start, phys_t size, long type);
 
-/*
- * Defaults, may be overwritten by milo. We initialize
- * them to make sure that both boot_info and screen_info
- * are in the .data segment since the .bss segment is
- * cleared during startup.
- */
-#define BOOT_INFO { 0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,0, {{0,}}, 0, "" }
-#define SCREEN_INFO {0, 0, {0, }, 52, 3, 80, 4626, 3, 9, 50}
-
-#else /* !__LANGUAGE_ASSEMBLY__ */
-
-/*
- * Same structure, but as offsets for usage within assembler source.
- * Don't mess with struct bootinfo without changing offsets too!
- */
-
-#define OFFSET_BOOTINFO_MACHTYPE           0
-#define OFFSET_BOOTINFO_CPUTYPE            4
-#define OFFSET_BOOTINFO_MEMLOWER           8
-#define OFFSET_BOOTINFO_MEMUPPER          12
-#define OFFSET_BOOTINFO_ICACHE_SIZE       16
-#define OFFSET_BOOTINFO_ICACHE_LINESIZE   20
-#define OFFSET_BOOTINFO_DCACHE_SIZE       24
-#define OFFSET_BOOTINFO_DCACHE_LINESIZE   28
-#define OFFSET_BOOTINFO_SCACHE_SIZE       32
-#define OFFSET_BOOTINFO_SCACHE_LINESIZE   36
-#define OFFSET_BOOTINFO_TLB_ENTRIES       40
-#define OFFSET_BOOTINFO_DMA_CACHE_SIZE    44
-#define OFFSET_BOOTINFO_DMA_CACHE_BASE    48
-#define OFFSET_BOOTINFO_RAMDISK_SIZE      52
-#define OFFSET_BOOTINFO_RAMDISK_BASE      56
-#define OFFSET_BOOTINFO_MOUNT_RD_ONLY     60
-#define OFFSET_BOOTINFO_DRIVE_INFO        64
-#define OFFSET_BOOTINFO_VRAM_BASE         96
-#define OFFSET_BOOTINFO_COMMAND_LINE      100
-
-#endif /* __LANGUAGE_ASSEMBLY__ */
-
-#endif /* __ASM_MIPS_BOOTINFO_H */
+#endif /* _ASM_BOOTINFO_H */

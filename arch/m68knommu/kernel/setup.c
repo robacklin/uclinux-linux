@@ -1,12 +1,14 @@
 /*
  *  linux/arch/m68knommu/kernel/setup.c
  *
- *  Copyright (C) 2000       Lineo Inc. (www.lineo.com)
  *  Copyleft  ()) 2000       James D. Schettine {james@telos-systems.com}
- *  Copyright (C) 1999-2002  Greg Ungerer (gerg@snapgear.com)
- *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@lineo.ca>
+ *  Copyright (C) 1999-2004  Greg Ungerer (gerg@snapgear.com)
+ *  Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uClinux.org>
  *  Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
  *  Copyright (C) 1995       Hamish Macdonald
+ *  Copyright (C) 2000       Lineo Inc. (www.lineo.com) 
+ *  Copyright (C) 2001 	     Lineo, Inc. <www.lineo.com>
+ *
  */
 
 /*
@@ -25,7 +27,8 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/major.h>
-#include <linux/ctype.h>
+#include <linux/bootmem.h>
+#include <linux/seq_file.h>
 
 #include <asm/setup.h>
 #include <asm/irq.h>
@@ -36,37 +39,34 @@
 #include <asm/pgtable.h>
 #endif
 
-#ifdef CONFIG_M68332
-#include <asm/MC68332.h>
-#endif
-
-extern void register_console(void (*proc)(const char *));
-/*  conswitchp               = &fb_con;*/
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#ifdef CONFIG_FRAMEBUFFER
-extern struct consw fb_con;
-#endif
-#endif
-
 #if defined (CONFIG_M68360)
-#include <asm/quicc_cpm.h>
+#include<asm/m68360.h>  //Get the definition of QUICC type
 extern void m360_cpm_reset(void);
+extern QUICC *pquicc;
+extern struct console sercons;
 
+// Mask to select if the PLL prescaler is enabled.
+#define MCU_PREEN   ((unsigned short)(0x0001 << 13))
+
+#if defined(CONFIG_UCQUICC)
+#define OSCILLATOR  (unsigned long int)33000000
 #endif
 
+unsigned long int system_clock;
+#endif
+
+#if defined(CONFIG_M68VZ328)
+#include <asm/MC68VZ328.h>
+#endif
+  
 unsigned long rom_length;
 unsigned long memory_start;
 unsigned long memory_end;
 
-#define COMMAND_LINE_LENGTH 512
-#define CONSOLE_DEVICE_LENGTH 32
+struct task_struct *_current_task;
 
-char command_line[COMMAND_LINE_LENGTH];
-char saved_command_line[COMMAND_LINE_LENGTH];
-char console_device[CONSOLE_DEVICE_LENGTH];
-
-char console_default[] = "CONSOLE=/dev/ttyS0";
+char command_line[512];
+char saved_command_line[512];
 
 /* setup some dummy routines */
 static void dummy_waitbut(void)
@@ -84,11 +84,11 @@ void (*mach_init_IRQ) (void) = NULL;
 void (*(*mach_default_handler)[]) (int, void *, struct pt_regs *) = NULL;
 int (*mach_request_irq) (unsigned int, void (*)(int, void *, struct pt_regs *),
                          unsigned long, const char *, void *);
-int (*mach_free_irq) (unsigned int, void *);
+void (*mach_free_irq) (unsigned int irq, void *dev_id) = NULL;
 void (*mach_enable_irq) (unsigned int) = NULL;
 void (*mach_disable_irq) (unsigned int) = NULL;
 int (*mach_get_irq_list) (char *) = NULL;
-int (*mach_process_int) (int, struct pt_regs *) = NULL;
+void (*mach_process_int) (int irq, struct pt_regs *fp) = NULL;
 void (*mach_trap_init) (void);
 /* machine dependent timer functions */
 unsigned long (*mach_gettimeoffset) (void) = NULL;
@@ -99,11 +99,9 @@ void (*mach_mksound)( unsigned int count, unsigned int ticks ) = NULL;
 void (*mach_reset)( void ) = NULL;
 void (*waitbut)(void) = dummy_waitbut;
 void (*mach_debug_init)(void) = NULL;
+void (*mach_halt)( void ) = NULL;
+void (*mach_power_off)( void ) = NULL;
 
-/* Other prototypes */
-#ifdef CONFIG_DEV_FLASH
-void flash_probe(void);
-#endif
 
 #ifdef CONFIG_M68000
 	#define CPU "MC68000"
@@ -114,14 +112,14 @@ void flash_probe(void);
 #ifdef CONFIG_M68EZ328
 	#define CPU "MC68EZ328"
 #endif
+#ifdef CONFIG_M68VZ328
+	#define CPU "MC68VZ328"
+#endif
 #ifdef CONFIG_M68332
 	#define CPU "MC68332"
 #endif
 #ifdef CONFIG_M68360
 	#define CPU "MC68360"
-#endif
-#ifdef CONFIG_M68376
-	#define CPU "MC68376"
 #endif
 #if defined(CONFIG_M5206)
 	#define	CPU "COLDFIRE(m5206)"
@@ -129,11 +127,29 @@ void flash_probe(void);
 #if defined(CONFIG_M5206e)
 	#define	CPU "COLDFIRE(m5206e)"
 #endif
+#if defined(CONFIG_M5208)
+	#define CPU "COLDFIRE(m5208)"
+#endif
+#if defined(CONFIG_M5235)
+	#define CPU "COLDFIRE(m5235)"
+#endif
 #if defined(CONFIG_M5249)
-	#define	CPU "COLDFIRE(m5249)"
+	#define CPU "COLDFIRE(m5249)"
+#endif
+#if defined(CONFIG_M5271)
+	#define CPU "COLDFIRE(m5270/5271)"
+#endif
+#if defined(CONFIG_M5275)
+	#define CPU "COLDFIRE(m5274/5275)"
 #endif
 #if defined(CONFIG_M5272)
-	#define	CPU "COLDFIRE(m5272)"
+	#define CPU "COLDFIRE(m5272)"
+#endif
+#if defined(CONFIG_M5280)
+	#define CPU "COLDFIRE(m5280)"
+#endif
+#if defined(CONFIG_M5282)
+	#define CPU "COLDFIRE(m5282)"
 #endif
 #if defined(CONFIG_M5307)
 	#define	CPU "COLDFIRE(m5307)"
@@ -141,109 +157,32 @@ void flash_probe(void);
 #if defined(CONFIG_M5407)
 	#define	CPU "COLDFIRE(m5407)"
 #endif
+#if defined(CONFIG_M547x)
+	#define	CPU "COLDFIRE(m547x)"
+#endif
 #ifndef CPU
 	#define	CPU "UNKOWN"
 #endif
 
-
-/*
- *	Setup the console. There may be a console defined in
- *	the command line arguments, so we look there first. If the
- *	command line arguments don't exist then we default to the
- *	first serial port. If we are going to use a console then
- *	setup its device name and the UART for it.
- */
-
-void setup_console(void)
-{
-#if defined(CONFIG_COLDFIRE) || defined(CONFIG_M68360)
-	char *sp, *cp;
-	int i;
-#ifdef CONFIG_COLDFIRE
-	extern void rs_console_init(void);
-	extern void rs_console_print(const char *b);
-	extern int rs_console_setup(char *arg);
-#endif
-
-	/* Quickly check if any command line arguments for CONSOLE. */
-	for (sp = NULL, i = 0; i < sizeof(command_line) - 8; i++) {
-		if (command_line[i] == 0)
-			break;
-		if (command_line[i] == 'C' || command_line[i] == 'c') {
-			if (strncmp(&command_line[i], "CONSOLE=", 8) == 0 ||
-					strncmp(&command_line[i], "console=", 8) == 0) {
-				sp = &command_line[i + 8];
-				/* break; dont break so we find the last console= entry */
-			}
-		}
-	}
-
-	/* If no CONSOLE defined then default one */
-	if (sp == NULL) {
-		/* make sure init gets a copy, tack it on the end */
-		if (sizeof(command_line) - strlen(command_line) >
-				strlen(console_default) + 2) {
-			strcat(command_line, " ");
-			strcat(command_line, console_default);
-		}
-		sp = console_default + 8;
-	}
-
-	cp = sp; /* save a copy */
-
-	/* If console specified then copy it into name buffer */
-	for (i = 0; i < sizeof(console_device) - 1; i++) {
-		if (*sp == '\0' || isspace(*sp) || *sp == ',')
-			break;
-		console_device[i] = *sp++;
-	}
-	console_device[i] = 0;
-
-	/* If a serial console then init it */
-#ifdef CONFIG_COLDFIRE
-	if (rs_console_setup(cp)) {
-		rs_console_init();
-		register_console(rs_console_print);
-	}
-#endif
-#ifdef CONFIG_M68360
-	if (rs_quicc_console_setup(cp))
-	{
-		console_print_function_t print_function = rs_quicc_console_init();
-
-		if (print_function)
-			register_console(print_function);
-		else
-			while(1);
-	}
-#endif
-#endif /* CONFIG_COLDFIRE || M68360 */
-#if defined(CONFIG_68332_SERIAL)
-	extern void console_print_68332(const char *b);
-		register_console(console_print_68332);
-#endif
-}
-
-#if defined( CONFIG_TELOS) || defined( CONFIG_UCSIMM ) || (defined( CONFIG_PILOT ) && defined( CONFIG_M68328 ))
+/* (es) */
+/* note: why is this defined here?  the must be a better place to put this */
+#if defined( CONFIG_TELOS) || defined( CONFIG_UCDIMM ) || defined( CONFIG_UCSIMM ) || defined(CONFIG_DRAGEN2) || (defined( CONFIG_PILOT ) && defined( CONFIG_M68328 ))
 #define CAT_ROMARRAY
 #endif
+/* (/es) */
 
-void setup_arch(char **cmdline_p,
-		unsigned long * memory_start_p, unsigned long * memory_end_p)
+extern int _stext, _etext, _sdata, _edata, _sbss, _ebss, _end;
+extern unsigned int _ramstart, _ramend;
+
+void setup_arch(char **cmdline_p)
 {
-	extern int _stext, _etext;
-#ifdef DEBUG
-	extern int _sdata;
-	extern int _sbss, _ebss;
-#endif
-	extern int _edata, _end;
-	extern int _ramstart, _ramend;
+	int bootmap_size;
 
-#ifdef CAT_ROMARRAY
+#if defined(CAT_ROMARRAY) && defined(DEBUG)
 	extern int __data_rom_start;
 	extern int __data_start;
 	int *romarray = (int *)((int) &__data_rom_start +
-				      (int)&_edata - (int)&__data_start);
+			      (int)&_edata - (int)&__data_start);
 #endif
 
 #if defined(CONFIG_CHR_DEV_FLASH) || defined(CONFIG_BLK_DEV_FLASH)
@@ -253,38 +192,49 @@ void setup_arch(char **cmdline_p,
 	flash_probe();
 #endif
 
-#ifdef CONFIG_COLDFIRE
-	memory_start = _ramstart;
-	memory_end = _ramend - 4096; /* <- stack area */
-#else
- #if defined(CONFIG_PILOT) && defined(CONFIG_M68EZ328) && \
- 		!defined(CONFIG_PILOT_INCROMFS)
-	memory_start = _ramstart;
- #else
-	memory_start = &_end;
- #endif
-	memory_end = &_ramend - 4096; /* <- stack area */
-#endif /* CONFIG_COLDFIRE */
+	memory_start = PAGE_ALIGN(_ramstart);
+	memory_end = _ramend; /* by now the stack is part of the init task */
 
-#ifdef CONFIG_MWI
-	memory_start = _ramstart;
-	memory_end = _ramend - 0x400;
+	init_mm.start_code = (unsigned long) &_stext;
+	init_mm.end_code = (unsigned long) &_etext;
+	init_mm.end_data = (unsigned long) &_edata;
+#if 0 /* DAVIDM - don't set brk just incase someone decides to use it */
+	init_mm.brk = (unsigned long) &_end;
+#else
+	init_mm.brk = (unsigned long) 0; 
 #endif
 
+
 #if defined (CONFIG_M68360)
-	if (quicc_cpm_init())
-		while(1);
+    m360_cpm_reset();
+
+   /* Calculate the real system clock value. */
+   {
+       unsigned int local_pllcr = (unsigned int)(pquicc->sim_pllcr);
+       if( local_pllcr & MCU_PREEN ) // If the prescaler is dividing by 128
+       {
+           int mf = (int)(pquicc->sim_pllcr & 0x0fff);
+           system_clock = (OSCILLATOR / 128) * (mf + 1);
+       }
+       else
+       {
+           int mf = (int)(pquicc->sim_pllcr & 0x0fff);
+           system_clock = (OSCILLATOR) * (mf + 1);
+       }
+   }
+
+   /* Setup SMC 2 as a serial console */
+   serial_console_setup(&sercons, NULL);
+   console_360_init(0, 0);
 #endif
 
 	config_BSP(&command_line[0], sizeof(command_line));
 
-	setup_console();
-	printk("\x0F\r\n\nuClinux/" CPU "\n");
+	printk("\r\nuClinux/" CPU "\n");
 
-#if defined( CONFIG_M68360 )
-	printk("uCquicc support by Lineo Inc. <mleslie@lineo.com>\n");
+#ifdef CONFIG_UCDIMM
+	printk("uCdimm by Arcturus Networks, Inc. <www.arcturusnetworks.com>\n");
 #endif
-
 #ifdef CONFIG_COLDFIRE
 	printk("COLDFIRE port done by Greg Ungerer, gerg@snapgear.com\n");
 #ifdef CONFIG_M5307
@@ -296,6 +246,28 @@ void setup_arch(char **cmdline_p,
 #ifdef CONFIG_TELOS
 	printk("Modified for Omnia ToolVox by James D. Schettine, james@telos-systems.com\n");
 #endif
+#if defined(CONFIG_M5307) || defined(CONFIG_M5407)
+	{
+		/*
+		 * Read the reset status register and print a message regarding
+		 * the source of the reset. This may provide usefull information
+		 * in debugging a system (especially one with a watchdog timer).
+		 * I know the 5407 has a reset status register and the 5307 is
+		 * very similar to the 5407. I am assuming the 5307's RSR is
+		 * the same as the 5407's RSR. If other coldfire's have the
+		 * same RSR, feel free to add them to the list.
+		 */
+		volatile unsigned char  *mbar =
+			(volatile unsigned char *) MCF_MBAR;
+		if((*(mbar + MCFSIM_RSR)) & MCFSIM_RSR_HRST)
+			printk("Coldfire was last reset by a hard reset.\n");
+		else if((*(mbar + MCFSIM_RSR)) & MCFSIM_RSR_SWTR)
+			printk("Coldfire was last reset by a software watchdog reset.\n");
+		else
+			printk("Coldfire was last reset for unknown reason.\n");
+		*(mbar + MCFSIM_RSR) = 0;
+	}
+#endif
 #endif
 	printk("Flat model support (C) 1998,1999 Kenneth Albanowski, D. Jeff Dionne\n");
 
@@ -304,7 +276,7 @@ void setup_arch(char **cmdline_p,
 #endif
 
 #if defined( CONFIG_PILOT ) && defined( CONFIG_M68EZ328 )
-	printk("PalmV support by Lineo Inc. <jeff@uClinux.com>\n");
+	printk("PalmV support by <jeff@uClinux.org>\n");
 #endif
 
 #ifdef CONFIG_M68EZ328ADS
@@ -314,14 +286,25 @@ void setup_arch(char **cmdline_p,
 #ifdef CONFIG_ALMA_ANS
 	printk("Alma Electronics board support (C) 1999 Vladimir Gurevich <vgurevic@cisco.com>\n");
 #endif
+#if defined (CONFIG_M68360)
+    printk("QUICC port done by SED Systems <hamilton@sedsystems.ca>,\n");
+    printk("based on 2.0.38 port by <mleslie@ArcturusNetworks.com>.\n");
+#endif
+#ifdef CONFIG_DRAGEN2
+	printk("DragonEngine II board support by Georges Menie\n");
+#endif
 
 #ifdef CONFIG_CWEZ328
-	printk("Cwlinux cwez328 board support (C) 2002 Andrew Ip <aip@cwlinux.com>\n");
-#endif
-#ifdef CONFIG_MWI
-	printk("Mini Web Interface T10 Board Support (C) 2003 Gerold Boehler <gboehler@mail.austria.at>\n");
+	printk("cwez328 board support by 2002 Andrew Ip <aip@cwlinux.com> and Inky Lung <ilung@cwlinux.com>\n");
 #endif
 
+#ifdef CONFIG_CWVZ328
+	printk("cwvz328 board support by 2002 Andrew Ip <aip@cwlinux.com> and Inky Lung <ilung@cwlinux.com>\n");
+#endif
+
+#ifdef CONFIG_M5235
+	printk("MCF5235 support (C) 2004 Syntech Systems, Inc. Jate Sujjavanich, Rob Falkenhayn\n");
+#endif
 
 #ifdef DEBUG
 	printk("KERNEL -> TEXT=0x%06x-0x%06x DATA=0x%06x-0x%06x "
@@ -336,22 +319,11 @@ void setup_arch(char **cmdline_p,
 	       (int) &_ebss, (int) memory_start,
 #endif
 		(int) memory_start, (int) memory_end,
-		(int) memory_end,
-			((unsigned) &_ramend > (unsigned) &_sdata &&
-				(unsigned) &_ramend < (unsigned) &_end) ?
-				(unsigned) _ramend : (unsigned) &_ramend);
+		(int) memory_end, (int) _ramend);
 #endif
-
-	init_task.mm->start_code = (unsigned long) &_stext;
-	init_task.mm->end_code = (unsigned long) &_etext;
-	init_task.mm->end_data = (unsigned long) &_edata;
-	init_task.mm->brk = (unsigned long) &_end;
 
 #ifdef CONFIG_BLK_DEV_BLKMEM
 	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
-#endif
-#ifdef CONFIG_BLK_DEV_INITRD
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
 #endif
 
 	/* Keep a copy of command line */
@@ -362,28 +334,45 @@ void setup_arch(char **cmdline_p,
 #ifdef DEBUG
 	if (strlen(*cmdline_p)) 
 		printk("Command line: '%s'\n", *cmdline_p);
-	else
-		printk("No Command line passed\n");
 #endif
-	*memory_start_p = memory_start;
-	*memory_end_p = memory_end;
 	/*rom_length = (unsigned long)&_flashend - (unsigned long)&_romvec;*/
 	
-#ifdef CONFIG_CONSOLE
-#ifdef CONFIG_FRAMEBUFFER
-	conswitchp = &fb_con;
-#else
-	conswitchp = 0;
+#ifdef CONFIG_VT_CONSOLE
+#ifdef CONFIG_FB
+       conswitchp = &dummy_con;
 #endif
 #endif
 
+	/*
+	 * give all the memory to the bootmap allocator,  tell it to put the
+	 * boot mem_map at the start of memory
+	 */
+	bootmap_size = init_bootmem_node(
+			NODE_DATA(0),
+			memory_start >> PAGE_SHIFT, /* map goes here */
+			PAGE_OFFSET >> PAGE_SHIFT,	/* 0 on coldfire */
+			memory_end >> PAGE_SHIFT);
+	/*
+	 * free the usable memory,  we have to make sure we do not free
+	 * the bootmem bitmap so we then reserve it after freeing it :-)
+	 */
+	free_bootmem(memory_start, memory_end - memory_start);
+	reserve_bootmem(memory_start, bootmap_size);
+	/*
+	 * get kmalloc into gear
+	 */
+	paging_init();
 #ifdef DEBUG
 	printk("Done setup_arch\n");
 #endif
 
 }
 
-int get_cpuinfo(char * buffer)
+/*
+ *	Get CPU information for use by the procfs.
+ */
+
+static int show_cpuinfo(struct seq_file *m, void *v)
 {
     char *cpu, *mmu, *fpu;
     u_long clockfreq;
@@ -392,13 +381,32 @@ int get_cpuinfo(char * buffer)
     mmu = "none";
     fpu = "none";
 
-#ifdef CONFIG_COLDFIRE
-    clockfreq = loops_per_sec*3;
+#if defined(CONFIG_COLDFIRE)
+    clockfreq = (loops_per_jiffy*HZ)*3;
+#elif defined(CONFIG_DRAGONIXVZ)
+    clockfreq = (loops_per_jiffy*HZ)*29;
+#elif defined(CONFIG_UCDIMM)
+    {
+      unsigned short p, q;
+      unsigned short prot;
+      unsigned short sysclk_sel, presc1, presc2;
+
+      p    = PLLFSR & PLLFSR_PC_MASK;
+      q    = (PLLFSR & PLLFSR_QC_MASK) >> PLLFSR_QC_SHIFT;
+      prot = (PLLFSR & PLLFSR_PROT)? 1 : 0;
+
+      presc1 = (PLLCR & PLLCR_PRESC1) ? 1 : 0;
+      presc2 = (PLLCR & PLLCR_PRESC2) ? 1 : 0;
+      sysclk_sel = (PLLCR & PLLCR_SYSCLK_SEL_MASK) >> PLLCR_SYSCLK_SEL_SHIFT;
+
+      clockfreq = 2*(14*(p+1) + q+1) * 32768;
+      clockfreq = (clockfreq >> presc1) >> presc2;
+    }
 #else
-    clockfreq = loops_per_sec*16;
+    clockfreq = (loops_per_jiffy*HZ)*16;
 #endif
 
-    return(sprintf(buffer, "CPU:\t\t%s\n"
+    seq_printf(m, "CPU:\t\t%s\n"
 		   "MMU:\t\t%s\n"
 		   "FPU:\t\t%s\n"
 		   "Clocking:\t%lu.%1luMHz\n"
@@ -406,10 +414,33 @@ int get_cpuinfo(char * buffer)
 		   "Calibration:\t%lu loops\n",
 		   cpu, mmu, fpu,
 		   clockfreq/1000000,(clockfreq/100000)%10,
-		   loops_per_sec/500000,(loops_per_sec/5000)%100,
-		   loops_per_sec));
+		   (loops_per_jiffy*HZ)/500000,((loops_per_jiffy*HZ)/5000)%100,
+		   (loops_per_jiffy*HZ));
 
+	return 0;
 }
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? ((void *) 0x12345678) : NULL;
+}
+
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};
 
 void arch_gettod(int *year, int *mon, int *day, int *hour,
 		 int *min, int *sec)
@@ -418,4 +449,5 @@ void arch_gettod(int *year, int *mon, int *day, int *hour,
 	if (mach_gettod)
 		mach_gettod(year, mon, day, hour, min, sec);
 }
+
 

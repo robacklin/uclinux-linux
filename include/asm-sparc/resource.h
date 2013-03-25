@@ -1,4 +1,4 @@
-/* $Id: resource.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: resource.h,v 1.12 2000/09/23 02:09:21 davem Exp $
  * resource.h: Resource definitions.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -20,17 +20,31 @@
 #define RLIMIT_NOFILE	6		/* max number of open files */
 #define RLIMIT_NPROC	7		/* max number of processes */
 #define RLIMIT_MEMLOCK  8               /* max locked-in-memory address space */
-#define RLIM_NLIMITS	9
+#define RLIMIT_AS       9               /* address space limit */
+#define RLIMIT_LOCKS	10		/* maximum file locks held */
+
+#define RLIM_NLIMITS	11
+
+/*
+ * SuS says limits have to be unsigned.
+ * We make this unsigned, but keep the
+ * old value.
+ */
+#define RLIM_INFINITY	0x7fffffff
 
 #ifdef __KERNEL__
-
-#define INIT_RLIMITS							\
-{									\
-    {LONG_MAX, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
-    {LONG_MAX, LONG_MAX}, {_STK_LIM, _STK_LIM},				\
-    {       0, LONG_MAX}, {LONG_MAX, LONG_MAX},				\
-    {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER}, {NR_OPEN, NR_OPEN},	\
-    {LONG_MAX, LONG_MAX},                                               \
+#define INIT_RLIMITS			\
+{					\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {_STK_LIM, RLIM_INFINITY},		\
+    {       0, RLIM_INFINITY},		\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {INR_OPEN, INR_OPEN}, {0, 0},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY},	\
+    {RLIM_INFINITY, RLIM_INFINITY}	\
 }
 
 #endif /* __KERNEL__ */

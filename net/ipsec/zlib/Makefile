@@ -1,7 +1,7 @@
 
 .EXPORT_ALL_VARIABLES:
 
-CFLAGS += -I$(ROOTDIR)/freeswan/zlib
+EXTRA_CFLAGS += -I$(ROOTDIR)/freeswan/zlib -DNO_ERRNO_H
 
 VPATH = $(ROOTDIR)/freeswan/zlib
 

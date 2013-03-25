@@ -1,4 +1,4 @@
-/* $Id: checksum.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $ */
+/* $Id: checksum.h,v 1.32 2001/10/30 04:32:24 davem Exp $ */
 #ifndef __SPARC_CHECKSUM_H
 #define __SPARC_CHECKSUM_H
 
@@ -7,155 +7,20 @@
  *  Copyright(C) 1995 Linus Torvalds
  *  Copyright(C) 1995 Miguel de Icaza
  *  Copyright(C) 1996 David S. Miller
+ *  Copyright(C) 1996 Eddie C. Dost
+ *  Copyright(C) 1997 Jakub Jelinek
  *
  * derived from:
  *	Alpha checksum c-code
  *      ix86 inline assembly
+ *      RFC1071 Computing the Internet Checksum
  */
+ 
+#include <linux/in6.h>
+#include <asm/uaccess.h>
+#include <asm/cprefix.h>
 
-/*
- * computes the checksum of the TCP/UDP pseudo-header
- * returns a 16-bit checksum, already complemented
- */
-
-extern inline unsigned short csum_tcpudp_magic(unsigned long saddr,
-					       unsigned long daddr,
-					       unsigned short len,
-					       unsigned short proto,
-					       unsigned int sum)
-{
-	__asm__ __volatile__("
-		addcc	%0, %1, %0
-		addxcc	%0, %4, %0
-		addxcc	%0, %5, %0
-		addx	%0, %%g0, %0
-
-		! We need the carry from the addition of 16-bit
-		! significant addition, so we zap out the low bits
-		! in one half, zap out the high bits in another,
-		! shift them both up to the top 16-bits of a word
-		! and do the carry producing addition, finally
-		! shift the result back down to the low 16-bits.
-
-		! Actually, we can further optimize away two shifts
-		! because we know the low bits of the original
-		! value will be added to zero-only bits so cannot
-		! affect the addition result nor the final carry
-		! bit.
-
-		sll	%0, 16, %1
-		addcc	%0, %1, %0		! add and set carry, neat eh?
-		srl	%0, 16, %0		! shift back down the result
-		addx	%0, %%g0, %0		! get remaining carry bit
-		xnor	%%g0, %0, %0		! negate, sparc is cool
-		"
-		: "=&r" (sum), "=&r" (saddr)
-		: "0" (daddr), "1" (saddr), "r" (len+proto), "r" (sum));
-		return ((unsigned short) sum); 
-}
-
-extern inline unsigned short from32to16(unsigned long x)
-{
-	__asm__ __volatile__("
-		addcc	%0, %1, %0
-		srl	%0, 16, %0
-		addx	%%g0, %0, %0
-		"
-		: "=r" (x)
-		: "r" (x << 16), "0" (x));
-	return x;
-}
-
-extern inline unsigned long do_csum(unsigned char * buff, int len)
-{
-	int odd, count;
-	unsigned long result = 0;
-
-	if (len <= 0)
-		goto out;
-	odd = 1 & (unsigned long) buff;
-	if (odd) {
-		result = *buff;
-		len--;
-		buff++;
-	}
-	count = len >> 1;		/* nr of 16-bit words.. */
-	if (count) {
-		if (2 & (unsigned long) buff) {
-			result += *(unsigned short *) buff;
-			count--;
-			len -= 2;
-			buff += 2;
-		}
-		count >>= 1;		/* nr of 32-bit words.. */
-		if (count) {
-		        unsigned long carry = 0;
-			do {
-				unsigned long w = *(unsigned long *) buff;
-				count--;
-				buff += 4;
-				result += carry;
-				result += w;
-				carry = (w > result);
-			} while (count);
-			result += carry;
-			result = (result & 0xffff) + (result >> 16);
-		}
-		if (len & 2) {
-			result += *(unsigned short *) buff;
-			buff += 2;
-		}
-	}
-	if (len & 1)
-		result += (*buff << 8);
-	result = from32to16(result);
-	if (odd)
-		result = ((result >> 8) & 0xff) | ((result & 0xff) << 8);
-out:
-	return result;
-}
-
-/* ihl is always 5 or greater, almost always is 5, iph is always word
- * aligned but can fail to be dword aligned very often.
- */
-extern inline unsigned short ip_fast_csum(const unsigned char *iph, unsigned int ihl)
-{
-	unsigned int sum;
-
-	__asm__ __volatile__("
-		ld	[%1], %0
-		sub	%2, 4, %2
-		ld	[%1 + 0x4], %%g1
-		ld	[%1 + 0x8], %%g2
-		addcc	%%g1, %0, %0
-		addxcc	%%g2, %0, %0
-		ld	[%1 + 0xc], %%g1
-		ld	[%1 + 0x10], %%g2
-		addxcc	%%g1, %0, %0
-		addxcc	%0, %%g0, %0
-1:
-		addcc	%%g2, %0, %0
-		add	%1, 0x4, %1
-		addxcc	%0, %%g0, %0
-		subcc	%2, 0x1, %2
-		bne,a	1b
-		 ld	[%1 + 0x10], %%g2
-
-		sll	%0, 16, %2
-		addcc	%0, %2, %2
-		srl	%2, 16, %0
-		addx	%0, %%g0, %2
-		xnor	%%g0, %2, %0
-2:
-		"
-		: "=&r" (sum), "=&r" (iph), "=&r" (ihl)
-		: "1" (iph), "2" (ihl)
-		: "g1", "g2");
-	return sum;
-}
-
-/*
- * computes the checksum of a memory block at buff, length len,
+/* computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
  *
  * returns a 32-bit number suitable for feeding into itself
@@ -166,152 +31,230 @@ extern inline unsigned short ip_fast_csum(const unsigned char *iph, unsigned int
  *
  * it's best to have buff aligned on a 32-bit boundary
  */
-extern inline unsigned int csum_partial(unsigned char * buff, int len, unsigned int sum)
-{
-	__asm__ __volatile__("
-		mov	0, %%g5			! g5 = result
-		cmp	%1, 0
-		bgu,a	1f
-		 andcc	%0, 1, %%g7		! g7 = odd
+extern unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum);
 
-		b,a	9f
-
-1:
-		be,a	1f
-		 srl	%1, 1, %%g6		! g6 = count = (len >> 1)
-
-		sub	%1, 1, %1	! if(odd) { result = *buff;
-		ldub	[%0], %%g5	!           len--;
-		add	%0, 1, %0	!           buff++ }
-
-		srl	%1, 1, %%g6
-1:
-		cmp	%%g6, 0		! if (count) {
-		be,a	8f
-		 andcc	%1, 1, %%g0
-
-		andcc	%0, 2, %%g0	! if (2 & buff) {
-		be,a	1f
-		 srl	%%g6, 1, %%g6
-
-		sub	%1, 2, %1	!	result += *(unsigned short *) buff;
-		lduh	[%0], %%g1	!	count--; 
-		sub	%%g6, 1, %%g6	!	len -= 2;
-		add	%%g1, %%g5, %%g5!	buff += 2; 
-		add	%0, 2, %0	! }
-
-		srl	%%g6, 1, %%g6
-1:
-		cmp	%%g6, 0		! if (count) {
-		be,a	2f
-		 andcc	%1, 2, %%g0
-
-		ld	[%0], %%g1		! csum aligned 32bit words
-1:
-		add	%0, 4, %0
-		addcc	%%g1, %%g5, %%g5
-		addx	%%g5, %%g0, %%g5
-		subcc	%%g6, 1, %%g6
-		bne,a	1b
-		 ld	[%0], %%g1
-
-		sethi	%%hi(0xffff), %%g3
-		srl	%%g5, 16, %%g2
-		or	%%g3, %%lo(0xffff), %%g3
-		and	%%g5, %%g3, %%g5
-		add	%%g2, %%g5, %%g5! }
-
-		andcc	%1, 2, %%g0
-2:
-		be,a	8f		! if (len & 2) {
-		 andcc	%1, 1, %%g0
-
-		lduh	[%0], %%g1	!	result += *(unsigned short *) buff; 
-		add	%%g5, %%g1, %%g5!	buff += 2; 
-		add	%0, 2, %0	! }
-
-
-		andcc	%1, 1, %%g0
-8:
-		be,a	1f		! if (len & 1) {
-		 sll	%%g5, 16, %%g1
-
-		ldub	[%0], %%g1
-		sll	%%g1, 8, %%g1	!	result += (*buff << 8); 
-		add	%%g5, %%g1, %%g5! }
-
-		sll	%%g5, 16, %%g1
-1:
-		addcc	%%g1, %%g5, %%g5! result = from32to16(result);
-		srl	%%g5, 16, %%g1
-		addx	%%g0, %%g1, %%g5
-
-		orcc	%%g7, %%g0, %%g0! if(odd) {
-		be	9f
-		 srl	%%g5, 8, %%g1
-
-		and	%%g5, 0xff, %%g2!	result = ((result >> 8) & 0xff) |
-		and	%%g1, 0xff, %%g1!		((result & 0xff) << 8);
-		sll	%%g2, 8, %%g2
-		or	%%g2, %%g1, %%g5! }
-9:
-		addcc	%2, %%g5, %2	! add result and sum with carry
-		addx	%%g0, %2, %2
-	" :
-        "=&r" (buff), "=&r" (len), "=&r" (sum) :
-        "0" (buff), "1" (len), "2" (sum) :
-	"g1", "g2", "g3", "g5", "g6", "g7"); 
-
-	return sum;
-}
-
-/*
- * the same as csum_partial, but copies from fs:src while it
+/* the same as csum_partial, but copies from fs:src while it
  * checksums
  *
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
  */
-extern inline unsigned int csum_partial_copy(char *src, char *dst, int len, int sum)
-{
-	/*
-	 * The whole idea is to do the copy and the checksum at
-	 * the same time, but we do it the easy way now.
-	 *
-	 * At least csum on the source, not destination, for cache
-	 * reasons..
-	 */
-	sum = csum_partial(src, len, sum);
-	memcpy(dst, src, len);
-	return sum;
-}
 
-/*
- * this routine is used for miscellaneous IP-like checksums, mainly
- * in icmp.c
- */
-extern inline unsigned short ip_compute_csum(unsigned char * buff, int len)
-{
-	return ~from32to16(do_csum(buff,len));
-}
-
+/* FIXME: Remove these two macros ASAP */
+#define csum_partial_copy(src, dst, len, sum) \
+ 		       csum_partial_copy_nocheck(src,dst,len,sum)
 #define csum_partial_copy_fromuser(s, d, l, w)  \
-                       csum_partial_copy((char *) (s), (d), (l), (w))
+                         csum_partial_copy((char *) (s), (d), (l), (w))
+  
+extern unsigned int __csum_partial_copy_sparc_generic (const char *, char *);
+
+static inline unsigned int 
+csum_partial_copy_nocheck (const char *src, char *dst, int len, 
+			   unsigned int sum)
+{
+	register unsigned int ret asm("o0") = (unsigned int)src;
+	register char *d asm("o1") = dst;
+	register int l asm("g1") = len;
+
+	__asm__ __volatile__ (
+		"call " C_LABEL_STR(__csum_partial_copy_sparc_generic) "\n\t"
+		" mov %6, %%g7\n"
+	: "=&r" (ret), "=&r" (d), "=&r" (l)
+	: "0" (ret), "1" (d), "2" (l), "r" (sum)
+	: "o2", "o3", "o4", "o5", "o7",
+	  "g2", "g3", "g4", "g5", "g7",
+	  "memory", "cc");
+	return ret;
+}
+
+static inline unsigned int 
+csum_partial_copy_from_user(const char *src, char *dst, int len, 
+			    unsigned int sum, int *err)
+  {
+	if (!access_ok (VERIFY_READ, src, len)) {
+		*err = -EFAULT;
+		memset (dst, 0, len);
+		return sum;
+	} else {
+		register unsigned int ret asm("o0") = (unsigned int)src;
+		register char *d asm("o1") = dst;
+		register int l asm("g1") = len;
+		register unsigned int s asm("g7") = sum;
+
+		__asm__ __volatile__ (
+		".section __ex_table,#alloc\n\t"
+		".align 4\n\t"
+		".word 1f,2\n\t"
+		".previous\n"
+		"1:\n\t"
+		"call " C_LABEL_STR(__csum_partial_copy_sparc_generic) "\n\t"
+		" st %8, [%%sp + 64]\n"
+		: "=&r" (ret), "=&r" (d), "=&r" (l), "=&r" (s)
+		: "0" (ret), "1" (d), "2" (l), "3" (s), "r" (err)
+		: "o2", "o3", "o4", "o5", "o7", "g2", "g3", "g4", "g5",
+		  "cc", "memory");
+		return ret;
+	}
+  }
+  
+static inline unsigned int 
+csum_partial_copy_to_user(const char *src, char *dst, int len, 
+			  unsigned int sum, int *err)
+{
+	if (!access_ok (VERIFY_WRITE, dst, len)) {
+		*err = -EFAULT;
+		return sum;
+	} else {
+		register unsigned int ret asm("o0") = (unsigned int)src;
+		register char *d asm("o1") = dst;
+		register int l asm("g1") = len;
+		register unsigned int s asm("g7") = sum;
+
+		__asm__ __volatile__ (
+		".section __ex_table,#alloc\n\t"
+		".align 4\n\t"
+		".word 1f,1\n\t"
+		".previous\n"
+		"1:\n\t"
+		"call " C_LABEL_STR(__csum_partial_copy_sparc_generic) "\n\t"
+		" st %8, [%%sp + 64]\n"
+		: "=&r" (ret), "=&r" (d), "=&r" (l), "=&r" (s)
+		: "0" (ret), "1" (d), "2" (l), "3" (s), "r" (err)
+		: "o2", "o3", "o4", "o5", "o7",
+		  "g2", "g3", "g4", "g5",
+		  "cc", "memory");
+		return ret;
+	}
+}
+
+#define HAVE_CSUM_COPY_USER
+#define csum_and_copy_to_user csum_partial_copy_to_user
+
+/* ihl is always 5 or greater, almost always is 5, and iph is word aligned
+ * the majority of the time.
+ */
+static inline unsigned short ip_fast_csum(const unsigned char *iph,
+					  unsigned int ihl)
+{
+	unsigned short sum;
+
+	/* Note: We must read %2 before we touch %0 for the first time,
+	 *       because GCC can legitimately use the same register for
+	 *       both operands.
+	 */
+	__asm__ __volatile__("sub\t%2, 4, %%g4\n\t"
+			     "ld\t[%1 + 0x00], %0\n\t"
+			     "ld\t[%1 + 0x04], %%g2\n\t"
+			     "ld\t[%1 + 0x08], %%g3\n\t"
+			     "addcc\t%%g2, %0, %0\n\t"
+			     "addxcc\t%%g3, %0, %0\n\t"
+			     "ld\t[%1 + 0x0c], %%g2\n\t"
+			     "ld\t[%1 + 0x10], %%g3\n\t"
+			     "addxcc\t%%g2, %0, %0\n\t"
+			     "addx\t%0, %%g0, %0\n"
+			     "1:\taddcc\t%%g3, %0, %0\n\t"
+			     "add\t%1, 4, %1\n\t"
+			     "addxcc\t%0, %%g0, %0\n\t"
+			     "subcc\t%%g4, 1, %%g4\n\t"
+			     "be,a\t2f\n\t"
+			     "sll\t%0, 16, %%g2\n\t"
+			     "b\t1b\n\t"
+			     "ld\t[%1 + 0x10], %%g3\n"
+			     "2:\taddcc\t%0, %%g2, %%g2\n\t"
+			     "srl\t%%g2, 16, %0\n\t"
+			     "addx\t%0, %%g0, %0\n\t"
+			     "xnor\t%%g0, %0, %0"
+			     : "=r" (sum), "=&r" (iph)
+			     : "r" (ihl), "1" (iph)
+			     : "g2", "g3", "g4", "cc");
+	return sum;
+}
+
+/* Fold a partial checksum without adding pseudo headers. */
+static inline unsigned int csum_fold(unsigned int sum)
+{
+	unsigned int tmp;
+
+	__asm__ __volatile__("addcc\t%0, %1, %1\n\t"
+			     "srl\t%1, 16, %1\n\t"
+			     "addx\t%1, %%g0, %1\n\t"
+			     "xnor\t%%g0, %1, %0"
+			     : "=&r" (sum), "=r" (tmp)
+			     : "0" (sum), "1" (sum<<16)
+			     : "cc");
+	return sum;
+}
+
+static inline unsigned long csum_tcpudp_nofold(unsigned long saddr,
+					       unsigned long daddr,
+					       unsigned int len,
+					       unsigned short proto,
+					       unsigned int sum)
+{
+	__asm__ __volatile__("addcc\t%1, %0, %0\n\t"
+			     "addxcc\t%2, %0, %0\n\t"
+			     "addxcc\t%3, %0, %0\n\t"
+			     "addx\t%0, %%g0, %0\n\t"
+			     : "=r" (sum), "=r" (saddr)
+			     : "r" (daddr), "r" ((proto<<16)+len), "0" (sum),
+			       "1" (saddr)
+			     : "cc");
+	return sum;
+}
 
 /*
- *	Fold a partial checksum without adding pseudo headers
+ * computes the checksum of the TCP/UDP pseudo-header
+ * returns a 16-bit checksum, already complemented
  */
-extern inline unsigned int csum_fold(unsigned int sum)
+static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
+						   unsigned long daddr,
+						   unsigned short len,
+						   unsigned short proto,
+						   unsigned int sum) 
 {
-	__asm__ __volatile__("
-		addcc	%0, %1, %0
-		srl	%0, 16, %0
-		addx	%%g0, %0, %0
-		xnor	%%g0, %0, %0
-		"
-		: "=r" (sum)
-		: "r" (sum << 16), "0" (sum)); 
-	return sum;
+	return csum_fold(csum_tcpudp_nofold(saddr,daddr,len,proto,sum));
+}
+
+#define _HAVE_ARCH_IPV6_CSUM
+
+static inline unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
+						 struct in6_addr *daddr,
+						 __u32 len,
+						 unsigned short proto,
+						 unsigned int sum) 
+{
+	__asm__ __volatile__ (
+		"addcc	%3, %4, %%g4\n\t"
+		"addxcc	%5, %%g4, %%g4\n\t"
+		"ld	[%2 + 0x0c], %%g2\n\t"
+		"ld	[%2 + 0x08], %%g3\n\t"
+		"addxcc	%%g2, %%g4, %%g4\n\t"
+		"ld	[%2 + 0x04], %%g2\n\t"
+		"addxcc	%%g3, %%g4, %%g4\n\t"
+		"ld	[%2 + 0x00], %%g3\n\t"
+		"addxcc	%%g2, %%g4, %%g4\n\t"
+		"ld	[%1 + 0x0c], %%g2\n\t"
+		"addxcc	%%g3, %%g4, %%g4\n\t"
+		"ld	[%1 + 0x08], %%g3\n\t"
+		"addxcc	%%g2, %%g4, %%g4\n\t"
+		"ld	[%1 + 0x04], %%g2\n\t"
+		"addxcc	%%g3, %%g4, %%g4\n\t"
+		"ld	[%1 + 0x00], %%g3\n\t"
+		"addxcc	%%g2, %%g4, %%g4\n\t"
+		"addxcc	%%g3, %%g4, %0\n\t"
+		"addx	0, %0, %0\n"
+		: "=&r" (sum)
+		: "r" (saddr), "r" (daddr), 
+		  "r"(htonl(len)), "r"(htonl(proto)), "r"(sum)
+		: "g2", "g3", "g4", "cc");
+
+	return csum_fold(sum);
+}
+
+/* this routine is used for miscellaneous IP-like checksums, mainly in icmp.c */
+static inline unsigned short ip_compute_csum(unsigned char * buff, int len)
+{
+	return csum_fold(csum_partial(buff, len, 0));
 }
 
 #endif /* !(__SPARC_CHECKSUM_H) */

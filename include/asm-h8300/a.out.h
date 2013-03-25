@@ -1,5 +1,7 @@
-#ifndef __H8300H_A_OUT_H__
-#define __H8300H_A_OUT_H__
+#ifndef __H8300_A_OUT_H__
+#define __H8300_A_OUT_H__
+
+/* do not use */
 
 struct exec
 {
@@ -23,4 +25,4 @@ struct exec
 
 #endif
 
-#endif /* __H8300H_A_OUT_H__ */
+#endif /* __H8300_A_OUT_H__ */

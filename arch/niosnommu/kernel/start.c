@@ -268,7 +268,7 @@ int  Test_Flash_Regions(void)
 
     puts( "***Checking flash CRC's" );
     if ( (startAddr == -1) || (startAddr >= endAddr) 
-     || !( ((startAddr >= (int) na_flash_kernel) && (endAddr < (int) na_flash_kernel_end))
+     || !( ((startAddr >= (int) NIOS_FLASH_START) && (endAddr < (int) NIOS_FLASH_END))
            || ((startAddr >= (int) na_flash)     && (endAddr < (int) na_flash_end)) ) )
     {
 	puts( "   No Flash regions defined." );

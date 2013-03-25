@@ -11,17 +11,19 @@
  * Now that /dev/vcs exists, most of this can disappear again.
  */
 
+#include <linux/module.h>
 #include <linux/tty.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-#include "vt_kern.h"
-#include "consolemap.h"
-#include "selection.h"
+#include <linux/vt_kern.h>
+#include <linux/consolemap.h>
+#include <linux/console_struct.h>
+#include <linux/selection.h>
 
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
@@ -30,15 +32,15 @@
 /* Don't take this from <ctype.h>: 011-015 on the screen aren't spaces */
 #define isspace(c)	((c) == ' ')
 
+extern void poke_blanked_console(void);
+
 /* Variables for selection control. */
 /* Use a dynamic buffer, instead of static (Dec 1994) */
-       int sel_cons = 0;		/* must not be disallocated */
+       int sel_cons;		/* must not be disallocated */
 static volatile int sel_start = -1; 	/* cleared by clear_selection */
 static int sel_end;
-static int sel_buffer_lth = 0;
-static char *sel_buffer = NULL;
-
-#define sel_pos(n)   inverse_translate(scrw2glyph(screen_word(sel_cons, n, 1)))
+static int sel_buffer_lth;
+static char *sel_buffer;
 
 /* clear_selection, highlight and highlight_pointer can be called
    from interrupt (via scrollback/front) */
@@ -53,6 +55,12 @@ highlight(const int s, const int e) {
 inline static void
 highlight_pointer(const int where) {
 	complement_pos(sel_cons, where);
+}
+
+static unsigned char
+sel_pos(int n)
+{
+	return inverse_translate(vc_cons[sel_cons].d, screen_glyph(sel_cons, n));
 }
 
 /* remove the current selection highlight, if any,
@@ -88,26 +96,19 @@ static inline int inword(const unsigned char c) {
 /* set inwordLut contents. Invoked by ioctl(). */
 int sel_loadlut(const unsigned long arg)
 {
-	int i = verify_area(VERIFY_READ, (char *) arg, 36);
-	if (i)
-		return i;
-	memcpy_fromfs(inwordLut, (u32 *)(arg+4), 32);
-	return 0;
+	return copy_from_user(inwordLut, (u32 *)(arg+4), 32) ? -EFAULT : 0;
 }
 
 /* does screen address p correspond to character at LH/RH edge of screen? */
-static inline int atedge(const int p)
+static inline int atedge(const int p, int size_row)
 {
-	return (!(p % video_size_row) || !((p + 2) % video_size_row));
+	return (!(p % size_row)	|| !((p + 2) % size_row));
 }
 
 /* constrain v such that v <= u */
 static inline unsigned short limit(const unsigned short v, const unsigned short u)
 {
-/* gcc miscompiles the ?: operator, so don't use it.. */
-	if (v > u)
-		return u;
-	return v;
+	return (v > u) ? u : v;
 }
 
 /* set the current selection. Invoked by ioctl() or by kernel code. */
@@ -116,29 +117,30 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 	int sel_mode, new_sel_start, new_sel_end, spc;
 	char *bp, *obp;
 	int i, ps, pe;
+	unsigned int currcons = fg_console;
 
-	do_unblank_screen();
+	unblank_screen();
+	poke_blanked_console();
 
 	{ unsigned short *args, xs, ys, xe, ye;
 
 	  args = (unsigned short *)(arg + 1);
 	  if (user) {
-	  	  int err;
-		  err = verify_area(VERIFY_READ, args, sizeof(short) * 5);
-		  if (err)
-		  	return err;
-		  xs = get_user(args++) - 1;
-		  ys = get_user(args++) - 1;
-		  xe = get_user(args++) - 1;
-		  ye = get_user(args++) - 1;
-		  sel_mode = get_user(args);
+		  if (verify_area(VERIFY_READ, args, sizeof(short) * 5))
+		  	return -EFAULT;
+		  __get_user(xs, args++);
+		  __get_user(ys, args++);
+		  __get_user(xe, args++);
+		  __get_user(ye, args++);
+		  __get_user(sel_mode, args);
 	  } else {
-		  xs = *(args++) - 1; /* set selection from kernel */
-		  ys = *(args++) - 1;
-		  xe = *(args++) - 1;
-		  ye = *(args++) - 1;
+		  xs = *(args++); /* set selection from kernel */
+		  ys = *(args++);
+		  xe = *(args++);
+		  ye = *(args++);
 		  sel_mode = *args;
 	  }
+	  xs--; ys--; xe--; ye--;
 	  xs = limit(xs, video_num_columns - 1);
 	  ys = limit(ys, video_num_lines - 1);
 	  xe = limit(xe, video_num_columns - 1);
@@ -215,9 +217,11 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 
 	/* select to end of line if on trailing space */
 	if (new_sel_end > new_sel_start &&
-		!atedge(new_sel_end) && isspace(sel_pos(new_sel_end))) {
+		!atedge(new_sel_end, video_size_row) &&
+		isspace(sel_pos(new_sel_end))) {
 		for (pe = new_sel_end + 2; ; pe += 2)
-			if (!isspace(sel_pos(pe)) || atedge(pe))
+			if (!isspace(sel_pos(pe)) ||
+			    atedge(pe, video_size_row))
 				break;
 		if (isspace(sel_pos(pe)))
 			new_sel_end = pe;
@@ -248,16 +252,18 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 	sel_start = new_sel_start;
 	sel_end = new_sel_end;
 
-	if (sel_buffer)
-		kfree(sel_buffer);
-	sel_buffer = kmalloc((sel_end-sel_start)/2+1, GFP_KERNEL);
-	if (!sel_buffer) {
-		printk("selection: kmalloc() failed\n");
+	/* Allocate a new buffer before freeing the old one ... */
+	bp = kmalloc((sel_end-sel_start)/2+1, GFP_KERNEL);
+	if (!bp) {
+		printk(KERN_WARNING "selection: kmalloc() failed\n");
 		clear_selection();
 		return -ENOMEM;
 	}
+	if (sel_buffer)
+		kfree(sel_buffer);
+	sel_buffer = bp;
 
-	obp = bp = sel_buffer;
+	obp = bp;
 	for (i = sel_start; i <= sel_end; i += 2) {
 		*bp = sel_pos(i);
 		if (!isspace(*bp++))
@@ -276,32 +282,37 @@ int set_selection(const unsigned long arg, struct tty_struct *tty, int user)
 	return 0;
 }
 
-/* Insert the contents of the selection buffer into the queue of the
-   tty associated with the current console. Invoked by ioctl(). */
+/* Insert the contents of the selection buffer into the
+ * queue of the tty associated with the current console.
+ * Invoked by ioctl().
+ */
 int paste_selection(struct tty_struct *tty)
 {
-	struct wait_queue wait = { current, NULL };
-	char	*bp = sel_buffer;
-	int	c = sel_buffer_lth;
-	int	l;
 	struct vt_struct *vt = (struct vt_struct *) tty->driver_data;
-	
-	if (!bp || !c)
-		return 0;
-	do_unblank_screen();
+	int	pasted = 0, count;
+	struct  tty_ldisc *ld;
+	DECLARE_WAITQUEUE(wait, current);
+
+	poke_blanked_console();
+	ld = tty_ldisc_ref_wait(tty);
 	add_wait_queue(&vt->paste_wait, &wait);
-	do {
-		current->state = TASK_INTERRUPTIBLE;
+	while (sel_buffer && sel_buffer_lth > pasted) {
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (test_bit(TTY_THROTTLED, &tty->flags)) {
 			schedule();
 			continue;
 		}
-		l = MIN(c, tty->ldisc.receive_room(tty));
-		tty->ldisc.receive_buf(tty, bp, 0, l);
-		c -= l;
-		bp += l;
-	} while (c);
+		count = sel_buffer_lth - pasted;
+		count = MIN(count, ld->receive_room(tty));
+		ld->receive_buf(tty, sel_buffer + pasted, 0, count);
+		pasted += count;
+	}
 	remove_wait_queue(&vt->paste_wait, &wait);
 	current->state = TASK_RUNNING;
+
+	tty_ldisc_deref(ld);
 	return 0;
 }
+
+EXPORT_SYMBOL(set_selection);
+EXPORT_SYMBOL(paste_selection);

@@ -34,11 +34,6 @@
 #endif
 
 
-/* These are some defined Ethernet Protocol ID's. */
-#define ETH_P_IP	0x0800		/* Internet Protocol packet	*/
-#define ETH_P_ARP	0x0806		/* Address Resolution packet	*/
-#define ETH_P_RARP      0x8035		/* Reverse Addr Res packet	*/
-
 /* LLC and SNAP constants */
 #define EXTENDED_SAP 0xAA
 #define UI_CMD       0x03
@@ -64,29 +59,31 @@ struct trllc {
 
 /* Token-Ring statistics collection data. */
 struct tr_statistics {
-	int rx_packets;			/* total packets received	*/
-	int tx_packets;			/* total packets transmitted	*/
-	int rx_errors;			/* bad packets received		*/
-	int tx_errors;			/* packet transmit problems	*/
-	int rx_dropped;			/* no space in linux buffers	*/
-	int tx_dropped;			/* no space available in linux	*/
-	int multicast;			/* multicast packets received	*/
-	int transmit_collision;
+	unsigned long rx_packets;       /* total packets received	*/
+	unsigned long tx_packets;	/* total packets transmitted	*/
+	unsigned long rx_bytes;		/* total bytes received   	*/
+	unsigned long tx_bytes;		/* total bytes transmitted	*/
+	unsigned long rx_errors;	/* bad packets received		*/
+	unsigned long tx_errors;	/* packet transmit problems	*/
+	unsigned long rx_dropped;	/* no space in linux buffers	*/
+	unsigned long tx_dropped;	/* no space available in linux	*/
+	unsigned long multicast;	/* multicast packets received	*/
+	unsigned long transmit_collision;
 
 	/* detailed Token-Ring errors. See IBM Token-Ring Network
 	   Architecture for more info */
 
-	int line_errors;
-	int internal_errors;
-	int burst_errors;
-	int A_C_errors;
-	int abort_delimiters;
-	int lost_frames;
-	int recv_congest_count;
-	int frame_copied_errors;
-	int frequency_errors;
-	int token_errors;
-	int dummy1;
+	unsigned long line_errors;
+	unsigned long internal_errors;
+	unsigned long burst_errors;
+	unsigned long A_C_errors;
+	unsigned long abort_delimiters;
+	unsigned long lost_frames;
+	unsigned long recv_congest_count;
+	unsigned long frame_copied_errors;
+	unsigned long frequency_errors;
+	unsigned long token_errors;
+	unsigned long dummy1;
 };
 
 /* source routing stuff */
@@ -94,9 +91,10 @@ struct tr_statistics {
 #define TR_RII 0x80
 #define TR_RCF_DIR_BIT 0x80
 #define TR_RCF_LEN_MASK 0x1f00
-#define TR_RCF_BROADCAST 0x8000
-#define TR_RCF_LIMITED_BROADCAST 0xA000
+#define TR_RCF_BROADCAST 0x8000         /* all-routes broadcast */
+#define TR_RCF_LIMITED_BROADCAST 0xC000 /* single-route broadcast */
 #define TR_RCF_FRAME2K 0x20
 #define TR_RCF_BROADCAST_MASK 0xC000
+#define TR_MAXRIFLEN 18
 
 #endif	/* _LINUX_IF_TR_H */

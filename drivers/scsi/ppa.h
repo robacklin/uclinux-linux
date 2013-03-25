@@ -2,25 +2,15 @@
  * the Iomega ZIP drive
  * 
  * (c) 1996     Grant R. Guenther  grant@torque.net
- *		David Campbell	   campbell@torque.net
+ *              David Campbell     campbell@torque.net
  *
- *	All comments to David.
+ *      All comments to David.
  */
 
-#include <linux/config.h> /* CONFIG_SCSI_PPA_HAVE_PEDANTIC */
 #ifndef _PPA_H
 #define _PPA_H
 
-#define   PPA_VERSION   "1.42"
-
-#if 0
-/* Use the following to enable certain chipset support
- * Default is PEDANTIC = 3
- */
-#ifndef CONFIG_SCSI_PPA_HAVE_PEDANTIC
-#define CONFIG_SCSI_PPA_HAVE_PEDANTIC	3
-#endif
-#endif
+#define   PPA_VERSION   "2.07 (for Linux 2.4.x)"
 
 /* 
  * this driver has been hacked by Matteo Frigo (athena@theory.lcs.mit.edu)
@@ -34,45 +24,57 @@
  *
  * [ Stuff removed ]
  *
- * Compiled against 2.1.53.
- *	Rebuilt ppa_abort() function, should handle unplugged cable.
- *							[1.35s]
- *
- * PPA now auto probes for EPP on base address which are aligned on
- * 8 byte boundaries (0x278 & 0x378) using the attached devices.
- * This hopefully avoids the nasty problem of trying to detect EPP.
- *	Tested on 2.1.53				[1.36]
- *
- * The id_probe utility no longer performs read/write tests.
- * Additional code included for checking the Intel ECP bug
- * (Bit 0 of STR stuck low which fools the EPP detection routine)
- *							[1.37]
- *
- * Oops! Got the bit sign mixed up for the Intel bug check.
- * Found that an additional delay is required during SCSI resets
- * to allow devices to settle down.
- *							[1.38]
- *
- * Fixed all problems in the parport sharing scheme. Now ppa can be safe
- * used with lp or other parport devices on the same parallel port.
- *		1997 by Andrea Arcangeli
- *							[1.39]
- *
- * Little fix in ppa engine to ensure that ppa don' t release parport
- * or disconnect in wrong cases.
- *		1997 by Andrea Arcangeli
- *							[1.40]
- *
  * Corrected ppa.h for 2.1.x kernels (>=2.1.85)
  * Modified "Nat Semi Kludge" for extended chipsets
- *							[1.41]
+ *                                                      [1.41]
  *
  * Fixed id_probe for EPP 1.9 chipsets (misdetected as EPP 1.7)
- *							[1.42]
+ *                                                      [1.42]
+ *
+ * Development solely for 2.1.x kernels from now on!
+ *                                                      [2.00]
+ *
+ * Hack and slash at the init code (EPP device check routine)
+ * Added INSANE option.
+ *                                                      [2.01]
+ *
+ * Patch applied to sync against the 2.1.x kernel code
+ * Included qboot_zip.sh
+ *                                                      [2.02]
+ *
+ * Cleaned up the mess left by someone else trying to fix the
+ * asm section to keep egcc happy. The asm section no longer
+ * exists, the nibble code is *almost* as fast as the asm code
+ * providing it is compiled with egcc.
+ *
+ * Other clean ups include the follow changes:
+ *    CONFIG_SCSI_PPA_HAVE_PEDANTIC => CONFIG_SCSI_IZIP_EPP16
+ *    added CONFIG_SCSI_IZIP_SLOW_CTR option
+ *                                                      [2.03]
+ *
+ * Use ppa_wait() to check for ready AND connected status bits
+ * Add ppa_wait() calls to ppa_completion()
+ *  by Peter Cherriman <pjc@ecs.soton.ac.uk> and
+ *     Tim Waugh <twaugh@redhat.com>
+ *							[2.04]
+ *
+ * Fix kernel panic on scsi timeout, 2000-08-18		[2.05]
+ *
+ * Avoid io_request_lock problems.
+ * John Cavan <johncavan@home.com>			[2.06]
+ *
+ * Busy wait for connected status bit in ppa_completion()
+ *  in order to cope with some hardware that has this bit low
+ *  for short periods of time.
+ * Add udelay() to ppa_select()
+ *  by Peter Cherriman <pjc@ecs.soton.ac.uk> and
+ *     Oleg Makarenko <omakarenko@cyberplat.ru>         
+ *                                                      [2.07]
  */
 /* ------ END OF USER CONFIGURABLE PARAMETERS ----- */
 
 #ifdef PPA_CODE
+#include  <linux/config.h>
 #include  <linux/stddef.h>
 #include  <linux/module.h>
 #include  <linux/kernel.h>
@@ -108,7 +110,11 @@ static char *PPA_MODE_STRING[] =
     "PS/2",
     "EPP 8 bit",
     "EPP 16 bit",
+#ifdef CONFIG_SCSI_IZIP_EPP16
+    "EPP 16 bit",
+#else
     "EPP 32 bit",
+#endif
     "Unknown"};
 
 /* This is a global option */
@@ -119,7 +125,8 @@ int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define PPA_BURST_SIZE	512	/* data burst size */
 #define PPA_SELECT_TMO  5000	/* how long to wait for target ? */
 #define PPA_SPIN_TMO    50000	/* ppa_wait loop limiter */
-#define PPA_DEBUG	0	/* debuging option */
+#define PPA_RECON_TMO   500	/* scsi reconnection loop limiter */
+#define PPA_DEBUG	0	/* debugging option */
 #define IN_EPP_MODE(x) (x == PPA_EPP_8 || x == PPA_EPP_16 || x == PPA_EPP_32)
 
 /* args to ppa_connect */
@@ -130,15 +137,21 @@ int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define r_str(x)        (unsigned char)inb((x)+1)
 #define r_ctr(x)        (unsigned char)inb((x)+2)
 #define r_epp(x)        (unsigned char)inb((x)+4)
-#define r_fifo(x)       (unsigned char)inb((x)+0x400)
-#define r_ecr(x)        (unsigned char)inb((x)+0x402)
+#define r_fifo(x)       (unsigned char)inb((x)) /* x must be base_hi */
+					/* On PCI is base+0x400 != base_hi */
+#define r_ecr(x)        (unsigned char)inb((x)+0x2) /* x must be base_hi */
 
 #define w_dtr(x,y)      outb(y, (x))
 #define w_str(x,y)      outb(y, (x)+1)
-#define w_ctr(x,y)      outb(y, (x)+2)
 #define w_epp(x,y)      outb(y, (x)+4)
-#define w_fifo(x,y)     outb(y, (x)+0x400)
-#define w_ecr(x,y)      outb(y, (x)+0x402)
+#define w_fifo(x,y)     outb(y, (x))	/* x must be base_hi */
+#define w_ecr(x,y)      outb(y, (x)+0x2)/* x must be base_hi */
+
+#ifdef CONFIG_SCSI_IZIP_SLOW_CTR
+#define w_ctr(x,y)      outb_p(y, (x)+2)
+#else
+#define w_ctr(x,y)      outb(y, (x)+2)
+#endif
 
 static int ppa_engine(ppa_struct *, Scsi_Cmnd *);
 static int ppa_in(int, char *, int);
@@ -146,31 +159,35 @@ static int ppa_init(int);
 static void ppa_interrupt(void *);
 static int ppa_out(int, char *, int);
 
-struct proc_dir_entry proc_scsi_ppa =
-{PROC_SCSI_PPA, 3, "ppa", S_IFDIR | S_IRUGO | S_IXUGO, 2};
 #else
-extern struct proc_dir_entry proc_scsi_ppa;
+#define ppa_release 0
 #endif
 
 int ppa_detect(Scsi_Host_Template *);
 const char *ppa_info(struct Scsi_Host *);
+int ppa_command(Scsi_Cmnd *);
 int ppa_queuecommand(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 int ppa_abort(Scsi_Cmnd *);
-int ppa_reset(Scsi_Cmnd *, unsigned int);
+int ppa_reset(Scsi_Cmnd *);
 int ppa_proc_info(char *, char **, off_t, int, int, int);
 int ppa_biosparam(Disk *, kdev_t, int *);
 
-#define PPA {	proc_dir:		&proc_scsi_ppa,			\
-		proc_info:		ppa_proc_info,			\
-		name:			"Iomega parport ZIP drive",	\
-		detect:			ppa_detect,			\
-		queuecommand:		ppa_queuecommand,		\
-		abort:			ppa_abort,			\
-		reset:			ppa_reset,			\
-		bios_param:		ppa_biosparam,			\
-		this_id:		-1,				\
-		sg_tablesize:		SG_ALL,				\
-		cmd_per_lun:		1,				\
-		use_clustering:		ENABLE_CLUSTERING		\
+#define PPA {	proc_name:			"ppa",		\
+		proc_info:			ppa_proc_info,		\
+		name:				"Iomega VPI0 (ppa) interface",\
+		detect:				ppa_detect,		\
+		release:			ppa_release,		\
+		command:			ppa_command,		\
+		queuecommand:			ppa_queuecommand,	\
+		eh_abort_handler:		ppa_abort,		\
+		eh_device_reset_handler:	NULL,			\
+		eh_bus_reset_handler:		ppa_reset,		\
+		eh_host_reset_handler:		ppa_reset,		\
+		use_new_eh_code:		1,			\
+		bios_param:			ppa_biosparam,		\
+		this_id:			-1,			\
+		sg_tablesize:			SG_ALL,			\
+		cmd_per_lun:			1,			\
+		use_clustering:			ENABLE_CLUSTERING	\
 }
 #endif				/* _PPA_H */

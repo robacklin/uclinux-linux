@@ -1,15 +1,24 @@
 #
-# Makefile for the linux proc-filesystem routines.
+# Makefile for the Linux proc filesystem routines.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# unless it's something special (not a .c file).
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
+# Note 2! The CFLAGS definitions are now in the main makefile.
 
 O_TARGET := proc.o
-O_OBJS   := inode.o root.o base.o mem.o link.o fd.o array.o kmsg.o net.o scsi.o serial.o
-OX_OBJS  := procfs_syms.o
-M_OBJS   := $(O_TARGET)
+
+export-objs := root.o
+
+obj-y    := inode.o root.o base.o generic.o array.o \
+		kmsg.o proc_tty.o proc_misc.o kcore.o
+
+ifeq ($(CONFIG_PROC_DEVICETREE),y)
+obj-y += proc_devtree.o
+endif
+ifeq ($(CONFIG_UCLINUX),y)
+obj-y += nommu.o
+endif
 
 include $(TOPDIR)/Rules.make

@@ -1,3 +1,4 @@
+//vic - temp define task_size
 /*
  * include/asm-niosnommu/processor.h
  *
@@ -14,13 +15,20 @@
 #ifndef __ASM_NIOS_PROCESSOR_H
 #define __ASM_NIOS_PROCESSOR_H
 
+/*
+ * Default implementation of macro that returns current
+ * instruction pointer ("program counter").
+ */
+#define current_text_addr() ({ __label__ _l; _l: &&_l;})
+
 #include <linux/a.out.h>
 
 #include <asm/psr.h>
 #include <asm/ptrace.h>
 #include <asm/signal.h>
 #include <asm/segment.h>
-
+#include <asm/current.h>
+#include <asm/system.h> /* for get_hi_limit */
 /*
  * Bus types
  */
@@ -42,6 +50,8 @@
 #define MAX_USER_ADDR	TASK_SIZE
 #define MMAP_SEARCH_START (TASK_SIZE/3)
 #endif
+
+#define TASK_SIZE	0x2000000	//vic for lack of something better ...
 
 /* The Nios processor specific thread struct. */
 struct thread_struct {
@@ -67,23 +77,11 @@ struct thread_struct {
 	 *
 	 * KH - I don't think the nios port requires this
 	 */
-#define NSWINS 8
+#define NSWINS 1 //vic8
 	struct reg_window spare_reg_window[NSWINS];
-	unsigned long spare_rwbuf_stkptrs[NSWINS];
 	unsigned long spare_w_saved;
 
-	/* The Nios does not have a floating point processor these
-	 * are acting as place holders to prevent C-structures and
-	 * assembler constants from getting out of step.
-	 */
-	unsigned long   spare_float_regs[64];
-	unsigned long   spare_fsr;
-	unsigned long   spare_fpqdepth;
-	struct spare_fpq {
-		unsigned long *insn_addr;
-		unsigned long insn;
-	} spare_fpqueue[16];
-	struct sigstack sstk_info;
+	/* struct sigstack sstk_info; */
 
 	/* Flags are defined below */
 
@@ -94,32 +92,24 @@ struct thread_struct {
 
 #define NIOS_FLAG_KTHREAD	0x00000001	/* task is a kernel thread */
 #define NIOS_FLAG_COPROC	0x00000002	/* Thread used coprocess */
+#define NIOS_FLAG_DEBUG		0x00000004	/* task is being debugged */
 
 #define INIT_MMAP { &init_mm, (0), (0), \
 		    __pgprot(0x0) , VM_READ | VM_WRITE | VM_EXEC }
 
-#define INIT_TSS  { \
+#define INIT_THREAD  { \
 /* uwinmask, kregs, sig_address, sig_desc, ksp, kpc, kpsr, kwvalid */ \
    0,        0,     0,           0,        0,   0,   0,    0, \
 /* fork_kpsr, fork_kwvalid */ \
    0,         0, \
 /* spare_reg_window */  \
 { { { 0, }, { 0, } }, }, \
-/* spare_rwbuf_stkptrs */  \
-{ 0, 0, 0, 0, 0, 0, 0, 0, }, \
 /* spare_w_saved */ \
    0, \
-/* Spare FPU regs */   \
-                 { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, \
-                   0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, }, \
-/* spare FPU status, spare FPU qdepth, FPU queue */ \
-   0,                0,            { { 0, 0, }, }, \
 /* sstk_info */ \
-{ 0, 0, }, \
 /* flags,              current_ds, */ \
-   NIOS_FLAG_KTHREAD, USER_DS, \
+/*   NIOS_FLAG_KTHREAD, USER_DS, */ \
+   NIOS_FLAG_KTHREAD, __KERNEL_DS, \
 /* core_exec */ \
 { 0, }, \
 }
@@ -133,7 +123,7 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 /*
  * Do necessary setup to start up a newly executed thread.
  */
-extern inline void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp, unsigned long globals)
+extern inline void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
 {
 	unsigned long saved_psr = (get_hi_limit() << 4) | PSR_IPRI | PSR_IE;
 	int i;
@@ -142,12 +132,28 @@ extern inline void start_thread(struct pt_regs * regs, unsigned long pc, unsigne
 	regs->pc = pc >> 1;
 	regs->psr = saved_psr;
 	regs->u_regs[UREG_FP] = (sp - REGWIN_SZ);
-	regs->globals = globals;
 }
 
+extern int kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
+/* Copy and release all segment info associated with a VM */
+#define copy_segments(tsk, mm)		do { } while (0)
+#define release_segments(mm)		do { } while (0)
+
+unsigned long get_wchan(struct task_struct *p);
+
+#define KSTK_EIP(tsk)  ((tsk)->thread.kregs->pc)
+#define KSTK_ESP(tsk)  ((tsk)->thread.kregs->u_regs[UREG_FP])
+
 #ifdef __KERNEL__
-#define alloc_kernel_stack()    __get_free_page(GFP_KERNEL)
-#define free_kernel_stack(page) free_page((page))
+/* Allocation and freeing of basic task resources. */
+#define alloc_task_struct() \
+	((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
+#define free_task_struct(p)	free_pages((unsigned long)(p),1)
+#define get_task_struct(tsk)      atomic_inc(&mem_map[MAP_NR(tsk)].count)
+
+#define init_task	(init_task_union.task)
+#define init_stack	(init_task_union.stack)
 #endif
 
+#define cpu_relax()    do { } while (0)
 #endif /* __ASM_NIOS_PROCESSOR_H */

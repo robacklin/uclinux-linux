@@ -1,7 +1,7 @@
 #ifndef _LINUX_BINFMTS_H
 #define _LINUX_BINFMTS_H
 
-#include <linux/ptrace.h>
+#include <linux/capability.h>
 
 /*
  * MAX_ARG_PAGES defines the number of pages allocated for arguments
@@ -10,24 +10,25 @@
  */
 #define MAX_ARG_PAGES 32
 
+/* sizeof(linux_binprm->buf) */
+#define BINPRM_BUF_SIZE 128
+
+#ifdef __KERNEL__
+
 /*
  * This structure is used to hold the arguments that are used when loading binaries.
  */
 struct linux_binprm{
-	char buf[128];
-#ifndef NO_MM
-	unsigned long page[MAX_ARG_PAGES];
-#else /* !NO_MM */
-	char ** envp, **argv;
-#endif /* !NO_MM */
-	unsigned long p;
+	char buf[BINPRM_BUF_SIZE];
+	struct page *page[MAX_ARG_PAGES];
+	unsigned long p; /* current top of mem */
 	int sh_bang;
-	struct inode * inode;
+	struct file * file;
 	int e_uid, e_gid;
+	kernel_cap_t cap_inheritable, cap_permitted, cap_effective;
 	int argc, envc;
 	char * filename;	/* Name of binary */
 	unsigned long loader, exec;
-	int dont_iput;		/* binfmt handler has put inode */
 };
 
 /*
@@ -36,39 +37,32 @@ struct linux_binprm{
  */
 struct linux_binfmt {
 	struct linux_binfmt * next;
-	long *use_count;
+	struct module *module;
 	int (*load_binary)(struct linux_binprm *, struct  pt_regs * regs);
-	int (*load_shlib)(int fd);
-	int (*core_dump)(long signr, struct pt_regs * regs);
+	int (*load_shlib)(struct file *);
+	int (*core_dump)(long signr, struct pt_regs * regs, struct file * file);
+	unsigned long min_coredump;	/* minimal dump size */
 };
 
 extern int register_binfmt(struct linux_binfmt *);
 extern int unregister_binfmt(struct linux_binfmt *);
 
-extern int read_exec(struct inode *inode, unsigned long offset,
-	char * addr, unsigned long count, int to_kmem);
-
-extern int open_inode(struct inode * inode, int mode);
-
-extern int init_flat_binfmt(void);
-extern int init_elf_binfmt(void);
-extern int init_aout_binfmt(void);
-extern int init_script_binfmt(void);
-extern int init_java_binfmt(void);
-
 extern int prepare_binprm(struct linux_binprm *);
 extern void remove_arg_zero(struct linux_binprm *);
 extern int search_binary_handler(struct linux_binprm *,struct pt_regs *);
 extern int flush_old_exec(struct linux_binprm * bprm);
-extern unsigned long setup_arg_pages(unsigned long p, struct linux_binprm * bprm);
-#ifndef NO_MM
-extern unsigned long copy_strings(int argc,char ** argv,unsigned long *page,
-		unsigned long p, int from_kmem);
-#else
-extern char **copy_strings(int argc,char ** argv);
-#endif
+extern int setup_arg_pages(struct linux_binprm * bprm, unsigned long stack_top);
+extern int copy_strings(int argc,char ** argv,struct linux_binprm *bprm); 
+extern int copy_strings_kernel(int argc,char ** argv,struct linux_binprm *bprm);
+extern void compute_creds(struct linux_binprm *binprm);
+extern int do_coredump(long signr, struct pt_regs * regs);
+extern void set_binfmt(struct linux_binfmt *new);
 
-/* this eventually goes away */
+
+#if 0
+/* this went away now */
 #define change_ldt(a,b) setup_arg_pages(a,b)
-
 #endif
+
+#endif /* __KERNEL__ */
+#endif /* _LINUX_BINFMTS_H */

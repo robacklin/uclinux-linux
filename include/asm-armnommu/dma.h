@@ -3,21 +3,41 @@
 
 typedef unsigned int dmach_t;
 
-#include <asm/irq.h>
+#include <linux/config.h>
+#include <linux/spinlock.h>
+#include <asm/system.h>
+#include <asm/memory.h>
+#include <asm/scatterlist.h>
 #include <asm/arch/dma.h>
 
-typedef struct {
-	unsigned long address;
-	unsigned long length;
-} dmasg_t;
+/*
+ * DMA modes
+ */
+typedef unsigned int dmamode_t;
 
-extern const char dma_str[];
+#define DMA_MODE_MASK	3
+
+#define DMA_MODE_READ	 0
+#define DMA_MODE_WRITE	 1
+#define DMA_MODE_CASCADE 2
+#define DMA_AUTOINIT	 4
+
+extern spinlock_t  dma_spin_lock;
+
+extern __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+extern __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
 
 /* Clear the 'DMA Pointer Flip Flop'.
  * Write 0 for LSB/MSB, 1 for MSB/LSB access.
- *
- * NOTE: This is an architecture specific function, and should
- *       be hidden from the drivers.
  */
 #define clear_dma_ff(channel)
 
@@ -26,10 +46,7 @@ extern const char dma_str[];
  * NOTE: This is an architecture specific function, and should
  *       be hidden from the drivers
  */
-static __inline__ void set_dma_page(dmach_t channel, char pagenr)
-{
-	printk(dma_str, "set_dma_page", channel);
-}
+extern void set_dma_page(dmach_t channel, char pagenr);
 
 /* Request a DMA channel
  *
@@ -63,7 +80,7 @@ extern void disable_dma(dmach_t channel);
  * especially since some DMA architectures don't update the
  * DMA address immediately, but defer it to the enable_dma().
  */
-extern void set_dma_sg(dmach_t channel, dmasg_t *sg, int nr_sg);
+extern void set_dma_sg(dmach_t channel, struct scatterlist *sg, int nr_sg);
 
 /* Set the DMA address for this channel
  *
@@ -90,6 +107,10 @@ extern void set_dma_count(dmach_t channel, unsigned long count);
  */
 extern void set_dma_mode(dmach_t channel, dmamode_t mode);
 
+/* Set the transfer speed for this channel
+ */
+extern void set_dma_speed(dmach_t channel, int cycle_ns);
+
 /* Get DMA residue count. After a DMA transfer, this
  * should return zero. Reading this while a DMA transfer is
  * still in progress will return unpredictable results.
@@ -99,7 +120,13 @@ extern void set_dma_mode(dmach_t channel, dmamode_t mode);
 extern int  get_dma_residue(dmach_t channel);
 
 #ifndef NO_DMA
-#define NO_DMA 255
+#define NO_DMA	255
+#endif
+
+#ifdef CONFIG_PCI
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy    (0)
 #endif
 
 #endif /* _ARM_DMA_H */

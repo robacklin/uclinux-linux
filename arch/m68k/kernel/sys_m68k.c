@@ -9,14 +9,22 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
 #include <linux/mman.h>
+#include <linux/file.h>
+#include <linux/utsname.h>
 
-#include <asm/segment.h>
+#include <asm/setup.h>
+#include <asm/uaccess.h>
 #include <asm/cachectl.h>
+#include <asm/traps.h>
+#include <asm/ipc.h>
+#include <asm/page.h>
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -27,15 +35,45 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	int fd[2];
 	int error;
 
-	error = verify_area(VERIFY_WRITE,fildes,8);
-	if (error)
-		return error;
 	error = do_pipe(fd);
-	if (error)
-		return error;
-	put_user(fd[0],0+fildes);
-	put_user(fd[1],1+fildes);
-	return 0;
+	if (!error) {
+		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+			error = -EFAULT;
+	}
+	return error;
+}
+
+/* common code for old and new mmaps */
+static inline long do_mmap2(
+	unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	int error = -EBADF;
+	struct file * file = NULL;
+
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	if (!(flags & MAP_ANONYMOUS)) {
+		file = fget(fd);
+		if (!file)
+			goto out;
+	}
+
+	down_write(&current->mm->mmap_sem);
+	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up_write(&current->mm->mmap_sem);
+
+	if (file)
+		fput(file);
+out:
+	return error;
+}
+
+asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	return do_mmap2(addr, len, prot, flags, fd, pgoff);
 }
 
 /*
@@ -45,47 +83,95 @@ asmlinkage int sys_pipe(unsigned long * fildes)
  * used a memory block for parameter passing..
  */
 
-asmlinkage int old_mmap(unsigned long *buffer)
-{
-	int error;
+struct mmap_arg_struct {
+	unsigned long addr;
+	unsigned long len;
+	unsigned long prot;
 	unsigned long flags;
-	struct file * file = NULL;
+	unsigned long fd;
+	unsigned long offset;
+};
 
-	error = verify_area(VERIFY_READ, buffer, 6*sizeof(long));
-	if (error)
-		return error;
-	flags = get_user(buffer+3);
-	if (!(flags & MAP_ANONYMOUS)) {
-		unsigned long fd = get_user(buffer+4);
-		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-			return -EBADF;
-	}
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	return do_mmap(file, get_user(buffer), get_user(buffer+1),
-		       get_user(buffer+2), flags, get_user(buffer+5));
+asmlinkage int old_mmap(struct mmap_arg_struct *arg)
+{
+	struct mmap_arg_struct a;
+	int error = -EFAULT;
+
+	if (copy_from_user(&a, arg, sizeof(a)))
+		goto out;
+
+	error = -EINVAL;
+	if (a.offset & ~PAGE_MASK)
+		goto out;
+
+	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	error = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset >> PAGE_SHIFT);
+out:
+	return error;
 }
 
+#if 0
+struct mmap_arg_struct64 {
+	__u32 addr;
+	__u32 len;
+	__u32 prot;
+	__u32 flags;
+	__u64 offset; /* 64 bits */
+	__u32 fd;
+};
+
+asmlinkage long sys_mmap64(struct mmap_arg_struct64 *arg)
+{
+	int error = -EFAULT;
+	struct file * file = NULL;
+	struct mmap_arg_struct64 a;
+	unsigned long pgoff;
+
+	if (copy_from_user(&a, arg, sizeof(a)))
+		return -EFAULT;
+
+	if ((long)a.offset & ~PAGE_MASK)
+		return -EINVAL;
+
+	pgoff = a.offset >> PAGE_SHIFT;
+	if ((a.offset >> PAGE_SHIFT) != pgoff)
+		return -EINVAL;
+
+	if (!(a.flags & MAP_ANONYMOUS)) {
+		error = -EBADF;
+		file = fget(a.fd);
+		if (!file)
+			goto out;
+	}
+	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	down_write(&current->mm->mmap_sem);
+	error = do_mmap_pgoff(file, a.addr, a.len, a.prot, a.flags, pgoff);
+	up_write(&current->mm->mmap_sem);
+	if (file)
+		fput(file);
+out:
+	return error;
+}
+#endif
 
 extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
-asmlinkage int old_select(unsigned long *buffer)
-{
-	int n;
-	fd_set *inp;
-	fd_set *outp;
-	fd_set *exp;
+struct sel_arg_struct {
+	unsigned long n;
+	fd_set *inp, *outp, *exp;
 	struct timeval *tvp;
+};
 
-	n = verify_area(VERIFY_READ, buffer, 5*sizeof(unsigned long));
-	if (n)
-	  return n;
+asmlinkage int old_select(struct sel_arg_struct *arg)
+{
+	struct sel_arg_struct a;
 
-	n = get_user(buffer);
-	inp = (fd_set *) get_user(buffer+1);
-	outp = (fd_set *) get_user(buffer+2);
-	exp = (fd_set *) get_user(buffer+3);
-	tvp = (struct timeval *) get_user(buffer+4);
-	return sys_select(n, inp, outp, exp, tvp);
+	if (copy_from_user(&a, arg, sizeof(a)))
+		return -EFAULT;
+	/* sys_select() does the appropriate kernel locking */
+	return sys_select(a.n, a.inp, a.outp, a.exp, a.tvp);
 }
 
 /*
@@ -93,9 +179,10 @@ asmlinkage int old_select(unsigned long *buffer)
  *
  * This is really horribly ugly.
  */
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
+asmlinkage int sys_ipc (uint call, int first, int second,
+			int third, void *ptr, long fifth)
 {
-	int version;
+	int version, ret;
 
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
@@ -108,12 +195,10 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 			return sys_semget (first, second, third);
 		case SEMCTL: {
 			union semun fourth;
-			int err;
 			if (!ptr)
 				return -EINVAL;
-			if ((err = verify_area (VERIFY_READ, ptr, sizeof(long))))
-				return err;
-			fourth.__pad = get_user((void **)ptr);
+			if (get_user(fourth.__pad, (void **) ptr))
+				return -EFAULT;
 			return sys_semctl (first, second, third, fourth);
 			}
 		default:
@@ -123,27 +208,30 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		switch (call) {
 		case MSGSND:
 			return sys_msgsnd (first, (struct msgbuf *) ptr, 
-					   second, third);
+					  second, third);
 		case MSGRCV:
 			switch (version) {
 			case 0: {
 				struct ipc_kludge tmp;
-				int err;
 				if (!ptr)
 					return -EINVAL;
-				if ((err = verify_area (VERIFY_READ, ptr, sizeof(tmp))))
-					return err;
-				memcpy_fromfs (&tmp,(struct ipc_kludge *) ptr,
-					       sizeof (tmp));
-				return sys_msgrcv (first, tmp.msgp, second, tmp.msgtyp, third);
+				if (copy_from_user (&tmp,
+						    (struct ipc_kludge *)ptr,
+						    sizeof (tmp)))
+					return -EFAULT;
+				return sys_msgrcv (first, tmp.msgp, second,
+						   tmp.msgtyp, third);
 				}
-			case 1: default:
-				return sys_msgrcv (first, (struct msgbuf *) ptr, second, fifth, third);
+			default:
+				return sys_msgrcv (first,
+						   (struct msgbuf *) ptr,
+						   second, fifth, third);
 			}
 		case MSGGET:
 			return sys_msgget ((key_t) first, second);
 		case MSGCTL:
-			return sys_msgctl (first, second, (struct msqid_ds *) ptr);
+			return sys_msgctl (first, second,
+					   (struct msqid_ds *) ptr);
 		default:
 			return -EINVAL;
 		}
@@ -151,31 +239,26 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		switch (call) {
 		case SHMAT:
 			switch (version) {
-			case 0: default: {
+			default: {
 				ulong raddr;
-				int err;
-				if ((err = verify_area(VERIFY_WRITE, (ulong*) third, sizeof(ulong))))
-					return err;
-				err = sys_shmat (first, (char *) ptr, second, &raddr);
-				if (err)
-					return err;
-				put_user (raddr, (ulong *) third);
-				return 0;
-				}
-			case 1:	/* iBCS2 emulator entry point */
-				if (get_fs() != get_ds())
-					return -EINVAL;
-				return sys_shmat (first, (char *) ptr, second, (ulong *) third);
+				ret = sys_shmat (first, (char *) ptr,
+						 second, &raddr);
+				if (ret)
+					return ret;
+				return put_user (raddr, (ulong *) third);
+			}
 			}
 		case SHMDT: 
 			return sys_shmdt ((char *)ptr);
 		case SHMGET:
 			return sys_shmget (first, second, third);
 		case SHMCTL:
-			return sys_shmctl (first, second, (struct shmid_ds *) ptr);
+			return sys_shmctl (first, second,
+					   (struct shmid_ds *) ptr);
 		default:
 			return -EINVAL;
 		}
+
 	return -EINVAL;
 }
 
@@ -184,33 +267,26 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
   return -ENOSYS;
 }
 
-/* Convert virtual address VADDR to physical address PADDR, recording
-   in VALID whether the virtual address is actually mapped.  */
-#define virt_to_phys_040(vaddr, paddr, valid)				\
-{									\
-  register unsigned long _tmp1 __asm__ ("a0") = (vaddr);		\
-  register unsigned long _tmp2 __asm__ ("d0");				\
-  unsigned long _mmusr;							\
+
+/* Convert virtual (user) address VADDR to physical address PADDR */
+#define virt_to_phys_040(vaddr)						\
+({									\
+  unsigned long _mmusr, _paddr;						\
 									\
-  __asm__ __volatile__ (".word 0xf568 /* ptestr (%1) */\n\t"		\
-			".long 0x4e7a0805 /* movec %%mmusr,%0 */"	\
-			: "=d" (_tmp2)					\
-			: "a" (_tmp1));					\
-  _mmusr = _tmp2;							\
-  if (0 /* XXX _mmusr & MMU_?_040 */)					\
-    (valid) = 0;							\
-  else									\
-    {									\
-      (valid) = 1;							\
-      (paddr) = _mmusr & ~0xfff;					\
-    }									\
-}
+  __asm__ __volatile__ (".chip 68040\n\t"				\
+			"ptestr (%1)\n\t"				\
+			"movec %%mmusr,%0\n\t"				\
+			".chip 68k"					\
+			: "=r" (_mmusr)					\
+			: "a" (vaddr));					\
+  _paddr = (_mmusr & MMU_R_040) ? (_mmusr & PAGE_MASK) : 0;		\
+  _paddr;								\
+})
 
 static inline int
 cache_flush_040 (unsigned long addr, int scope, int cache, unsigned long len)
 {
-  unsigned long paddr;
-  int valid;
+  unsigned long paddr, i;
 
   switch (scope)
     {
@@ -220,104 +296,134 @@ cache_flush_040 (unsigned long addr, int scope, int cache, unsigned long len)
 	case FLUSH_CACHE_DATA:
 	  /* This nop is needed for some broken versions of the 68040.  */
 	  __asm__ __volatile__ ("nop\n\t"
-				".word 0xf478 /* cpusha %%dc */");
+				".chip 68040\n\t"
+				"cpusha %dc\n\t"
+				".chip 68k");
 	  break;
 	case FLUSH_CACHE_INSN:
 	  __asm__ __volatile__ ("nop\n\t"
-				".word 0xf4b8 /* cpusha %%ic */");
+				".chip 68040\n\t"
+				"cpusha %ic\n\t"
+				".chip 68k");
 	  break;
 	default:
 	case FLUSH_CACHE_BOTH:
 	  __asm__ __volatile__ ("nop\n\t"
-				".word 0xf4f8 /* cpusha %%bc */");
+				".chip 68040\n\t"
+				"cpusha %bc\n\t"
+				".chip 68k");
 	  break;
 	}
       break;
 
     case FLUSH_SCOPE_LINE:
-      len >>= 4;
-      for (;;)
-	{
-	  virt_to_phys_040 (addr, paddr, valid);
-	  if (valid)
-	    break;
-	  if (len <= PAGE_SIZE / 16)
-	    return 0;
-	  len -= PAGE_SIZE / 16;
-	  addr += PAGE_SIZE;
-	}
+      /* Find the physical address of the first mapped page in the
+	 address range.  */
+      if ((paddr = virt_to_phys_040(addr))) {
+        paddr += addr & ~(PAGE_MASK | 15);
+        len = (len + (addr & 15) + 15) >> 4;
+      } else {
+	unsigned long tmp = PAGE_SIZE - (addr & ~PAGE_MASK);
+
+	if (len <= tmp)
+	  return 0;
+	addr += tmp;
+	len -= tmp;
+	tmp = PAGE_SIZE;
+	for (;;)
+	  {
+	    if ((paddr = virt_to_phys_040(addr)))
+	      break;
+	    if (len <= tmp)
+	      return 0;
+	    addr += tmp;
+	    len -= tmp;
+	  }
+	len = (len + 15) >> 4;
+      }
+      i = (PAGE_SIZE - (paddr & ~PAGE_MASK)) >> 4;
       while (len--)
 	{
-	  register unsigned long tmp __asm__ ("a0") = paddr;
 	  switch (cache)
 	    {
 	    case FLUSH_CACHE_DATA:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf468 /* cpushl %%dc,(%0) */"
-				    : : "a" (tmp));
+				    ".chip 68040\n\t"
+				    "cpushl %%dc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    case FLUSH_CACHE_INSN:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf4a8 /* cpushl %%ic,(%0) */"
-				    : : "a" (tmp));
+				    ".chip 68040\n\t"
+				    "cpushl %%ic,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    default:
 	    case FLUSH_CACHE_BOTH:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf4e8 /* cpushl %%bc,(%0) */"
+				    ".chip 68040\n\t"
+				    "cpushl %%bc,(%0)\n\t"
+				    ".chip 68k"
 				    : : "a" (paddr));
 	      break;
 	    }
-	  addr += 16;
-	  if (len)
+	  if (!--i && len)
 	    {
-	      if ((addr & (PAGE_SIZE-1)) < 16)
+	      /*
+	       * No need to page align here since it is done by
+	       * virt_to_phys_040().
+	       */
+	      addr += PAGE_SIZE;
+	      i = PAGE_SIZE / 16;
+	      /* Recompute physical address when crossing a page
+	         boundary. */
+	      for (;;)
 		{
-		  /* Recompute physical address when crossing a page
-		     boundary. */
-		  for (;;)
-		    {
-		      virt_to_phys_040 (addr, paddr, valid);
-		      if (valid)
-			break;
-		      if (len <= PAGE_SIZE / 16)
-			return 0;
-		      len -= PAGE_SIZE / 16;
-		      addr += PAGE_SIZE;
-		    }
+		  if ((paddr = virt_to_phys_040(addr)))
+		    break;
+		  if (len <= i)
+		    return 0;
+		  len -= i;
+		  addr += PAGE_SIZE;
 		}
-	      else
-		paddr += 16;
 	    }
+	  else
+	    paddr += 16;
 	}
       break;
 
     default:
     case FLUSH_SCOPE_PAGE:
+      len += (addr & ~PAGE_MASK) + (PAGE_SIZE - 1);
       for (len >>= PAGE_SHIFT; len--; addr += PAGE_SIZE)
 	{
-	  register unsigned long tmp __asm__ ("a0");
-	  virt_to_phys_040 (addr, paddr, valid);
-	  if (!valid)
+	  if (!(paddr = virt_to_phys_040(addr)))
 	    continue;
-	  tmp = paddr;
 	  switch (cache)
 	    {
 	    case FLUSH_CACHE_DATA:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf470 /* cpushp %%dc,(%0) */"
-				    : : "a" (tmp));
+				    ".chip 68040\n\t"
+				    "cpushp %%dc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    case FLUSH_CACHE_INSN:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf4b0 /* cpushp %%ic,(%0) */"
-				    : : "a" (tmp));
+				    ".chip 68040\n\t"
+				    "cpushp %%ic,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    default:
 	    case FLUSH_CACHE_BOTH:
 	      __asm__ __volatile__ ("nop\n\t"
-				    ".word 0xf4f0 /* cpushp %%bc,(%0) */"
-				    : : "a" (tmp));
+				    ".chip 68040\n\t"
+				    "cpushp %%bc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    }
 	}
@@ -326,128 +432,158 @@ cache_flush_040 (unsigned long addr, int scope, int cache, unsigned long len)
   return 0;
 }
 
-#define virt_to_phys_060(vaddr, paddr, valid)		\
-{							\
-  register unsigned long _tmp __asm__ ("a0") = (vaddr);	\
-							\
-  __asm__ __volatile__ (".word 0xf5c8 /* plpar (%1) */"	\
-			: "=a" (_tmp)			\
-			: "0" (_tmp));			\
-  (valid) = 1; /* XXX */				\
-  (paddr) = _tmp;					\
-}
+#define virt_to_phys_060(vaddr)				\
+({							\
+  unsigned long paddr;					\
+  __asm__ __volatile__ (".chip 68060\n\t"		\
+			"plpar (%0)\n\t"		\
+			".chip 68k"			\
+			: "=a" (paddr)			\
+			: "0" (vaddr));			\
+  (paddr); /* XXX */					\
+})
 
 static inline int
 cache_flush_060 (unsigned long addr, int scope, int cache, unsigned long len)
 {
-  unsigned long paddr;
-  int valid;
+  unsigned long paddr, i;
 
+  /*
+   * 68060 manual says: 
+   *  cpush %dc : flush DC, remains valid (with our %cacr setup)
+   *  cpush %ic : invalidate IC
+   *  cpush %bc : flush DC + invalidate IC
+   */
   switch (scope)
     {
     case FLUSH_SCOPE_ALL:
       switch (cache)
 	{
 	case FLUSH_CACHE_DATA:
-	  __asm__ __volatile__ (".word 0xf478 /* cpusha %%dc */\n\t"
-				".word 0xf458 /* cinva %%dc */");
+	  __asm__ __volatile__ (".chip 68060\n\t"
+				"cpusha %dc\n\t"
+				".chip 68k");
 	  break;
 	case FLUSH_CACHE_INSN:
-	  __asm__ __volatile__ (".word 0xf4b8 /* cpusha %%ic */\n\t"
-				".word 0xf498 /* cinva %%ic */");
+	  __asm__ __volatile__ (".chip 68060\n\t"
+				"cpusha %ic\n\t"
+				".chip 68k");
 	  break;
 	default:
 	case FLUSH_CACHE_BOTH:
-	  __asm__ __volatile__ (".word 0xf4f8 /* cpusha %%bc */\n\t"
-				".word 0xf4d8 /* cinva %%bc */");
+	  __asm__ __volatile__ (".chip 68060\n\t"
+				"cpusha %bc\n\t"
+				".chip 68k");
 	  break;
 	}
       break;
 
     case FLUSH_SCOPE_LINE:
-      len >>= 4;
-      for (;;)
-	{
-	  virt_to_phys_060 (addr, paddr, valid);
-	  if (valid)
-	    break;
-	  if (len <= PAGE_SIZE / 16)
-	    return 0;
-	  len -= PAGE_SIZE / 16;
-	  addr += PAGE_SIZE;
-	}
+      /* Find the physical address of the first mapped page in the
+	 address range.  */
+      len += addr & 15;
+      addr &= -16;
+      if (!(paddr = virt_to_phys_060(addr))) {
+	unsigned long tmp = PAGE_SIZE - (addr & ~PAGE_MASK);
+
+	if (len <= tmp)
+	  return 0;
+	addr += tmp;
+	len -= tmp;
+	tmp = PAGE_SIZE;
+	for (;;)
+	  {
+	    if ((paddr = virt_to_phys_060(addr)))
+	      break;
+	    if (len <= tmp)
+	      return 0;
+	    addr += tmp;
+	    len -= tmp;
+	  }
+      }
+      len = (len + 15) >> 4;
+      i = (PAGE_SIZE - (paddr & ~PAGE_MASK)) >> 4;
       while (len--)
 	{
-	  register unsigned long tmp __asm__ ("a0") = paddr;
 	  switch (cache)
 	    {
 	    case FLUSH_CACHE_DATA:
-	      __asm__ __volatile__ (".word 0xf468 /* cpushl %%dc,(%0) */\n\t"
-				    ".word 0xf448 /* cinv %%dc,(%0) */"
-				    : : "a" (tmp));
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushl %%dc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    case FLUSH_CACHE_INSN:
-	      __asm__ __volatile__ (".word 0xf4a8 /* cpushl %%ic,(%0) */\n\t"
-				    ".word 0xf488 /* cinv %%ic,(%0) */"
-				    : : "a" (tmp));
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushl %%ic,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    default:
 	    case FLUSH_CACHE_BOTH:
-	      __asm__ __volatile__ (".word 0xf4e8 /* cpushl %%bc,(%0) */\n\t"
-				    ".word 0xf4c8 /* cinv %%bc,(%0) */"
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushl %%bc,(%0)\n\t"
+				    ".chip 68k"
 				    : : "a" (paddr));
 	      break;
 	    }
-	  addr += 16;
-	  if (len)
+	  if (!--i && len)
 	    {
-	      if ((addr & (PAGE_SIZE-1)) < 16)
-		{
-		  /* Recompute the physical address when crossing a
-		     page boundary.  */
-		  for (;;)
-		    {
-		      virt_to_phys_060 (addr, paddr, valid);
-		      if (valid)
-			break;
-		      if (len <= PAGE_SIZE / 16)
-			return 0;
-		      len -= PAGE_SIZE / 16;
-		      addr += PAGE_SIZE;
-		    }
-		}
-	      else
-		paddr += 16;
+
+	      /*
+	       * We just want to jump to the first cache line
+	       * in the next page.
+	       */
+	      addr += PAGE_SIZE;
+	      addr &= PAGE_MASK;
+
+	      i = PAGE_SIZE / 16;
+	      /* Recompute physical address when crossing a page
+	         boundary. */
+	      for (;;)
+	        {
+	          if ((paddr = virt_to_phys_060(addr)))
+	            break;
+	          if (len <= i)
+	            return 0;
+	          len -= i;
+	          addr += PAGE_SIZE;
+	        }
 	    }
+	  else
+	    paddr += 16;
 	}
       break;
 
     default:
     case FLUSH_SCOPE_PAGE:
+      len += (addr & ~PAGE_MASK) + (PAGE_SIZE - 1);
+      addr &= PAGE_MASK;	/* Workaround for bug in some
+				   revisions of the 68060 */
       for (len >>= PAGE_SHIFT; len--; addr += PAGE_SIZE)
 	{
-	  register unsigned long tmp __asm__ ("a0");
-	  virt_to_phys_060 (addr, paddr, valid);
-	  if (!valid)
+	  if (!(paddr = virt_to_phys_060(addr)))
 	    continue;
-	  tmp = paddr;
 	  switch (cache)
 	    {
 	    case FLUSH_CACHE_DATA:
-	      __asm__ __volatile__ (".word 0xf470 /* cpushp %%dc,(%0) */\n\t"
-				    ".word 0xf450 /* cinv %%dc,(%0) */"
-				    : : "a" (tmp));
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushp %%dc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    case FLUSH_CACHE_INSN:
-	      __asm__ __volatile__ (".word 0xf4b0 /* cpushp %%ic,(%0) */\n\t"
-				    ".word 0xf490 /* cinv %%ic,(%0) */"
-				    : : "a" (tmp));
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushp %%ic,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    default:
 	    case FLUSH_CACHE_BOTH:
-	      __asm__ __volatile__ (".word 0xf4f0 /* cpushp %%bc,(%0) */\n\t"
-				    ".word 0xf4d0 /* cinv %%bc,(%0) */"
-				    : : "a" (tmp));
+	      __asm__ __volatile__ (".chip 68060\n\t"
+				    "cpushp %%bc,(%0)\n\t"
+				    ".chip 68k"
+				    : : "a" (paddr));
 	      break;
 	    }
 	}
@@ -460,46 +596,93 @@ cache_flush_060 (unsigned long addr, int scope, int cache, unsigned long len)
 asmlinkage int
 sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 {
-  struct vm_area_struct *vma;
+	struct vm_area_struct *vma;
+	int ret = -EINVAL;
 
-  if (scope < FLUSH_SCOPE_LINE || scope > FLUSH_SCOPE_ALL
-      || cache & ~FLUSH_CACHE_BOTH)
-    return -EINVAL;
+	lock_kernel();
+	if (scope < FLUSH_SCOPE_LINE || scope > FLUSH_SCOPE_ALL ||
+	    cache & ~FLUSH_CACHE_BOTH)
+		goto out;
 
-  if (scope == FLUSH_SCOPE_ALL)
-    {
-      /* Only the superuser may flush the whole cache. */
-      if (!suser ())
-	return -EPERM;
-    }
-  else
-    {
-      /* Verify that the specified address region actually belongs to
-	 this process.  */
-      vma = find_vma (current, addr);
-      if (vma == NULL || addr < vma->vm_start || addr + len > vma->vm_end)
-	return -EINVAL;
-    }
+	if (scope == FLUSH_SCOPE_ALL) {
+		/* Only the superuser may explicitly flush the whole cache. */
+		ret = -EPERM;
+		if (!capable(CAP_SYS_ADMIN))
+			goto out;
+	} else {
+		/*
+		 * Verify that the specified address region actually belongs
+		 * to this process.
+		 */
+		vma = find_vma (current->mm, addr);
+		ret = -EINVAL;
+		/* Check for overflow.  */
+		if (addr + len < addr)
+			goto out;
+		if (vma == NULL || addr < vma->vm_start || addr + len > vma->vm_end)
+			goto out;
+	}
 
-  switch (m68k_is040or060)
-    {
-    default: /* 030 */
-      /* Always flush the whole cache, everything else would not be
-	 worth the hassle.  */
-      __asm__ __volatile__
-	("movec %%cacr, %%d0\n\t"
-	 "or %0, %%d0\n\t"
-	 "movec %%d0, %%cacr"
-	 : /* no outputs */
-	 : "di" ((cache & FLUSH_CACHE_INSN ? 8 : 0)
-		 | (cache & FLUSH_CACHE_DATA ? 0x800 : 0))
-	 : "d0");
-      return 0;
+	if (CPU_IS_020_OR_030) {
+		if (scope == FLUSH_SCOPE_LINE && len < 256) {
+			unsigned long cacr;
+			__asm__ ("movec %%cacr, %0" : "=r" (cacr));
+			if (cache & FLUSH_CACHE_INSN)
+				cacr |= 4;
+			if (cache & FLUSH_CACHE_DATA)
+				cacr |= 0x400;
+			len >>= 2;
+			while (len--) {
+				__asm__ __volatile__ ("movec %1, %%caar\n\t"
+						      "movec %0, %%cacr"
+						      : /* no outputs */
+						      : "r" (cacr), "r" (addr));
+				addr += 4;
+			}
+		} else {
+			/* Flush the whole cache, even if page granularity requested. */
+			unsigned long cacr;
+			__asm__ ("movec %%cacr, %0" : "=r" (cacr));
+			if (cache & FLUSH_CACHE_INSN)
+				cacr |= 8;
+			if (cache & FLUSH_CACHE_DATA)
+				cacr |= 0x800;
+			__asm__ __volatile__ ("movec %0, %%cacr" : : "r" (cacr));
+		}
+		ret = 0;
+		goto out;
+	} else {
+	    /*
+	     * 040 or 060: don't blindly trust 'scope', someone could
+	     * try to flush a few megs of memory.
+	     */
 
-    case 4: /* 040 */
-      return cache_flush_040 (addr, scope, cache, len);
+	    if (len>=3*PAGE_SIZE && scope<FLUSH_SCOPE_PAGE)
+	        scope=FLUSH_SCOPE_PAGE;
+	    if (len>=10*PAGE_SIZE && scope<FLUSH_SCOPE_ALL)
+	        scope=FLUSH_SCOPE_ALL;
+	    if (CPU_IS_040) {
+		ret = cache_flush_040 (addr, scope, cache, len);
+	    } else if (CPU_IS_060) {
+		ret = cache_flush_060 (addr, scope, cache, len);
+	    }
+	}
+out:
+	unlock_kernel();
+	return ret;
+}
 
-    case 6: /* 060 */
-      return cache_flush_060 (addr, scope, cache, len);
-    }
+asmlinkage int sys_getpagesize(void)
+{
+	return PAGE_SIZE;
+}
+
+/*
+ * Old cruft
+ */
+asmlinkage int sys_pause(void)
+{
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	return -ERESTARTNOHAND;
 }

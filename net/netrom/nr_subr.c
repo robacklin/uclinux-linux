@@ -1,7 +1,7 @@
 /*
- *	NET/ROM release 006
+ *	NET/ROM release 007
  *
- *	This code REQUIRES 1.2.1 or higher/ NET3.029
+ *	This code REQUIRES 2.1.15 or higher/ NET3.038
  *
  *	This module:
  *		This module is free software; you can redistribute it and/or
@@ -12,10 +12,9 @@
  *	History
  *	NET/ROM 001	Jonathan(G4KLX)	Cloned from ax25_subr.c
  *	NET/ROM	003	Jonathan(G4KLX)	Added G8BPQ NET/ROM extensions.
+ *	NET/ROM 007	Jonathan(G4KLX)	New timer architecture.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -31,7 +30,7 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
@@ -43,19 +42,10 @@
  */
 void nr_clear_queues(struct sock *sk)
 {
-	struct sk_buff *skb;
-
-	while ((skb = skb_dequeue(&sk->write_queue)) != NULL)
-		kfree_skb(skb, FREE_WRITE);
-
-	while ((skb = skb_dequeue(&sk->protinfo.nr->ack_queue)) != NULL)
-		kfree_skb(skb, FREE_WRITE);
-
-	while ((skb = skb_dequeue(&sk->protinfo.nr->reseq_queue)) != NULL)
-		kfree_skb(skb, FREE_READ);
-
-	while ((skb = skb_dequeue(&sk->protinfo.nr->frag_queue)) != NULL)
-		kfree_skb(skb, FREE_READ);
+	skb_queue_purge(&sk->write_queue);
+	skb_queue_purge(&sk->protinfo.nr->ack_queue);
+	skb_queue_purge(&sk->protinfo.nr->reseq_queue);
+	skb_queue_purge(&sk->protinfo.nr->frag_queue);
 }
 
 /*
@@ -73,7 +63,7 @@ void nr_frames_acked(struct sock *sk, unsigned short nr)
 	if (sk->protinfo.nr->va != nr) {
 		while (skb_peek(&sk->protinfo.nr->ack_queue) != NULL && sk->protinfo.nr->va != nr) {
 		        skb = skb_dequeue(&sk->protinfo.nr->ack_queue);
-			kfree_skb(skb, FREE_WRITE);
+			kfree_skb(skb);
 			sk->protinfo.nr->va = (sk->protinfo.nr->va + 1) % NR_MODULUS;
 		}
 	}
@@ -155,14 +145,12 @@ void nr_write_internal(struct sock *sk, int frametype)
 		case NR_INFOACK:
 			break;
 		default:
-			printk(KERN_ERR "nr_write_internal: invalid frame type %d\n", frametype);
+			printk(KERN_ERR "NET/ROM: nr_write_internal - invalid frame type %d\n", frametype);
 			return;
 	}
 
 	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
 		return;
-
-	skb->free = 1;
 
 	/*
 	 *	Space for AX.25 and NET/ROM network header
@@ -174,7 +162,7 @@ void nr_write_internal(struct sock *sk, int frametype)
 	switch (frametype & 0x0F) {
 
 		case NR_CONNREQ:
-			timeout  = sk->protinfo.nr->t1 / NR_SLOWHZ;
+			timeout  = sk->protinfo.nr->t1 / HZ;
 			*dptr++  = sk->protinfo.nr->my_index;
 			*dptr++  = sk->protinfo.nr->my_id;
 			*dptr++  = 0;
@@ -229,9 +217,8 @@ void nr_write_internal(struct sock *sk, int frametype)
 /*
  * This routine is called when a Connect Acknowledge with the Choke Flag
  * set is needed to refuse a connection.
- * If 'my' is set, send the "reset" using our circuit ID.
  */
-void nr_transmit_dm(struct sk_buff *skb, int my)
+void nr_transmit_refusal(struct sk_buff *skb, int mine)
 {
 	struct sk_buff *skbn;
 	unsigned char *dptr;
@@ -241,8 +228,6 @@ void nr_transmit_dm(struct sk_buff *skb, int my)
 
 	if ((skbn = alloc_skb(len, GFP_ATOMIC)) == NULL)
 		return;
-
-	skbn->free = 1;
 
 	skb_reserve(skbn, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN);
 
@@ -262,7 +247,7 @@ void nr_transmit_dm(struct sk_buff *skb, int my)
 
 	*dptr++ = sysctl_netrom_network_ttl_initialiser;
 
-	if (my) {
+	if (mine) {
 		*dptr++ = 0;
 		*dptr++ = 0;
 		*dptr++ = skb->data[15];
@@ -278,7 +263,26 @@ void nr_transmit_dm(struct sk_buff *skb, int my)
 	*dptr++ = 0;
 
 	if (!nr_route_frame(skbn, NULL))
-		kfree_skb(skbn, FREE_WRITE);
+		kfree_skb(skbn);
 }
 
-#endif
+void nr_disconnect(struct sock *sk, int reason)
+{
+	nr_stop_t1timer(sk);
+	nr_stop_t2timer(sk);
+	nr_stop_t4timer(sk);
+	nr_stop_idletimer(sk);
+
+	nr_clear_queues(sk);
+
+	sk->protinfo.nr->state = NR_STATE_0;
+
+	sk->state     = TCP_CLOSE;
+	sk->err       = reason;
+	sk->shutdown |= SEND_SHUTDOWN;
+
+	if (!sk->dead)
+		sk->state_change(sk);
+
+	sk->dead = 1;
+}

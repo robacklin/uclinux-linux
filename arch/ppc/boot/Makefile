@@ -7,43 +7,76 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 # Adapted for PowerPC by Gary Thomas
+# modified by Cort (cort@cs.nmt.edu)
 #
 
-.c.s:
-	$(CC) $(CFLAGS) -S -o $*.s $<
-.s.o:
-	$(AS) -o $*.o $<
-.c.o:
-	$(CC) $(CFLAGS) -c -o $*.o $<
-.S.s:
-	$(CC) -D__ASSEMBLY__ -traditional -E -o $*.o $<
-.S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
+GZIP_FLAGS = -v9f
 
-OBJECTS = head.o main.o
+CFLAGS	+= -fno-builtin -D__BOOTER__ -I$(TOPDIR)/arch/$(ARCH)/boot/include
 
-all:	linux.boot mkboot
+AFLAGS	+= -D__BOOTER__
+OBJCOPY_ARGS = -O elf32-powerpc
 
-linux.boot: $(TOPDIR)/vmlinux mkboot
-	rsh charon /bin/rm -f /usr/tftpboot/vmlinux
-	/bin/rm -f /usr/tftpboot/vmlinux
-	./mkboot $(TOPDIR)/vmlinux /usr/tftpboot/vmlinux
-	rcp /usr/tftpboot/vmlinux charon:/usr/tftpboot/vmlinux
-	sync
+MKIMAGE				:= $(TOPDIR)/scripts/mkuboot.sh
 
-tImage: mk_type41 $(TOPDIR)/vmlinux mkboot
-	./mkboot $(TOPDIR)/vmlinux vmlinux 
-	mk_type41 vmlinux tImage
-	rm vmlinux
+lib/zlib.a: lib/zlib.c
+	$(MAKE) -C lib
 
-mkboot : cortstrip.c
-	$(HOSTCC) -o mkboot cortstrip.c
+images/vmlinux.gz: $(TOPDIR)/vmlinux
+	$(MAKE) -C images vmlinux.gz
 
-mk_type41: mk_type41.c
-	gcc -o mk_type41 mk_type41.c
+# Subdirs and tools needed for each.  Assume we always need to go into
+# 'simple' unless told otherwise.
+subdir-y			:= lib common simple
+subdir-$(CONFIG_ALL_PPC)	:= chrp pmac prep
+tools-$(CONFIG_ALL_PPC)		:= addnote mknote hack-coff mkprep
+tools-$(CONFIG_4xx)		:= mktree
+tools-$(CONFIG_LOPEC)		:= mkbugboot mkprep
+tools-$(CONFIG_PPLUS)		:= mkbugboot mkprep
+tools-$(CONFIG_PRPMC750)	:= mkbugboot mkprep
+tools-$(CONFIG_SPRUCE)		:= mktree
 
+# These are dirs we don't want to go into on BOOT_TARGETS.  We have them for
+# the 'depend' stage.
+NONBOOT				:= lib common
+
+# These are the subdirs we want to use
+BOOTDIRS			= $(filter-out $(NONBOOT), $(subdir-y))
+
+makeof1275:
+	$(MAKE) -C of1275
+
+# This will make the tools we need.  We do it like this to ensure that we use
+# HOSTCC. -- Tom
+maketools:
+	$(MAKE) -C utils $(tools-y)
+
+# The targets all boards support for boot images.
+BOOT_TARGETS = zImage zImage.initrd znetboot znetboot.initrd
+
+$(BOOT_TARGETS): vmapus lib/zlib.a images/vmlinux.gz makeof1275 maketools
+ifneq ($(BOOTDIRS),)
+	for d in $(BOOTDIRS); do $(MAKE) -C $$d $@; done
+endif
+
+vmapus: $(TOPDIR)/vmlinux
+ifdef CONFIG_APUS
+	$(STRIP) $(TOPDIR)/vmlinux -o images/vmapus
+	gzip $(GZIP_FLAGS) images/vmapus
+endif
+
+# Make an image for PPCBoot / U-Boot.
+uImage: $(MKIMAGE) images/vmlinux.gz
+	$(CONFIG_SHELL) $(MKIMAGE) -A ppc -O linux -T kernel \
+	-C gzip -a 00000000 -e 00000000 \
+	-n 'Linux-$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)' \
+	-d images/vmlinux.gz images/vmlinux.UBoot
+	ln -sf vmlinux.UBoot images/uImage
+	rm -f ./mkuboot
+
+# These are subdirs with files not normally rm'ed. -- Tom
 clean:
-	rsh charon /bin/rm -f /usr/tftpboot/vmlinux
-	/bin/rm -f /usr/tftpboot/vmlinux
+	$(MAKE) -C images clean
+	$(MAKE) -C utils clean
 
-dep:
+include $(TOPDIR)/Rules.make

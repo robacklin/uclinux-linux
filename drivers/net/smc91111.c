@@ -1,3 +1,4 @@
+//#define SMC_DEBUG 2 // Must be defined in makefile
 /*------------------------------------------------------------------------
  . smc91111.c
  . This is a driver for SMSC's 91C111 single-chip Ethernet device.
@@ -39,7 +40,7 @@
  . author:
  . 	Erik Stahlman				( erik@vt.edu )
  . 	Daris A Nevil				( dnevil@snmc.com )
- .      Kendrick Hamilton                       ( hamilton@sedsystems.ca )
+ .  	Pramod B Bhardwaj   			(pramod.bhardwaj@smsc.com)
  .
  .
  . Hardware multicast code from Peter Cammaert ( pc@denkart.be )
@@ -50,34 +51,23 @@
  .    o   skeleton.c by Donald Becker ( becker@cesdis.gsfc.nasa.gov )
  .
  . History:
+ .	01/15/03  Greg Ungerer, add support for GILBARCONAP board
+ .	06/03/02  Greg Ungerer, added support for M5249C3 board
+ .	09/24/01  Pramod B Bhardwaj, Added the changes for Kernel 2.4
+ .	08/21/01  Pramod B Bhardwaj Added support for RevB of LAN91C111
  .	04/25/01  Daris A Nevil  Initial public release through SMSC
  .	03/16/01  Daris A Nevil  Modified smc9194.c for use with LAN91C111
- .	03/06/02  Greg Ungerer	 Code to support ColdFire (M5249C3 board)
  ----------------------------------------------------------------------------*/
 
 // Use power-down feature of the chip
 #define POWER_DOWN	1
-#define NO_AUTOPROBE 1
 
-//Should be part of the automatic configuration
-#define CONFIG_SMC91C111_EXTRA_DELAY 1
-// Do you want to use 32 bit xfers?  This should work on all chips, as
-// the chipset is designed to accommodate them.
-#define CONFIG_SMC91C111_32_BIT 1
-
-
-#if defined(CONFIG_SMC91C111_EXTRA_DELAY)
-#define SMC91C111_EXTRA_DELAY 20
-#endif
 
 static const char version[] =
-    "smc91111.c:v1.2 01/29/02 by ???\n";
+	"SMSC LAN91C111 Driver (v2.0), (Linux Kernel 2.4 + Support for Odd Byte) 09/24/01 -      by Pramod Bhardwaj (pramod.bhardwaj@smsc.com)\n";
 
-#ifdef MODULE
 #include <linux/module.h>
 #include <linux/version.h>
-#endif
-
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/types.h>
@@ -86,23 +76,22 @@ static const char version[] =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/bitops.h>
 
-#if defined(CONFIG_SED_SIOS)
-#include <asm/m68ksmc.h>
-#include <asm/m68360.h>
-#elif defined(CONFIG_M5249C3)
-#define CONFIG_SMC16BITONLY	1
+#if defined(CONFIG_M5249C3) || defined(CONFIG_GILBARCONAP)
+#define CONFIG_SMC16BITONLY     1
 #include <asm/mcfsmc.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
+#elif defined(CONFIG_SUZAKU)
+#define CONFIG_SMC16BITONLY     1
+#include <asm/suzaku_smc.h>
 #else
 #include <asm/io.h>
 #endif
-
-#include <asm/irq.h>
 
 #include <linux/errno.h>
 #include <linux/delay.h>
@@ -110,25 +99,28 @@ static const char version[] =
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+//#include <linux/kcomp.h>
 
-//#define CONFIG_SYSCTL 1
-
-#ifdef SMC_DEBUG
-#undef SMC_DEBUG
-#endif
- 
 #ifdef CONFIG_SYSCTL
 #include <linux/proc_fs.h>
 #include <linux/sysctl.h>
 #endif
 
 #include "smc91111.h"
+/*------------------------------------------------------------------------
+ .
+ . Configuration options, for the experienced user to change.
+ .
+ -------------------------------------------------------------------------*/
 
-//------------------------------------------------------------------------
-//
-// Configuration options, for the experienced user to change.
-//
-//------------------------------------------------------------------------
+/*
+ . Do you want to use 32 bit xfers?  This should work on all chips, as
+ . the chipset is designed to accommodate them. ... but not on the RTE_ME2_CB
+*/
+
+#if !defined(CONFIG_RTE_CB_ME2) && !defined(CONFIG_SUZAKU)
+# define USE_32_BIT 1
+#endif 
 
 
 /*
@@ -136,16 +128,20 @@ static const char version[] =
  .for a slightly different card, you can add it to the array.  Keep in
  .mind that the array must end in zero.
 */
-#if defined(CONFIG_SED_SIOS)
-static unsigned int smc_portlist[] = { 0x01800300, 0 }; 
-static unsigned int smc_irqlist[]  = { IRQ4, 0 };
-#elif defined(CONFIG_M5249C3)
-static unsigned int smc_portlist[] = { 0xe0000300, 0 }; 
+#if defined(CONFIG_M5249C3)
+static unsigned int smc_portlist[] = { 0xe0000300, 0 };
 static unsigned int smc_irqlist[]  = { 166, 0 };
+#elif defined(CONFIG_GILBARCONAP)
+static unsigned int smc_portlist[] = { 0x30600300, 0 };
+static unsigned int smc_irqlist[]  = { 68, 0 };
+unsigned char smc_defethaddr[] = { 0x00, 0xd0, 0xcf, 0x00, 0x01, 0x21 };
+#elif defined(CONFIG_SUZAKU)
+static unsigned int smc_portlist[] = { 0xffe00300, 0 };
+static unsigned int smc_irqlist[]  = { 2, 0 };
 #else
-static unsigned int smc_portlist[] =
+static unsigned int smc_portlist[] __initdata =
    { 0x200, 0x220, 0x240, 0x260, 0x280, 0x2A0, 0x2C0, 0x2E0,
-	  0x300, 0x320, 0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0};
+	 0x300, 0x320, 0x340, 0x360, 0x380, 0x3A0, 0x3C0, 0x3E0, 0};
 #endif
 
 
@@ -205,8 +201,7 @@ struct smc_local {
  	// these are things that the kernel wants me to keep, so users
 	// can find out semi-useless statistics of how well the card is
 	// performing
-	//struct net_device_stats stats;
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 
 	// If I have to wait until memory is available to send
 	// a packet, I will store the skbuff here, until I get the
@@ -238,6 +233,14 @@ struct smc_local {
 
 	// Contains the current active receive/phy mode
 	word	rpc_cur_mode;
+
+	/* => Pramod, Odd Byte issue */
+	// Contains the Current ChipID
+	unsigned short ChipID;
+
+	//Contains the Current ChipRevision
+	unsigned short ChipRev;
+	/* <= Pramod, Odd Byte issue */
 
 
 #ifdef CONFIG_SYSCTL
@@ -337,52 +340,49 @@ struct smc_local {
  .
  . NB:This shouldn't be static since it is referred to externally.
 */
-int smc_init_91C111(struct device *dev);
+int smc_init(struct net_device *dev);
 
 /*
  . This is called by  unregister_netdev().  It is responsible for
  . cleaning up before the driver is finally unregistered and discarded.
 */
-void smc_91C111_destructor(struct device *dev);
+void smc_destructor(struct net_device *dev);
 
 /*
- . The kernel calls this function when someone wants to use the device,
+ . The kernel calls this function when someone wants to use the net_device,
  . typically 'ifconfig ethX up'.
 */
-static int smc_open(struct device *dev);
+static int smc_open(struct net_device *dev);
 
 /*
  . This is called by the kernel to send a packet out into the net.  it's
  . responsible for doing a best-effort send, but if it's simply not possible
  . to send it, the packet gets dropped.
 */
-static int smc_send_packet(struct sk_buff *skb, struct device *dev);
-
+static void smc_timeout (struct net_device *dev);
 /*
  . This is called by the kernel in response to 'ifconfig ethX down'.  It
  . is responsible for cleaning up everything that the open routine
  . does, and maybe putting the card into a powerdown state.
 */
-static int smc_close(struct device *dev);
+static int smc_close(struct net_device *dev);
 
 /*
  . This routine allows the proc file system to query the driver's
  . statistics.
 */
-static struct enet_statistics * smc_query_statistics( struct device *dev);
+static struct net_device_stats * smc_query_statistics( struct net_device *dev);
 
 /*
  . Finally, a call to set promiscuous mode ( for TCPDUMP and related
  . programs ) and multicast modes.
 */
-static void smc_set_multicast_list(struct device *dev);
+static void smc_set_multicast_list(struct net_device *dev);
 
 /*
  . Configures the PHY through the MII Management interface
 */
-static void smc_phy_configure(struct device* dev);
-
-void smc_register_dump(const struct device *dev);
+static void smc_phy_configure(struct net_device* dev);
 
 /*---------------------------------------------------------------
  .
@@ -398,17 +398,17 @@ static void smc_interrupt(int irq, void *, struct pt_regs *regs);
  . This is a separate procedure to handle the receipt of a packet, to
  . leave the interrupt code looking slightly cleaner
 */
-inline static void smc_rcv( struct device *dev );
+inline static void smc_rcv( struct net_device *dev );
 /*
  . This handles a TX interrupt, which is only called when an error
  . relating to a packet is sent.
 */
-inline static void smc_tx( struct device * dev );
+inline static void smc_tx( struct net_device * dev );
 
 /*
  . This handles interrupts generated from PHY register 18
 */
-static void smc_phy_interrupt(struct device* dev);
+static void smc_phy_interrupt(struct net_device* dev);
 
 /*
  ------------------------------------------------------------
@@ -422,16 +422,7 @@ static void smc_phy_interrupt(struct device* dev);
  . Test if a given location contains a chip, trying to cause as
  . little damage as possible if it's not a SMC chip.
 */
-static int smc_probe( unsigned long ioaddr );
-
-/*
- . this routine initializes the cards hardware, prints out the configuration
- . to the system log as well as the vanity message, and handles the setup
- . of a device parameter.
- . It will give an error if it can't initialize the card.
-*/
-static int smc_initcard( struct device *, unsigned long ioaddr );
-static void smc_wait_ms(unsigned int ms);
+static int smc_probe(struct net_device *dev, unsigned int ioaddr);
 
 /*
  . A rather simple routine to print out a packet for debugging purposes.
@@ -443,59 +434,48 @@ static void print_packet( byte *, int );
 #define tx_done(dev) 1
 
 /* this is called to actually send the packet to the chip */
-static void smc_hardware_send_packet( struct device * dev );
+static void smc_hardware_send_packet( struct net_device * dev );
 
 /* Since I am not sure if I will have enough room in the chip's ram
  . to store the packet, I call this routine, which either sends it
  . now, or generates an interrupt when the card is ready for the
  . packet */
-static int  smc_wait_to_send_packet( struct sk_buff * skb, struct device *dev );
+static int  smc_wait_to_send_packet( struct sk_buff * skb, struct net_device *dev );
 
 /* this does a soft reset on the device */
-static void smc_reset( struct device* dev );
+static void smc_reset( struct net_device* dev );
 
 /* Enable Interrupts, Receive, and Transmit */
-static void smc_enable( struct device *dev );
+static void smc_enable( struct net_device *dev );
 
 /* this puts the device in an inactive state */
-static void smc_shutdown( unsigned long ioaddr );
+static void smc_shutdown( unsigned int ioaddr );
 
 #ifndef NO_AUTOPROBE
 /* This routine will find the IRQ of the driver if one is not
  . specified in the input to the device.  */
-static int smc_findirq( unsigned long ioaddr );
+static int smc_findirq( unsigned int ioaddr );
 #endif
 
 /*
   this routine will set the hardware multicast table to the specified
   values given it by the higher level routines
 */
-static void smc_setmulticast( unsigned long ioaddr, int count,
-        struct dev_mc_list *  );
+static void smc_setmulticast( unsigned int ioaddr, int count, struct dev_mc_list *  );
 static int crc32( char *, int );
 
 /* Routines to Read and Write the PHY Registers across the
    MII Management Interface
 */
 
-static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
-        byte phyreg);
-static void smc_write_phy_register(unsigned long ioaddr,
-	byte phyaddr, byte phyreg, word phydata);
-#if 0
-//Interpret the read data, only understands some registers, more need to be
-// added.
-static word smc_interpret_phy_register(const struct device *dev,
-        byte phyreg, word status);
-#endif
+static word smc_read_phy_register(unsigned int ioaddr, byte phyaddr, byte phyreg);
+static void smc_write_phy_register(unsigned int ioaddr, byte phyaddr, byte phyreg, word phydata);
 
-/*
-  Initilizes our device's sysctl proc filesystem
-*/
+/* Initilizes our device's sysctl proc filesystem */
 
 #ifdef CONFIG_SYSCTL
-static void smc_sysctl_register(struct device *dev);
-static void smc_sysctl_unregister(struct device *dev);
+static void smc_sysctl_register(struct net_device *);
+static void smc_sysctl_unregister(struct net_device *);
 #endif /* CONFIG_SYSCTL */ 
 
 /*
@@ -515,10 +495,10 @@ static void smc_sysctl_unregister(struct device *dev);
  .	5.  clear all interrupts
  .
 */
-static void smc_reset( struct device* dev )
+static void smc_reset( struct net_device* dev )
 {
 	//struct smc_local *lp 	= (struct smc_local *)dev->priv;
-	unsigned long	ioaddr = dev->base_addr;
+	unsigned int	ioaddr = dev->base_addr;
 
 	PRINTK2("%s:smc_reset\n", dev->name);
 
@@ -532,7 +512,11 @@ static void smc_reset( struct device* dev )
 	/* by a soft reset */
 
 	SMC_SELECT_BANK( 1 );
+#ifdef CONFIG_GILBARCONAP
+	outw( CONFIG_DEFAULT | CONFIG_NO_WAIT, ioaddr + CONFIG_REG);
+#else
 	outw( CONFIG_DEFAULT, ioaddr + CONFIG_REG);
+#endif
 
 	/* Setup for fast accesses if requested */
 	/* If the card/system can't handle it then there will */
@@ -589,9 +573,9 @@ static void smc_reset( struct device* dev )
  .	2.  Enable the receiver
  .	3.  Enable interrupts
 */
-static void smc_enable( struct device *dev )
+static void smc_enable( struct net_device *dev )
 {
-	unsigned long ioaddr 	= dev->base_addr;
+	unsigned int ioaddr 	= dev->base_addr;
 	struct smc_local *lp 	= (struct smc_local *)dev->priv;
 
 	PRINTK2("%s:smc_enable\n", dev->name);
@@ -624,9 +608,9 @@ static void smc_enable( struct device *dev )
  .	the manual says that it will wake up in response to any I/O requests
  .	in the register space.   Empirical results do not show this working.
 */
-static void smc_shutdown( unsigned long ioaddr )
+static void smc_shutdown( unsigned int ioaddr )
 {
-	PRINTK2(CARDNAME":smc_shutdown\n");
+	PRINTK2("CARDNAME:smc_shutdown\n");
 
 	/* no more interrupts for me */
 	SMC_SELECT_BANK( 2 );
@@ -656,7 +640,7 @@ static void smc_shutdown( unsigned long ioaddr )
 
 
 /*
- . Function: smc_setmulticast( int ioaddr, int count, dev_mc_list * adds )
+ . Function: smc_setmulticast( unsigned int ioaddr, int count, dev_mc_list * adds )
  . Purpose:
  .    This sets the internal hardware table to filter out unwanted multicast
  .    packets before they take up memory.
@@ -673,16 +657,14 @@ static void smc_shutdown( unsigned long ioaddr )
 */
 
 
-static void smc_setmulticast( unsigned long ioaddr, int count,
-        struct dev_mc_list * addrs )
-{
+static void smc_setmulticast( unsigned int ioaddr, int count, struct dev_mc_list * addrs ) {
 	int			i;
 	unsigned char		multicast_table[ 8 ];
 	struct dev_mc_list	* cur_addr;
 	/* table for flipping the order of 3 bits */
 	unsigned char invert3[] = { 0, 4, 2, 6, 1, 5, 3, 7 };
 
-	PRINTK2(CARDNAME":smc_setmulticast\n");
+	PRINTK2("CARDNAME:smc_setmulticast\n");
 
 	/* start with a table of all zeros: reject all */
 	memset( multicast_table, 0, sizeof( multicast_table ) );
@@ -765,111 +747,112 @@ static int crc32( char * s, int length ) {
  . o 	(NO): Enable interrupts and let the interrupt handler deal with it.
  . o	(YES):Send it now.
 */
-static int smc_wait_to_send_packet( struct sk_buff * skb, struct device * dev )
+static int smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * dev )
 {
-    struct          smc_local *lp   = (struct smc_local *)dev->priv;
-    unsigned long   ioaddr          = dev->base_addr;
-    word            length;
-    unsigned short  numPages;
-    word            time_out;
-    word            status;
+	struct smc_local *lp 	= (struct smc_local *)dev->priv;
+	unsigned int ioaddr 	= dev->base_addr;
+	word 			length;
+	unsigned short 		numPages;
+	word			time_out;
+	word			status;
 
-    PRINTK3("%s:smc_wait_to_send_packet\n", dev->name);
+	PRINTK3("%s:smc_wait_to_send_packet\n", dev->name);
 
-    if (lp->saved_skb)
-    {
-        // THIS SHOULD NEVER HAPPEN.
-        lp->stats.tx_aborted_errors++;
-        printk("%s: Bad Craziness - sent packet while busy.\n", dev->name);
-        return 1;
-    }
-    lp->saved_skb = skb;
+	if ( lp->saved_skb) {
+		/* THIS SHOULD NEVER HAPPEN. */
+		lp->stats.tx_aborted_errors++;
+		printk("%s: Bad Craziness - sent packet while busy.\n",
+			dev->name);
+		return 1;
+	}
+	lp->saved_skb = skb;
 
-    length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 
 		
-    //
-    // The MMU wants the number of pages to be the number of 256 bytes
-    // 'pages', minus 1 ( since a packet can't ever have 0 pages :) )
-    //
-    // The 91C111 ignores the size bits, but the code is left intact
-    // for backwards and future compatibility.
-    //
-    // Pkt size for allocating is data length +6 (for additional status
-    // words, length and ctl!)
-    //
-    // If odd size then last byte is included in this header.
-    //
-    numPages =   ((length & 0xfffe) + 6);
-    numPages >>= 8; // Divide by 256
+	/*
+	** The MMU wants the number of pages to be the number of 256 bytes
+	** 'pages', minus 1 ( since a packet can't ever have 0 pages :) )
+	**
+	** The 91C111 ignores the size bits, but the code is left intact
+	** for backwards and future compatibility.
+	**
+	** Pkt size for allocating is data length +6 (for additional status
+	** words, length and ctl!)
+	**
+	** If odd size then last byte is included in this header.
+	*/
+	numPages =   ((length & 0xfffe) + 6);
+	numPages >>= 8; // Divide by 256
 
-    if (numPages > 7 )
-    {
-        printk("%s: Far too big packet error. \n", dev->name);
-        // freeing the packet is a good thing here... but should
-        // . any packets of this size get down here?
-        dev_kfree_skb (skb,FREE_WRITE);
-        lp->saved_skb = NULL;
-        // this IS an error, but, i don't want the skb saved
-        return 0;
-    }
-	// either way, a packet is waiting now
-    lp->packets_waiting++;
+	if (numPages > 7 ) {
+		printk("%s: Far too big packet error. \n", dev->name);
+		/* freeing the packet is a good thing here... but should
+		 . any packets of this size get down here?   */
+		dev_kfree_skb (skb);
+		lp->saved_skb = NULL;
+		/* this IS an error, but, i don't want the skb saved */
+		netif_wake_queue(dev);
+		return 0;
+	}
+	/* either way, a packet is waiting now */
+	lp->packets_waiting++;
 
-    // now, try to allocate the memory
-    SMC_SELECT_BANK( 2 );
-    outw( MC_ALLOC | numPages, ioaddr + MMU_CMD_REG );
-    //
-    // Performance Hack
-    //
-    // wait a short amount of time.. if I can send a packet now, I send
-    // it now.  Otherwise, I enable an interrupt and wait for one to be
-    // available.
-    //
-    // I could have handled this a slightly different way, by checking to
-    // see if any memory was available in the FREE MEMORY register.  However,
-    // either way, I need to generate an allocation, and the allocation works
-    // no matter what, so I saw no point in checking free memory.
-    //
-    time_out = MEMORY_WAIT_TIME;
-    do
-    {
-        status = inb( ioaddr + INT_REG );
-        time_out = time_out - 1;
-    } while ((time_out > 0) && ((status & IM_ALLOC_INT) == 0));
-
-    //If interrupt, acknowledge interrupt
-    if(status & IM_ALLOC_INT)
-    {
+	/* now, try to allocate the memory */
+	SMC_SELECT_BANK( 2 );
+	outw( MC_ALLOC | numPages, ioaddr + MMU_CMD_REG );
+	/*
+ 	. Performance Hack
+	.
+ 	. wait a short amount of time.. if I can send a packet now, I send
+	. it now.  Otherwise, I enable an interrupt and wait for one to be
+	. available.
+	.
+	. I could have handled this a slightly different way, by checking to
+	. see if any memory was available in the FREE MEMORY register.  However,
+	. either way, I need to generate an allocation, and the allocation works
+	. no matter what, so I saw no point in checking free memory.
+	*/
+	time_out = MEMORY_WAIT_TIME;
+	do {
+		status = inb( ioaddr + INT_REG );
+		if ( status & IM_ALLOC_INT ) {
+			/* acknowledge the interrupt */
 #if defined(CONFIG_SMC16BITONLY)
-        outw( IM_ALLOC_INT | (inb(ioaddr + IM_REG) << 8), ioaddr + INT_REG );
+			outw( IM_ALLOC_INT | (inb(ioaddr + IM_REG) << 8),
+				ioaddr + INT_REG );
 #else
-        outb( IM_ALLOC_INT, ioaddr + INT_REG );
+			outb( IM_ALLOC_INT, ioaddr + INT_REG );
 #endif
-    }
-    else
-    {
-        // oh well, wait until the chip finds memory later
-        SMC_ENABLE_INT( IM_ALLOC_INT );
-        // Check the status bit one more time just in case
-        // it snuk in between the time we last checked it
-        // and when we set the interrupt bit
-        status = inb( ioaddr + INT_REG );
-        if ( !(status & IM_ALLOC_INT) )
-        {
-            PRINTK2("%s: memory allocation deferred. \n", dev->name);
-            smc_register_dump(dev);
-            // it's deferred, but I'll handle it later
-            return 0;
-        }
+  			break;
+		}
+   	} while ( -- time_out );
 
-        // Looks like it did sneak in, so disable the interrupt
-        SMC_DISABLE_INT( IM_ALLOC_INT );
-    }
-    // or YES! I can send the packet now.
-    smc_hardware_send_packet(dev);
-   
-    return 0;
+   	if ( !time_out ) {
+		/* oh well, wait until the chip finds memory later */
+		SMC_ENABLE_INT( IM_ALLOC_INT );
+
+		/* Check the status bit one more time just in case */
+		/* it snuk in between the time we last checked it */
+		/* and when we set the interrupt bit */
+		status = inb( ioaddr + INT_REG );
+		if ( !(status & IM_ALLOC_INT) ) {
+      			PRINTK2("%s: memory allocation deferred. \n",
+				dev->name);
+			netif_stop_queue(dev);			
+
+			/* it's deferred, but I'll handle it later */
+      			return 0;
+			}
+
+		/* Looks like it did sneak in, so disable */
+		/* the interrupt */
+		SMC_DISABLE_INT( IM_ALLOC_INT );
+   	}
+	/* or YES! I can send the packet now.. */
+	smc_hardware_send_packet(dev);
+	netif_wake_queue(dev);
+	return 0;
 }
 
 /*
@@ -890,22 +873,20 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct device * dev )
  .	Enable the transmit interrupt, so I know if it failed
  . 	Free the kernel data if I actually sent it.
 */
-static void smc_hardware_send_packet( struct device * dev )
+static void smc_hardware_send_packet( struct net_device * dev )
 {
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 	byte	 		packet_no;
 	struct sk_buff * 	skb = lp->saved_skb;
 	word			length;
-	unsigned long		ioaddr;
+	unsigned int		ioaddr;
 	byte			* buf;
 
 	PRINTK3("%s:smc_hardware_send_packet\n", dev->name);
 
 	ioaddr = dev->base_addr;
-	PRINTK3("%s:smc io address is 0x%08lx\n", dev->name, ioaddr);
 
-	if ( !skb )
-	{
+	if ( !skb ) {
 		PRINTK("%s: In XMIT with no packet to send \n", dev->name);
 		return;
 	}
@@ -914,14 +895,13 @@ static void smc_hardware_send_packet( struct device * dev )
 
 	/* If I get here, I _know_ there is a packet slot waiting for me */
 	packet_no = inb( ioaddr + AR_REG );
-	if ( packet_no & AR_FAILED )
-	{
+	if ( packet_no & AR_FAILED ) {
 		/* or isn't there?  BAD CHIP! */
 		printk(KERN_DEBUG "%s: Memory allocation failed. \n",
 			dev->name);
-		kfree(skb);
+		dev_kfree_skb_any (skb);
 		lp->saved_skb = NULL;
-		dev->tbusy = 0;
+		netif_wake_queue(dev);
 		return;
 	}
 
@@ -945,7 +925,7 @@ static void smc_hardware_send_packet( struct device * dev )
 
 	/* send the packet length ( +6 for status, length and ctl byte )
  	   and the status word ( set to zeros ) */
-#ifdef CONFIG_SMC91C111_32_BIT
+#ifdef USE_32_BIT
 #if defined(CONFIG_SMC16BITONLY)
 	outl(  (length +6 ) , ioaddr + DATA_REG );
 #else
@@ -969,47 +949,7 @@ static void smc_hardware_send_packet( struct device * dev )
  	 . a good idea to check which is optimal?  But that could take
 	 . almost as much time as is saved?
 	*/
-#if defined(CONFIG_SED_SIOS)
-	outsl(ioaddr + DATA_REG, buf,  length >> 2 );
-	if(length & 0x2)
-	{
-		dword last_dword;
-		unsigned int index = (length >> 2) << 2;
-		PRINTK3("<1>Length %d, Index %d\n", length, index);
-		PRINTK3("<1>buf[index] 0x%02x, buf[index + 1] 0x%02x\n",
-			buf[index], buf[index +1]);
-
-		last_dword = buf[index];
-		PRINTK3("<1>last dword 0x%08x\n", last_dword);
-		last_dword = ((last_dword << 8) & 0xff00) | buf[index +1];
-		PRINTK3("<1>last dword 0x%08x\n", last_dword);
-		last_dword = (last_dword << 16) & 0xffff0000;
-		PRINTK3("<1>last dword 0x%08x\n", last_dword);
-
-		if(length & 0x01)
-		{
-			last_dword = last_dword | ((buf[index + 2]) << 8 ) | (0x20);
-			PRINTK3("<1>last dword 0x%08x\n", last_dword);
-		}
-		outsl(ioaddr + DATA_REG, &last_dword, 1);
-	}
-	else
-	{
-		PRINTK3("<1>Sending a single word at end\n");
-		if((length & 0x01) == 0)
-		{
-			outw(0, ioaddr + DATA_REG);
-		}
-		else
-		{
-			// I am letting outw do the swap
-			word last_word;
-			last_word = (buf[length - 1]) | 0x2000;
-			outw(last_word, ioaddr + DATA_REG);
-		}
-	}
-#else
-#ifdef CONFIG_SMC91C111_32_BIT
+#ifdef USE_32_BIT
 	outsl(ioaddr + DATA_REG, buf,  length >> 2 );
 	if ( length & 0x2  )
 #if defined(CONFIG_SMC16BITONLY)
@@ -1019,7 +959,7 @@ static void smc_hardware_send_packet( struct device * dev )
 #endif
 #else
 	outsw(ioaddr + DATA_REG , buf, (length ) >> 1);
-#endif // CONFIG_SMC91C111_32_BIT
+#endif // USE_32_BIT
 
 	/* Send the last byte, if there is one.   */
 	if ( (length & 1) == 0 ) {
@@ -1032,7 +972,6 @@ static void smc_hardware_send_packet( struct device * dev )
 		outb( 0x20, ioaddr + DATA_REG); // Set odd bit in CONTROL BYTE
 #endif
 	}
-#endif //SED_SIOS
 
 	/* enable the interrupts */
 	SMC_ENABLE_INT( (IM_TX_INT | IM_TX_EMPTY_INT) );
@@ -1043,12 +982,12 @@ static void smc_hardware_send_packet( struct device * dev )
 	PRINTK2("%s: Sent packet of length %d \n", dev->name, length);
 
 	lp->saved_skb = NULL;
-	dev_kfree_skb (skb,FREE_WRITE);
+	dev_kfree_skb_any (skb);
 
 	dev->trans_start = jiffies;
 
 	/* we can send another packet */
-	dev->tbusy = 0;
+	netif_wake_queue(dev);
 
 
 	return;
@@ -1069,53 +1008,44 @@ static void smc_hardware_send_packet( struct device * dev )
  |
  ---------------------------------------------------------------------------
 */
-int smc_init_91C111(struct device *dev)
+int __init smc_init(struct net_device *dev)
 {
-        int i;
-        int base_addr = dev ? dev->base_addr : 0;
+	PRINTK2("CARDNAME:smc_init\n");
 
-        PRINTK2(CARDNAME":smc_init_91C111\n");
-        printk(CARDNAME":smc_init_91C111\n");
-       
-        /*  try a specific location */
-        if (base_addr > 0x1ff)
-        {
-                int	error;
-                error = smc_probe(base_addr);
-                if ( 0 == error )
-                {
-                        return smc_initcard( dev, base_addr );
-                }
-                return error;
-        }
-        else
-        {
-                if ( 0 != base_addr )
-                {
-                        return -ENXIO;
-                }
-        }
+	SET_MODULE_OWNER (dev);
 
-        /* check every ethernet address */
-        for (i = 0; smc_portlist[i]; i++)
-        {
-                int ioaddr = smc_portlist[i];
-#if defined(CONFIG_SED_SIOS) || defined(CONFIG_M5249C3)
-                dev->irq = smc_irqlist[i];
+#if defined(CONFIG_COLDFIRE) || defined(CONFIG_SUZAKU)
+{
+	static int index = 0;
+
+	/* check every ethernet address */
+	while (smc_portlist[index]) {
+		dev->irq = smc_irqlist[index];
+		if ( smc_probe(dev,smc_portlist[index++]) == 0 )
+			return 0;
+	}
+}
+#else
+{
+	int i;
+	int base_addr = dev ? dev->base_addr : 0;
+
+	/*  try a specific location */
+	if (base_addr > 0x1ff)
+		return smc_probe(dev, base_addr);
+	else if ( 0 != base_addr ) 
+		return -ENXIO;
+		
+	/* check every ethernet address */
+	for (i = 0; smc_portlist[i]; i++) {
+		if ( smc_probe(dev,smc_portlist[i]) ==0)
+			return 0;
+	}
+}
 #endif
-
-                // check if the area is available & check this specific address
-                if(check_region(ioaddr , SMC_IO_EXTENT) == 0)
-                {
-                        if(smc_probe(ioaddr) == 0)
-                                return smc_initcard(dev, ioaddr);
-                        else
-                                printk("<1>Error during smc probe.\n");
-                }
-        }
-
-        // couldn't find anything
-        return -ENODEV;
+		
+	/* couldn't find anything */
+	return -ENODEV;
 }
 
 
@@ -1130,9 +1060,9 @@ int smc_init_91C111(struct device *dev)
  |
  ---------------------------------------------------------------------------
 */
-void smc_91C111_destructor(struct device *dev)
+void smc_destructor(struct net_device *dev)
 {
-	PRINTK2(CARDNAME":smc_91C111_destructor\n");
+	PRINTK2("CARDNAME:smc_destructor\n");
 }
 
 
@@ -1144,18 +1074,20 @@ void smc_91C111_destructor(struct device *dev)
  . interrupt, so an auto-detect routine can detect it, and find the IRQ,
  ------------------------------------------------------------------------
 */
-int smc_findirq( unsigned long ioaddr )
+int __init smc_findirq( unsigned int ioaddr )
 {
 	int	timeout = 20;
+	unsigned long cookie;
 
-	PRINTK2(CARDNAME":smc_findirq\n");
+	PRINTK2("CARDNAME:smc_findirq\n");
 
 	/* I have to do a STI() here, because this is called from
 	   a routine that does an CLI during this process, making it
 	   rather difficult to get interrupts for auto detection */
 	sti();
-	autoirq_setup( 0 );
-    
+
+	cookie = probe_irq_on();
+
 	/*
 	 * What I try to do here is trigger an ALLOC_INT. This is done
 	 * by allocating a small chunk of memory, which will give an interrupt
@@ -1165,7 +1097,11 @@ int smc_findirq( unsigned long ioaddr )
 
 	SMC_SELECT_BANK(2);
 	/* enable ALLOCation interrupts ONLY */
+#if defined(CONFIG_SMC16BITONLY)
+	outw( IM_ALLOC_INT | (inb(ioaddr + IM_REG) << 8), ioaddr + INT_REG );
+#else
 	outb( IM_ALLOC_INT, ioaddr + IM_REG );
+#endif
 
 	/*
  	 . Allocate 512 bytes of memory.  Note that the chip was just
@@ -1200,14 +1136,18 @@ int smc_findirq( unsigned long ioaddr )
 	mdelay(10);
 
 	/* and disable all interrupts again */
+#if defined(CONFIG_SMC16BITONLY)
+	outw( 0, ioaddr + INT_REG );
+#else
 	outb( 0, ioaddr + IM_REG );
+#endif
 
 	/* clear hardware interrupts again, because that's how it
 	   was when I was called... */
 	cli();
 
 	/* and return what I found */
-	return autoirq_report( 0 );
+	return probe_irq_off(cookie);
 }
 #endif
 
@@ -1225,81 +1165,6 @@ int smc_findirq( unsigned long ioaddr )
  .
  .---------------------------------------------------------------------
  */
-
-static int smc_probe( unsigned long ioaddr )
-{
-        unsigned int	bank;
-        word	revision_register;
-        word  base_address_register;
-
-        PRINTK2(CARDNAME":smc_probe\n");
-
-        /* First, see if the high byte is 0x33 */
-        bank = inw( ioaddr + BANK_SELECT );
-        if ( (bank & 0xFF00) != 0x3300 )
-        {
-                printk("<1>Smc probe bank check 1 failed.\n");
-                return -ENODEV;
-        }
-        /* The above MIGHT indicate a device, but I need to write to further
-           test this.  */
-        outw( 0x0, ioaddr + BANK_SELECT );
-        bank = inw( ioaddr + BANK_SELECT );
-        if ( (bank & 0xFF00 ) != 0x3300 )
-        {
-                printk("<1>Smc probe bank check 2 failed.\n");
-                return -ENODEV;
-        }
-#if SMC_DEBUG > 3
-        PRINTK3(CARDNAME":Bank read as a 16 bit value:0x%04x\n",
-                        inw(ioaddr + BANK_SELECT));
-        PRINTK3(CARDNAME":Bank read as an 8 bit value:0x%02x\n",
-                        inb(ioaddr + BANK_SELECT));
-        PRINTK3(CARDNAME":Bank + 1 read as an 8 bit value:0x%02x\n",
-                        inb(ioaddr + BANK_SELECT + 1));
-#endif
-        /* well, we've already written once, so hopefully another time won't
-           hurt.  This time, I need to switch the bank register to bank 1,
-           so I can access the base address register */
-        SMC_SELECT_BANK(1);
-        base_address_register = inw( ioaddr + BASE_REG );
-#if defined(CONFIG_SED_SIOS)
-        if (ioaddr != ((base_address_register >> 3 & 0x3E0) + 0x01800000))
-#elif defined(CONFIG_M5249C3)
-        if ((ioaddr & 0xfff) != (base_address_register >> 3 & 0x3E0))
-#else
-        if (ioaddr != (base_address_register >> 3 & 0x3E0))
-#endif
-        {
-                printk(CARDNAME": IOADDR %lx doesn't match configuration (%x)."
-                                "Probably not a SMC chip\n",
-                                ioaddr, base_address_register >> 3 & 0x3E0 );
-                /* well, the base address register didn't match.  Must not have
-                   been a SMC chip after all. */
-                return -ENODEV;
-        }
-
-        /*  check if the revision register is something that I recognize.
-            These might need to be added to later, as future revisions
-            could be added.  */
-        SMC_SELECT_BANK(3);
-        revision_register  = inw( ioaddr + REV_REG );
-        if ( !chip_ids[ ( revision_register  >> 4 ) & 0xF  ] )
-        {
-                /* I don't recognize this chip, so... */
-                printk(CARDNAME": IO %lx: Unrecognized revision register:"
-                                " %x, Contact author. \n",
-                                ioaddr, revision_register );
-
-                return -ENODEV;
-        }
-       
-        /* at this point I'll assume that the chip is an SMC9xxx. It might be
-           prudent to check a listing of MAC addresses against the hardware
-           address, or do some other tests. */
-        return 0;
-}
-
 /*---------------------------------------------------------------
  . Here I do typical initialization tasks.
  .
@@ -1312,42 +1177,92 @@ static int smc_probe( unsigned long ioaddr )
  . o  configure the dev structure with my subroutines
  . o  actually GRAB the irq.
  . o  GRAB the region
- .-----------------------------------------------------------------
-*/
-static int  smc_initcard(struct device *dev, unsigned long ioaddr)
+ .-----------------------------------------------------------------*/
+
+static int __init smc_probe(struct net_device *dev, unsigned int ioaddr )
 {
-        int i;
+	int i, memory, retval;
+	static unsigned version_printed = 0;
+	unsigned int	bank;
 
-        static unsigned version_printed = 0;
+        const char *version_string;
 
-        /* registers */
-        word	revision_register;
-        word  	memory_info_register;
+	/*registers */
+	word	revision_register;
+	word	base_address_register;
+	word  	memory_info_register;
+	/*=> Pramod */
+	struct smc_local *lp;
+	/*<= Pramod */
 
-        const char *	version_string;
-        int	memory;
+	PRINTK2("CARDNAME:smc_probe\n");
 
-        int   irqval;
+#if !defined(CONFIG_M5249C3) && !defined(CONFIG_GILBARCONAP)
+	/* Grab the region so that no one else tries to probe our ioports. */
+	if (!request_region(ioaddr, SMC_IO_EXTENT, dev->name)) return -EBUSY;
+#endif
 
-        PRINTK2("%s:smc_initcard\n", dev->name);
+	/* First, see if the high byte is 0x33 */
+	bank = inw( ioaddr + BANK_SELECT );
+	if ( (bank & 0xFF00) != 0x3300 ) return -ENODEV;
 
-        /* see if I need to initialize the ethernet card structure */
-        if (dev == NULL)
-        {
-                dev = init_etherdev(0, 0);
-                if (dev == NULL)
-                        return -ENOMEM;
-        }
-       
-        if (version_printed++ == 0)
-                printk("%s", version);
+	/* The above MIGHT indicate a device, but I need to write to further test this.  */
+	outw( 0x0, ioaddr + BANK_SELECT );
+	bank = inw( ioaddr + BANK_SELECT );
+	if ( (bank & 0xFF00 ) != 0x3300 )
+	{
+		retval = -ENODEV;
+		goto err_out;
+	}
 
-        /* fill in some of the fields */
-        dev->base_addr = ioaddr;
+	/* well, we've already written once, so hopefully another time won't
+ 	   hurt.  This time, I need to switch the bank register to bank 1,
+	   so I can access the base address register */
+	SMC_SELECT_BANK(1);
+	base_address_register = inw( ioaddr + BASE_REG );
+#if defined(CONFIG_M5249C3) || defined(CONFIG_GILBARCONAP) || defined(CONFIG_RTE_CB_ME2) || defined(CONFIG_SUZAKU)
+	if ((ioaddr & 0xfff) != (base_address_register >> 3 & 0x3E0))
+#else
+	if ( ioaddr != ( base_address_register >> 3 & 0x3E0 ) )
+#endif
+	{
+		printk("CARDNAME: IOADDR %x doesn't match configuration (%x)."
+			"Probably not a SMC chip\n",
+			ioaddr, base_address_register >> 3 & 0x3E0 );
+		/* well, the base address register didn't match.  Must not have
+		   been a SMC chip after all. */
+		retval = -ENODEV;
+		goto err_out;
+	}
+
+	/*  check if the revision register is something that I recognize.
+	    These might need to be added to later, as future revisions
+	    could be added.  */
+	SMC_SELECT_BANK(3);
+	revision_register  = inw( ioaddr + REV_REG );
+	if ( !chip_ids[ ( revision_register  >> 4 ) & 0xF  ] )
+	{
+		/* I don't recognize this chip, so... */
+		printk("CARDNAME: IO %x: Unrecognized revision register:"
+			" %x, Contact author. \n",
+			ioaddr, revision_register );
+		retval =  -ENODEV;
+		goto err_out;
+	}
+
+	/* at this point I'll assume that the chip is an SMC9xxx.
+	   It might be prudent to check a listing of MAC addresses
+	   against the hardware address, or do some other tests. */
+
+	if (version_printed++ == 0)
+		printk("%s", version);
+
+	/* fill in some of the fields */
+	dev->base_addr = ioaddr;
 
 #if defined(CONFIG_M5249C3)
 	/* Program MAC address if not set... */
-       	SMC_SELECT_BANK( 1 );
+	SMC_SELECT_BANK( 1 );
 	for (i = 0; (i < 6); i += 2) {
 		word address;
 		address = inw( ioaddr + ADDR0_REG + i ) ;
@@ -1361,58 +1276,83 @@ static int  smc_initcard(struct device *dev, unsigned long ioaddr)
 		outw(0x01C3, ioaddr + ADDR0_REG + 4);
 	}
 #endif
+#if defined(CONFIG_GILBARCONAP)
+{
+	unsigned char *ep;
 
-        /* . Get the MAC address ( bank 1, regs 4 - 9 ) */
-        SMC_SELECT_BANK( 1 );
-        for ( i = 0; i < 6; i += 2 )
-        {
-                word	address;
-                address = inw( ioaddr + ADDR0_REG + i  );
-                dev->dev_addr[ i + 1] = address >> 8;
-                dev->dev_addr[ i ] = address & 0xFF;
-        }
+	/* Pull MAC address from FLASH */
+	ep = (unsigned char *) 0xf0006006;
+	if ((ep[0] == 0xff) && (ep[1] == 0xff) && (ep[2] == 0xff) &&
+	    (ep[3] == 0xff) && (ep[4] == 0xff) && (ep[5] == 0xff))
+		ep = (unsigned char *) &smc_defethaddr[0];
+	else if ((ep[0] == 0) && (ep[1] == 0) && (ep[2] == 0) &&
+	    (ep[3] == 0) && (ep[4] == 0) && (ep[5] == 0))
+		ep = (unsigned char *) &smc_defethaddr[0];
 
-        /* get the memory information */
+	SMC_SELECT_BANK( 1 );
+	for (i = 0; i < 6; i += 2) {
+		word address;
+		address = (((word) ep[i+1]) << 8) | ep[i];
+		outw(address, ioaddr + ADDR0_REG + i);
+	}
+}
+#endif
 
-        SMC_SELECT_BANK( 0 );
-        memory_info_register = inw( ioaddr + MIR_REG );
-        memory = memory_info_register & (word)0x00ff;
-        memory *= LAN91C111_MEMORY_MULTIPLIER;
+	/*
+ 	 . Get the MAC address ( bank 1, regs 4 - 9 )
+	*/
+	SMC_SELECT_BANK( 1 );
+	for ( i = 0; i < 6; i += 2 )
+	{
+		word	address;
 
-        /*
-           Now, I want to find out more about the chip.  This is sort of
-           redundant, but it's cleaner to have it in both, rather than having
-           one VERY long probe procedure.
-         */
-        SMC_SELECT_BANK(3);
-        revision_register  = inw( ioaddr + REV_REG );
-        version_string = chip_ids[ ( revision_register  >> 4 ) & 0xF  ];
-        if ( !version_string )
-        {
-                /* I shouldn't get here because this call was done before.... */
-                return -ENODEV;
-        }
-       
-        /* now, reset the chip, and put it into a known state */
-        smc_reset( dev );
+		address = inw( ioaddr + ADDR0_REG + i  );
+		dev->dev_addr[ i + 1] = address >> 8;
+		dev->dev_addr[ i ] = address & 0xFF;
+	}
 
-        /*
-           . If dev->irq is 0, then the device has to be banged on to see
-           . what the IRQ is.
-           .
-           . This banging doesn't always detect the IRQ, for unknown reasons.
-           . a workaround is to reset the chip and try again.
-           .
-           . Interestingly, the DOS packet driver *SETS* the IRQ on the card to
-           . be what is requested on the command line. I don't do that, mostly
-           . because the card that I have uses a non-standard method of
-           . accessing the IRQs, and because this _should_ work in most
-           .  configurations.
-	   . Specifying an IRQ is done with the assumption that the user knows
-	   . what (s)he is doing.  No checking is done!!!!
+	/* get the memory information */
+
+	SMC_SELECT_BANK( 0 );
+	memory_info_register = inw( ioaddr + MIR_REG );
+	memory = memory_info_register & (word)0x00ff;
+	memory *= LAN91C111_MEMORY_MULTIPLIER;
+
+	/*
+	 Now, I want to find out more about the chip.  This is sort of
+ 	 redundant, but it's cleaner to have it in both, rather than having
+ 	 one VERY long probe procedure.
+	*/
+	SMC_SELECT_BANK(3);
+	revision_register  = inw( ioaddr + REV_REG );
+	version_string = chip_ids[ ( revision_register  >> 4 ) & 0xF  ];
+	if ( !version_string )
+	{
+		/* I shouldn't get here because this call was done before.... */
+		retval =  -ENODEV;
+		goto err_out;
+	}
+
+	/* now, reset the chip, and put it into a known state */
+	smc_reset( dev );
+
+#if !defined(CONFIG_SUZAKU)
+	/*
+	 . If dev->irq is 0, then the device has to be banged on to see
+	 . what the IRQ is.
+ 	 .
+	 . This banging doesn't always detect the IRQ, for unknown reasons.
+	 . a workaround is to reset the chip and try again.
+	 .
+	 . Interestingly, the DOS packet driver *SETS* the IRQ on the card to
+	 . be what is requested on the command line.   I don't do that, mostly
+	 . because the card that I have uses a non-standard method of accessing
+	 . the IRQs, and because this _should_ work in most configurations.
+	 .
+	 . Specifying an IRQ is done with the assumption that the user knows
+	 . what (s)he is doing.  No checking is done!!!!
  	 .
 	*/
-#ifndef NO_AUTOPROBE
 	if ( dev->irq < 2 ) {
 		int	trials;
 
@@ -1428,56 +1368,40 @@ static int  smc_initcard(struct device *dev, unsigned long ioaddr)
 	if (dev->irq == 0 ) {
 		printk("%s: Couldn't autodetect your IRQ. Use irq=xx.\n",
 			dev->name);
-		return -ENODEV;
+		retval =  -ENODEV;
+		goto err_out;
 	}
-#if defined(CONFIG_SED_SIOS)
-#error "SED SIOS does not support autoprobing irqs."
-#elif defined(CONFIG_M5249C3)
-#error "M5249C3 does not support autoprobing irqs."
-#endif
 
-#else
-	if (dev->irq == 0 ) {
-		printk(
-		"%s: Autoprobing IRQs is not supported for old kernels.\n",
-		dev->name);
-		return -ENODEV;
-	}
-#endif
 	if (dev->irq == 2) {
 		/* Fixup for users that don't know that IRQ 2 is really IRQ 9,
 		 * or don't know which one to set.
 		 */
 		dev->irq = 9;
 	}
+#endif
 
 	/* now, print out the card info, in a short format.. */
 
-	printk("%s: %s(rev:%d) at %#3lx IRQ:%d MEMSIZE:%db NOWAIT:%d ",
+	printk("%s: %s(rev:%d) at %#3x IRQ:%d MEMSIZE:%db NOWAIT:%d ",
 		dev->name,
 		version_string, revision_register & 0xF, ioaddr, dev->irq,
 		memory, dev->dma);
 	/*
 	 . Print the Ethernet address
 	*/
-	printk("\n\tADDR: ");
+	printk("ADDR: ");
 	for (i = 0; i < 5; i++)
 		printk("%2.2x:", dev->dev_addr[i] );
 	printk("%2.2x \n", dev->dev_addr[5] );
 
 
-	// Initialize the private structure.
-	if (dev->priv == NULL)
-	{
-		PRINTK3("%s:Requesting memory for private data\n", dev->name);
+	/* Initialize the private structure. */
+	if (dev->priv == NULL) {
 		dev->priv = kmalloc(sizeof(struct smc_local), GFP_KERNEL);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-	}
-	else
-	{
-		PRINTK3("%s:Memory already allocated for private data at 0x%08lx\n",
-			dev->name, (unsigned long)dev->priv);
+		if (dev->priv == NULL) {
+			retval = -ENOMEM;
+			goto err_out;
+		}
 	}
 	/* set the private data to zero by default */
 	memset(dev->priv, 0, sizeof(struct smc_local));
@@ -1486,39 +1410,61 @@ static int  smc_initcard(struct device *dev, unsigned long ioaddr)
 	ether_setup(dev);
 
 	/* Grab the IRQ */
-      	irqval = request_irq(dev->irq, &smc_interrupt, 0, dev->name, dev);
-      	if (irqval) {
+	retval = request_irq(dev->irq, &smc_interrupt, 0, dev->name, dev);
+	if (retval) {
        	  printk("%s: unable to get IRQ %d (irqval=%d).\n",
-		dev->name, dev->irq, irqval);
-       	  return -EAGAIN;
+		dev->name, dev->irq, retval);
+		  kfree (dev->priv);
+		  dev->priv = NULL;
+		  goto err_out;
       	}
-	irq2dev_map[dev->irq] =dev; 
-	/* Grab the region so that no one else tries to probe our ioports. */
-	request_region(ioaddr, SMC_IO_EXTENT, dev->name);
 
 #if defined(CONFIG_M5249C3)
 	/* Enable interrupts for GPIO6 */
 	*((volatile unsigned long *) (MCF_MBAR2+MCFSIM2_GPIOINTENABLE)) |=
-		 0x00000040;
+		0x00000040;
 	/* Enable interrupt level for GPIO6 - VEC38 */
 	*((volatile unsigned long *) (MCF_MBAR2+MCFSIM2_INTLEVEL5)) |=
-		 0x04000000;
+		0x04000000;
+#endif
+#if defined(CONFIG_GILBARCONAP)
+{
+	/* Enable INT4 function on multi-purpose pin PD5 */
+	*((volatile unsigned long *) (MCF_MBAR+MCFSIM_PDCNT)) |= 0x00000c00;
+
+	/* Enable interrupts on external INT4  */
+	*((volatile unsigned long *) (MCF_MBAR+MCFSIM_ICR1)) |= 0x000d0000;
+	/**((volatile unsigned long *) (MCF_MBAR+MCFSIM_PITR)) |= 0x10000000;*/
+}
 #endif
 
-	dev->open		        = smc_open;
-	dev->stop		        = smc_close;
-	dev->hard_start_xmit    	= smc_send_packet;
-	dev->get_stats			= smc_query_statistics;
+	dev->open	        = smc_open;
+	dev->stop	        = smc_close;
+	dev->hard_start_xmit   	= smc_wait_to_send_packet;
+	dev->tx_timeout		= smc_timeout;
+	dev->get_stats		= smc_query_statistics;
 #ifdef	HAVE_MULTICAST
-	dev->set_multicast_list 	= &smc_set_multicast_list;
+	dev->set_multicast_list = &smc_set_multicast_list;
 #endif
+
+	/* => Store the ChipRevision and ChipID, to be used in resolving the Odd-Byte issue in RevB of LAN91C111; Pramod */
+	SMC_SELECT_BANK(3);
+	revision_register  = inw( ioaddr + REV_REG );
+	lp = (struct smc_local *)dev->priv;
+	lp->ChipID = (revision_register >> 4) & 0xF;
+	lp->ChipRev = revision_register & 0xF;
 
 	return 0;
+
+err_out:
+	release_region (ioaddr, SMC_IO_EXTENT);
+	return retval;
 }
 
 #if SMC_DEBUG > 2
 static void print_packet( byte * buf, int length )
 {
+#if 1
 #if SMC_DEBUG > 3
 	int i;
 	int remainder;
@@ -1552,6 +1498,7 @@ static void print_packet( byte * buf, int length )
 	}
 	printk("\n");
 #endif
+#endif
 }
 #endif
 
@@ -1562,10 +1509,10 @@ static void print_packet( byte * buf, int length )
  * Set up everything, reset the card, etc ..
  *
  */
-static int smc_open(struct device *dev)
+static int smc_open(struct net_device *dev)
 {
 	struct smc_local *lp 	= (struct smc_local *)dev->priv;
-	unsigned long   ioaddr = dev->base_addr;
+	unsigned int	ioaddr = dev->base_addr;
 	int	i;	/* used to set hw ethernet address */
 
 	PRINTK2("%s:smc_open\n", dev->name);
@@ -1573,9 +1520,7 @@ static int smc_open(struct device *dev)
 	/* clear out all the junk that was put here before... */
 	memset(dev->priv, 0, sizeof(struct smc_local));
 
-	dev->tbusy 	= 0;
-	dev->interrupt  = 0;
-	dev->start 	= 1;
+	netif_start_queue(dev);
 #ifdef MODULE
 	MOD_INC_USE_COUNT;
 #endif
@@ -1599,6 +1544,7 @@ static int smc_open(struct device *dev)
 	lp->ctl_forcol = 0;
 	lp->ctl_filtcar = 0;
 #endif
+
 	/* reset the hardware */
 
 	smc_reset( dev );
@@ -1625,6 +1571,7 @@ static int smc_open(struct device *dev)
 	smc_sysctl_register(dev);
 #endif /* CONFIG_SYSCTL */ 
 
+	netif_start_queue(dev);
 	return 0;
 }
 
@@ -1634,51 +1581,30 @@ static int smc_open(struct device *dev)
  . skeleton.c, from Becker.
  .--------------------------------------------------------
 */
-static int smc_send_packet(struct sk_buff *skb, struct device *dev)
+static void smc_timeout (struct net_device *dev)
 {
 
 	PRINTK3("%s:smc_send_packet\n", dev->name);
 
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		printk(KERN_WARNING "%s: transmit timed out, %s?\n",
-			dev->name, tx_done(dev) ? "IRQ conflict" :
-			"network cable problem");
-		/* "kick" the adaptor */
-		smc_reset( dev );
-		smc_enable( dev );
+	/* If we get here, some higher level has decided we are broken.
+	There should really be a "kick me" function call instead. */
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n",dev->name, tx_done(dev) ? "IRQ conflict" :"network cable problem");
+	/* "kick" the adaptor */
+	smc_reset( dev );
+	smc_enable( dev );
 
-		/* Reconfigure the PHY */
-		smc_phy_configure(dev);
+	/* Reconfigure the PHY */
+	smc_phy_configure(dev);
 
-
-		dev->tbusy = 0;
-		dev->trans_start = jiffies;
-		/* clear anything saved */
-		((struct smc_local *)dev->priv)->saved_skb = NULL;
-	}
-
-	/* Block a timer-based transmit from overlapping.  This could better be
-	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
-		printk(KERN_WARNING "%s: Transmitter access conflict.\n",
-			dev->name);
-		dev_kfree_skb (skb,FREE_WRITE);
-	} else {
-		/* Well, I want to send the packet.. but I don't know
-		   if I can send it right now...  */
-		return smc_wait_to_send_packet( skb, dev );
-	}
-	return 0;
+	netif_wake_queue(dev);
+	dev->trans_start = jiffies;
+	/* clear anything saved */
+	((struct smc_local *)dev->priv)->saved_skb = NULL;
 }
 
 /*--------------------------------------------------------------------
  .
- . This is the main routine of the driver, to handle the device when
+ . This is the main routine of the driver, to handle the net_device when
  . it needs some attention.
  .
  . So:
@@ -1690,10 +1616,9 @@ static int smc_send_packet(struct sk_buff *skb, struct device *dev)
  ---------------------------------------------------------------------*/
 static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 {
-	struct device *dev      = dev_id;
-	//Don't initializes these until after testing that the pointer is not NULL
-	unsigned long ioaddr;
-	struct smc_local *lp;
+	struct net_device *dev 	= dev_id;
+	unsigned int ioaddr 	= dev->base_addr;
+	struct smc_local *lp 	= (struct smc_local *)dev->priv;
 
 	byte	status;
 	word	card_stats;
@@ -1703,30 +1628,35 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 	word	saved_bank;
 	word	saved_pointer;
 
-	PRINTK3("%s: SMC interrupt started ---------------------\n", dev->name);
+
+
+	PRINTK3("%s: SMC interrupt started \n", dev->name);
 
 	if (dev == NULL) {
-		printk(KERN_WARNING "irq %d for unknown device.\n", irq);
+		printk(KERN_WARNING "%s: irq %d for unknown device.\n",
+			dev->name, irq);
 		return;
 	}
-	ioaddr = dev->base_addr;
-	lp = (struct smc_local *)dev->priv;
 
-#if defined(CONFIG_M5249C3)
-	/* Clear interrupts for GPIO6 */
-	*((volatile unsigned long *) (MCF_MBAR2+MCFSIM2_GPIOINTCLEAR)) =
-		 0x00000040;
-#endif
-
-	/* will Linux let this happen ??  If not, this costs some speed */
+	/* will Linux let this happen ??  If not, this costs some speed
 	if ( dev->interrupt ) {
 		printk(KERN_WARNING "%s: interrupt inside interrupt.\n",
 			dev->name);
 		return;
 	}
 
-	dev->interrupt = 1;
-	smc_register_dump(dev);
+	dev->interrupt = 1; */
+
+#if defined(CONFIG_M5249C3)
+	/* Clear interrupts for GPIO6 */
+	*((volatile unsigned long *) (MCF_MBAR2+MCFSIM2_GPIOINTCLEAR)) =
+		0x00000040;
+#endif
+#if defined(CONFIG_GILBARCONAP)
+	*((volatile unsigned long *) (MCF_MBAR+MCFSIM_ICR1)) =
+		(*((volatile unsigned long *) (MCF_MBAR+MCFSIM_ICR1)) &
+		0x77777777) | 0x00080000;
+#endif
 
 	saved_bank = inw( ioaddr + BANK_SELECT );
 
@@ -1748,133 +1678,116 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 	timeout = 4;
 
 	PRINTK2(KERN_WARNING "%s: MASK IS %x \n", dev->name, mask);
-	do
-    {
-        /* read the status flag, and mask it */
-        status = inb( ioaddr + INT_REG ) & mask;
-        if (!status )
-            break;
-       
-        PRINTK3(KERN_WARNING "%s: Handling interrupt status %x \n",
-                dev->name, status);
-       
-        if (status & IM_RCV_INT)
-        {
-            /* Got a packet(s). */
-            PRINTK2(KERN_WARNING"%s: Receive Interrupt\n", dev->name);
-            smc_rcv(dev);
-        }
-        else
-            if (status & IM_TX_INT )
-            {
-                PRINTK2(KERN_WARNING "%s: TX ERROR handled\n", dev->name);
-                smc_tx(dev);
-                // Acknowledge the interrupt
+	do {
+		/* read the status flag, and mask it */
+		status = inb( ioaddr + INT_REG ) & mask;
+		if (!status )
+			break;
+
+		PRINTK3(KERN_WARNING "%s: Handling interrupt status %x \n",
+			dev->name, status);
+
+		if (status & IM_RCV_INT) {
+			/* Got a packet(s). */
+			PRINTK2(KERN_WARNING
+				"%s: Receive Interrupt\n", dev->name);
+			smc_rcv(dev);
+		} else if (status & IM_TX_INT ) {
+			PRINTK2(KERN_WARNING "%s: TX ERROR handled\n",
+				dev->name);
+			smc_tx(dev);
+			// Acknowledge the interrupt
 #if defined(CONFIG_SMC16BITONLY)
-		// MASK is 0 here, so 16bit write is safe
-                outw(IM_TX_INT, ioaddr + INT_REG );
+			// MASK is 0 here, so 16bit write is safe
+			outw(IM_TX_INT, ioaddr + INT_REG );
 #else
-                outb(IM_TX_INT, ioaddr + INT_REG );
+			outb(IM_TX_INT, ioaddr + INT_REG );
 #endif
-            }
-            else
-                if (status & IM_TX_EMPTY_INT )
-                {
-                    /* update stats */
-                    SMC_SELECT_BANK( 0 );
-                    card_stats = inw( ioaddr + COUNTER_REG );
-                    /* single collisions */
-                    lp->stats.collisions += card_stats & 0xF;
-                    card_stats >>= 4;
-                    /* multiple collisions */
-                    lp->stats.collisions += card_stats & 0xF;
-                    /* these are for when linux supports these statistics */
+		} else if (status & IM_TX_EMPTY_INT ) {
+			/* update stats */
+			SMC_SELECT_BANK( 0 );
+			card_stats = inw( ioaddr + COUNTER_REG );
+			/* single collisions */
+			lp->stats.collisions += card_stats & 0xF;
+			card_stats >>= 4;
+			/* multiple collisions */
+			lp->stats.collisions += card_stats & 0xF;
+
+			/* these are for when linux supports these statistics */
 #if 0
-                    card_stats >>= 4;
-                    /* deferred */
-                    card_stats >>= 4;
-                    /* excess deferred */
+			card_stats >>= 4;
+			/* deferred */
+			card_stats >>= 4;
+			/* excess deferred */
 #endif
-                    SMC_SELECT_BANK( 2 );
-                    PRINTK2(KERN_WARNING "%s: TX_BUFFER_EMPTY handled\n",
-                            dev->name);
-                    // Acknowledge the interrupt
+			SMC_SELECT_BANK( 2 );
+			PRINTK2(KERN_WARNING "%s: TX_BUFFER_EMPTY handled\n",
+				dev->name);
+			// Acknowledge the interrupt
 #if defined(CONFIG_SMC16BITONLY)
-		    // MASK is 0 here, so 16bit write is safe
-                    outw( IM_TX_EMPTY_INT, ioaddr + INT_REG );
+			// MASK is 0 here, so 16bit write is safe
+			outw( IM_TX_EMPTY_INT, ioaddr + INT_REG );
 #else
-                    outb( IM_TX_EMPTY_INT, ioaddr + INT_REG );
+			outb( IM_TX_EMPTY_INT, ioaddr + INT_REG );
 #endif
-                    mask &= ~IM_TX_EMPTY_INT;
-                    lp->stats.tx_packets += lp->packets_waiting;
-                    lp->packets_waiting = 0;
-                }
-                else
-                    if (status & IM_ALLOC_INT )
-                    {
-                        PRINTK2(KERN_DEBUG "%s: Allocation interrupt \n",
-                                dev->name);
-                        /* clear this interrupt so it doesn't happen again */
-                        mask &= ~IM_ALLOC_INT;
-                       
-                        smc_hardware_send_packet( dev );
+			mask &= ~IM_TX_EMPTY_INT;
+			lp->stats.tx_packets += lp->packets_waiting;
+			lp->packets_waiting = 0;
 
-                        /* enable xmit interrupts based on this */
-                        mask |= ( IM_TX_EMPTY_INT | IM_TX_INT );
+		} else if (status & IM_ALLOC_INT ) {
+			PRINTK2(KERN_DEBUG "%s: Allocation interrupt \n",
+				dev->name);
+			/* clear this interrupt so it doesn't happen again */
+			mask &= ~IM_ALLOC_INT;
 
-                        /* and let the card send more packets to me */
-                        mark_bh( NET_BH );
-                       
-                        PRINTK2("%s: Handoff done successfully.\n", dev->name);
-                    }
-                    else
-                        if (status & IM_RX_OVRN_INT )
-                        {
-                            lp->stats.rx_errors++;
-                            lp->stats.rx_fifo_errors++;
-                            // Acknowledge the interrupt
+			smc_hardware_send_packet( dev );
+
+			/* enable xmit interrupts based on this */
+			mask |= ( IM_TX_EMPTY_INT | IM_TX_INT );
+
+			/* and let the card send more packets to me */
+			netif_wake_queue(dev);
+
+			PRINTK2("%s: Handoff done successfully.\n",
+				dev->name);
+		} else if (status & IM_RX_OVRN_INT ) {
+			lp->stats.rx_errors++;
+			lp->stats.rx_fifo_errors++;
+			// Acknowledge the interrupt
 #if defined(CONFIG_SMC16BITONLY)
-			    // MASK is 0 here, so 16bit write is safe
-                            outw( IM_RX_OVRN_INT, ioaddr + INT_REG );
+			// MASK is 0 here, so 16bit write is safe
+			outw( IM_RX_OVRN_INT, ioaddr + INT_REG );
 #else
-                            outb( IM_RX_OVRN_INT, ioaddr + INT_REG );
+			outb( IM_RX_OVRN_INT, ioaddr + INT_REG );
 #endif
-                        }
-                        else
-                            if (status & IM_EPH_INT )
-                            {
-                                PRINTK("%s: UNSUPPORTED: EPH INTERRUPT \n",
-                                        dev->name);
-                            }
-                            else
-                                if (status & IM_MDINT )
-                                {
-                                    smc_phy_interrupt(dev);
-                                    // Acknowledge the interrupt
+		} else if (status & IM_EPH_INT ) {
+			PRINTK("%s: UNSUPPORTED: EPH INTERRUPT \n",
+				dev->name);
+		} else if (status & IM_MDINT ) {
+			smc_phy_interrupt(dev);
+			// Acknowledge the interrupt
 #if defined(CONFIG_SMC16BITONLY)
-				    // MASK is 0 here, so 16bit write is safe
-                                    outw(IM_MDINT, ioaddr + INT_REG );
+			// MASK is 0 here, so 16bit write is safe
+			outw(IM_MDINT, ioaddr + INT_REG );
 #else
-                                    outb(IM_MDINT, ioaddr + INT_REG );
+			outb(IM_MDINT, ioaddr + INT_REG );
 #endif
-                                }
-                                else
-                                    if (status & IM_ERCV_INT )
-                                    {
-                                        PRINTK("%s: UNSUPPORTED: ERCV INTERRUPT"
-                                               " \n", dev->name);
-                                        // Acknowledge the interrupt
+		} else if (status & IM_ERCV_INT ) {
+			PRINTK("%s: UNSUPPORTED: ERCV INTERRUPT \n",
+				dev->name);
+			// Acknowledge the interrupt
 #if defined(CONFIG_SMC16BITONLY)
-					// MASK is 0 , so 16bit write is safe
-                                        outw( IM_ERCV_INT, ioaddr + INT_REG );
+			// MASK is 0 here, so 16bit write is safe
+			outw( IM_ERCV_INT, ioaddr + INT_REG );
 #else
-                                        outb( IM_ERCV_INT, ioaddr + INT_REG );
+			outb( IM_ERCV_INT, ioaddr + INT_REG );
 #endif
-                                    }
-    } while ( timeout -- );
+		}
+	} while ( timeout -- );
 
 
 	/* restore register states */
+
 	SMC_SELECT_BANK( 2 );
 
 #if defined(CONFIG_SMC16BITONLY)
@@ -1888,7 +1801,7 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 
 	SMC_SELECT_BANK( saved_bank );
 
-	dev->interrupt = 0;
+	//dev->interrupt = 0;
 	PRINTK3("%s: Interrupt done\n", dev->name);
 	return;
 }
@@ -1905,75 +1818,61 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
  . o otherwise, read in the packet
  --------------------------------------------------------------
 */
-static void smc_rcv(struct device *dev)
+static void smc_rcv(struct net_device *dev)
 {
-    struct smc_local *lp = (struct smc_local *)dev->priv;
-    unsigned long ioaddr = dev->base_addr;
-    int 	packet_number;
-    word	status;
-    word	packet_length;
+	struct smc_local *lp = (struct smc_local *)dev->priv;
+	unsigned int  ioaddr = dev->base_addr;
+	int 	packet_number;
+	word	status;
+	word	packet_length;
 
-    PRINTK3("%s:smc_rcv\n", dev->name);
+	PRINTK3("%s:smc_rcv\n", dev->name);
 
-    // assume bank 2 -valid since this is called from ISR
+	/* assume bank 2 */
 
-    packet_number = inw( ioaddr + RXFIFO_REG );
+	packet_number = inw( ioaddr + RXFIFO_REG );
 
-    if ( packet_number & RXFIFO_REMPTY )
-    {
-        // we got called , but nothing was on the FIFO
-        PRINTK("%s: WARNING: smc_rcv with nothing on FIFO. \n", dev->name);
-        // don't need to restore anything
-        return;
-    }
+	if ( packet_number & RXFIFO_REMPTY ) {
 
-	// start reading from the start of the packet
-    outw( PTR_READ | PTR_RCV | PTR_AUTOINC, ioaddr + PTR_REG );
+		/* we got called , but nothing was on the FIFO */
+		PRINTK("%s: WARNING: smc_rcv with nothing on FIFO. \n",
+			dev->name);
+		/* don't need to restore anything */
+		return;
+	}
 
-#if defined(CONFIG_SED_SIOS)
-    {
-        dword temp = inl(ioaddr + DATA_REG);
-        status = temp;
-        packet_length = (temp >> 16);
-        PRINTK2("%s:Received length and status joined 0x%08x\n", dev->name,
-                temp);
-    }
-#else
-    status          = inw( ioaddr + DATA_REG );
-    packet_length   = inw( ioaddr + DATA_REG );
-#endif
-    
-    // Handle odd number of bytes bug, problems with reading data register,...
-    packet_length = (packet_length & 0xfffc) + 4;
-    packet_length &= 0x07ff;  // mask off top bits
+	/*  start reading from the start of the packet */
+	outw( PTR_READ | PTR_RCV | PTR_AUTOINC, ioaddr + PTR_REG );
 
-    PRINTK2("%s:receive  status 0x%04x length field 0x%04x length 0x%04x\n",
-            dev->name, status, packet_length, (packet_length&0x07ff));
+	/* First two words are status and packet_length */
+	status 		= inw( ioaddr + DATA_REG );
+	packet_length 	= inw( ioaddr + DATA_REG );
 
-    if ( !(status & RS_ERRORS ))
-    {
-        // do stuff to make a new packet
-        struct sk_buff  * skb;
-        byte		* data;
-        PRINTK3("%s:No errors on receive\n", dev->name);
-        if(packet_length == 0)
-            panic("Zero lengthed packet receieved.");
+	packet_length &= 0x07ff;  /* mask off top bits */
 
-        // set multicast stats
-        if ( status & RS_MULTICAST )
-            lp->stats.multicast++;
+	PRINTK2("RCV: STATUS %4x LENGTH %4x\n", status, packet_length );
 
-        // Allocate enough memory for entire receive frame, to be safe
-        skb = dev_alloc_skb( packet_length );
+	if ( !(status & RS_ERRORS ) ){
+		/* do stuff to make a new packet */
+		struct sk_buff  * skb;
+		byte		* data;
 
-		// Adjust for having already read the first two words
-        packet_length -= 4;
+		/* set multicast stats */
+		if ( status & RS_MULTICAST )
+			lp->stats.multicast++;
 
-	    if ( skb == NULL )
-        {
-            printk(KERN_NOTICE "%s: Low memory, packet dropped.\n", dev->name);
-            lp->stats.rx_dropped++;
-        }
+		// Allocate enough memory for entire receive frame, to be safe
+		skb = dev_alloc_skb( packet_length );
+
+		/* Adjust for having already read the first two words */
+		packet_length -= 4;
+
+		if ( skb == NULL ) {
+			printk(KERN_NOTICE "%s: Low memory, packet dropped.\n",
+				dev->name);
+			lp->stats.rx_dropped++;
+			goto done;
+		}
 
 		/*
 		 ! This should work without alignment, but it could be
@@ -1984,31 +1883,43 @@ static void smc_rcv(struct device *dev)
 
 		skb->dev = dev;
 
-		// set odd length for bug in LAN91C111,
-		// which never sets RS_ODDFRAME
-		// Instead, just round up to the next dword size
-		//data = skb_put( skb, packet_length + 1 );
-		data = skb_put( skb, packet_length);
+		/* The odd byte flag in the status is never set for
+		 * LAN91C111 Rev A, so we'll ignore it and use the
+		 * odd byte flag in the control byte to fix the packet
+		 * length later. */
+		data = skb_put(skb, packet_length);
 
-#ifdef CONFIG_SMC91C111_32_BIT
+#ifdef USE_32_BIT
 		PRINTK3(" Reading %d dwords (and %d bytes) \n",
-			((packet_length >> 2) + 1), packet_length & 3 );
+			packet_length >> 2, packet_length & 3 );
 		/* QUESTION:  Like in the TX routine, do I want
 		   to send the DWORDs or the bytes first, or some
 		   mixture.  A mixture might improve already slow PIO
 		   performance  */
-		insl(ioaddr + DATA_REG , data, (packet_length >> 2) + 1 );
-		// read the left over bytes - there are none, I read an extra word
-		//insb( ioaddr + DATA_REG, data + (packet_length & 0xFFFFFC),
-		//	packet_length & 0x3  );
+		insl(ioaddr + DATA_REG , data, packet_length >> 2 );
+		/* read the left over bytes */
+		insb( ioaddr + DATA_REG, data + (packet_length & 0xFFFFFC),
+			packet_length & 0x3  );
 #else
 		PRINTK3(" Reading %d words and %d byte(s) \n",
 			(packet_length >> 1 ), packet_length & 1 );
 		insw(ioaddr + DATA_REG , data, packet_length >> 1);
 
-#endif // CONFIG_SMC91C111_32_BIT
+#endif // USE_32_BIT
 
-#if SMC_DEBUG > 2
+		/*
+		 * For broken Revision A LAN91c111 leave the trailing
+		 * data in place, let IP layer clear it out.
+		 */
+		if ((9 != lp->ChipID) && (0 != lp->ChipRev)) {
+			/* Trim the control byte and odd byte if needed */
+			packet_length--;
+			if (!(data[packet_length] & 0x20))
+				packet_length--;
+			skb_trim(skb, packet_length);
+		}
+
+#if	SMC_DEBUG > 2
 		printk("Receiving Packet\n");
 		print_packet( data, packet_length );
 #endif
@@ -2028,7 +1939,7 @@ static void smc_rcv(struct device *dev)
 
 	while ( inw( ioaddr + MMU_CMD_REG ) & MC_BUSY )
 		udelay(1); // Wait until not busy
-
+done:
 	/*  error or good, tell the card to get rid of this packet */
 	outw( MC_RELEASE, ioaddr + MMU_CMD_REG );
 
@@ -2052,9 +1963,9 @@ static void smc_rcv(struct device *dev)
  .	( resend?  Not really, since we don't want old packets around )
  .	Restore saved values
  ************************************************************************/
-static void smc_tx( struct device * dev )
+static void smc_tx( struct net_device * dev )
 {
-	unsigned long ioaddr = dev->base_addr;
+	unsigned int  ioaddr = dev->base_addr;
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 	byte saved_packet;
 	byte packet_no;
@@ -2070,9 +1981,8 @@ static void smc_tx( struct device * dev )
 	packet_no &= 0x7F;
 
 	/* If the TX FIFO is empty then nothing to do */
-	if ( packet_no & TXFIFO_TEMPTY ) {
+	if ( packet_no & TXFIFO_TEMPTY )
 		return;
-	}
 
 	/* select this as the packet to read from */
 #if defined(CONFIG_SMC16BITONLY)
@@ -2097,7 +2007,7 @@ static void smc_tx( struct device * dev )
 #ifdef CONFIG_SYSCTL
 		lp->ctl_forcol = 0; // Reset forced collsion
 #endif
-    }
+	}
 #if 0
 	if ( tx_status & TS_16COL ) { ... }
 #endif
@@ -2137,10 +2047,10 @@ static void smc_tx( struct device * dev )
  . an 'ifconfig ethX down'
  .
  -----------------------------------------------------*/
-static int smc_close(struct device *dev)
+static int smc_close(struct net_device *dev)
 {
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue(dev);
+	//dev->start = 0;
 
 	PRINTK2("%s:smc_close\n", dev->name);
 
@@ -2163,7 +2073,7 @@ static int smc_close(struct device *dev)
  . Get the current statistics.
  . This may be called with the card open or closed.
  .-------------------------------------------------------------*/
-static struct enet_statistics* smc_query_statistics(struct device *dev) {
+static struct net_device_stats* smc_query_statistics(struct net_device *dev) {
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 
 	PRINTK2("%s:smc_query_statistics\n", dev->name);
@@ -2179,9 +2089,9 @@ static struct enet_statistics* smc_query_statistics(struct device *dev) {
  . promiscuous mode ( for TCPDUMP and cousins ) or accept
  . a select set of multicast packets
 */
-static void smc_set_multicast_list(struct device *dev)
+static void smc_set_multicast_list(struct net_device *dev)
 {
-	unsigned long ioaddr = dev->base_addr;
+	unsigned int ioaddr = dev->base_addr;
 
 	PRINTK2("%s:smc_set_multicast_list\n", dev->name);
 
@@ -2239,13 +2149,7 @@ static void smc_set_multicast_list(struct device *dev)
 
 #ifdef MODULE
 
-static char devicename[9] = { 0, };
-static struct device devSMC91111 = {
-	devicename, /* device name is inserted by linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0, 0,  /* I/O address, IRQ */
-	0, 0, 0, NULL, smc_init_91C111, smc_91C111_destructor};
-
+static struct net_device devSMC91111;
 int io = 0;
 int irq = 0;
 int nowait = 0;
@@ -2261,8 +2165,7 @@ int init_module(void)
 {
 	int result;
 
-	PRINTK2(CARDNAME":init_module\n");
-
+	PRINTK2("CARDNAME:init_module\n");
 	if (io == 0)
 		printk(KERN_WARNING
 		CARDNAME": You shouldn't use auto-probing with insmod!\n" );
@@ -2270,10 +2173,11 @@ int init_module(void)
 	/* copy the parameters from insmod into the device structure */
 	devSMC91111.base_addr	= io;
 	devSMC91111.irq		= irq;
-	devSMC91111.dma		= nowait; // Use DMA field for nowait
+	devSMC91111.dma		= nowait; // Use DMA field for nowait		
+	devSMC91111.init	= smc_init;/* Kernel 2.4 Changes - Pramod */
 	if ((result = register_netdev(&devSMC91111)) != 0)
 		return result;
-
+	
 	return 0;
 }
 
@@ -2289,7 +2193,7 @@ void cleanup_module(void)
 	release_region(devSMC91111.base_addr, SMC_IO_EXTENT);
 
 	if (devSMC91111.priv)
-		kfree_s(devSMC91111.priv, sizeof(struct smc_local));
+		kfree(devSMC91111.priv); /* Kernel 2.4 Changes - Pramod */
 }
 
 #endif /* MODULE */
@@ -2301,7 +2205,7 @@ void cleanup_module(void)
 /*------------------------------------------------------------
  . Modify a bit in the LAN91C111 register set
  .-------------------------------------------------------------*/
-static word smc_modify_regbit(int bank, unsigned long ioaddr, int reg,
+static word smc_modify_regbit(int bank, unsigned int ioaddr, int reg,
 	unsigned int bit, int val)
 {
 	word regval;
@@ -2322,8 +2226,7 @@ static word smc_modify_regbit(int bank, unsigned long ioaddr, int reg,
 /*------------------------------------------------------------
  . Retrieve a bit in the LAN91C111 register set
  .-------------------------------------------------------------*/
-static int smc_get_regbit(int bank, unsigned long ioaddr, int reg,
-        unsigned int bit)
+static int smc_get_regbit(int bank, unsigned int ioaddr, int reg, unsigned int bit)
 {
 	SMC_SELECT_BANK( bank );
 	if ( inw( ioaddr+reg ) & bit)
@@ -2336,7 +2239,7 @@ static int smc_get_regbit(int bank, unsigned long ioaddr, int reg,
 /*------------------------------------------------------------
  . Modify a LAN91C111 register (word access only)
  .-------------------------------------------------------------*/
-static void smc_modify_reg(int bank, unsigned long ioaddr, int reg, word val)
+static void smc_modify_reg(int bank, unsigned int ioaddr, int reg, word val)
 {
 	SMC_SELECT_BANK( bank );
 	outw( val, ioaddr+reg );
@@ -2346,7 +2249,7 @@ static void smc_modify_reg(int bank, unsigned long ioaddr, int reg, word val)
 /*------------------------------------------------------------
  . Retrieve a LAN91C111 register (word access only)
  .-------------------------------------------------------------*/
-static int smc_get_reg(int bank, unsigned long ioaddr, int reg)
+static int smc_get_reg(int bank, unsigned int ioaddr, int reg)
 {
 	SMC_SELECT_BANK( bank );
 	return(inw( ioaddr+reg ));
@@ -2381,9 +2284,9 @@ static const char smc_info_string[] =
 static int smc_sysctl_handler(ctl_table *ctl, int write, struct file * filp,
 				void *buffer, size_t *lenp)
 {
-	struct device *dev = (struct device*)ctl->extra1;
+	struct net_device *dev = (struct net_device*)ctl->extra1;
 	struct smc_local *lp = (struct smc_local *)ctl->extra2;
-	unsigned long ioaddr = dev->base_addr;
+	unsigned int ioaddr = dev->base_addr;
 	int *valp = ctl->data;
 	int val;
 	int ret;
@@ -2899,34 +2802,13 @@ static int smc_sysctl_handler(ctl_table *ctl, int write, struct file * filp,
         return ret;
 }
 
-
-#ifdef MODULE
-/*
- * This is called as the fill_inode function when an inode
- * is going into (fill = 1) or out of service (fill = 0).
- * We use it here to manage the module use counts.
- *
- * Note: only the top-level directory needs to do this; if
- * a lower level is referenced, the parent will be as well.
- */
-static void smc_procfs_modcount(struct inode *inode, int fill)
-{
-	if (fill) {
-		MOD_INC_USE_COUNT;
-	} else {
-		MOD_DEC_USE_COUNT;
-	}
-}
-#endif // MODULE
-
 /*------------------------------------------------------------
  . Sysctl registration function for all parameters (files)
  .-------------------------------------------------------------*/
-static void smc_sysctl_register(struct device *dev)
+static void smc_sysctl_register(struct net_device *dev)
 {
 	struct smc_local *lp = (struct smc_local *)dev->priv;
-	//static int ctl_name = CTL_SMC;
-	static int ctl_name = "SMC91111";
+	static int ctl_name = CTL_SMC;
 	ctl_table* ct;
 	int i;
 
@@ -3419,19 +3301,13 @@ static void smc_sysctl_register(struct device *dev)
 
 	// Register /proc/sys/dev/ethX
 	lp->sysctl_header = register_sysctl_table(lp->root_table, 1);
-
-#ifdef MODULE
-	// Register our modcount function which adjusts the module count
-	lp->root_table->child->de->fill_inode = smc_procfs_modcount;
-#endif // MODULE
-
 }
 
 
 /*------------------------------------------------------------
  . Sysctl unregistration when driver is closed
  .-------------------------------------------------------------*/
-static void smc_sysctl_unregister(struct device *dev)
+static void smc_sysctl_unregister(struct net_device *dev)
 {
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 
@@ -3443,14 +3319,13 @@ static void smc_sysctl_unregister(struct device *dev)
 
 //---PHY CONTROL AND CONFIGURATION-----------------------------------------
 
+#if (SMC_DEBUG > 2 )
 
 /*------------------------------------------------------------
  . Debugging function for viewing MII Management serial bitstream
  .-------------------------------------------------------------*/
-#if (SMC_DEBUG > 2 )
 static void smc_dump_mii_stream(byte* bits, int size)
 {
-#if (SMC_DEBUG > 3 )
 	int i;
 
 	printk("BIT#:");
@@ -3487,154 +3362,13 @@ static void smc_dump_mii_stream(byte* bits, int size)
 		}
 
 	printk("\n");
-#endif
-}
-#endif
-
-#if 0
-static word smc_interpret_phy_register(const struct device *dev,
-        byte phyreg, word status)
-{
-#if (SMC_DEBUG > 3)
-    switch(phyreg)
-    {
-        case PHY_STAT_REG:
-            if(status & PHY_STAT_CAP_T4)
-                printk("<1>%s:100 Base T4 capable\n", dev->name);
-            else
-                printk("<1>%s:100 Base T4 incapable\n", dev->name);
-
-            if(status & PHY_STAT_CAP_TXF)
-                printk("<1>%s:100 Base X, Full Duplex capable\n", dev->name);
-            else
-                printk("<1>%s:100 Base X, Full Duplex incapable\n", dev->name);
-           
-            if(status & PHY_STAT_CAP_TXH)
-                printk("<1>%s:100 Base X, Half Duplex capable\n", dev->name);
-            else
-                printk("<1>%s:100 Base X, Half Duplex incapable\n", dev->name);
-
-            if(status & PHY_STAT_CAP_TF)
-                printk("<1>%s:10 Base X, Full Duplex capable\n", dev->name);
-            else
-                printk("<1>%s:10 Base X, Full Duplex incapable\n", dev->name);
-           
-            if(status & PHY_STAT_RESERVED)
-                printk("<1>%s:Reserved bits set 0x%x(bad thing :-(\n",
-                        dev->name, status & PHY_STAT_RESERVED);
-            else
-                printk("<1>%s:Reserved bits not set(good thing :-)\n",
-                        dev->name);
-           
-            if(status & PHY_STAT_CAP_SUPR)
-                printk("<1>%s:MI Preamble suppression capable\n", dev->name);
-            else
-                printk("<1>%s:MI Preamble suppression incapable\n", dev->name);
-           
-            if(status & PHY_STAT_ANEG_ACK)
-                printk("<1>%s:Auto-Negotiation Acknowledgment completed\n",
-                        dev->name);
-            else
-                printk("<1>%s:Auto-Negotiation Acknowledgment incomplete\n",
-                        dev->name);
-
-            if(status & PHY_STAT_REM_FLT)
-                printk("<1>%s:Remote Fault Detected :-(\n", dev->name);
-            else
-                printk("<1>%s:Remote Fault NOT Detected :-)\n", dev->name);
-           
-            if(status & PHY_STAT_CAP_ANEG)
-                printk("<1>%s:Auto-Negotiate Capable\n", dev->name);
-            else
-                printk("<1>%s:Auto-Negotiate InCapable\n", dev->name);
-           
-            if(status & PHY_STAT_LINK)
-                printk("<1>%s:Valid Link Detected\n", dev->name);
-            else
-                printk("<1>%s:Invalid Link Detected\n", dev->name);
-
-            if(status & PHY_STAT_JAB)
-                printk("<1>%s:Jabber Detected\n", dev->name);
-            else
-                printk("<1>%s:Jabber Not Detected\n", dev->name);
-
-            if(status & PHY_STAT_EXREG)
-                printk("<1>%s:Extended Registers Implemented\n", dev->name);
-            else
-                printk("<1>%s:Extended Registers Not Implemented\n", dev->name);
-
-            break;
-
-        case PHY_INT_REG:
-            if(status & PHY_INT_INT)
-                printk("<1>%s:Bits have changed since last read\n", dev->name);
-            else
-                printk("<1>%s:Bits have not changed since last read\n",
-                        dev->name);
-           
-            if(status & PHY_INT_LNKFAIL)
-                printk("<1>%s:Link Fail Detected\n", dev->name);
-            else
-                printk("<1>%s:Link Normal Detected\n", dev->name);
-
-            if(status & PHY_INT_LOSSSYNC)
-                printk("<1>%s:Descrambler lost sync\n", dev->name);
-            else
-                printk("<1>%s:No loss of sync\n", dev->name);
-           
-            if(status & PHY_INT_CWRD)
-                printk("<1>%s:Invalid 4B5B Code Word received\n", dev->name);
-            else
-                printk("<1>%s:No Invalid 4B5B Code Word\n", dev->name);
-
-            if(status & PHY_INT_SSD)
-                printk("<1>%s:No Start of stream detected on rx\n", dev->name);
-            else
-                printk("<1>%s:Start of stream detected on rx\n", dev->name);
-           
-            if(status & PHY_INT_ESD)
-                printk("<1>%s:No End of stream detected on rx\n", dev->name);
-            else
-                printk("<1>%s:End of stream detected on rx\n", dev->name);
-           
-            if(status & PHY_INT_RPOL)
-                printk("<1>%s:Reverse Polarity Detected\n", dev->name);
-            else
-                printk("<1>%s:Normal Polarity Detected\n", dev->name);
-           
-            if(status & PHY_INT_JAB)
-                printk("<1>%s:Jabber Detected\n", dev->name);
-            else
-                printk("<1>%s:Jabber Not Detected\n", dev->name);
-           
-            if(status & PHY_INT_SPDDET)
-                printk("<1>%s:100 MBps Operation\n", dev->name);
-            else
-                printk("<1>%s:10 MBps Operation\n", dev->name);
-           
-            if(status & PHY_INT_DPLXDET)
-                printk("<1>%s:Device in Full Duplex Mode\n", dev->name);
-            else
-                printk("<1>%s:Device in Half Duplex Mode\n", dev->name);
-
-            break;
-
-        default:
-            printk(KERN_DEBUG
-                    "%s:Don't Know How to interpret the specified register\n",
-                    dev->name);
-            break;
-    }
-#endif
-    return(status);
 }
 #endif
 
 /*------------------------------------------------------------
  . Reads a register from the MII Management serial interface
  .-------------------------------------------------------------*/
-static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
-        byte phyreg)
+static word smc_read_phy_register(unsigned int ioaddr, byte phyaddr, byte phyreg)
 {
 	int oldBank;
 	int i;
@@ -3646,8 +3380,8 @@ static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
 	word phydata;
 
 	// 32 consecutive ones on MDO to establish sync
-    for (i = 0; i < 32; ++i)
-        bits[clk_idx++] = MII_MDOE | MII_MDO;
+	for (i = 0; i < 32; ++i)
+		bits[clk_idx++] = MII_MDOE | MII_MDO;
 
 	// Start code <01>
 	bits[clk_idx++] = MII_MDOE;
@@ -3660,26 +3394,28 @@ static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
 	// Output the PHY address, msb first
 	mask = (byte)0x10;
 	for (i = 0; i < 5; ++i)
-    {
-        if (phyaddr & mask)
-            bits[clk_idx++] = MII_MDOE | MII_MDO;
-        else
-            bits[clk_idx++] = MII_MDOE;
-        // Shift to next lowest bit
-        mask >>= 1;
-    }
+		{
+		if (phyaddr & mask)
+			bits[clk_idx++] = MII_MDOE | MII_MDO;
+		else
+			bits[clk_idx++] = MII_MDOE;
+
+		// Shift to next lowest bit
+		mask >>= 1;
+		}
 
 	// Output the phy register number, msb first
 	mask = (byte)0x10;
 	for (i = 0; i < 5; ++i)
-    {
-        if (phyreg & mask)
-            bits[clk_idx++] = MII_MDOE | MII_MDO;
-        else
-            bits[clk_idx++] = MII_MDOE;
-        // Shift to next lowest bit
-        mask >>= 1;
-    }
+		{
+		if (phyreg & mask)
+			bits[clk_idx++] = MII_MDOE | MII_MDO;
+		else
+			bits[clk_idx++] = MII_MDOE;
+
+		// Shift to next lowest bit
+		mask >>= 1;
+		}
 
 	// Tristate and turnaround (2 bit times)
 	bits[clk_idx++] = 0;
@@ -3739,10 +3475,6 @@ static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
 			phydata |= 0x0001;
 		}
 
-//    printk("Slow the system down by a bit.\n");
-#if defined(CONFIG_SMC91C111_EXTRA_DELAY)
-    mdelay(SMC91C111_EXTRA_DELAY);
-#endif
 #if (SMC_DEBUG > 2 )
 	printk("smc_read_phy_register(): phyaddr=%x,phyreg=%x,phydata=%x\n",
 		phyaddr, phyreg, phydata);
@@ -3756,7 +3488,7 @@ static word smc_read_phy_register(unsigned long ioaddr, byte phyaddr,
 /*------------------------------------------------------------
  . Writes a register to the MII Management serial interface
  .-------------------------------------------------------------*/
-static void smc_write_phy_register(unsigned long ioaddr,
+static void smc_write_phy_register(unsigned int ioaddr,
 	byte phyaddr, byte phyreg, word phydata)
 {
 	int oldBank;
@@ -3858,10 +3590,6 @@ static void smc_write_phy_register(unsigned long ioaddr,
 	// Restore original bank select
 	SMC_SELECT_BANK( oldBank );
 
-//    printk("Slow the system down by a bit.\n");
-#if defined(CONFIG_SMC91C111_EXTRA_DELAY)
-    mdelay(20);
-#endif
 #if (SMC_DEBUG > 2 )
 	printk("smc_write_phy_register(): phyaddr=%x,phyreg=%x,phydata=%x\n",
 		phyaddr, phyreg, phydata);
@@ -3873,10 +3601,10 @@ static void smc_write_phy_register(unsigned long ioaddr,
 /*------------------------------------------------------------
  . Finds and reports the PHY address
  .-------------------------------------------------------------*/
-static int smc_detect_phy(struct device* dev)
+static int smc_detect_phy(struct net_device* dev)
 {
 	struct smc_local *lp = (struct smc_local *)dev->priv;
-	unsigned long ioaddr = dev->base_addr;
+	unsigned int ioaddr = dev->base_addr;
 	word phy_id1;
 	word phy_id2;
 	int phyaddr;
@@ -3927,7 +3655,6 @@ static int smc_detect_phy(struct device* dev)
 		PRINTK("%s: PHY=LAN83C180\n", dev->name);
 		}
 
-
 	return(1);
 }
 
@@ -3950,13 +3677,13 @@ static void smc_wait_ms(unsigned int ms)
 		}
 }
 
+#ifdef CONFIG_SYSCTL
 /*------------------------------------------------------------
  . Sets the PHY to a configuration as determined by the user
  .-------------------------------------------------------------*/
-#ifdef CONFIG_SYSCTL
-static int smc_phy_fixed(struct device* dev)
+static int smc_phy_fixed(struct net_device* dev)
 {
-	unsigned long ioaddr = dev->base_addr;
+	unsigned int ioaddr = dev->base_addr;
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 	byte phyaddr = lp->phyaddr;
 	word my_fixed_caps;
@@ -3992,13 +3719,14 @@ static int smc_phy_fixed(struct device* dev)
 }
 #endif
 
+
 /*------------------------------------------------------------
  . Configures the specified PHY using Autonegotiation. Calls
  . smc_phy_fixed() if the user has requested a certain config.
  .-------------------------------------------------------------*/
-static void smc_phy_configure(struct device* dev)
+static void smc_phy_configure(struct net_device* dev)
 {
-	int ioaddr = dev->base_addr;
+	unsigned int ioaddr = dev->base_addr;
 	struct smc_local *lp = (struct smc_local *)dev->priv;
 	int timeout;
 	byte phyaddr;
@@ -4023,6 +3751,8 @@ static void smc_phy_configure(struct device* dev)
 
 	// Reset the PHY, setting all other bits to zero
 	smc_write_phy_register(ioaddr, phyaddr, PHY_CNTL_REG, PHY_CNTL_RST);
+
+	smc_wait_ms(50);
 
 	// Wait for the reset to complete, or time out
 	timeout = 6; // Wait up to 3 seconds
@@ -4051,6 +3781,7 @@ static void smc_phy_configure(struct device* dev)
 		goto smc_phy_configure_exit;
 		}
 
+#ifndef CONFIG_RTE_CB_ME2
 	// Read PHY Register 18, Status Output
 	lp->lastPhy18 = smc_read_phy_register(ioaddr, phyaddr, PHY_INT_REG);
 
@@ -4060,6 +3791,7 @@ static void smc_phy_configure(struct device* dev)
 		PHY_INT_LOSSSYNC | PHY_INT_CWRD | PHY_INT_SSD |
 		PHY_INT_ESD | PHY_INT_RPOL | PHY_INT_JAB |
 		PHY_INT_SPDDET | PHY_INT_DPLXDET);
+#endif
 
 	/* Configure the Receive/Phy Control register */
 	SMC_SELECT_BANK( 0 );
@@ -4084,7 +3816,7 @@ static void smc_phy_configure(struct device* dev)
 	if (my_phy_caps & PHY_STAT_CAP_TH)
 		my_ad_caps |= PHY_AD_10_HDX;
 
-#if 0
+#ifdef CONFIG_SYSCTL
 	// Disable capabilities not selected by our user
 	if (lp->ctl_rspeed != 100)
 		{
@@ -4103,7 +3835,7 @@ static void smc_phy_configure(struct device* dev)
 	PRINTK2("%s:phy caps=%x\n", dev->name, my_phy_caps);
 	PRINTK2("%s:phy advertised caps=%x\n", dev->name, my_ad_caps);
 
-#if 0
+#ifdef CONFIG_SYSCTL
 	// If the user requested no auto neg, then go set his request
 	if (!(lp->ctl_autoneg))
 		{
@@ -4164,6 +3896,7 @@ static void smc_phy_configure(struct device* dev)
 	// Fail if we detected an auto-negotiate remote fault
 	if (status & PHY_STAT_REM_FLT)
 		{
+		printk(KERN_DEBUG "%s:PHY remote fault detected\n", dev->name);
 		PRINTK2("%s:PHY remote fault detected\n", dev->name);
 		failed = 1;
 		}
@@ -4203,44 +3936,6 @@ static void smc_phy_configure(struct device* dev)
 }
 
 
-void smc_register_dump(const struct device *dev)
-{
-#if SMC_DEBUG > 3
-    //Read all of the configuration registers.
-    unsigned long ioaddr = dev->base_addr;
-    word current_bank = inw(ioaddr + BANK_SELECT);
-    int i;
-
-    SMC_SELECT_BANK(0);
-    PRINTK("%s:Register Dump Bank 0\n", dev->name);
-    for(i = 0; i <= 0x0a; i = i + 2)
-        PRINTK("\t%s:Bank 0 Register 0x%02x: 0x%04x\n", dev->name,
-                i, inw(ioaddr + i));
-
-    SMC_SELECT_BANK(1);
-    PRINTK("%s:Register Dump Bank 1\n", dev->name);
-    for(i = 0; i <= 0x0c; i = i + 2)
-        PRINTK("\t%s:Bank 1 Register 0x%02x: 0x%04x\n", dev->name,
-                i, inw(ioaddr + i));
-
-    SMC_SELECT_BANK(2);
-    PRINTK("%s:Register Dump Bank 2\n", dev->name);
-    for(i = 0; i <= 0x0c; i = i + 2)
-        PRINTK("\t%s:Bank 2 Register 0x%02x: 0x%04x\n", dev->name,
-                i, inw(ioaddr + i));
-        
-    SMC_SELECT_BANK(3);
-    PRINTK("%s:Register Dump Bank 3\n", dev->name);
-    for(i = 0; i <= 0x0c; i = i + 2)
-        PRINTK("\t%s:Bank 3 Register 0x%02x: 0x%04x\n", dev->name,
-                i, inw(ioaddr + i));
-
-    PRINTK("%s:Current Bank is 0x%04x\n", dev->name, current_bank);
-    SMC_SELECT_BANK((current_bank&0x0007));
-#endif
-}
-
-
 
 /*************************************************************************
  . smc_phy_interrupt
@@ -4249,9 +3944,9 @@ void smc_register_dump(const struct device *dev)
  .  called from the "hard" interrupt handler.
  .
  ************************************************************************/
-static void smc_phy_interrupt(struct device* dev)
+static void smc_phy_interrupt(struct net_device* dev)
 {
-	unsigned long ioaddr 		= dev->base_addr;
+	unsigned int ioaddr	= dev->base_addr;
 	struct smc_local *lp 	= (struct smc_local *)dev->priv;
 	byte phyaddr = lp->phyaddr;
 	word phy18;

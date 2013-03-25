@@ -13,17 +13,18 @@ struct isofs_sb_info {
 	
 	unsigned char s_high_sierra; /* A simple flag */
 	unsigned char s_mapping;
-	unsigned char s_conversion;
+	int           s_rock_offset; /* offset of SUSP fields within SU area */
 	unsigned char s_rock;
 	unsigned char s_joliet_level;
 	unsigned char s_utf8;
-	unsigned char s_name_check; /* r = relaxed, s = strict */
 	unsigned char s_cruft; /* Broken disks with high
 				  byte of length containing
 				  junk */
 	unsigned char s_unhide;
 	unsigned char s_nosuid;
 	unsigned char s_nodev;
+	unsigned char s_nocompress;
+
 	mode_t s_mode;
 	gid_t s_gid;
 	uid_t s_uid;
@@ -31,10 +32,3 @@ struct isofs_sb_info {
 };
 
 #endif
-
-
-
-
-
-
-

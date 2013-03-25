@@ -1,12 +1,18 @@
-/* $Id: head.S,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: head.S,v 1.105 2001/08/12 09:08:56 davem Exp $
  * head.S: The initial boot code for the Sparc port of Linux.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
- * Copyright (C) 1995 Peter Zaitcev   (Zaitcev@ipmce.su)
+ * Copyright (C) 1995,1999 Pete Zaitcev   (zaitcev@yahoo.com)
+ * Copyright (C) 1996 Miguel de Icaza (miguel@nuclecu.unam.mx)
+ * Copyright (C) 1997 Jakub Jelinek   (jj@sunsite.mff.cuni.cz)
+ * Copyright (C) 1997 Michael A. Griffith (grif@acm.org)
+ *
+ * CompactPCI platform by Eric Brower, 1999.
  */
 
 #include <linux/version.h>
 #include <linux/config.h>
+#include <linux/init.h>
 
 #include <asm/cprefix.h>
 #include <asm/head.h>
@@ -17,6 +23,7 @@
 #include <asm/page.h>
 #include <asm/kdebug.h>
 #include <asm/winmacro.h>
+#include <asm/errno.h>
 
 	.data
 /* 
@@ -56,21 +63,25 @@ C_LABEL(cputypvar_sun4m):
 	.asciz "compatible"
 
 	.align 4
-sun4_notsup:
-	.asciz  "Sparc-Linux sun4 support not implemented yet\n\n"
-	.align 4
 
-sun4d_notsup:
-        .asciz  "Sparc-Linux sun4d support does not exist\n\n"
+#ifndef CONFIG_SUN4
+sun4_notsup:
+	.asciz	"Sparc-Linux sun4 needs a specially compiled kernel, turn CONFIG_SUN4 on.\n\n"
 	.align 4
+#else
+sun4cdm_notsup:
+	.asciz	"Kernel compiled with CONFIG_SUN4 cannot run on SUN4C/SUN4M/SUN4D\nTurn CONFIG_SUN4 off.\n\n"
+	.align 4
+#endif
 
 sun4e_notsup:
         .asciz  "Sparc-Linux sun4e support does not exist\n\n"
 	.align 4
 
-sun4u_notsup:
-        .asciz  "Sparc-Linux sun4u support does not exist\n\n"
-	.align 4
+#ifndef CONFIG_SUNOS_EMUL
+#undef SUNOS_SYSCALL_TRAP
+#define SUNOS_SYSCALL_TRAP SUNOS_NO_SYSCALL_TRAP
+#endif
 
 	/* The Sparc trap table, bootloader gives us control at _start. */
 	.text
@@ -81,7 +92,7 @@ __stext:
 _stext:
 start:
 C_LABEL(trapbase):
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 C_LABEL(trapbase_cpu0):
 #endif
 /* We get control passed to us here at t_zero. */
@@ -112,16 +123,17 @@ t_irq11:TRAP_ENTRY_INTERRUPT(11)            /* IRQ Floppy Intr.              */
 t_irq12:TRAP_ENTRY_INTERRUPT(12)            /* IRQ Zilog serial chip         */
 t_irq13:TRAP_ENTRY_INTERRUPT(13)            /* IRQ Audio Intr.               */
 t_irq14:TRAP_ENTRY_INTERRUPT(14)            /* IRQ Timer #2                  */
-#ifndef __SMP__
+	.globl	t_nmi
+#ifndef CONFIG_SMP
 t_nmi:	NMI_TRAP                            /* Level 15 (NMI)                */
 #else
-	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
+t_nmi:	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
 #endif
 t_racc:	TRAP_ENTRY(0x20, do_reg_access)     /* General Register Access Error */
 t_iacce:BAD_TRAP(0x21)                      /* Instr Access Error            */
 t_bad22:BAD_TRAP(0x22) BAD_TRAP(0x23)
 t_cpdis:TRAP_ENTRY(0x24, do_cp_disabled)    /* Co-Processor Disabled         */
-t_uflsh:TRAP_ENTRY(0x25, do_bad_flush)      /* Unimplemented FLUSH inst.     */
+t_uflsh:SKIP_TRAP(0x25, unimp_flush)        /* Unimplemented FLUSH inst.     */
 t_bad26:BAD_TRAP(0x26) BAD_TRAP(0x27)
 t_cpexc:TRAP_ENTRY(0x28, do_cp_exception)   /* Co-Processor Exception        */
 t_dacce:SPARC_DFAULT                        /* Data Access Error             */
@@ -147,8 +159,8 @@ t_bad74:BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x7
 t_bad79:BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 t_bad7e:BAD_TRAP(0x7e) BAD_TRAP(0x7f)
 t_sunos:SUNOS_SYSCALL_TRAP                  /* SunOS System Call             */
-t_sbkpt:BAD_TRAP(0x81)                      /* Software Breakpoint/KGDB      */
-t_divz:	BAD_TRAP(0x82)                      /* Divide by zero trap           */
+t_sbkpt:BREAKPOINT_TRAP                     /* Software Breakpoint/KGDB      */
+t_divz:	TRAP_ENTRY(0x82, do_hw_divzero)     /* Divide by zero trap           */
 t_flwin:TRAP_ENTRY(0x83, do_flush_windows)  /* Flush Windows Trap            */
 t_clwin:BAD_TRAP(0x84)                      /* Clean Windows Trap            */
 t_rchk:	BAD_TRAP(0x85)                      /* Range Check                   */
@@ -164,8 +176,10 @@ t_bad96:BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99) BAD_TRAP(0x9
 t_bad9b:BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e) BAD_TRAP(0x9f)
 t_getcc:GETCC_TRAP                          /* Get Condition Codes           */
 t_setcc:SETCC_TRAP                          /* Set Condition Codes           */
-t_bada2:BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
-t_bada7:BAD_TRAP(0xa7) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
+t_getpsr:GETPSR_TRAP                        /* Get PSR Register              */
+t_bada3:BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+t_slowi:INDIRECT_SOLARIS_SYSCALL(156)
+t_bada8:BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 t_badac:BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 t_badb1:BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
 t_badb6:BAD_TRAP(0xb6) BAD_TRAP(0xb7) BAD_TRAP(0xb8) BAD_TRAP(0xb9) BAD_TRAP(0xba)
@@ -189,7 +203,7 @@ dbtrap2:BAD_TRAP(0xff)                      /* Debugger/PROM breakpoint #2   */
 	.globl	C_LABEL(end_traptable)
 C_LABEL(end_traptable):
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* Trap tables for the other cpus. */
 	.globl	C_LABEL(trapbase_cpu1), C_LABEL(trapbase_cpu2), C_LABEL(trapbase_cpu3)
 C_LABEL(trapbase_cpu1):
@@ -208,7 +222,7 @@ C_LABEL(trapbase_cpu1):
 	TRAP_ENTRY_INTERRUPT(13) TRAP_ENTRY_INTERRUPT(14)
 	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
 	TRAP_ENTRY(0x20, do_reg_access) BAD_TRAP(0x21) BAD_TRAP(0x22)
-	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) TRAP_ENTRY(0x25, do_bad_flush)
+	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) SKIP_TRAP(0x25, unimp_flush)
 	BAD_TRAP(0x26) BAD_TRAP(0x27) TRAP_ENTRY(0x28, do_cp_exception)
 	SRMMU_DFAULT TRAP_ENTRY(0x2a, do_hw_divzero) BAD_TRAP(0x2b) BAD_TRAP(0x2c)
 	BAD_TRAP(0x2d) BAD_TRAP(0x2e) BAD_TRAP(0x2f) BAD_TRAP(0x30) BAD_TRAP(0x31)
@@ -229,7 +243,9 @@ C_LABEL(trapbase_cpu1):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP BAD_TRAP(0x81) BAD_TRAP(0x82)
+	SUNOS_SYSCALL_TRAP 
+	BREAKPOINT_TRAP
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -237,9 +253,9 @@ C_LABEL(trapbase_cpu1):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
-	BAD_TRAP(0xa7) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
 	BAD_TRAP(0xb6) BAD_TRAP(0xb7) BAD_TRAP(0xb8) BAD_TRAP(0xb9) BAD_TRAP(0xba)
@@ -274,7 +290,7 @@ C_LABEL(trapbase_cpu2):
 	TRAP_ENTRY_INTERRUPT(13) TRAP_ENTRY_INTERRUPT(14)
 	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
 	TRAP_ENTRY(0x20, do_reg_access) BAD_TRAP(0x21) BAD_TRAP(0x22)
-	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) TRAP_ENTRY(0x25, do_bad_flush)
+	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) SKIP_TRAP(0x25, unimp_flush)
 	BAD_TRAP(0x26) BAD_TRAP(0x27) TRAP_ENTRY(0x28, do_cp_exception)
 	SRMMU_DFAULT TRAP_ENTRY(0x2a, do_hw_divzero) BAD_TRAP(0x2b) BAD_TRAP(0x2c)
 	BAD_TRAP(0x2d) BAD_TRAP(0x2e) BAD_TRAP(0x2f) BAD_TRAP(0x30) BAD_TRAP(0x31)
@@ -295,7 +311,9 @@ C_LABEL(trapbase_cpu2):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP BAD_TRAP(0x81) BAD_TRAP(0x82)
+	SUNOS_SYSCALL_TRAP 
+	BREAKPOINT_TRAP
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -303,9 +321,9 @@ C_LABEL(trapbase_cpu2):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
-	BAD_TRAP(0xa7) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
 	BAD_TRAP(0xb6) BAD_TRAP(0xb7) BAD_TRAP(0xb8) BAD_TRAP(0xb9) BAD_TRAP(0xba)
@@ -340,7 +358,7 @@ C_LABEL(trapbase_cpu3):
 	TRAP_ENTRY_INTERRUPT(13) TRAP_ENTRY_INTERRUPT(14)
 	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
 	TRAP_ENTRY(0x20, do_reg_access) BAD_TRAP(0x21) BAD_TRAP(0x22)
-	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) TRAP_ENTRY(0x25, do_bad_flush)
+	BAD_TRAP(0x23) TRAP_ENTRY(0x24, do_cp_disabled) SKIP_TRAP(0x25, unimp_flush)
 	BAD_TRAP(0x26) BAD_TRAP(0x27) TRAP_ENTRY(0x28, do_cp_exception)
 	SRMMU_DFAULT TRAP_ENTRY(0x2a, do_hw_divzero) BAD_TRAP(0x2b) BAD_TRAP(0x2c)
 	BAD_TRAP(0x2d) BAD_TRAP(0x2e) BAD_TRAP(0x2f) BAD_TRAP(0x30) BAD_TRAP(0x31)
@@ -361,7 +379,9 @@ C_LABEL(trapbase_cpu3):
 	BAD_TRAP(0x74) BAD_TRAP(0x75) BAD_TRAP(0x76) BAD_TRAP(0x77) BAD_TRAP(0x78)
 	BAD_TRAP(0x79) BAD_TRAP(0x7a) BAD_TRAP(0x7b) BAD_TRAP(0x7c) BAD_TRAP(0x7d)
 	BAD_TRAP(0x7e) BAD_TRAP(0x7f)
-	SUNOS_SYSCALL_TRAP BAD_TRAP(0x81) BAD_TRAP(0x82)
+	SUNOS_SYSCALL_TRAP  
+	BREAKPOINT_TRAP
+	TRAP_ENTRY(0x82, do_hw_divzero)
 	TRAP_ENTRY(0x83, do_flush_windows) BAD_TRAP(0x84) BAD_TRAP(0x85)
 	BAD_TRAP(0x86) BAD_TRAP(0x87) SOLARIS_SYSCALL_TRAP
 	NETBSD_SYSCALL_TRAP BAD_TRAP(0x8a) BAD_TRAP(0x8b) BAD_TRAP(0x8c)
@@ -369,9 +389,9 @@ C_LABEL(trapbase_cpu3):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
-	BAD_TRAP(0xa7) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
 	BAD_TRAP(0xb6) BAD_TRAP(0xb7) BAD_TRAP(0xb8) BAD_TRAP(0xb9) BAD_TRAP(0xba)
@@ -390,33 +410,52 @@ C_LABEL(trapbase_cpu3):
 	BAD_TRAP(0xf7) BAD_TRAP(0xf8) BAD_TRAP(0xf9) BAD_TRAP(0xfa) BAD_TRAP(0xfb)
 	BAD_TRAP(0xfc) BAD_TRAP(0xfd) BAD_TRAP(0xfe) BAD_TRAP(0xff)
 
-	.globl	C_LABEL(cpu0_stack), C_LABEL(cpu1_stack), C_LABEL(cpu2_stack)
-	.globl	C_LABEL(cpu3_stack)
-C_LABEL(cpu0_stack):			.skip 0x2000
-C_LABEL(cpu1_stack):			.skip 0x2000
-C_LABEL(cpu2_stack):			.skip 0x2000
-C_LABEL(cpu3_stack):			.skip 0x2000
 #endif
-	.skip 4096
+	.align PAGE_SIZE
 
 /* This was the only reasonable way I could think of to properly align
  * these page-table data structures.
  */
-	.globl C_LABEL(bootup_user_stack)
-	.globl C_LABEL(bootup_kernel_stack)
-	.globl C_LABEL(pg0)
+	.globl C_LABEL(pg0), C_LABEL(pg1), C_LABEL(pg2), C_LABEL(pg3)
 	.globl C_LABEL(empty_bad_page)
 	.globl C_LABEL(empty_bad_page_table)
 	.globl C_LABEL(empty_zero_page)
 	.globl C_LABEL(swapper_pg_dir)
-C_LABEL(bootup_user_stack):		.skip 0x2000
-C_LABEL(bootup_kernel_stack):		.skip 0x2000
-C_LABEL(swapper_pg_dir):		.skip 0x1000
-C_LABEL(pg0):				.skip 0x1000
-C_LABEL(empty_bad_page):		.skip 0x1000
-C_LABEL(empty_bad_page_table):		.skip 0x1000
-C_LABEL(empty_zero_page):		.skip 0x1000
+C_LABEL(swapper_pg_dir):		.skip PAGE_SIZE
+C_LABEL(pg0):				.skip PAGE_SIZE
+C_LABEL(pg1):				.skip PAGE_SIZE
+C_LABEL(pg2):				.skip PAGE_SIZE
+C_LABEL(pg3):				.skip PAGE_SIZE
+C_LABEL(empty_bad_page):		.skip PAGE_SIZE
+C_LABEL(empty_bad_page_table):		.skip PAGE_SIZE
+C_LABEL(empty_zero_page):		.skip PAGE_SIZE
 
+	.global C_LABEL(root_flags)
+	.global C_LABEL(ram_flags)
+	.global C_LABEL(root_dev)
+	.global C_LABEL(sparc_ramdisk_image)
+	.global C_LABEL(sparc_ramdisk_size)
+
+/* This stuff has to be in sync with SILO and other potential boot loaders
+ * Fields should be kept upward compatible and whenever any change is made,
+ * HdrS version should be incremented.
+ */
+	.ascii	"HdrS"
+	.word	LINUX_VERSION_CODE
+	.half	0x0203		/* HdrS version */
+C_LABEL(root_flags):
+	.half	1
+C_LABEL(root_dev):
+	.half	0
+C_LABEL(ram_flags):
+	.half	0
+C_LABEL(sparc_ramdisk_image):
+	.word	0
+C_LABEL(sparc_ramdisk_size):
+	.word	0
+	.word	C_LABEL(reboot_command)
+	.word	0, 0, 0
+	.word	_end
 
 /* Cool, here we go. Pick up the romvec pointer in %o0 and stash it in
  * %g7 and at prom_vector_p. And also quickly check whether we are on
@@ -444,8 +483,9 @@ current_pc:
 1:
 		mov	%o7, %g3
 
-got_pc:
-		mov	%g4, %o7		/* Previous %o7. */
+		tst	%o0
+		be	no_sun4u_here
+		 mov	%g4, %o7		/* Previous %o7. */
 	
 		mov	%o0, %l0		! stash away romvec
 		mov	%o0, %g7		! put it here too
@@ -460,10 +500,9 @@ got_pc:
 		/* %l6 will hold the offset we have to subtract
 		 * from absolute symbols in order to access areas
 		 * in our own image.  If already mapped this is
-		 * just plain zero, else it is PAGE_OFFSET which is
-		 * also KERNBASE.
+		 * just plain zero, else it is KERNBASE.
 		 */
-		set	PAGE_OFFSET, %l6
+		set	KERNBASE, %l6
 		b	copy_prom_lvl14
 		 nop
 
@@ -517,6 +556,9 @@ copy_prom_done:
 		lduba	[%g1] ASI_CONTROL, %g1	! Only safe to try on Sun4.
 		subcc	%g1, 0x24, %g0		! Is this a mutant Sun4/400???
 		be	sun4_mutant_remap	! Ugh, it is...
+		 nop
+
+		b	sun4_normal_remap	! regular sun4, 2 level mmu
 		 nop
 
 remap_not_a_sun4:
@@ -669,7 +711,24 @@ sun4_mutant_loop:
 		b	go_to_highmem		! Jump to high memory.
 		 nop
 
-/* The following works for normal (ie. non Sun4/400) Sun4 MMU's */
+		/* The following is for non-4/4xx sun4 MMU's. */
+sun4_normal_remap:
+		mov	0, %g3			! source base
+		set	KERNBASE, %g4		! destination base
+		set	0x300000, %g5		! upper bound 3MB
+		mov	1, %l6
+		sll	%l6, 18, %l6		! sun4 mmu segmap size
+sun4_normal_loop:
+		lduha	[%g3] ASI_SEGMAP, %g6	! load phys_seg
+		stha	%g6, [%g4] ASI_SEGMAP	! stort new virt mapping
+		add	%g3, %l6, %g3		! increment source pointer
+		subcc	%g3, %g5, %g0		! reached limit?
+		blu	sun4_normal_loop	! nope, loop again
+		 add	%g4, %l6, %g4		! delay, increment dest ptr
+		b	go_to_highmem
+		 nop
+
+		/* The following works for Sun4c MMU's */
 sun4c_remap:
 		mov	0, %g3			! source base
 		set	KERNBASE, %g4		! destination base
@@ -690,15 +749,17 @@ go_to_highmem:
 		jmpl	%g1, %g0
 		 nop
 
+	/* This is to align init_task_union properly, be careful. -DaveM */
+	.align	8192
+
+/* The code above should be at beginning and we have to take care about
+ * short jumps, as branching to .text.init section from .text is usually
+ * impossible */
+		__INIT
 /* Acquire boot time privileged register values, this will help debugging.
  * I figure out and store nwindows and nwindowsm1 later on.
  */
 execute_in_high_mem:
-#if CONFIG_AP1000
-                /* we don't have a prom :-( */
-                b sun4m_init
-                nop
-#endif
 		mov	%l0, %o0		! put back romvec
 		mov	%l1, %o1		! and debug_vec
 
@@ -725,18 +786,24 @@ execute_in_high_mem:
  * your code. Sun probably still does that because they don't even
  * trust their own "OpenBoot" specifications.
  */
-
 		set	LOAD_ADDR, %g6
 		cmp	%o0, %g6		! an old sun4?
-		be	no_sun4_here
+		be	sun4_init
 		 nop
 
 found_version:
-
+#ifdef CONFIG_SUN4
+/* For people who try sun4 kernels, even if Configure.help advises them. */
+		ld	[%g7 + 0x68], %o1
+		set	sun4cdm_notsup, %o0
+		call	%o1
+		 nop
+		b	halt_me
+		 nop
+#endif
 /* Get the machine type via the mysterious romvec node operations. */
 
-		or	%g0, %g7, %l1
-		add	%l1, 0x1c, %l1		
+		add	%g7, 0x1c, %l1		
 		ld	[%l1], %l0
 		ld	[%l0], %l0
 		call 	%l0
@@ -772,31 +839,30 @@ got_prop:
 		set	C_LABEL(cputypval), %o2
 		ldub	[%o2 + 0x4], %l1
 
-		cmp	%l1, 'c'		! We already know we are not
-		be	1f			! on a plain sun4 because of
-		 nop				! the check for 0x4000 in %o0
-
-		cmp	%l1, 'm'		! at start
+		cmp	%l1, ' '
 		be	1f
-		 nop
-
-		cmp	%l1, 'd'
-		be	no_sun4d_here		! God bless the person who
-		 nop				! tried to run this on sun4d.
-	
-		cmp	%l1, 'e'
+		 cmp	%l1, 'c'
+		be	1f
+		 cmp	%l1, 'm'
+		be	1f
+		 cmp	%l1, 's'
+		be	1f
+		 cmp	%l1, 'd'
+		be	1f
+		 cmp	%l1, 'e'
 		be	no_sun4e_here		! Could be a sun4e.
 		 nop
-
-		b	no_sun4u_here		! AIEEE, a V9 sun4u...
+		b	no_sun4u_here		! AIEEE, a V9 sun4u... Get our BIG BROTHER kernel :))
 		 nop
 
-
-1:
-		set	C_LABEL(cputypval), %l1
+1:		set	C_LABEL(cputypval), %l1
 		ldub	[%l1 + 0x4], %l1
 		cmp	%l1, 'm'		! Test for sun4d, sun4e ?
 		be	sun4m_init
+		 cmp	%l1, 's'		! Treat sun4s as sun4m
+		be	sun4m_init
+		 cmp	%l1, 'd'		! Let us see how the beast will die
+		be	sun4d_init
 		 nop
 
 		/* Jump into mmu context zero. */
@@ -806,14 +872,102 @@ got_prop:
 		b	sun4c_continue_boot
 		 nop
 
+/* CPUID in bootbus can be found at PA 0xff0140000 */
+#define SUN4D_BOOTBUS_CPUID     0xf0140000
+
+sun4d_init:
+	/* Need to patch call to handler_irq */
+	set	C_LABEL(patch_handler_irq), %g4
+	set	C_LABEL(sun4d_handler_irq), %g5
+	sethi	%hi(0x40000000), %g3		! call
+	sub	%g5, %g4, %g5
+	srl	%g5, 2, %g5
+	or	%g5, %g3, %g5
+	st	%g5, [%g4]
+
+#ifdef CONFIG_SMP
+	/* Get our CPU id out of bootbus */
+	set     SUN4D_BOOTBUS_CPUID, %g3
+	lduba   [%g3] ASI_M_CTL, %g3
+	and     %g3, 0xf8, %g3
+	srl     %g3, 3, %g4
+	sta     %g4, [%g0] ASI_M_VIKING_TMP1
+	sethi	%hi(boot_cpu_id), %g5
+	stb	%g4, [%g5 + %lo(boot_cpu_id)]
+	sll	%g4, 2, %g4
+	sethi	%hi(boot_cpu_id4), %g5
+	stb	%g4, [%g5 + %lo(boot_cpu_id4)]
+#endif
+
+	/* Fall through to sun4m_init */
+
 sun4m_init:
+	/* XXX Fucking Cypress... */
+	lda	[%g0] ASI_M_MMUREGS, %g5
+	srl	%g5, 28, %g4
+
+	cmp	%g4, 1
+	bne	1f
+	 srl	%g5, 24, %g4
+
+	and	%g4, 0xf, %g4
+	cmp	%g4, 7		/* This would be a HyperSparc. */
+
+	bne	2f
+	 nop
+
+1:
+
+#define PATCH_IT(dst, src)	\
+	set	(dst), %g5;	\
+	set	(src), %g4;	\
+	ld	[%g4], %g3;	\
+	st	%g3, [%g5];	\
+	ld	[%g4+0x4], %g3;	\
+	st	%g3, [%g5+0x4];
+
+	/* Signed multiply. */
+	PATCH_IT(.mul, .mul_patch)
+	PATCH_IT(.mul+0x08, .mul_patch+0x08)
+
+	/* Signed remainder. */
+	PATCH_IT(.rem, .rem_patch)
+	PATCH_IT(.rem+0x08, .rem_patch+0x08)
+	PATCH_IT(.rem+0x10, .rem_patch+0x10)
+	PATCH_IT(.rem+0x18, .rem_patch+0x18)
+	PATCH_IT(.rem+0x20, .rem_patch+0x20)
+	PATCH_IT(.rem+0x28, .rem_patch+0x28)
+
+	/* Signed division. */
+	PATCH_IT(.div, .div_patch)
+	PATCH_IT(.div+0x08, .div_patch+0x08)
+	PATCH_IT(.div+0x10, .div_patch+0x10)
+	PATCH_IT(.div+0x18, .div_patch+0x18)
+	PATCH_IT(.div+0x20, .div_patch+0x20)
+
+	/* Unsigned multiply. */
+	PATCH_IT(.umul, .umul_patch)
+	PATCH_IT(.umul+0x08, .umul_patch+0x08)
+
+	/* Unsigned remainder. */
+	PATCH_IT(.urem, .urem_patch)
+	PATCH_IT(.urem+0x08, .urem_patch+0x08)
+	PATCH_IT(.urem+0x10, .urem_patch+0x10)
+	PATCH_IT(.urem+0x18, .urem_patch+0x18)
+
+	/* Unsigned division. */
+	PATCH_IT(.udiv, .udiv_patch)
+	PATCH_IT(.udiv+0x08, .udiv_patch+0x08)
+	PATCH_IT(.udiv+0x10, .udiv_patch+0x10)
+
+#undef PATCH_IT
 
 /* Ok, the PROM could have done funny things and apple cider could still
  * be sitting in the fault status/address registers.  Read them all to
  * clear them so we don't get magic faults later on.
  */
 /* This sucks, apparently this makes Vikings call prom panic, will fix later */
-
+2:
 		rd	%psr, %o1
 		srl	%o1, 28, %o1		! Get a type of the CPU
 
@@ -856,13 +1010,14 @@ sun4c_continue_boot:
 		WRITE_PAUSE
 
 		/* I want a kernel stack NOW! */
-		set	C_LABEL(bootup_user_stack), %g1
-		add	%g1, (PAGE_SIZE - REGWIN_SZ), %sp
+		set	C_LABEL(init_task_union), %g1
+		set	(TASK_UNION_SIZE - STACKFRAME_SZ), %g2
+		add	%g1, %g2, %sp
 		mov	0, %fp			/* And for good luck */
 
 		/* Zero out our BSS section. */
-		set	C_LABEL(edata) , %o0	! First address of BSS
-		set	C_LABEL(end) , %o1	! Last address of BSS
+		set	C_LABEL(__bss_start) , %o0	! First address of BSS
+		set	C_LABEL(end) , %o1		! Last address of BSS
 		add	%o0, 0x1, %o0
 1:	
 		stb	%g0, [%o0]
@@ -871,15 +1026,19 @@ sun4c_continue_boot:
 		 add	%o0, 0x1, %o0
 
 		/* Initialize the umask value for init_task just in case.
-		 * But first make current_set[0] point to something useful.
+		 * But first make current_set[boot_cpu_id] point to something useful.
 		 */
-		set	C_LABEL(init_task), %g4
+		set	C_LABEL(init_task_union), %g6
 		set	C_LABEL(current_set), %g2
-		st	%g4, [%g2]
+#ifdef CONFIG_SMP
+		sethi	%hi(C_LABEL(boot_cpu_id4)), %g3
+		ldub	[%g3 + %lo(C_LABEL(boot_cpu_id4))], %g3
+		st	%g6, [%g2]
+		add	%g2, %g3, %g2
+#endif
+		st	%g6, [%g2]
 
-		set	C_LABEL(bootup_kernel_stack), %g3
-		st	%g3, [%g4 + TASK_KSTACK_PG]
-		st	%g0, [%g4 + THREAD_UMASK]
+		st	%g0, [%g6 + AOFF_task_thread + AOFF_thread_uwinmask]
 
 /* Compute NWINDOWS and stash it away. Now uses %wim trick explained
  * in the V8 manual. Ok, this method seems to work, Sparc is cool...
@@ -912,9 +1071,9 @@ sun4c_continue_boot:
 
 #define		PATCH_INSN(src, dest) \
 		set	src, %g5; \
-		set	dest, %g6; \
+		set	dest, %g2; \
 		ld	[%g5], %g4; \
-		st	%g4, [%g6];
+		st	%g4, [%g2];
 	
 		/* Patch for window spills... */
 		PATCH_INSN(spnwin_patch1_7win, spnwin_patch1)
@@ -940,16 +1099,31 @@ sun4c_continue_boot:
 		PATCH_INSN(rtrap_7win_patch4, rtrap_patch4)
 		PATCH_INSN(rtrap_7win_patch5, rtrap_patch5)
 
-#ifdef __SMP__
+		/* Patch for killing user windows from the register file. */
+		PATCH_INSN(kuw_patch1_7win, kuw_patch1)
 
-		/* Patch for returning from an ipi... */
-		PATCH_INSN(rirq_7win_patch1, rirq_patch1)
-		PATCH_INSN(rirq_7win_patch2, rirq_patch2)
-		PATCH_INSN(rirq_7win_patch3, rirq_patch3)
-		PATCH_INSN(rirq_7win_patch4, rirq_patch4)
-		PATCH_INSN(rirq_7win_patch5, rirq_patch5)
-
-#endif
+		/* Now patch the kernel window flush sequences.
+		 * This saves 2 traps on every switch and fork.
+		 */
+		set	0x01000000, %g4
+		set	flush_patch_one, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_two, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_three, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_four, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_exception, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
+		set	flush_patch_switch, %g5
+		st	%g4, [%g5 + 0x18]
+		st	%g4, [%g5 + 0x1c]
 
 2:		
 		sethi	%hi( C_LABEL(nwindows) ), %g4
@@ -987,27 +1161,28 @@ sun4c_continue_boot:
 		call	halt_me
 		 nop
 
+sun4_init:
+#ifdef CONFIG_SUN4
 /* There, happy now Adrian? */
+		set	C_LABEL(cputypval), %o2		! Let everyone know we
+		set	' ', %o0			! are a "sun4 " architecture
+		stb	%o0, [%o2 + 0x4]		
 
-		/* XXX Fix this... XXX */
-no_sun4_here:
-		sethi	%hi(SUN4_PROM_VECTOR+SUN4_PRINTF), %o1
-		ld	[%o1 + %lo(SUN4_PROM_VECTOR+SUN4_PRINTF)], %o1
-		set	sun4_notsup, %o0
-		call	%o1
+		b got_prop 
 		 nop
-1:
-		ba	1b			! Cannot exit into KMON
+#else
+		sethi   %hi(SUN4_PROM_VECTOR+0x84), %o1
+		ld      [%o1 + %lo(SUN4_PROM_VECTOR+0x84)], %o1
+		set     sun4_notsup, %o0
+		call    %o1	/* printf */
 		 nop
-
-no_sun4d_here:
-		ld	[%g7 + 0x68], %o1
-		set	sun4d_notsup, %o0
-		call	%o1
+		sethi   %hi(SUN4_PROM_VECTOR+0xc4), %o1
+		ld      [%o1 + %lo(SUN4_PROM_VECTOR+0xc4)], %o1
+		call    %o1	/* exittomon */
 		 nop
-		b	halt_me
+1:		ba      1b                      ! Cannot exit into KMON
 		 nop
-
+#endif
 no_sun4e_here:
 		ld	[%g7 + 0x68], %o1
 		set	sun4e_notsup, %o0
@@ -1016,18 +1191,96 @@ no_sun4e_here:
 		b	halt_me
 		 nop
 
-no_sun4u_here:
-		ld	[%g7 + 0x68], %o1
-		set	sun4u_notsup, %o0
-		call	%o1
-		 nop
-		b	halt_me
-		 nop
+		__INITDATA
 
+sun4u_1:
+		.asciz "finddevice"
+		.align	4
+sun4u_2:
+		.asciz "/chosen"
+		.align	4
+sun4u_3:
+		.asciz "getprop"
+		.align	4
+sun4u_4:
+		.asciz "stdout"
+		.align	4
+sun4u_5:
+		.asciz "write"
+		.align	4
+sun4u_6:
+        	.asciz  "\n\rOn sun4u you have to use UltraLinux (64bit) kernel\n\rand not a 32bit sun4[cdem] version\n\r\n\r"
+sun4u_6e:
+		.align	4
+sun4u_7:
+		.asciz "exit"
+		.align	8
+sun4u_a1:
+		.word	0, sun4u_1, 0, 1, 0, 1, 0, sun4u_2, 0
+sun4u_r1:
+		.word	0
+sun4u_a2:
+		.word	0, sun4u_3, 0, 4, 0, 1, 0
+sun4u_i2:
+		.word	0, 0, sun4u_4, 0, sun4u_1, 0, 8, 0
+sun4u_r2:
+		.word	0
+sun4u_a3:
+		.word	0, sun4u_5, 0, 3, 0, 1, 0
+sun4u_i3:
+		.word	0, 0, sun4u_6, 0, sun4u_6e - sun4u_6 - 1, 0
+sun4u_r3:
+		.word	0
+sun4u_a4:
+		.word	0, sun4u_7, 0, 0, 0, 0
+sun4u_r4:
+
+		__INIT
+no_sun4u_here:
+		set	sun4u_a1, %o0
+		set	current_pc, %l2
+		cmp	%l2, %g3
+		be	1f
+		 mov	%o4, %l0
+		sub	%g3, %l2, %l6
+		add	%o0, %l6, %o0
+		mov	%o0, %l4
+		mov	sun4u_r4 - sun4u_a1, %l3
+		ld	[%l4], %l5
+2:
+		add	%l4, 4, %l4
+		cmp	%l5, %l2
+		add	%l5, %l6, %l5
+		bgeu,a	3f
+		 st	%l5, [%l4 - 4]
+3:
+		subcc	%l3, 4, %l3
+		bne	2b
+		 ld	[%l4], %l5
+1:
+		call	%l0
+		 mov	%o0, %l1
+
+		ld	[%l1 + (sun4u_r1 - sun4u_a1)], %o1
+		add	%l1, (sun4u_a2 - sun4u_a1), %o0
+		call	%l0
+		 st	%o1, [%o0 + (sun4u_i2 - sun4u_a2)]
+
+		ld	[%l1 + (sun4u_1 - sun4u_a1)], %o1
+		add	%l1, (sun4u_a3 - sun4u_a1), %o0
+		call	%l0
+		st	%o1, [%o0 + (sun4u_i3 - sun4u_a3)]
+
+		call	%l0
+		 add	%l1, (sun4u_a4 - sun4u_a1), %o0
+
+		/* Not reached */
 halt_me:
 		ld	[%g7 + 0x74], %o0
 		call	%o0			! Get us out of here...
 		 nop				! Apparently Solaris is better.
+
+/* Ok, now we continue in the .data/.text sections */
 
 	.data
 	.align 4
@@ -1072,3 +1325,8 @@ C_LABEL(lvl14_save):
 	.word	0
 	.word	t_irq14
 
+        .section        ".fixup",#alloc,#execinstr
+        .globl  __ret_efault
+__ret_efault:
+        ret
+         restore %g0, -EFAULT, %o0

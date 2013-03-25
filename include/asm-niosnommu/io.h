@@ -1,9 +1,3 @@
-/*
-    December 21, 2000   Ken Hill
-    21Mar2001    1.1    dgt32 - Crystal CS8900
-*/
-
-
 #ifndef __NIOS_IO_H
 #define __NIOS_IO_H
 
@@ -12,92 +6,88 @@
 #include <asm/page.h>      /* IO address mapping routines need this */
 #include <asm/system.h>
 
-/*
- * Defines for io operations on the Sparc. Whether a memory access is going
- * to i/o sparc is encoded in the pte. The type bits determine whether this
- * is i/o sparc, on board memory, or VME space for VME cards. I think VME
- * space only works on sun4's
- */
+extern void insw(unsigned long port, void *dst, unsigned long count);
+extern void outsw(unsigned long port, void *src, unsigned long count);
 
-extern inline unsigned long inb_local(unsigned long addr)
-{
-	return 0;
-}
-
-extern inline void outb_local(unsigned char b, unsigned long addr)
-{
-	return;
-}
-
-extern inline unsigned long inb(unsigned long addr)
-{
-	return 0;
-}
-
-/* 1.1 see ucCs8900.*                                                       */
-/*                                                                          */
-//extern inline unsigned long inw(unsigned long addr)
-//{
-//	return 0;
-//}
-
-extern inline unsigned long inl(unsigned long addr)
-{
-	return 0;
-}
-
-extern inline void outb(unsigned char b, unsigned long addr)
-{
-	return;
-}
-
-/* 1.1 see ucCs8900.*                                                       */
-/*                                                                          */
-//extern inline void outw(unsigned short b, unsigned long addr)
-//{
-//	return;
-//}
-
-extern inline void outl(unsigned int b, unsigned long addr)
-{
-	return;
-}
 
 /*
- * Memory functions
+ * readX/writeX() are used to access memory mapped devices. On some
+ * architectures the memory mapped IO stuff needs to be accessed
+ * differently. On the Nios architecture, we just read/write the
+ * memory location directly.
  */
-extern inline unsigned long readb(unsigned long addr)
+
+#define readb(addr) (*(volatile unsigned char *)  (addr))
+#define readw(addr) (*(volatile unsigned short *) (addr))
+#define readl(addr) (*(volatile unsigned int *)   (addr))
+
+#define writeb(b,addr) (*(volatile unsigned char *)  (addr) = (b))
+#define writew(b,addr) (*(volatile unsigned short *) (addr) = (b))
+#define writel(b,addr) (*(volatile unsigned int *)   (addr) = (b))
+
+
+/*
+ *	make the short names macros so specific devices
+ *	can override them as required
+ */
+
+#define inb(addr)    readb(addr)
+#define inw(addr)    readw(addr)
+#define inl(addr)    readl(addr)
+
+#define outb(x,addr) ((void) writeb(x,addr))
+#define outw(x,addr) ((void) writew(x,addr))
+#define outl(x,addr) ((void) writel(x,addr))
+
+#define inb_p(addr)    inb(addr)
+#define inw_p(addr)    inw(addr)
+#define inl_p(addr)    inl(addr)
+
+#define outb_p(x,addr) outb(x,addr)
+#define outw_p(x,addr) outw(x,addr)
+#define outl_p(x,addr) outl(x,addr)
+
+
+
+extern inline void insb(unsigned long port, void *dst, unsigned long count)
 {
-	return 0;
+	while (count--)
+		*(((unsigned char *)dst)++) = inb(port);
 }
 
-extern inline unsigned long readw(unsigned long addr)
+/* See arch/niosnommu/io.c for optimized version */
+extern inline void _insw(unsigned long port, void *dst, unsigned long count)
 {
-	return 0;
+	while (count--)
+		*(((unsigned short *)dst)++) = inw(port);
 }
 
-extern inline unsigned long readl(unsigned long addr)
+extern inline void insl(unsigned long port, void *dst, unsigned long count)
 {
-	return 0;
+	while (count--)
+		*(((unsigned long *)dst)++) = inl(port);
 }
 
-extern inline void writeb(unsigned short b, unsigned long addr)
+extern inline void outsb(unsigned long port, void *src, unsigned long count)
 {
-	return;
+	while (count--) 
+        outb( *(((unsigned char *)src)++), port );
 }
 
-extern inline void writew(unsigned short b, unsigned long addr)
+/* See arch/niosnommu/io.c for optimized version */
+extern inline void _outsw(unsigned long port, void *src, unsigned long count)
 {
-	return;
+	while (count--) 
+        outw( *(((unsigned short *)src)++), port );
 }
 
-extern inline void writel(unsigned int b, unsigned long addr)
+extern inline void outsl(unsigned long port, void *src, unsigned long count)
 {
-	return;
+	while (count--) 
+        outl( *(((unsigned long *)src)++), port );
 }
 
-#define inb_p inb
-#define outb_p outb
+
 
 extern inline void mapioaddr(unsigned long physaddr, unsigned long virt_addr,
 			     int bus, int rdonly)
@@ -105,8 +95,36 @@ extern inline void mapioaddr(unsigned long physaddr, unsigned long virt_addr,
 	return;
 }
 
-extern void *sparc_alloc_io (void *, void *, int, char *, int, int);
-extern void *sparc_dvma_malloc (int, char *);
+//vic - copied from m68knommu
 
+/* Values for nocacheflag and cmode */
+#define IOMAP_FULL_CACHING		0
+#define IOMAP_NOCACHE_SER		1
+#define IOMAP_NOCACHE_NONSER		2
+#define IOMAP_WRITETHROUGH		3
+
+extern void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag);
+extern void __iounmap(void *addr, unsigned long size);
+
+extern inline void *ioremap(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_NOCACHE_SER);
+}
+extern inline void *ioremap_nocache(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_NOCACHE_SER);
+}
+extern inline void *ioremap_writethrough(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_WRITETHROUGH);
+}
+extern inline void *ioremap_fullcache(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_FULL_CACHING);
+}
+
+extern void iounmap(void *addr);
+
+#define IO_SPACE_LIMIT 0xffff
 #endif /* !(__NIOS_IO_H) */
 

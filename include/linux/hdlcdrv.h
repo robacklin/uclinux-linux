@@ -1,19 +1,11 @@
 /*
  * hdlcdrv.h  -- HDLC packet radio network driver.
  * The Linux soundcard driver for 1200 baud and 9600 baud packet radio
- * (C) 1996 by Thomas Sailer, HB9JNX/AE4WA
+ * (C) 1996-1998 by Thomas Sailer, HB9JNX/AE4WA
  */
 
 #ifndef _HDLCDRV_H
 #define _HDLCDRV_H
-
-#include <linux/version.h>
-#include <linux/sockios.h>
-#include <linux/version.h>
-#if LINUX_VERSION_CODE < 0x20119
-#include <linux/if_ether.h>
-#endif
-#include <linux/netdevice.h>
 
 /* -------------------------------------------------------------------- */
 /*
@@ -43,9 +35,6 @@ struct hdlcdrv_old_channel_state {
   	int ptt;
   	int dcd;
   	int ptt_keyed;
-#if LINUX_VERSION_CODE < 0x20100
-  	struct enet_statistics stats;
-#endif
 };
 
 struct hdlcdrv_channel_state {
@@ -115,8 +104,11 @@ struct hdlcdrv_ioctl {
 
 #ifdef __KERNEL__
 
+#include <linux/netdevice.h>
+#include <linux/if.h>
+#include <linux/spinlock.h>
+
 #define HDLCDRV_MAGIC      0x5ac6e778
-#define HDLCDRV_IFNAMELEN    6
 #define HDLCDRV_HDLCBUFFER  32 /* should be a power of 2 for speed reasons */
 #define HDLCDRV_BITBUFFER  256 /* should be a power of 2 for speed reasons */
 #undef HDLCDRV_LOOPBACK  /* define for HDLC debugging purposes */
@@ -127,6 +119,7 @@ struct hdlcdrv_ioctl {
 
 
 struct hdlcdrv_hdlcbuffer {
+	spinlock_t lock;
 	unsigned rd, wr;
 	unsigned short buf[HDLCDRV_HDLCBUFFER];
 };
@@ -139,7 +132,7 @@ struct hdlcdrv_bitbuffer {
 	unsigned char buffer[HDLCDRV_BITBUFFER];
 };
 
-extern inline void hdlcdrv_add_bitbuffer(struct hdlcdrv_bitbuffer *buf, 
+static inline void hdlcdrv_add_bitbuffer(struct hdlcdrv_bitbuffer *buf, 
 					 unsigned int bit)
 {
 	unsigned char new;
@@ -154,7 +147,7 @@ extern inline void hdlcdrv_add_bitbuffer(struct hdlcdrv_bitbuffer *buf,
 	}
 }
 
-extern inline void hdlcdrv_add_bitbuffer_word(struct hdlcdrv_bitbuffer *buf, 
+static inline void hdlcdrv_add_bitbuffer_word(struct hdlcdrv_bitbuffer *buf, 
 					      unsigned int bits)
 {
 	buf->buffer[buf->wr] = bits & 0xff;
@@ -179,16 +172,14 @@ struct hdlcdrv_ops {
 	/*
 	 * the routines called by the hdlcdrv routines
 	 */
-	int (*open)(struct device *);
-	int (*close)(struct device *);
-	int (*ioctl)(struct device *, struct ifreq *, 
+	int (*open)(struct net_device *);
+	int (*close)(struct net_device *);
+	int (*ioctl)(struct net_device *, struct ifreq *, 
 		     struct hdlcdrv_ioctl *, int);
 };
 
 struct hdlcdrv_state {
 	int magic;
-
-	char ifname[HDLCDRV_IFNAMELEN];
 
 	const struct hdlcdrv_ops *ops;
 
@@ -208,7 +199,7 @@ struct hdlcdrv_state {
 
 	struct hdlcdrv_hdlcrx {
 		struct hdlcdrv_hdlcbuffer hbuf;
-		int in_hdlc_rx;
+		long in_hdlc_rx;
 		/* 0 = sync hunt, != 0 receiving */
 		int rx_state;	
 		unsigned int bitstream;
@@ -249,77 +240,85 @@ struct hdlcdrv_state {
 	struct hdlcdrv_bitbuffer bitbuf_hdlc;
 #endif /* HDLCDRV_DEBUG */
 
-#if LINUX_VERSION_CODE < 0x20119
-	struct enet_statistics stats;
-#else
 	struct net_device_stats stats;
-#endif
 	int ptt_keyed;
 
-	struct sk_buff_head send_queue;  /* Packets awaiting transmission */
+	/* queued skb for transmission */
+	struct sk_buff *skb;
 };
 
 
 /* -------------------------------------------------------------------- */
 
-extern inline int hdlcdrv_hbuf_full(struct hdlcdrv_hdlcbuffer *hb) 
+static inline int hdlcdrv_hbuf_full(struct hdlcdrv_hdlcbuffer *hb) 
 {
-	return !((HDLCDRV_HDLCBUFFER - 1 + hb->rd - hb->wr) 
-		 % HDLCDRV_HDLCBUFFER);
-}
-
-/* -------------------------------------------------------------------- */
-
-extern inline int hdlcdrv_hbuf_empty(struct hdlcdrv_hdlcbuffer *hb)
-{
-	return hb->rd == hb->wr;
-}
-
-/* -------------------------------------------------------------------- */
-
-extern inline unsigned short hdlcdrv_hbuf_get(struct hdlcdrv_hdlcbuffer *hb)
-{
-	unsigned newr;
-	unsigned short val;
 	unsigned long flags;
+	int ret;
+	
+	spin_lock_irqsave(&hb->lock, flags);
+	ret = !((HDLCDRV_HDLCBUFFER - 1 + hb->rd - hb->wr) % HDLCDRV_HDLCBUFFER);
+	spin_unlock_irqrestore(&hb->lock, flags);
+	return ret;
+}
 
+/* -------------------------------------------------------------------- */
+
+static inline int hdlcdrv_hbuf_empty(struct hdlcdrv_hdlcbuffer *hb)
+{
+	unsigned long flags;
+	int ret;
+	
+	spin_lock_irqsave(&hb->lock, flags);
+	ret = (hb->rd == hb->wr);
+	spin_unlock_irqrestore(&hb->lock, flags);
+	return ret;
+}
+
+/* -------------------------------------------------------------------- */
+
+static inline unsigned short hdlcdrv_hbuf_get(struct hdlcdrv_hdlcbuffer *hb)
+{
+	unsigned long flags;
+	unsigned short val;
+	unsigned newr;
+
+	spin_lock_irqsave(&hb->lock, flags);
 	if (hb->rd == hb->wr)
-		return 0;
-	save_flags(flags);
-	cli();
-	newr = (hb->rd+1) % HDLCDRV_HDLCBUFFER;
-	val = hb->buf[hb->rd];
-	hb->rd = newr;
-	restore_flags(flags);
+		val = 0;
+	else {
+		newr = (hb->rd+1) % HDLCDRV_HDLCBUFFER;
+		val = hb->buf[hb->rd];
+		hb->rd = newr;
+	}
+	spin_unlock_irqrestore(&hb->lock, flags);
 	return val;
 }
 
 /* -------------------------------------------------------------------- */
 
-extern inline void hdlcdrv_hbuf_put(struct hdlcdrv_hdlcbuffer *hb, 
+static inline void hdlcdrv_hbuf_put(struct hdlcdrv_hdlcbuffer *hb, 
 				    unsigned short val)
 {
 	unsigned newp;
 	unsigned long flags;
-
-	save_flags(flags);
-	cli();
+	
+	spin_lock_irqsave(&hb->lock, flags);
 	newp = (hb->wr+1) % HDLCDRV_HDLCBUFFER;
 	if (newp != hb->rd) { 
 		hb->buf[hb->wr] = val & 0xffff;
 		hb->wr = newp;
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&hb->lock, flags);
 }
 
 /* -------------------------------------------------------------------- */
 
-extern inline void hdlcdrv_putbits(struct hdlcdrv_state *s, unsigned int bits)
+static inline void hdlcdrv_putbits(struct hdlcdrv_state *s, unsigned int bits)
 {
 	hdlcdrv_hbuf_put(&s->hdlcrx.hbuf, bits);
 }
 
-extern inline unsigned int hdlcdrv_getbits(struct hdlcdrv_state *s)
+static inline unsigned int hdlcdrv_getbits(struct hdlcdrv_state *s)
 {
 	unsigned int ret;
 
@@ -337,33 +336,33 @@ extern inline unsigned int hdlcdrv_getbits(struct hdlcdrv_state *s)
 	return ret;
 }
 
-extern inline void hdlcdrv_channelbit(struct hdlcdrv_state *s, unsigned int bit)
+static inline void hdlcdrv_channelbit(struct hdlcdrv_state *s, unsigned int bit)
 {
 #ifdef HDLCDRV_DEBUG
 	hdlcdrv_add_bitbuffer(&s->bitbuf_channel, bit);
 #endif /* HDLCDRV_DEBUG */
 }
 
-extern inline void hdlcdrv_setdcd(struct hdlcdrv_state *s, int dcd)
+static inline void hdlcdrv_setdcd(struct hdlcdrv_state *s, int dcd)
 {
 	s->hdlcrx.dcd = !!dcd;
 }
 
-extern inline int hdlcdrv_ptt(struct hdlcdrv_state *s)
+static inline int hdlcdrv_ptt(struct hdlcdrv_state *s)
 {
 	return s->hdlctx.ptt || (s->hdlctx.calibrate > 0);
 }
 
 /* -------------------------------------------------------------------- */
 
-void hdlcdrv_receiver(struct device *, struct hdlcdrv_state *);
-void hdlcdrv_transmitter(struct device *, struct hdlcdrv_state *);
-void hdlcdrv_arbitrate(struct device *, struct hdlcdrv_state *);
-int hdlcdrv_register_hdlcdrv(struct device *dev, const struct hdlcdrv_ops *ops,
+void hdlcdrv_receiver(struct net_device *, struct hdlcdrv_state *);
+void hdlcdrv_transmitter(struct net_device *, struct hdlcdrv_state *);
+void hdlcdrv_arbitrate(struct net_device *, struct hdlcdrv_state *);
+int hdlcdrv_register_hdlcdrv(struct net_device *dev, const struct hdlcdrv_ops *ops,
 			     unsigned int privsize, char *ifname,
 			     unsigned int baseaddr, unsigned int irq, 
 			     unsigned int dma);
-int hdlcdrv_unregister_hdlcdrv(struct device *dev);
+int hdlcdrv_unregister_hdlcdrv(struct net_device *dev);
 
 /* -------------------------------------------------------------------- */
 

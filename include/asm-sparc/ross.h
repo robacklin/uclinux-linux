@@ -1,4 +1,4 @@
-/* $Id: ross.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: ross.h,v 1.13 1998/01/07 06:49:11 baccala Exp $
  * ross.h: Ross module specific definitions and defines.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -8,6 +8,7 @@
 #define _SPARC_ROSS_H
 
 #include <asm/asi.h>
+#include <asm/page.h>
 
 /* Ross made Hypersparcs have a %psr 'impl' field of '0001'.  The 'vers'
  * field has '1111'.
@@ -93,27 +94,31 @@
 #define HYPERSPARC_ICCR_FTD     0x00000002
 #define HYPERSPARC_ICCR_ICE     0x00000001
 
-extern inline unsigned int get_ross_icr(void)
+#ifndef __ASSEMBLY__
+
+static inline unsigned int get_ross_icr(void)
 {
 	unsigned int icreg;
 
 	__asm__ __volatile__(".word 0x8347c000\n\t" /* rd %iccr, %g1 */
-			     "mov %%g1, %0\n\t" :
-			     "=r" (icreg) : :
-			     "g1", "memory");
+			     "mov %%g1, %0\n\t"
+			     : "=r" (icreg)
+			     : /* no inputs */
+			     : "g1", "memory");
 
 	return icreg;
 }
 
-extern inline void put_ross_icr(unsigned int icreg)
+static inline void put_ross_icr(unsigned int icreg)
 {
 	__asm__ __volatile__("or %%g0, %0, %%g1\n\t"
 			     ".word 0xbf806000\n\t" /* wr %g1, 0x0, %iccr */
 			     "nop\n\t"
 			     "nop\n\t"
-			     "nop\n\t" : : 
-			     "r" (icreg) :
-			     "g1", "memory");
+			     "nop\n\t"
+			     : /* no outputs */
+			     : "r" (icreg)
+			     : "g1", "memory");
 
 	return;
 }
@@ -121,54 +126,66 @@ extern inline void put_ross_icr(unsigned int icreg)
 /* HyperSparc specific cache flushing. */
 
 /* This is for the on-chip instruction cache. */
-extern inline void hyper_flush_whole_icache(void)
+static inline void hyper_flush_whole_icache(void)
 {
-	__asm__ __volatile__("sta %%g0, [%%g0] %0\n\t" : :
-			     "i" (ASI_M_FLUSH_IWHOLE));
+	__asm__ __volatile__("sta %%g0, [%%g0] %0\n\t"
+			     : /* no outputs */
+			     : "i" (ASI_M_FLUSH_IWHOLE)
+			     : "memory");
 	return;
 }
 
-extern int hyper_cache_size;
-extern int hyper_line_size;
+extern int vac_cache_size;
+extern int vac_line_size;
 
-extern inline void hyper_clear_all_tags(void)
+static inline void hyper_clear_all_tags(void)
 {
 	unsigned long addr;
 
-	for(addr = 0; addr < hyper_cache_size; addr += hyper_line_size)
-		__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-				     "r" (addr), "i" (ASI_M_DATAC_TAG));
+	for(addr = 0; addr < vac_cache_size; addr += vac_line_size)
+		__asm__ __volatile__("sta %%g0, [%0] %1\n\t"
+				     : /* no outputs */
+				     : "r" (addr), "i" (ASI_M_DATAC_TAG)
+				     : "memory");
 }
 
-extern inline void hyper_flush_unconditional_combined(void)
+static inline void hyper_flush_unconditional_combined(void)
 {
 	unsigned long addr;
 
-	for(addr = 0; addr < hyper_cache_size; addr += hyper_line_size)
-		__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-				     "r" (addr), "i" (ASI_M_FLUSH_CTX));
+	for (addr = 0; addr < vac_cache_size; addr += vac_line_size)
+		__asm__ __volatile__("sta %%g0, [%0] %1\n\t"
+				     : /* no outputs */
+				     : "r" (addr), "i" (ASI_M_FLUSH_CTX)
+				     : "memory");
 }
 
-extern inline void hyper_flush_cache_user(void)
+static inline void hyper_flush_cache_user(void)
 {
 	unsigned long addr;
 
-	for(addr = 0; addr < hyper_cache_size; addr += hyper_line_size)
-		__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-				     "r" (addr), "i" (ASI_M_FLUSH_USER));
+	for (addr = 0; addr < vac_cache_size; addr += vac_line_size)
+		__asm__ __volatile__("sta %%g0, [%0] %1\n\t"
+				     : /* no outputs */
+				     : "r" (addr), "i" (ASI_M_FLUSH_USER)
+				     : "memory");
 }
 
-extern inline void hyper_flush_cache_page(unsigned long page)
+static inline void hyper_flush_cache_page(unsigned long page)
 {
 	unsigned long end;
 
 	page &= PAGE_MASK;
 	end = page + PAGE_SIZE;
-	while(page < end) {
-		__asm__ __volatile__("sta %%g0, [%0] %1\n\t" : :
-				     "r" (page), "i" (ASI_M_FLUSH_PAGE));
-		page += hyper_line_size;
+	while (page < end) {
+		__asm__ __volatile__("sta %%g0, [%0] %1\n\t"
+				     : /* no outputs */
+				     : "r" (page), "i" (ASI_M_FLUSH_PAGE)
+				     : "memory");
+		page += vac_line_size;
 	}
 }
+
+#endif /* !(__ASSEMBLY__) */
 
 #endif /* !(_SPARC_ROSS_H) */

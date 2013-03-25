@@ -1,7 +1,7 @@
 /*
  *	ROSE release 003
  *
- *	This code REQUIRES 2.1.0 or higher/ NET3.029
+ *	This code REQUIRES 2.1.15 or higher/ NET3.038
  *
  *	This module:
  *		This module is free software; you can redistribute it and/or
@@ -11,10 +11,10 @@
  *
  *	History
  *	ROSE 001	Jonathan(G4KLX)	Cloned from nr_timer.c
+ *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
+ *					Implemented idle timer.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -37,43 +37,103 @@
 #include <linux/interrupt.h>
 #include <net/rose.h>
 
-static void rose_timer(unsigned long);
+static void rose_heartbeat_expiry(unsigned long);
+static void rose_timer_expiry(unsigned long);
+static void rose_idletimer_expiry(unsigned long);
 
-/*
- *	Linux set timer
- */
-void rose_set_timer(struct sock *sk)
+void rose_start_heartbeat(struct sock *sk)
 {
-	unsigned long flags;
-
-	save_flags(flags); cli();
 	del_timer(&sk->timer);
-	restore_flags(flags);
 
 	sk->timer.data     = (unsigned long)sk;
-	sk->timer.function = &rose_timer;
-	sk->timer.expires  = jiffies + 10;
+	sk->timer.function = &rose_heartbeat_expiry;
+	sk->timer.expires  = jiffies + 5 * HZ;
 
 	add_timer(&sk->timer);
 }
 
-/*
- *	ROSE Timer
- *
- *	This routine is called every 100ms. Decrement timer by this
- *	amount - if expired then process the event.
- */
-static void rose_timer(unsigned long param)
+void rose_start_t1timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->timer);
+
+	sk->protinfo.rose->timer.data     = (unsigned long)sk;
+	sk->protinfo.rose->timer.function = &rose_timer_expiry;
+	sk->protinfo.rose->timer.expires  = jiffies + sk->protinfo.rose->t1;
+
+	add_timer(&sk->protinfo.rose->timer);
+}
+
+void rose_start_t2timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->timer);
+
+	sk->protinfo.rose->timer.data     = (unsigned long)sk;
+	sk->protinfo.rose->timer.function = &rose_timer_expiry;
+	sk->protinfo.rose->timer.expires  = jiffies + sk->protinfo.rose->t2;
+
+	add_timer(&sk->protinfo.rose->timer);
+}
+
+void rose_start_t3timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->timer);
+
+	sk->protinfo.rose->timer.data     = (unsigned long)sk;
+	sk->protinfo.rose->timer.function = &rose_timer_expiry;
+	sk->protinfo.rose->timer.expires  = jiffies + sk->protinfo.rose->t3;
+
+	add_timer(&sk->protinfo.rose->timer);
+}
+
+void rose_start_hbtimer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->timer);
+
+	sk->protinfo.rose->timer.data     = (unsigned long)sk;
+	sk->protinfo.rose->timer.function = &rose_timer_expiry;
+	sk->protinfo.rose->timer.expires  = jiffies + sk->protinfo.rose->hb;
+
+	add_timer(&sk->protinfo.rose->timer);
+}
+
+void rose_start_idletimer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->idletimer);
+
+	if (sk->protinfo.rose->idle > 0) {
+		sk->protinfo.rose->idletimer.data     = (unsigned long)sk;
+		sk->protinfo.rose->idletimer.function = &rose_idletimer_expiry;
+		sk->protinfo.rose->idletimer.expires  = jiffies + sk->protinfo.rose->idle;
+
+		add_timer(&sk->protinfo.rose->idletimer);
+	}
+}
+
+void rose_stop_heartbeat(struct sock *sk)
+{
+	del_timer(&sk->timer);
+}
+
+void rose_stop_timer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->timer);
+}
+
+void rose_stop_idletimer(struct sock *sk)
+{
+	del_timer(&sk->protinfo.rose->idletimer);
+}
+
+static void rose_heartbeat_expiry(unsigned long param)
 {
 	struct sock *sk = (struct sock *)param;
-	struct device *first;
 
 	switch (sk->protinfo.rose->state) {
+
 		case ROSE_STATE_0:
 			/* Magic here: If we listen() and a new link dies before it
 			   is accepted() it isn't 'dead' so doesn't get removed. */
 			if (sk->destroy || (sk->state == TCP_LISTEN && sk->dead)) {
-				del_timer(&sk->timer);
 				rose_destroy_socket(sk);
 				return;
 			}
@@ -83,76 +143,65 @@ static void rose_timer(unsigned long param)
 			/*
 			 * Check for the state of the receive buffer.
 			 */
-			if (sk->rmem_alloc < ((sk->rcvbuf - ROSE_MAX_WINDOW_LEN) / 2) && (sk->protinfo.rose->condition & ROSE_COND_OWN_RX_BUSY)) {
+			if (atomic_read(&sk->rmem_alloc) < (sk->rcvbuf / 2) &&
+			    (sk->protinfo.rose->condition & ROSE_COND_OWN_RX_BUSY)) {
 				sk->protinfo.rose->condition &= ~ROSE_COND_OWN_RX_BUSY;
 				sk->protinfo.rose->condition &= ~ROSE_COND_ACK_PENDING;
 				sk->protinfo.rose->vl         = sk->protinfo.rose->vr;
-				sk->protinfo.rose->timer      = 0;
 				rose_write_internal(sk, ROSE_RR);
+				rose_stop_timer(sk);	/* HB */
 				break;
 			}
-			/*
-			 * Check for frames to transmit.
-			 */
-			rose_kick(sk);
-			break;
-
-		default:
 			break;
 	}
 
-	if (sk->protinfo.rose->timer == 0 || --sk->protinfo.rose->timer > 0) {
-		rose_set_timer(sk);
-		return;
-	}
+	rose_start_heartbeat(sk);
+}
 
-	/*
-	 * Timer has expired, it may have been T1, T2, T3 or HB. We can tell
-	 * by the socket state.
-	 */
+static void rose_timer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
+
 	switch (sk->protinfo.rose->state) {
+
+		case ROSE_STATE_1:	/* T1 */
+		case ROSE_STATE_4:	/* T2 */
+			rose_write_internal(sk, ROSE_CLEAR_REQUEST);
+			sk->protinfo.rose->state = ROSE_STATE_2;
+			rose_start_t3timer(sk);
+			break;
+
+		case ROSE_STATE_2:	/* T3 */
+			sk->protinfo.rose->neighbour->use--;
+			rose_disconnect(sk, ETIMEDOUT, -1, -1);
+			break;
+
 		case ROSE_STATE_3:	/* HB */
 			if (sk->protinfo.rose->condition & ROSE_COND_ACK_PENDING) {
 				sk->protinfo.rose->condition &= ~ROSE_COND_ACK_PENDING;
 				rose_enquiry_response(sk);
 			}
 			break;
-
-		case ROSE_STATE_1:	/* T1 */
-		case ROSE_STATE_4:	/* T2 */
-			rose_write_internal(sk, ROSE_CLEAR_REQUEST);
-			/* F6FBB - Disconnect the calling station
-			sk->protinfo.rose->state = ROSE_STATE_2;
-			sk->protinfo.rose->timer = sk->protinfo.rose->t3;
-			break; */
-			
-			/* Falls to next case */
-
-		case ROSE_STATE_2:	/* T3 */
-			/* F6FBB - Added Cause and diagnostic */
-			sk->protinfo.rose->cause = ROSE_DTE_ORIGINATED;
-			sk->protinfo.rose->diagnostic = 0x30;
-			
-			/* F6FBB - Added Facilities */
-			first = rose_dev_first();
-			if (first) {	
-				sk->protinfo.rose->facilities.fail_call = rose_callsign;
-				memcpy(&sk->protinfo.rose->facilities.fail_addr, first->dev_addr, ROSE_ADDR_LEN);
-			}
-	
-			rose_clear_queues(sk);
-			sk->protinfo.rose->neighbour->use--;
-			sk->protinfo.rose->state = ROSE_STATE_0;
-			sk->state                = TCP_CLOSE;
-			sk->err                  = ETIMEDOUT;
-			sk->shutdown            |= SEND_SHUTDOWN;
-			if (!sk->dead)
-				sk->state_change(sk);
-			sk->dead                 = 1;
-			break;
 	}
-
-	rose_set_timer(sk);
 }
 
-#endif
+static void rose_idletimer_expiry(unsigned long param)
+{
+	struct sock *sk = (struct sock *)param;
+
+	rose_clear_queues(sk);
+
+	rose_write_internal(sk, ROSE_CLEAR_REQUEST);
+	sk->protinfo.rose->state = ROSE_STATE_2;
+
+	rose_start_t3timer(sk);
+
+	sk->state     = TCP_CLOSE;
+	sk->err       = 0;
+	sk->shutdown |= SEND_SHUTDOWN;	
+
+	if (!sk->dead)
+		sk->state_change(sk);
+
+	sk->dead = 1;
+}

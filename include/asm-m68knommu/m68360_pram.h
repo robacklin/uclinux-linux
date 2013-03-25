@@ -1,5 +1,5 @@
 /***********************************
- * $Id: m68360_pram.h,v 1.2 2002-02-12 15:28:53 davidm Exp $
+ * $Id: m68360_pram.h,v 1.1.1.1 2001/05/18 17:10:11 hamilton Exp $
  ***********************************
  *
  ***************************************
@@ -167,7 +167,7 @@ struct uart_pram {
     unsigned short  brkcr;          /* break count register */
                    
     unsigned short  parec;          /* Rx parity error counter */
-    unsigned short  frmec;          /* Rx framing error counter */
+    unsigned short  frmer;          /* Rx framing error counter */
     unsigned short  nosec;          /* Rx noise counter */
     unsigned short  brkec;          /* Rx break character counter */
     unsigned short  brkln;          /* Reaceive break length */

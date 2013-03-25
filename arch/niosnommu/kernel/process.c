@@ -2,7 +2,6 @@
  *  Mar 2, 2001 - Ken Hill
  *     Implement Nios architecture specifics
  *
- *  $Id: process.c,v 1.1 2002/08/01 23:25:18 mdurrant Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -22,11 +21,11 @@
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/ldt.h>
+#include <linux/slab.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 
+#include <asm/uaccess.h>
 #include <asm/segment.h>
 #include <asm/system.h>
 #include <asm/page.h>
@@ -35,28 +34,60 @@
 #include <asm/processor.h>
 #include <asm/psr.h>
 
-int active_ds = USER_DS;
+/*
+ * Initial task structure. Make this a per-architecture thing,
+ * because different architectures tend to have different
+ * alignment requirements and potentially different initial
+ * setup.
+ */
+static struct fs_struct init_fs = INIT_FS;
+static struct files_struct init_files = INIT_FILES;
+static struct signal_struct init_signals = INIT_SIGNALS;
+struct mm_struct init_mm = INIT_MM(init_mm);
+
+union task_union init_task_union
+__attribute__((section(".data.init_task"), aligned(THREAD_SIZE)))
+	= { task: INIT_TASK(init_task_union.task) };
+
 
 /*
- * the idle loop on a Nios... ;)
+ * The idle thread. There's no useful work to be
+ * done, so just try to conserve power and have a
+ * low exit latency (ie sit in a loop waiting for
+ * somebody to say that they'd like to reschedule)
  */
-asmlinkage int sys_idle(void)
+void cpu_idle(void)
 {
-#ifdef	DEBUG
-	printk("Arrived at sys_idle\n");
-#endif
-	if (current->pid != 0)
-		return -EPERM;
-
 	/* endless idle loop with no priority at all */
+	init_idle();
+	current->nice = 20;
 	current->counter = -100;
-	for (;;) {
+
+	while (1) {
+		while (!current->need_resched) {
+		}
 		schedule();
 	}
-	return 0;
 }
 
 extern char saved_command_line[];
+
+void machine_restart(char * __unused)
+{
+	//vic FIXME - what should we really do here ?
+	asm("trap 0");
+}
+
+void machine_halt(void)
+{
+	asm("trap 0");				/* trap to deamon */
+}
+
+void machine_power_off(void)
+{
+	//vic FIXME - what should we really do here ?
+	asm("trap 0");
+}
 
 void hard_reset_now(void)
 {
@@ -99,13 +130,6 @@ void show_regs(struct pt_regs * regs)
  */
 void exit_thread(void)
 {
-	flush_user_windows();
-
-	if(last_task_used_math == current) {
-		/* Keep process from leaving FPU in a bogon state. */
-		last_task_used_math = NULL;
-		current->tss.flags &= ~NIOS_FLAG_COPROC;
-	}
 }
 
 /*
@@ -113,31 +137,23 @@ void exit_thread(void)
  */
 void release_thread(struct task_struct *dead_task)
 {
+	/* nothing to do ... */
 }
 
 void flush_thread(void)
 {
-	/* Make sure old user windows don't get in the way. */
-	flush_user_windows();
-	current->tss.sig_address = 0;
-	current->tss.sig_desc = 0;
-	current->tss.sstk_info.cur_status = 0;
-	current->tss.sstk_info.the_stack = 0;
-
-	if(last_task_used_math == current) {
-		last_task_used_math = NULL;
-		current->tss.flags &= ~NIOS_FLAG_COPROC;
-	}
+	current->thread.sig_address = 0;
+	current->thread.sig_desc = 0;
 
 	/* Now, this task is no longer a kernel thread. */
-	current->tss.flags &= ~NIOS_FLAG_KTHREAD;
+	current->thread.flags &= ~NIOS_FLAG_KTHREAD;
 }
 
 /*
  * Copy a Nios thread.  The fork() return value conventions:
  * 
  * Parent -->  %o0 == childs  pid, %o1 == 0
- * Child  -->  %o0 == parents pid, %o1 == 1
+ * Child  -->  %o0 == 0, 	   %o1 == 1
  *
  * NOTE: We have a separate fork kpsr because
  *       the parent could change this value between
@@ -148,66 +164,100 @@ void flush_thread(void)
  */
 extern void ret_sys_call(void);
 
-void copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
+		unsigned long unused,
 		 struct task_struct *p, struct pt_regs *regs)
 {
 	struct pt_regs *childregs;
 	struct reg_window *old_stack, *new_stack;
 	unsigned long stack_offset;
 
-	if(last_task_used_math == current) {
-		current->tss.flags |= NIOS_FLAG_COPROC;
-	}
-
 	/* Calculate offset to stack_frame & pt_regs */
-	stack_offset = (PAGE_SIZE - TRACEREG_SZ);
+	stack_offset = (THREAD_SIZE - TRACEREG_SZ);
 
 	if(regs->psr & PSR_SUPERVISOR)
 		stack_offset -= REGWIN_SZ;
-	childregs = ((struct pt_regs *) (p->kernel_stack_page + stack_offset));
+	childregs = ((struct pt_regs *) ((unsigned long) p + stack_offset));
 	*childregs = *regs;
 	new_stack = (((struct reg_window *) childregs) - 1);
 	old_stack = (((struct reg_window *) regs) - 1);
 	*new_stack = *old_stack;
-	p->tss.ksp = p->saved_kernel_stack = (unsigned long) new_stack;
-	p->tss.kpc = (((unsigned long) ret_sys_call));
-#if 1
+	p->thread.ksp = (unsigned long) new_stack;
+	p->thread.kpc = (((unsigned long) ret_sys_call));
 	/* Start the new process with a fresh register window */
-	p->tss.kpsr = (current->tss.fork_kpsr & ~PSR_CWP) | ((get_hi_limit() - 1) << 4);
-#else
-	p->tss.kpsr = current->tss.fork_kpsr;
-#endif
+	p->thread.kpsr = (current->thread.fork_kpsr & ~PSR_CWP) | ((get_hi_limit() - 1) << 4);
 
 	/* If we decide to split the register file up for multiple
 	   task usage we will need this. Single register file usage
 	   for now so do not use.
 
-	p->tss.kwvalid = current->tss.fork_kwvalid;
+	p->thread.kwvalid = current->thread.fork_kwvalid;
 	*/
 
-	p->tss.kregs = childregs;
-	childregs->u_regs[UREG_FP] = sp;
-#if 1
+	p->thread.kregs = childregs;
 	/* Start the new process with a fresh register window */
 	childregs->psr = (childregs->psr & ~PSR_CWP) | (get_hi_limit() << 4);
-#endif
 
 	if(regs->psr & PSR_SUPERVISOR) {
 		stack_offset += TRACEREG_SZ;
-		childregs->u_regs[UREG_FP] = p->kernel_stack_page + stack_offset;
+		childregs->u_regs[UREG_FP] = (unsigned long) p + stack_offset;
 		new_stack->ins[6]=childregs->u_regs[UREG_FP];
 		memcpy(childregs->u_regs[UREG_FP], regs->u_regs[UREG_FP], REGWIN_SZ);
-		p->tss.flags |= NIOS_FLAG_KTHREAD;
-	} else
-		p->tss.flags &= ~NIOS_FLAG_KTHREAD;
+		p->thread.flags |= NIOS_FLAG_KTHREAD;
+	} else {
+		if (sp!=childregs->u_regs[UREG_FP]){
+			/* clone */
+			childregs->u_regs[UREG_FP] = (unsigned long) sp - REGWIN_SZ;
+			new_stack->ins[6]=childregs->u_regs[UREG_FP];
+			memcpy(childregs->u_regs[UREG_FP], regs->u_regs[UREG_FP], REGWIN_SZ);
+		}
+		p->thread.flags &= ~NIOS_FLAG_KTHREAD;
+	}
 
 	/* Set the return value for the child. */
-//vic	childregs->u_regs[UREG_I0] = current->pid;
 	childregs->u_regs[UREG_I0] = 0;
 	childregs->u_regs[UREG_I1] = 1;
 
 	/* Set the return value for the parent. */
 	regs->u_regs[UREG_I1] = 0;
+
+	return 0;
+}
+
+/*
+ * This is the mechanism for creating a new kernel thread.
+ *
+ * NOTE! Only a kernel-only process(ie the swapper or direct descendants
+ * who haven't done an "execve()") should use this: it will work within
+ * a system call from a "real" process, but the process memory space will
+ * not be free'd until both the parent and the child have exited.
+ */
+pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
+{
+	long retval;
+	register long clone_arg __asm__ ("%o0") = flags | CLONE_VM;
+	__asm__ __volatile(
+		"pfx	%%hi(%1)\n\t"
+		"movi	%%g1,%%lo(%1)\n\t"	/* syscall # */
+		"movi	%%o1, 0\n\t"			/* usp arg == 0 */
+		"trap	63\n\t"					/* Linux/nios clone(). */
+		"cmpi	%%o1, 0\n\t"			/* 2nd arg returned in %o1 */
+		"skps	cc_ne\n\t"
+		"br	1f\n\t"					/* The parent, just return. */
+		"nop\n\t"						/* Delay slot. */
+		"call	%3\n\t"					/* Call the function. */
+		"mov	%%o0, %4\n\t"			/* Get the arg (in delay slot) */
+		"pfx	%%hi(%2)\n\t"
+		"movi	%%g1, %%lo(%2)\n\t"	/* syscall # */
+		"trap	63\n\t"					/* Linux/nios exit(). */
+		   /* Not reached by child. */
+		"1:"
+		"mov	%0, %%o0\n\t"			/* arg returned in o0 */
+		: "=r" (retval)
+		: "i" (__NR_clone), "i" (__NR_exit), "r" (fn), "r" (arg), "r" (clone_arg)
+		: "g1","o0","o1");
+	return retval;
+//vic - may not be able to return argument in %g1 - "ret_trap_entry"
 }
 
 /*
@@ -215,31 +265,22 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
  */
 void dump_thread(struct pt_regs * regs, struct user * dump)
 {
-//vic	unsigned long first_stack_page;
-//vic
-//vic	dump->magic = SUNOS_CORE_MAGIC;
-//vic	dump->len = sizeof(struct user);
-//vic	dump->regs.psr = regs->psr;
-//vic	dump->regs.pc = regs->pc;
-//vic	dump->regs.npc = regs->npc;
-//vic	dump->regs.y = regs->y;
-//vic	/* fuck me plenty */
-//vic	memcpy(&dump->regs.regs[0], &regs->u_regs[1], (sizeof(unsigned long) * 15));
-//vic	dump->uexec = current->tss.core_exec;
-//vic	dump->u_tsize = (((unsigned long) current->mm->end_code) -
-//vic		((unsigned long) current->mm->start_code)) & ~(PAGE_SIZE - 1);
-//vic	dump->u_dsize = ((unsigned long) (current->mm->brk + (PAGE_SIZE-1)));
-//vic	dump->u_dsize -= dump->u_tsize;
-//vic	dump->u_dsize &= ~(PAGE_SIZE - 1);
-//vic	first_stack_page = (regs->u_regs[UREG_FP] & ~(PAGE_SIZE - 1));
-//vic	dump->u_ssize = (TASK_SIZE - first_stack_page) & ~(PAGE_SIZE - 1);
-//vic	memcpy(&dump->fpu.fpstatus.fregs.regs[0], &current->tss.float_regs[0], (sizeof(unsigned long) * 32));
-//vic	dump->fpu.fpstatus.fsr = current->tss.fsr;
-//vic	dump->fpu.fpstatus.flags = dump->fpu.fpstatus.extra = 0;
-//vic	dump->fpu.fpstatus.fpq_count = current->tss.fpqdepth;
-//vic	memcpy(&dump->fpu.fpstatus.fpq[0], &current->tss.fpqueue[0],
-//vic	       ((sizeof(unsigned long) * 2) * 16));
-//vic	dump->sigcode = current->tss.sig_desc;
+	unsigned long first_stack_page;
+
+	dump->magic = CMAGIC;
+	dump->start_code = 0;
+	dump->start_stack = regs->u_regs[UREG_FP] & ~(PAGE_SIZE - 1);
+	dump->regs.psr = regs->psr;
+	dump->regs.pc = regs->pc;
+	/* fuck me plenty */
+	memcpy(&dump->regs, regs, sizeof(regs));
+	dump->u_tsize = (((unsigned long) current->mm->end_code) -
+		((unsigned long) current->mm->start_code)) & ~(PAGE_SIZE - 1);
+	dump->u_dsize = ((unsigned long) (current->mm->brk + (PAGE_SIZE-1)));
+	dump->u_dsize -= dump->u_tsize;
+	dump->u_dsize &= ~(PAGE_SIZE - 1);
+	first_stack_page = (regs->u_regs[UREG_FP] & ~(PAGE_SIZE - 1));
+	dump->u_ssize = (TASK_SIZE - first_stack_page) & ~(PAGE_SIZE - 1);
 }
 
 /*
@@ -260,12 +301,48 @@ asmlinkage int nios_execve(struct pt_regs *regs)
 	int error;
 	char *filename;
 
-	flush_user_windows();
-	error = getname((char *) regs->u_regs[UREG_I0], &filename);
-	if(error)
+	filename = getname((char *)regs->u_regs[UREG_I0]);
+	error = PTR_ERR(filename);
+	if(IS_ERR(filename))
 		return error;
+
 	error = do_execve(filename, (char **) regs->u_regs[UREG_I1],
 			  (char **) regs->u_regs[UREG_I2], regs);
 	putname(filename);
 	return error;
+}
+
+void show_trace_task(struct task_struct *tsk)
+{
+	printk("STACK ksp=0x%lx\n", tsk->thread.ksp);
+}
+
+/*
+ * These bracket the sleeping functions..
+ */
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched	((unsigned long) scheduling_functions_start_here)
+#define last_sched	((unsigned long) scheduling_functions_end_here)
+
+unsigned long get_wchan(struct task_struct *p)
+{
+	unsigned long fp,pc;
+	unsigned long stack_page;
+	int count = 0;
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+
+	stack_page = (unsigned long)p;
+	fp = p->thread.ksp;
+	do {
+		if (fp < stack_page+sizeof(struct task_struct) ||
+		    fp >= THREAD_SIZE-REGWIN_SZ+stack_page)
+			return 0;
+		pc = ((struct reg_window *)fp)->ins[7]; /* saved return address */
+		if (pc < first_sched || pc >= last_sched)
+			return pc;
+		fp = ((struct reg_window *)fp)->ins[6];
+	} while (count++ < 16);
+	return 0;
 }

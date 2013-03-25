@@ -10,21 +10,25 @@
 
 #include <linux/config.h>
 #include <linux/types.h>
+#include <linux/miscdevice.h>
+#include <linux/init.h>
+#include <linux/module.h> 
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/wait.h>
 #include <asm/param.h>
+#ifdef CONFIG_M68VZ328
+#include <asm/MC68VZ328.h>
+#else
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
+#endif
+#include <linux/rtc.h>
+#include <linux/proc_fs.h>
+#include <asm/uaccess.h> 
 
 /*****************************************************************************/
-
-/*
- *	Same major/minor used by x86 type RTC.
- */
-#define	DS1302_MAJOR	10
-#define	DS1302_MINOR	135
 
 /*
  *	Size of RTC region. 32 bytes of calender and 32 bytes RAM.
@@ -55,6 +59,31 @@
  *	on exactly how it is wried up. This section specifically coded
  *	to match the Gilbarco/NAP board based on a 5272 ColdFire CPU.
  */
+#ifdef  CONFIG_M68VZ328
+/* 
+ * DS1302 connected to port E[0,1,2]
+ */
+static volatile unsigned char *ds1302_dirp =
+	(volatile unsigned char *) (PEDIR_ADDR);
+static volatile unsigned char *ds1302_dp =
+	(volatile unsigned char *) (PEDATA_ADDR);
+
+#define	RTC_RESET	PE_SPMRXD     /* SPMRXD = PE1 of 68VZ328 */
+#define	RTC_IODATA	PE_SPMTXD     /* SPMTXD = PE0 of 68VZ328 */
+#define	RTC_SCLK        PE_SPMCLK     /* SPMCLK = PE2 of 68VZ328 */
+
+#else
+#ifdef	CONFIG_VIOLA_RTC
+static volatile unsigned short	*ds1302_dirp =
+	(volatile unsigned short *) (MCF_MBAR + MCFSIM_PCDDR);
+static volatile unsigned short	*ds1302_dp =
+	(volatile unsigned short *) (MCF_MBAR + MCFSIM_PCDAT);
+
+#define	RTC_RESET	0x0010		/* PC4 of M5272 */
+#define	RTC_IODATA	0x0008		/* PC3 of M5272 */
+#define	RTC_SCLK	0x0004		/* PC2 of M5272 */
+
+#else
 static volatile unsigned short	*ds1302_dirp =
 	(volatile unsigned short *) (MCF_MBAR + MCFSIM_PADDR);
 static volatile unsigned short	*ds1302_dp =
@@ -63,6 +92,8 @@ static volatile unsigned short	*ds1302_dp =
 #define	RTC_RESET	0x0020		/* PA5 of M5272 */
 #define	RTC_IODATA	0x0040		/* PA6 of M5272 */
 #define	RTC_SCLK	0x0080		/* PA7 of M5272 */
+#endif
+#endif
 
 void ds1302_sendbits(unsigned int val)
 {
@@ -71,8 +102,8 @@ void ds1302_sendbits(unsigned int val)
 	for (i = 8; (i); i--, val >>= 1) {
 		*ds1302_dp = (*ds1302_dp & ~RTC_IODATA) |
 			 ((val & 0x1) ? RTC_IODATA : 0);
-		*ds1302_dp |= RTC_SCLK;
-		*ds1302_dp &= ~RTC_SCLK;
+		*ds1302_dp |= RTC_SCLK;		// clock high
+		*ds1302_dp &= ~RTC_SCLK;	// clock low
 	}
 }
 
@@ -82,9 +113,9 @@ unsigned int ds1302_recvbits(void)
 	int		i;
 
 	for (i = 0, val = 0; (i < 8); i++) {
-		*ds1302_dp |= RTC_SCLK;
-		val |= (((*ds1302_dp & RTC_IODATA) ? 1 : 0) << i);
-		*ds1302_dp &= ~RTC_SCLK;
+		val |= (((unsigned int)((*ds1302_dp & RTC_IODATA) ? 1 : 0)) << i);
+		*ds1302_dp |= RTC_SCLK;		// clock high
+		*ds1302_dp &= ~RTC_SCLK;	// clock low
 	}
 	return(val);
 }
@@ -178,7 +209,7 @@ int ds1302_set_clock_mmss(unsigned long nowtime)
 	unsigned long	m, s;
 
 #if 1
-	printk("ds1302_set_clock_mmss(nowtime=%d)\n", nowtime);
+	printk("ds1302_set_clock_mmss(nowtime=%ld)\n", nowtime);
 #endif
 
 	/* FIXME: not implemented yet... */
@@ -189,7 +220,7 @@ int ds1302_set_clock_mmss(unsigned long nowtime)
 
 /*****************************************************************************/
 
-static int ds1302_read(struct inode *ip, struct file *fp, char *buf, int count)
+static ssize_t ds1302_read(struct file *fp, char *buf, size_t count, loff_t *ptr)
 {
 	int	total;
 
@@ -211,9 +242,10 @@ static int ds1302_read(struct inode *ip, struct file *fp, char *buf, int count)
 
 /*****************************************************************************/
 
-int ds1302_write(struct inode *inode, struct file *fp, const char *buf, int count)
+static ssize_t ds1302_write(struct file *fp, const char *buf, size_t count, loff_t *ptr)
 {
 	int	total;
+	char val;
 
 #if 0
 	printk("ds1302_write(buf=%x,count=%d)\n", (int) buf, count);
@@ -224,8 +256,11 @@ int ds1302_write(struct inode *inode, struct file *fp, const char *buf, int coun
 	if (count > (DS1302_MSIZE - fp->f_pos))
 		count = DS1302_MSIZE - fp->f_pos;
 
-	for (total = 0; (total < count); total++)
-		ds1302_writebyte((fp->f_pos + total), get_user(buf++));
+	for (total = 0; (total < count); total++, buf++)
+	{
+		get_user(val,buf);
+		ds1302_writebyte((fp->f_pos + total), val);
+	}
 
 	fp->f_pos += total;
 	return(total);
@@ -237,27 +272,36 @@ int ds1302_write(struct inode *inode, struct file *fp, const char *buf, int coun
  *	Exported file operations structure for driver...
  */
 
-struct file_operations	ds1302_fops = {
+static struct file_operations ds1302_fops =
+{
+	owner:	THIS_MODULE, 
 	read:	ds1302_read,
 	write:	ds1302_write,
 };
 
+static struct miscdevice ds1302_dev =
+{
+	RTC_MINOR,
+	"rtc",
+	&ds1302_fops
+};
+
 /*****************************************************************************/
 
-void ds1302_init(void)
+static int __init ds1302_init(void)
 {
-	int	rc;
-
-	if ((rc = register_chrdev(DS1302_MAJOR, "ds1302", &ds1302_fops)) < 0) {
-		printk(KERN_WARNING "DS1302: can't get major %d\n",
-			DS1302_MAJOR);
-		return;
-	}
-
+	ds1302_reset();
+	misc_register(&ds1302_dev);
 	printk ("DS1302: Copyright (C) 2001, Greg Ungerer "
 		"(gerg@snapgear.com)\n");
+	return 0;
+}
 
-	ds1302_reset();
+static void __exit ds1302_exit(void)
+{
+	misc_deregister(&ds1302_dev);
 }
 
 /*****************************************************************************/
+module_init(ds1302_init);
+module_exit(ds1302_exit);

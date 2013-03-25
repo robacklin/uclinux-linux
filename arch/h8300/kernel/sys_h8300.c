@@ -1,35 +1,28 @@
 /*
  * linux/arch/h8300/kernel/sys_h8300.c
  *
- * Yoshinori Sato <qzb04471@nifty.ne.jp>
- *
- * Based on:
- *
- * linux/arch/m68knommu/kernel/sys_m68k.c
- *
- * Copyright (C) 1998  D. Jeff Dionne <jeff@ryeham.ee.ryerson.ca>,
- *                     Kenneth Albanowski <kjahds@kjahds.com>,
- *                     The Silver Hammer Group, Ltd.
- *
- * linux/arch/m68knommu/kernel/sys_m68k.c
- *
  * This file contains various random system calls that
- * have a non-standard calling sequence on the Linux/m68k
+ * have a non-standard calling sequence on the H8/300
  * platform.
  */
 
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/sem.h>
 #include <linux/msg.h>
 #include <linux/shm.h>
 #include <linux/stat.h>
 #include <linux/mman.h>
+#include <linux/file.h>
+#include <linux/utsname.h>
 
 #include <asm/setup.h>
-#include <asm/segment.h>
-#include <asm/traps.h>
+#include <asm/uaccess.h>
+#include <asm/cachectl.h>
+#include <asm/ipc.h>
 
 /*
  * sys_pipe() is the normal C calling standard for creating
@@ -40,15 +33,45 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	int fd[2];
 	int error;
 
-	error = verify_area(VERIFY_WRITE,fildes,8);
-	if (error)
-		return error;
 	error = do_pipe(fd);
-	if (error)
-		return error;
-	put_user(fd[0],0+fildes);
-	put_user(fd[1],1+fildes);
-	return 0;
+	if (!error) {
+		if (copy_to_user(fildes, fd, 2*sizeof(int)))
+			error = -EFAULT;
+	}
+	return error;
+}
+
+/* common code for old and new mmaps */
+static inline long do_mmap2(
+	unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	int error = -EBADF;
+	struct file * file = NULL;
+
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	if (!(flags & MAP_ANONYMOUS)) {
+		file = fget(fd);
+		if (!file)
+			goto out;
+	}
+
+	down_write(&current->mm->mmap_sem);
+	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up_write(&current->mm->mmap_sem);
+
+	if (file)
+		fput(file);
+out:
+	return error;
+}
+
+asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	return do_mmap2(addr, len, prot, flags, fd, pgoff);
 }
 
 /*
@@ -58,47 +81,95 @@ asmlinkage int sys_pipe(unsigned long * fildes)
  * used a memory block for parameter passing..
  */
 
-asmlinkage int old_mmap(unsigned long *buffer)
-{
-	int error;
+struct mmap_arg_struct {
+	unsigned long addr;
+	unsigned long len;
+	unsigned long prot;
 	unsigned long flags;
-	struct file * file = NULL;
+	unsigned long fd;
+	unsigned long offset;
+};
 
-	error = verify_area(VERIFY_READ, buffer, 6*sizeof(long));
-	if (error)
-		return error;
-	flags = get_user(buffer+3);
-	if (!(flags & MAP_ANONYMOUS)) {
-		unsigned long fd = get_user(buffer+4);
-		if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-			return -EBADF;
-	}
-	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	return do_mmap(file, get_user(buffer), get_user(buffer+1),
-		       get_user(buffer+2), flags, get_user(buffer+5));
+asmlinkage int old_mmap(struct mmap_arg_struct *arg)
+{
+	struct mmap_arg_struct a;
+	int error = -EFAULT;
+
+	if (copy_from_user(&a, arg, sizeof(a)))
+		goto out;
+
+	error = -EINVAL;
+	if (a.offset & ~PAGE_MASK)
+		goto out;
+
+	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	error = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset >> PAGE_SHIFT);
+out:
+	return error;
 }
 
+#if 0 /* DAVIDM - do we want this */
+struct mmap_arg_struct64 {
+	__u32 addr;
+	__u32 len;
+	__u32 prot;
+	__u32 flags;
+	__u64 offset; /* 64 bits */
+	__u32 fd;
+};
+
+asmlinkage long sys_mmap64(struct mmap_arg_struct64 *arg)
+{
+	int error = -EFAULT;
+	struct file * file = NULL;
+	struct mmap_arg_struct64 a;
+	unsigned long pgoff;
+
+	if (copy_from_user(&a, arg, sizeof(a)))
+		return -EFAULT;
+
+	if ((long)a.offset & ~PAGE_MASK)
+		return -EINVAL;
+
+	pgoff = a.offset >> PAGE_SHIFT;
+	if ((a.offset >> PAGE_SHIFT) != pgoff)
+		return -EINVAL;
+
+	if (!(a.flags & MAP_ANONYMOUS)) {
+		error = -EBADF;
+		file = fget(a.fd);
+		if (!file)
+			goto out;
+	}
+	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+
+	down_write(&current->mm->mmap_sem);
+	error = do_mmap_pgoff(file, a.addr, a.len, a.prot, a.flags, pgoff);
+	up_write(&current->mm->mmap_sem);
+	if (file)
+		fput(file);
+out:
+	return error;
+}
+#endif
 
 extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
-asmlinkage int old_select(unsigned long *buffer)
-{
-	int n;
-	fd_set *inp;
-	fd_set *outp;
-	fd_set *exp;
+struct sel_arg_struct {
+	unsigned long n;
+	fd_set *inp, *outp, *exp;
 	struct timeval *tvp;
+};
 
-	n = verify_area(VERIFY_READ, buffer, 5*sizeof(unsigned long));
-	if (n)
-	  return n;
+asmlinkage int old_select(struct sel_arg_struct *arg)
+{
+	struct sel_arg_struct a;
 
-	n = get_user(buffer);
-	inp = (fd_set *) get_user(buffer+1);
-	outp = (fd_set *) get_user(buffer+2);
-	exp = (fd_set *) get_user(buffer+3);
-	tvp = (struct timeval *) get_user(buffer+4);
-	return sys_select(n, inp, outp, exp, tvp);
+	if (copy_from_user(&a, arg, sizeof(a)))
+		return -EFAULT;
+	/* sys_select() does the appropriate kernel locking */
+	return sys_select(a.n, a.inp, a.outp, a.exp, a.tvp);
 }
 
 /*
@@ -106,9 +177,10 @@ asmlinkage int old_select(unsigned long *buffer)
  *
  * This is really horribly ugly.
  */
-asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, long fifth)
+asmlinkage int sys_ipc (uint call, int first, int second,
+			int third, void *ptr, long fifth)
 {
-	int version;
+	int version, ret;
 
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
@@ -121,12 +193,10 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 			return sys_semget (first, second, third);
 		case SEMCTL: {
 			union semun fourth;
-			int err;
 			if (!ptr)
 				return -EINVAL;
-			if ((err = verify_area (VERIFY_READ, ptr, sizeof(long))))
-				return err;
-			fourth.__pad = get_user((void **)ptr);
+			if (get_user(fourth.__pad, (void **) ptr))
+				return -EFAULT;
 			return sys_semctl (first, second, third, fourth);
 			}
 		default:
@@ -136,27 +206,30 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		switch (call) {
 		case MSGSND:
 			return sys_msgsnd (first, (struct msgbuf *) ptr, 
-					   second, third);
+					  second, third);
 		case MSGRCV:
 			switch (version) {
 			case 0: {
 				struct ipc_kludge tmp;
-				int err;
 				if (!ptr)
 					return -EINVAL;
-				if ((err = verify_area (VERIFY_READ, ptr, sizeof(tmp))))
-					return err;
-				memcpy_fromfs (&tmp,(struct ipc_kludge *) ptr,
-					       sizeof (tmp));
-				return sys_msgrcv (first, tmp.msgp, second, tmp.msgtyp, third);
+				if (copy_from_user (&tmp,
+						    (struct ipc_kludge *)ptr,
+						    sizeof (tmp)))
+					return -EFAULT;
+				return sys_msgrcv (first, tmp.msgp, second,
+						   tmp.msgtyp, third);
 				}
-			case 1: default:
-				return sys_msgrcv (first, (struct msgbuf *) ptr, second, fifth, third);
+			default:
+				return sys_msgrcv (first,
+						   (struct msgbuf *) ptr,
+						   second, fifth, third);
 			}
 		case MSGGET:
 			return sys_msgget ((key_t) first, second);
 		case MSGCTL:
-			return sys_msgctl (first, second, (struct msqid_ds *) ptr);
+			return sys_msgctl (first, second,
+					   (struct msqid_ds *) ptr);
 		default:
 			return -EINVAL;
 		}
@@ -164,31 +237,26 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		switch (call) {
 		case SHMAT:
 			switch (version) {
-			case 0: default: {
+			default: {
 				ulong raddr;
-				int err;
-				if ((err = verify_area(VERIFY_WRITE, (ulong*) third, sizeof(ulong))))
-					return err;
-				err = sys_shmat (first, (char *) ptr, second, &raddr);
-				if (err)
-					return err;
-				put_user (raddr, (ulong *) third);
-				return 0;
-				}
-			case 1:	/* iBCS2 emulator entry point */
-				if (get_fs() != get_ds())
-					return -EINVAL;
-				return sys_shmat (first, (char *) ptr, second, (ulong *) third);
+				ret = sys_shmat (first, (char *) ptr,
+						 second, &raddr);
+				if (ret)
+					return ret;
+				return put_user (raddr, (ulong *) third);
+			}
 			}
 		case SHMDT: 
 			return sys_shmdt ((char *)ptr);
 		case SHMGET:
 			return sys_shmget (first, second, third);
 		case SHMCTL:
-			return sys_shmctl (first, second, (struct shmid_ds *) ptr);
+			return sys_shmctl (first, second,
+					   (struct shmid_ds *) ptr);
 		default:
 			return -EINVAL;
 		}
+
 	return -EINVAL;
 }
 
@@ -197,9 +265,39 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
   return -ENOSYS;
 }
 
-/* sys_cacheflush -- flush (part of) the processor cache.  */
+/* sys_cacheflush -- no support.  */
 asmlinkage int
 sys_cacheflush (unsigned long addr, int scope, int cache, unsigned long len)
 {
-	return 0;
+	return -EINVAL;
 }
+
+asmlinkage int sys_getpagesize(void)
+{
+	return PAGE_SIZE;
+}
+
+/*
+ * Old cruft
+ */
+asmlinkage int sys_pause(void)
+{
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	return -ERESTARTNOHAND;
+}
+
+#if defined(CONFIG_SYSCALL_PRINT)
+asmlinkage void syscall_print(void *dummy,...)
+{
+	struct pt_regs *regs = (struct pt_regs *) ((unsigned char *)&dummy);
+#if defined(__H8300H__)
+	unsigned long *usp=rdusp()+8;
+#endif
+#if defined(__H8300S__)
+	unsigned long *usp=rdusp()+10;
+#endif
+	printk("call %06x:%d 1:%08x,2:%08x,3:%08x,ret:%08x\n",
+               ((*usp) & 0xffffff)-2,regs->orig_er0,regs->er1,regs->er2,regs->er3,regs->er0);
+}
+#endif

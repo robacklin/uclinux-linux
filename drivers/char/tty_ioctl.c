@@ -18,20 +18,16 @@
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 
 #include <asm/io.h>
 #include <asm/bitops.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #undef TTY_DEBUG_WAIT_UNTIL_SENT
 
 #undef	DEBUG
-#ifdef DEBUG
-# define	PRINTK(x)	printk (x)
-#else
-# define	PRINTK(x)	/**/
-#endif
 
 /*
  * Internal flag options for termios setting behavior
@@ -40,33 +36,35 @@
 #define TERMIOS_WAIT	2
 #define TERMIOS_TERMIO	4
 
-void tty_wait_until_sent(struct tty_struct * tty, int timeout)
+void tty_wait_until_sent(struct tty_struct * tty, long timeout)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 
 #ifdef TTY_DEBUG_WAIT_UNTIL_SENT
-	printk("%s wait until sent...\n", tty_name(tty));
+	char buf[64];
+	
+	printk(KERN_DEBUG "%s wait until sent...\n", tty_name(tty, buf));
 #endif
-	if (!tty->driver.chars_in_buffer ||
-	    !tty->driver.chars_in_buffer(tty))
+	if (!tty->driver.chars_in_buffer)
 		return;
 	add_wait_queue(&tty->write_wait, &wait);
-	current->counter = 0;	/* make us low-priority */
-	if (timeout)
-		current->timeout = timeout + jiffies;
-	else
-		current->timeout = (unsigned) -1;
+	if (!timeout)
+		timeout = MAX_SCHEDULE_TIMEOUT;
 	do {
 #ifdef TTY_DEBUG_WAIT_UNTIL_SENT
-		printk("waiting %s...(%d)\n", tty_name(tty), tty->driver.chars_in_buffer(tty));
+		printk(KERN_DEBUG "waiting %s...(%d)\n", tty_name(tty, buf),
+		       tty->driver.chars_in_buffer(tty));
 #endif
-		current->state = TASK_INTERRUPTIBLE;
-		if (current->signal & ~current->blocked)
-			break;
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (signal_pending(current))
+			goto stop_waiting;
 		if (!tty->driver.chars_in_buffer(tty))
 			break;
-		schedule();
-	} while (current->timeout);
+		timeout = schedule_timeout(timeout);
+	} while (timeout);
+	if (tty->driver.wait_until_sent)
+		tty->driver.wait_until_sent(tty, timeout);
+stop_waiting:
 	current->state = TASK_RUNNING;
 	remove_wait_queue(&tty->write_wait, &wait);
 }
@@ -80,7 +78,7 @@ static void unset_locked_termios(struct termios *termios,
 #define NOSET_MASK(x,y,z) (x = ((x) & ~(z)) | ((y) & (z)))
 
 	if (!locked) {
-		printk("Warning?!? termios_locked is NULL.\n");
+		printk(KERN_WARNING "Warning?!? termios_locked is NULL.\n");
 		return;
 	}
 
@@ -98,8 +96,16 @@ static void change_termios(struct tty_struct * tty, struct termios * new_termios
 {
 	int canon_change;
 	struct termios old_termios = *tty->termios;
+	struct tty_ldisc *ld;
 
-	cli();
+	/*
+	 *      Perform the actual termios internal changes under lock.
+	 */
+
+	/* FIXME: we need to decide on some locking/ordering semantics
+	   for the set_termios notification eventually */
+	down(&tty->termios_sem);
+
 	*tty->termios = *new_termios;
 	unset_locked_termios(tty->termios, &old_termios, tty->termios_locked);
 	canon_change = (old_termios.c_lflag ^ tty->termios->c_lflag) & ICANON;
@@ -109,7 +115,6 @@ static void change_termios(struct tty_struct * tty, struct termios * new_termios
 		tty->canon_data = 0;
 		tty->erasing = 0;
 	}
-	sti();
 	if (canon_change && !L_ICANON(tty) && tty->read_cnt)
 		/* Get characters left over from canonical mode. */
 		wake_up_interruptible(&tty->read_wait);
@@ -136,41 +141,48 @@ static void change_termios(struct tty_struct * tty, struct termios * new_termios
 	if (tty->driver.set_termios)
 		(*tty->driver.set_termios)(tty, &old_termios);
 
-	if (tty->ldisc.set_termios)
-		(*tty->ldisc.set_termios)(tty, &old_termios);
+	ld = tty_ldisc_ref(tty);
+	if (ld != NULL) {
+		if (ld->set_termios)
+			(ld->set_termios)(tty, &old_termios);
+		tty_ldisc_deref(ld);
+	}
+	up(&tty->termios_sem);
 }
 
 static int set_termios(struct tty_struct * tty, unsigned long arg, int opt)
 {
 	struct termios tmp_termios;
-	int retval;
+	struct tty_ldisc *ld;
+	int retval = tty_check_change(tty);
 
-	retval = tty_check_change(tty);
 	if (retval)
 		return retval;
 
 	if (opt & TERMIOS_TERMIO) {
-		struct termio tmp_termio;
-		retval = verify_area(VERIFY_READ, (void *) arg, sizeof(struct termio));
-		if (retval)
-			return retval;
-		tmp_termios = *tty->termios;
-		memcpy_fromfs(&tmp_termio, (struct termio *) arg,
-			      sizeof (struct termio));
-		trans_from_termio(&tmp_termio, &tmp_termios);
+		memcpy(&tmp_termios, tty->termios, sizeof(struct termios));
+		if (user_termio_to_kernel_termios(&tmp_termios,
+						  (struct termio *) arg))
+			return -EFAULT;
 	} else {
-		retval = verify_area(VERIFY_READ, (void *) arg, sizeof(struct termios));
-		if (retval)
-			return retval;
-		memcpy_fromfs(&tmp_termios, (struct termios *) arg,
-			      sizeof (struct termios));
+		if (user_termios_to_kernel_termios(&tmp_termios,
+						   (struct termios *) arg))
+			return -EFAULT;
 	}
 
-	if ((opt & TERMIOS_FLUSH) && tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	ld = tty_ldisc_ref(tty);
 
-	if (opt & TERMIOS_WAIT)
+	if (ld != NULL) {
+		if ((opt & TERMIOS_FLUSH) && ld->flush_buffer)
+			ld->flush_buffer(tty);
+		tty_ldisc_deref(ld);
+	}
+
+	if (opt & TERMIOS_WAIT) {
 		tty_wait_until_sent(tty, 0);
+		if (signal_pending(current))
+			return -EINTR;
+	}
 
 	change_termios(tty, &tmp_termios);
 	return 0;
@@ -178,14 +190,8 @@ static int set_termios(struct tty_struct * tty, unsigned long arg, int opt)
 
 static int get_termio(struct tty_struct * tty, struct termio * termio)
 {
-	int i;
-	struct termio tmp_termio;
-
-	i = verify_area(VERIFY_WRITE, termio, sizeof (struct termio));
-	if (i)
-		return i;
-	trans_to_termio(tty->termios, &tmp_termio);
-	memcpy_tofs(termio, &tmp_termio, sizeof (struct termio));
+	if (kernel_termios_to_user_termio(termio, tty->termios))
+		return -EFAULT;
 	return 0;
 }
 
@@ -218,11 +224,12 @@ static int get_sgflags(struct tty_struct * tty)
 {
 	int flags = 0;
 
-	if (!(tty->termios->c_lflag & ICANON))
+	if (!(tty->termios->c_lflag & ICANON)) {
 		if (tty->termios->c_lflag & ISIG)
 			flags |= 0x02;		/* cbreak */
 		else
 			flags |= 0x20;		/* raw */
+	}
 	if (tty->termios->c_lflag & ECHO)
 		flags |= 0x08;			/* echo */
 	if (tty->termios->c_oflag & OPOST)
@@ -233,19 +240,18 @@ static int get_sgflags(struct tty_struct * tty)
 
 static int get_sgttyb(struct tty_struct * tty, struct sgttyb * sgttyb)
 {
-	int retval;
 	struct sgttyb tmp;
+	unsigned long flags;
 
-	retval = verify_area(VERIFY_WRITE, sgttyb, sizeof(struct sgttyb));
-	if (retval)
-		return retval;
+	down(&tty->termios_sem);
 	tmp.sg_ispeed = 0;
 	tmp.sg_ospeed = 0;
 	tmp.sg_erase = tty->termios->c_cc[VERASE];
 	tmp.sg_kill = tty->termios->c_cc[VKILL];
 	tmp.sg_flags = get_sgflags(tty);
-	memcpy_tofs(sgttyb, &tmp, sizeof(tmp));
-	return 0;
+	up(&tty->termios_sem);
+
+	return copy_to_user(sgttyb, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 }
 
 static void set_sgflags(struct termios * termios, int flags)
@@ -258,7 +264,8 @@ static void set_sgflags(struct termios * termios, int flags)
 		termios->c_lflag &= ~ICANON;
 	}
 	if (flags & 0x08) {		/* echo */
-		termios->c_lflag |= ECHO | ECHOE | ECHOK | ECHOCTL | ECHOKE | IEXTEN;
+		termios->c_lflag |= ECHO | ECHOE | ECHOK |
+				    ECHOCTL | ECHOKE | IEXTEN;
 	}
 	if (flags & 0x10) {		/* crmod */
 		termios->c_oflag |= OPOST | ONLCR;
@@ -279,17 +286,17 @@ static int set_sgttyb(struct tty_struct * tty, struct sgttyb * sgttyb)
 	struct sgttyb tmp;
 	struct termios termios;
 
-	retval = verify_area(VERIFY_READ, sgttyb, sizeof(struct sgttyb));
-	if (retval)
-		return retval;
 	retval = tty_check_change(tty);
 	if (retval)
 		return retval;
+	if (copy_from_user(&tmp, sgttyb, sizeof(tmp)))
+		return -EFAULT;
+	down(&tty->termios_sem);
 	termios =  *tty->termios;
-	memcpy_fromfs(&tmp, sgttyb, sizeof(tmp));
 	termios.c_cc[VERASE] = tmp.sg_erase;
 	termios.c_cc[VKILL] = tmp.sg_kill;
 	set_sgflags(&termios, tmp.sg_flags);
+	up(&tty->termios_sem);
 	change_termios(tty, &termios);
 	return 0;
 }
@@ -298,31 +305,23 @@ static int set_sgttyb(struct tty_struct * tty, struct sgttyb * sgttyb)
 #ifdef TIOCGETC
 static int get_tchars(struct tty_struct * tty, struct tchars * tchars)
 {
-	int retval;
 	struct tchars tmp;
 
-	retval = verify_area(VERIFY_WRITE, tchars, sizeof(struct tchars));
-	if (retval)
-		return retval;
 	tmp.t_intrc = tty->termios->c_cc[VINTR];
 	tmp.t_quitc = tty->termios->c_cc[VQUIT];
 	tmp.t_startc = tty->termios->c_cc[VSTART];
 	tmp.t_stopc = tty->termios->c_cc[VSTOP];
 	tmp.t_eofc = tty->termios->c_cc[VEOF];
 	tmp.t_brkc = tty->termios->c_cc[VEOL2];	/* what is brkc anyway? */
-	memcpy_tofs(tchars, &tmp, sizeof(tmp));
-	return 0;
+	return copy_to_user(tchars, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 }
 
 static int set_tchars(struct tty_struct * tty, struct tchars * tchars)
 {
-	int retval;
 	struct tchars tmp;
 
-	retval = verify_area(VERIFY_READ, tchars, sizeof(struct tchars));
-	if (retval)
-		return retval;
-	memcpy_fromfs(&tmp, tchars, sizeof(tmp));
+	if (copy_from_user(&tmp, tchars, sizeof(tmp)))
+		return -EFAULT;
 	tty->termios->c_cc[VINTR] = tmp.t_intrc;
 	tty->termios->c_cc[VQUIT] = tmp.t_quitc;
 	tty->termios->c_cc[VSTART] = tmp.t_startc;
@@ -336,31 +335,24 @@ static int set_tchars(struct tty_struct * tty, struct tchars * tchars)
 #ifdef TIOCGLTC
 static int get_ltchars(struct tty_struct * tty, struct ltchars * ltchars)
 {
-	int retval;
 	struct ltchars tmp;
 
-	retval = verify_area(VERIFY_WRITE, ltchars, sizeof(struct ltchars));
-	if (retval)
-		return retval;
 	tmp.t_suspc = tty->termios->c_cc[VSUSP];
 	tmp.t_dsuspc = tty->termios->c_cc[VSUSP];	/* what is dsuspc anyway? */
 	tmp.t_rprntc = tty->termios->c_cc[VREPRINT];
 	tmp.t_flushc = tty->termios->c_cc[VEOL2];	/* what is flushc anyway? */
 	tmp.t_werasc = tty->termios->c_cc[VWERASE];
 	tmp.t_lnextc = tty->termios->c_cc[VLNEXT];
-	memcpy_tofs(ltchars, &tmp, sizeof(tmp));
-	return 0;
+	return copy_to_user(ltchars, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 }
 
 static int set_ltchars(struct tty_struct * tty, struct ltchars * ltchars)
 {
-	int retval;
 	struct ltchars tmp;
 
-	retval = verify_area(VERIFY_READ, ltchars, sizeof(struct ltchars));
-	if (retval)
-		return retval;
-	memcpy_fromfs(&tmp, ltchars, sizeof(tmp));
+	if (copy_from_user(&tmp, ltchars, sizeof(tmp)))
+		return -EFAULT;
+
 	tty->termios->c_cc[VSUSP] = tmp.t_suspc;
 	tty->termios->c_cc[VEOL2] = tmp.t_dsuspc;	/* what is dsuspc anyway? */
 	tty->termios->c_cc[VREPRINT] = tmp.t_rprntc;
@@ -371,11 +363,30 @@ static int set_ltchars(struct tty_struct * tty, struct ltchars * ltchars)
 }
 #endif
 
+/*
+ * Send a high priority character to the tty.
+ */
+void send_prio_char(struct tty_struct *tty, char ch)
+{
+	int	was_stopped = tty->stopped;
+
+	if (tty->driver.send_xchar) {
+		tty->driver.send_xchar(tty, ch);
+		return;
+	}
+	if (was_stopped)
+		start_tty(tty);
+	tty->driver.write(tty, 0, &ch, 1);
+	if (was_stopped)
+		stop_tty(tty);
+}
+
 int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 		       unsigned int cmd, unsigned long arg)
 {
 	struct tty_struct * real_tty;
 	int retval;
+	struct tty_ldisc *ld;
 
 	if (tty->driver.type == TTY_DRIVER_TYPE_PTY &&
 	    tty->driver.subtype == PTY_TYPE_MASTER)
@@ -404,16 +415,11 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 			return set_ltchars(real_tty, (struct ltchars *) arg);
 #endif
 		case TCGETS:
-			retval = verify_area(VERIFY_WRITE, (void *) arg,
-					     sizeof (struct termios));
-			if (retval)
-				return retval;
-			memcpy_tofs((struct termios *) arg,
-				    real_tty->termios,
-				    sizeof (struct termios));
+			if (kernel_termios_to_user_termios((struct termios *)arg, real_tty->termios))
+				return -EFAULT;
 			return 0;
 		case TCSETSF:
-			return set_termios(real_tty, arg, TERMIOS_FLUSH);
+			return set_termios(real_tty, arg,  TERMIOS_FLUSH | TERMIOS_WAIT);
 		case TCSETSW:
 			return set_termios(real_tty, arg, TERMIOS_WAIT);
 		case TCSETS:
@@ -421,7 +427,7 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 		case TCGETA:
 			return get_termio(real_tty,(struct termio *) arg);
 		case TCSETAF:
-			return set_termios(real_tty, arg, TERMIOS_FLUSH | TERMIOS_TERMIO);
+			return set_termios(real_tty, arg, TERMIOS_FLUSH | TERMIOS_WAIT | TERMIOS_TERMIO);
 		case TCSETAW:
 			return set_termios(real_tty, arg, TERMIOS_WAIT | TERMIOS_TERMIO);
 		case TCSETA:
@@ -432,20 +438,24 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 				return retval;
 			switch (arg) {
 			case TCOOFF:
-				stop_tty(tty);
+				if (!tty->flow_stopped) {
+					tty->flow_stopped = 1;
+					stop_tty(tty);
+				}
 				break;
 			case TCOON:
-				start_tty(tty);
+				if (tty->flow_stopped) {
+					tty->flow_stopped = 0;
+					start_tty(tty);
+				}
 				break;
 			case TCIOFF:
 				if (STOP_CHAR(tty) != __DISABLED_CHAR)
-					tty->driver.write(tty, 0,
-							  &STOP_CHAR(tty), 1);
+					send_prio_char(tty, STOP_CHAR(tty));
 				break;
 			case TCION:
 				if (START_CHAR(tty) != __DISABLED_CHAR)
-					tty->driver.write(tty, 0,
-							  &START_CHAR(tty), 1);
+					send_prio_char(tty, START_CHAR(tty));
 				break;
 			default:
 				return -EINVAL;
@@ -455,75 +465,58 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 			retval = tty_check_change(tty);
 			if (retval)
 				return retval;
+
+			ld = tty_ldisc_ref(tty);
 			switch (arg) {
 			case TCIFLUSH:
-				if (tty->ldisc.flush_buffer)
-					tty->ldisc.flush_buffer(tty);
+				if (ld->flush_buffer)
+					ld->flush_buffer(tty);
 				break;
 			case TCIOFLUSH:
-				if (tty->ldisc.flush_buffer)
-					tty->ldisc.flush_buffer(tty);
+				if (ld->flush_buffer)
+					ld->flush_buffer(tty);
 				/* fall through */
 			case TCOFLUSH:
 				if (tty->driver.flush_buffer)
 					tty->driver.flush_buffer(tty);
 				break;
 			default:
+				tty_ldisc_deref(ld);
 				return -EINVAL;
 			}
+			tty_ldisc_deref(ld);
 			return 0;
 		case TIOCOUTQ:
-			retval = verify_area(VERIFY_WRITE, (void *) arg,
-					     sizeof (int));
-			if (retval)
-				return retval;
-			if (tty->driver.chars_in_buffer)
-				put_user(tty->driver.chars_in_buffer(tty),
-					 (int *) arg);
-			else
-				put_user(0, (int *) arg);
-			return 0;
+			return put_user(tty->driver.chars_in_buffer ?
+					tty->driver.chars_in_buffer(tty) : 0,
+					(int *) arg);
 		case TIOCINQ:
-			retval = verify_area(VERIFY_WRITE, (void *) arg,
-					     sizeof (unsigned long));
-			if (retval)
-				return retval;
+			retval = tty->read_cnt;
 			if (L_ICANON(tty))
-				put_fs_long(inq_canon(tty),
-					(unsigned long *) arg);
-			else
-				put_fs_long(tty->read_cnt,
-					    (unsigned long *) arg);
-			return 0;
+				retval = inq_canon(tty);
+			return put_user(retval, (unsigned int *) arg);
 		case TIOCGLCKTRMIOS:
-			retval = verify_area(VERIFY_WRITE, (void *) arg,
-					     sizeof (struct termios));
-			if (retval)
-				return retval;
-			memcpy_tofs((struct termios *) arg,
-				    real_tty->termios_locked,
-				    sizeof (struct termios));
+			if (kernel_termios_to_user_termios((struct termios *)arg, real_tty->termios_locked))
+				return -EFAULT;
 			return 0;
+
 		case TIOCSLCKTRMIOS:
-			if (!suser())
+			if (!capable(CAP_SYS_ADMIN))
 				return -EPERM;
-			retval = verify_area(VERIFY_READ, (void *) arg,
-					     sizeof (struct termios));
-			if (retval)
-				return retval;
-			memcpy_fromfs(real_tty->termios_locked,
-				      (struct termios *) arg,
-				      sizeof (struct termios));
+			if (user_termios_to_kernel_termios(real_tty->termios_locked, (struct termios *) arg))
+				return -EFAULT;
 			return 0;
+
 		case TIOCPKT:
+		{
+			int pktmode;
+
 			if (tty->driver.type != TTY_DRIVER_TYPE_PTY ||
 			    tty->driver.subtype != PTY_TYPE_MASTER)
 				return -ENOTTY;
-			retval = verify_area(VERIFY_READ, (void *) arg,
-					     sizeof (int));
-			if (retval)
-				return retval;
-			if (get_user((int*)arg)) {
+			if (get_user(pktmode, (int *) arg))
+				return -EFAULT;
+			if (pktmode) {
 				if (!tty->packet) {
 					tty->packet = 1;
 					tty->link->ctrl_status = 0;
@@ -531,18 +524,21 @@ int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 			} else
 				tty->packet = 0;
 			return 0;
-		/* These two ioctl's always return success; even if */
-		/* the driver doesn't support them. */
-		case TCSBRK: case TCSBRKP:
-			retval = tty_check_change(tty);
-			if (retval)
-				return retval;
-			tty_wait_until_sent(tty, 0);
-			if (!tty->driver.ioctl)
-				return 0;
-			tty->driver.ioctl(tty, file, cmd, arg);
+		}
+		case TIOCGSOFTCAR:
+			return put_user(C_CLOCAL(tty) ? 1 : 0, (int *) arg);
+		case TIOCSSOFTCAR:
+			if (get_user(arg, (unsigned int *) arg))
+				return -EFAULT;
+			down(&tty->termios_sem);
+			tty->termios->c_cflag =
+				((tty->termios->c_cflag & ~CLOCAL) |
+				 (arg ? CLOCAL : 0));
+			up(&tty->termios_sem);
 			return 0;
 		default:
 			return -ENOIOCTLCMD;
 		}
 }
+
+EXPORT_SYMBOL(n_tty_ioctl);

@@ -1,532 +1,261 @@
 /*
- * arch/armnommu/kernel/setup.c
+ *  linux/arch/arm/kernel/setup.c
  *
- * based on:
+ *  Copyright (C) 1995-2000 Russell King
  *
- *   linux/arch/arm/kernel/setup.c
- *
- *   Copyright (C) 1995-1998 Russell King
- *
- *   This file obtains various parameters about the system that the kernel
- *   is running on.
- *
- * NET+ARM specific modification subejct to:
- *
- * Copyright (C) 2000, 2001 NETsilicon, Inc.
- * Copyright (C) 2000, 2001 Red Hat, Inc.
- *
- * This software is copyrighted by Red Hat. LICENSEE agrees that
- * it will not delete this copyright notice, trademarks or protective
- * notices from any copy made by LICENSEE.
- *
- * This software is provided "AS-IS" and any express or implied 
- * warranties or conditions, including but not limited to any
- * implied warranties of merchantability and fitness for a particular
- * purpose regarding this software. In no event shall Red Hat
- * be liable for any indirect, consequential, or incidental damages,
- * loss of profits or revenue, loss of use or data, or interruption
- * of business, whether the alleged damages are labeled in contract,
- * tort, or indemnity.
+ * added CONFIG_CMDLINE_FROM_BOOTLOADER support
+ *       by Thomas Eschenbacher <thomas.eschenbacher@gmx.de>
  *
  * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * author(s) : Joe deBlaquiere
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-
 #include <linux/config.h>
-#include <linux/errno.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
-#include <linux/mm.h>
 #include <linux/stddef.h>
-#include <linux/unistd.h>
-#include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/user.h>
-#include <linux/a.out.h>
-#include <linux/tty.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/major.h>
 #include <linux/utsname.h>
 #include <linux/blk.h>
+#include <linux/console.h>
+#include <linux/bootmem.h>
+#include <linux/init.h>
+#include <linux/seq_file.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/elf.h>
 #include <asm/hardware.h>
-#include <asm/pgtable.h>
-#include <asm/arch/mmu.h>
-#include <asm/procinfo.h>
 #include <asm/io.h>
+#include <asm/procinfo.h>
 #include <asm/setup.h>
-#include <asm/byteorder.h>
+#include <asm/mach-types.h>
 
-#ifdef	CONFIG_ARCH_NETARM
-#include <asm/arch/netarm_mem_module.h>
+#include <asm/mach/arch.h>
+#include <asm/mach/irq.h>
+
+#ifndef MEM_SIZE
+
+//#define MEM_SIZE	(64*1024*1024)
+//#define MEM_SIZE	(8*1024*1024)
+#define MEM_SIZE (END_MEM-PAGE_OFFSET)	// FIXME
+
+#endif
+
+#ifndef CONFIG_CMDLINE
+#define CONFIG_CMDLINE "root=/dev/rom0"
+#endif
+  
+#ifdef CONFIG_ARCH_NETARM
+#include <asm/arch/netarm_registers.h>
 #include <asm/arch/netarm_mmap.h>
 #include <asm/arch/netarm_nvram.h>
 
-#define NA_SAL_STATION_ADDR_1  0xFF8005C4 // SAL Station Address Register
-#define NA_SAL_STATION_ADDR_2  0xFF8005C8
-#define NA_SAL_STATION_ADDR_3  0xFF8005CC
 extern void _netarm_led_blink(void);
-extern void netarm_console_print(const char *b);
-void	netarm_dump_hex8(unsigned long int val);
+#endif
+ 
+extern void paging_init(struct meminfo *, struct machine_desc *desc);
+extern void convert_to_tag_list(struct tag *tags);
+extern void squash_mem_tags(struct tag *tag);
+extern void bootmem_init(struct meminfo *);
+extern void reboot_setup(char *str);
+extern unsigned long long memparse(char *ptr, char **retptr);
+extern unsigned long _end_kernel;
+#ifdef CONFIG_RAM_ATTACHED_ROMFS
+extern unsigned long _ramstart;
 #endif
 
-struct drive_info_struct { char dummy[32]; } drive_info;
-struct screen_info screen_info;
-struct processor processor;
-char init_kernel_stack[4096];
-
-extern const struct processor arm2_processor_functions;
-extern const struct processor arm250_processor_functions;
-extern const struct processor arm3_processor_functions;
-extern const struct processor arm6_processor_functions;
-extern const struct processor arm7_processor_functions;
-extern const struct processor sa110_processor_functions;
-
-struct armversions armidlist[] = {
-#if defined(CONFIG_CPU_ARM2) || defined(CONFIG_CPU_ARM3)
-	{ 0x41560200, 0xfffffff0, F_MEMC	, "ARM/VLSI",	"arm2"		, &arm2_processor_functions   },
-	{ 0x41560250, 0xfffffff0, F_MEMC	, "ARM/VLSI",	"arm250"	, &arm250_processor_functions },
-	{ 0x41560300, 0xfffffff0, F_MEMC|F_CACHE, "ARM/VLSI",	"arm3"		, &arm3_processor_functions   },
-#endif
-#if defined(CONFIG_CPU_ARM6) || defined(CONFIG_CPU_SA110)
-	{ 0x41560600, 0xfffffff0, F_MMU|F_32BIT	, "ARM/VLSI",	"arm6"		, &arm6_processor_functions   },
-	{ 0x41560610, 0xfffffff0, F_MMU|F_32BIT	, "ARM/VLSI",	"arm610"	, &arm6_processor_functions   },
-	{ 0x41007000, 0xffffff00, F_MMU|F_32BIT , "ARM/VLSI",   "arm7"		, &arm7_processor_functions   },
-	/* ARM710 does not follow the spec */
-	{ 0x41007100, 0xfff8ff00, F_MMU|F_32BIT , "ARM/VLSI",   "arm710"	, &arm7_processor_functions   },
-	{ 0x4401a100, 0xfffffff0, F_MMU|F_32BIT	, "DEC",	"sa110"		, &sa110_processor_functions  },
-#endif
-#if defined(CONFIG_CPU_ARM7)
-	{ 0x41007000, 0xffffff00, F_32BIT , "ARM/Atmel",   "arm7"		, &arm7_processor_functions   },
-	{ 0x41007100, 0xffffff00, F_32BIT , "ARM/APLIO",   "arm7"		, &arm7_processor_functions   },
-	{ 0x41007200, 0xffffff00, F_32BIT , "ARM/NETsilicon",   "arm7"		, &arm7_processor_functions   },
-	{ 0x41007300, 0xffffff00, F_32BIT , "ARM/GBA",   "arm7"	 		, &arm7_processor_functions   },
-#endif
-	{ 0x00000000, 0x00000000, 0		, "***",	"*unknown*"	, NULL }
-	
-};
-
-#if defined( CONFIG_ARCH_TRIO) 
-
-static struct param_struct *params = (struct param_struct *) PARAMS_BASE;
-
-u_long trio_romdisk_addr = 3*1024*1024;
-
-#elif	defined(CONFIG_ARCH_NETARM)
-struct param_struct netarm_params = { { {
-	4096,					// page_size
-#ifdef	CONFIG_NETARM_NET40_REV2
-	(16*1024*1024)/4096,			// nr_pages
-#else
-	(32*1024*1024)/4096,			// nr_pages
-#endif
-	0,					// ramdisk_size	
-	(FLAG_RDLOAD),					// flags
-
-#ifdef	CONFIG_BLK_DEV_RAMDISK_BLKMEM
-	MKDEV(BLKMEM_MAJOR,0),			// rootdev
-#else
-	MKDEV(JFFS_MAJOR,18),
-#endif
-	
-	80,					// video_num_cols
-	24,					// video_num_rows
-	0,					// video_x
-	0,					// video_y
-	0,					// bytes_per_char_h
-	0,					// bytes_per_char_v
-
-	0,  					// initrd_start
-	0,					// initrd_size
-
-#if 0
-	/* hardwired ramdisk address */
-	0x89000	/ BLOCK_SIZE			// rd_start
-#else
-	0					// rd_start
-#endif
-
-}
-}
-};
-
-static struct param_struct *params = &netarm_params;
-#else
-struct param_struct common_params = { { {
-	PAGE_SIZE,		// page_size
-	DRAM_SIZE/PAGE_SIZE,	// nr_pages
-	0,			// ramdisk_size	
-	0,			// flags
-	0,			// rootdev
-	80,			// video_num_cols
-	24,			// video_num_rows
-	0,			// video_x
-	0,			// video_y
-	0,			// bytes_per_char_h
-	0,			// bytes_per_char_v
-	0,			// initrd_start
-	0,
-	0
-} } };
-
-static struct param_struct *params = &common_params;
-
-#endif
-
-unsigned long arm_id;
-unsigned int vram_half_sam;
-int armidindex;
-int ioebpresent;
-int memc_ctrl_reg;
-int number_ide_drives;
-int number_mfm_drives;
-
-extern int bytes_per_char_h;
-extern int bytes_per_char_v;
 extern int root_mountflags;
-extern int _etext, _edata, _end;
-extern unsigned long real_end_mem;
+extern int _stext, _text, _etext, _edata, _end;
 
-#ifdef CONFIG_ARCH_ATMEL
-extern int atmel_console_initialized;
-extern void rs_atmel_print(const char*);
+unsigned int processor_id;
+unsigned int compat;
+unsigned int __machine_arch_type;
+unsigned int system_rev;
+unsigned int system_serial_low;
+unsigned int system_serial_high;
+unsigned int mem_fclk_21285 = 50000000;
+unsigned int elf_hwcap;
+
+#ifdef MULTI_CPU
+struct processor processor;
 #endif
+  
+struct drive_info_struct { char dummy[32]; } drive_info;
+
+struct screen_info screen_info = {
+ orig_video_lines:	30,
+ orig_video_cols:	80,
+ orig_video_mode:	0,
+ orig_video_ega_bx:	0,
+ orig_video_isVGA:	1,
+ orig_video_points:	8
+};
+
+unsigned char aux_device_present;
+char elf_platform[ELF_PLATFORM_SIZE];
+char saved_command_line[COMMAND_LINE_SIZE];
+
+static struct meminfo meminfo __initdata = { 0, };
+static struct proc_info_item proc_info;
+static const char *machine_name;
+static char command_line[COMMAND_LINE_SIZE] = "root=/dev/rom0";
+
+static char default_command_line[COMMAND_LINE_SIZE] __initdata = CONFIG_CMDLINE;
+static union { char c[4]; unsigned long l; } endian_test __initdata = { { 'l', '?', '?', 'b' } };
+#define ENDIANNESS ((char)endian_test.l)
 
 /*
- * ram disk
+ * Standard memory resources
  */
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_image_start;	/* starting block # of image */
+static struct resource mem_res[] = {
+	{ "Video RAM",   0,     0,     IORESOURCE_MEM			},
+	{ "Kernel code", 0,     0,     IORESOURCE_MEM			},
+	{ "Kernel data", 0,     0,     IORESOURCE_MEM			}
+};
 
+#define video_ram   mem_res[0]
+#define kernel_code mem_res[1]
+#define kernel_data mem_res[2]
 
-static void setup_ramdisk (struct param_struct *params)
+static struct resource io_res[] = {
+	{ "reserved",    0x3bc, 0x3be, IORESOURCE_IO | IORESOURCE_BUSY },
+	{ "reserved",    0x378, 0x37f, IORESOURCE_IO | IORESOURCE_BUSY },
+	{ "reserved",    0x278, 0x27f, IORESOURCE_IO | IORESOURCE_BUSY }
+};
+
+#define lp0 io_res[0]
+#define lp1 io_res[1]
+#define lp2 io_res[2]
+
+static void __init setup_processor(void)
 {
-#ifdef	CONFIG_BLK_DEV_RAMDISK_BLKMEM
-#ifdef	CONFIG_BLK_DEV_RAMDISK_COMPILED_IN
-#if 0
-	rd_image_start	= params->u1.s.rd_start;
-#else
-	extern void __ramdisk_data;
+	extern struct proc_info_list __proc_info_begin, __proc_info_end;
+	struct proc_info_list *list;
 
-	rd_image_start	= ((int)&__ramdisk_data) / BLOCK_SIZE ;
-#endif
-#endif
-#endif
-	rd_prompt	= ((params->u1.s.flags & FLAG_RDPROMPT) == 0) ? 0 : 1 ;
-	rd_doload	= ((params->u1.s.flags & FLAG_RDLOAD) == 0) ? 0 : 1 ;
-}
-#else
-#define setup_ramdisk(p)
-#endif
-
-/*
- * initial ram disk
- */
-#ifdef CONFIG_BLK_DEV_INITRD
-static void setup_initrd (struct param_struct *params, unsigned long memory_end)
-{
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
-
-	initrd_start = params->u1.s.initrd_start;
-	initrd_end   = params->u1.s.initrd_start + params->u1.s.initrd_size;
-
-	if (initrd_end > memory_end) {
-		printk ("initrd extends beyond end of memory "
-			"(0x%08lx > 0x%08lx) - disabling initrd\n",
-			initrd_end, memory_end);
-		initrd_start = 0;
-	}
-}
-#else
-#define setup_initrd(p,m)
-#endif
-
-static inline void check_ioeb_present(void)
-{
-#ifndef CONFIG_ARCH_TRIO
-#ifndef CONFIG_ARCH_ATMEL
-#ifndef CONFIG_ARCH_NETARM
-#ifndef CONFIG_ARCH_GBA
-	if (((*IOEB_BASE) & 15) == 5)
-		armidlist[armidindex].features |= F_IOEB;
-#endif
-#endif
-#endif
-#endif
-}
-
-static void get_processor_type (void)
-{
-	int i;
-
-	for (armidindex = 0; ; armidindex ++)
-		if (!((armidlist[armidindex].id ^ arm_id) &
-		      armidlist[armidindex].mask))
+	/*
+	 * locate processor in the list of supported processor
+	 * types.  The linker builds this table for us from the
+	 * entries in arch/arm/mm/proc-*.S
+	 */
+	for (list = &__proc_info_begin; list < &__proc_info_end ; list++)
+		if ((processor_id & list->cpu_mask) == list->cpu_val)
 			break;
 
-	if (armidlist[armidindex].id == 0) {
-#ifndef CONFIG_ARCH_NETARM
-#ifndef CONFIG_ARCH_ATMEL
-#ifndef CONFIG_ARCH_TRIO
-#ifndef CONFIG_ARCH_GBA
-		for (i = 0; i < 3200; i++)
-			((unsigned long *)SCREEN2_BASE)[i] = 0x77113322;
-#endif
-#endif
-#endif
-#endif
-
+	/*
+	 * If processor type is unrecognised, then we
+	 * can do nothing...
+	 */
+	if (list >= &__proc_info_end) {
+		printk("CPU configuration botched (ID %08x), unable "
+		       "to continue.\n", processor_id);
 		while (1);
 	}
 
-	processor = *armidlist[armidindex].proc;
+	proc_info = *list->info;
 
-#ifdef CONFIG_ARCH_ATMEL
-
-	switch((*((unsigned long *)SF_CHIP_ID)>>28)&0x7) {
-		    case 1:
-			i='F'; break;
-		    case 2:
-			i='C'; break;
-		    case 3:
-			i='S'; break;
-		    case 4:
-			i='R'; break;
-		    default:
-			i='M'; break;
-	}
-	printk("Found an Atmel AT91%c40xxx %s processor\n", // with %ldk kernel stack\n", 
-		i,
-		armidlist[armidindex].name
-		//, ((*((unsigned long *)SF_CHIP_ID)>>16) & 0xf)
-		);
-	printk("Atmel AT91 series microcontroller support (c) 2000,2001 Lineo Inc.\n");
-#else
-	printk("Found processor [%s] [%s]\n", armidlist[armidindex].name, armidlist[armidindex].manu);
+#ifdef MULTI_CPU
+	processor = *list->proc;
 #endif
-	
+
+	printk("Processor: %s %s revision %d\n",
+	       proc_info.manufacturer, proc_info.cpu_name,
+	       (int)processor_id & 15);
+
+	sprintf(system_utsname.machine, "%s%c", list->arch_name, ENDIANNESS);
+	sprintf(elf_platform, "%s%c", list->elf_name, ENDIANNESS);
+	elf_hwcap = list->elf_hwcap;
+
+	cpu_proc_init();
 }
 
-#define COMMAND_LINE_SIZE 256
-
-#ifdef	CONFIG_ARCH_ATMEL
-static char command_line[COMMAND_LINE_SIZE] = "root=/dev/rom0"; /* { 0, }; */
-#else
-static char command_line[COMMAND_LINE_SIZE] = { 0, };
-#endif
-       char saved_command_line[COMMAND_LINE_SIZE];
-
-#ifdef CONFIG_NETARM_EEPROM
-#ifdef	CONFIG_ETHER_NETARM
-static int parse_decimal(char ch)
+static struct machine_desc * __init setup_architecture(unsigned int nr)
 {
-	if ('0' >  ch) return -1;
-	if ('9' >= ch) return ch - '0' ;
-	return -1;
-}
+	extern struct machine_desc __arch_info_begin, __arch_info_end;
+	struct machine_desc *list;
 
-static unsigned int compute_checksum(NA_dev_board_params_t *pParams)
-{
-	int i;
-	unsigned int *pInt = (unsigned int *)pParams ;
-	unsigned int sum = 0;
-	for ( i = 0 ; i < NETARM_NVRAM_DWORD_COUNT ; i++ )
-	{
-		sum += pInt[i];
-	}
-	
-	if ( sum != 0 ) return -1 ;
-	return 0 ;
-}
-#endif
-#endif
-
-void setup_arch(char **cmdline_p,
-	unsigned long * memory_start_p, unsigned long * memory_end_p)
-{
-	static unsigned char smptrap = 0;
-	unsigned long memory_start, memory_end;
-	char c = ' ', *to = command_line, *from;
-	int len = 0;
-
-	if (smptrap == 1)
-		return;
-	smptrap = 1;
-
-#if CONFIG_GBATXT
-	{
-		extern void register_console(void (*proc)(const char *));
-		extern void gbatxt_console_print(const char * b);
-		extern void gbatxt_console_init(void);
-
-		gbatxt_console_init();
-		register_console(gbatxt_console_print);
-		printk("uClinux/GBA\n");
-		printk("GameBoyAdvance port by Greg Ungerer (gerg@napgearcom)\n");
-	}
-#endif
-
-	get_processor_type ();
-	check_ioeb_present ();
-	processor._proc_init ();
-
-#ifdef CONFIG_CONSOLE	
-	bytes_per_char_h  = params->u1.s.bytes_per_char_h;
-	bytes_per_char_v  = params->u1.s.bytes_per_char_v;
-#endif
-	from		  = params->commandline;
-	ROOT_DEV	  = to_kdev_t (params->u1.s.rootdev);
-	ORIG_X		  = params->u1.s.video_x;
-	ORIG_Y		  = params->u1.s.video_y;
-	ORIG_VIDEO_COLS	  = params->u1.s.video_num_cols;
-	ORIG_VIDEO_LINES  = params->u1.s.video_num_rows;
-
-	setup_ramdisk (params);
-
-	if (!(params->u1.s.flags & FLAG_READONLY))
-		root_mountflags &= ~MS_RDONLY;
-
-	/* If the kernel lives inside of our ram space (i.e. it isn't executing
-	 * in place in flash) then we need to exclude it from the memory that
-	 * the kernel gets to manage, since the kernel binary needs some space.
+	/*
+	 * locate architecture in the list of supported architectures.
 	 */
-	memory_end = ((unsigned long)DRAM_BASE) + ((unsigned long)DRAM_SIZE);
-	if (((unsigned long)&_end < (unsigned long)DRAM_BASE) ||
-		((unsigned long)&_end > (unsigned long)memory_end)) {
-	    memory_start = (unsigned long)DRAM_BASE;
-	} else {
-	    memory_start = (unsigned long)&_end;
-	    printk("kernel binary is in RAM -- reserving %ldk for the kernel\n",
-		    ((unsigned long)&_end - (unsigned long)DRAM_BASE)>>10);
+	for (list = &__arch_info_begin; list < &__arch_info_end; list++)
+		if (list->nr == nr)
+			break;
+
+	/*
+	 * If the architecture type is not recognised, then we
+	 * can do nothing...
+	 */
+	if (list >= &__arch_info_end) {
+		printk("Architecture configuration botched (nr %d), unable "
+		       "to continue.\n", nr);
+		while (1);
 	}
 
-#ifdef	CONFIG_ARCH_NETARM
-	netarm_console_print("setup_arch : MEM start ");
-	netarm_dump_hex8((unsigned long)memory_start);
-	netarm_console_print(" end ");
-	netarm_dump_hex8((unsigned long)memory_end);
-	netarm_console_print("\n");
+	printk("Architecture: %s\n", list->name);
+	if (compat)
+		printk(KERN_WARNING "Using compatibility code "
+			"scheduled for removal in v%d.%d.%d\n",
+			compat >> 24, (compat >> 12) & 0x3ff,
+			compat & 0x3ff);
 
-#ifdef CONFIG_NETARM_EEPROM
-#ifdef CONFIG_ETHER_NETARM
-	/* copy MAC address from NVRAM to Ethernet controller */
+	return list;
+}
 
-	{
-		NA_dev_board_params_t *pParams;
-		unsigned int *pUint;
-		unsigned int uItmp;
-		unsigned int serno;
-		unsigned int csum;
-		
-		pParams = (NA_dev_board_params_t *)(NETARM_MMAP_EEPROM_BASE) ;
-
-		csum = compute_checksum(pParams) ;
-		
-		if (csum == 0)
-		{
-			/* valid checksum... parse chars */
-			int i,j ;
-		
-			serno = 0;
-			for ( i = 0 ; i < 8 ; i++ )
-			{
-				j = parse_decimal(pParams->serialNumber[i]);
-				if (j < 0)
-				{
-					/* invalid digits - pretend csum bad */
-					csum = 1 ;
-					break;
-				}
-				serno *= 10 ;
-				serno += j;
-			}
-		}
-
-		if (csum != 0)
-		{
-			/* use default serial number */
-			serno = 99335 ;
-		}
-		/* multiply serno by 8 to calc MAC */
-		serno <<= 3 ;
-		
-		uItmp = serno & 0xFF ;
-		uItmp <<= 8 ;
-		uItmp += ( serno >> 8 ) & 0xFF ;
-		pUint = (unsigned int *)NA_SAL_STATION_ADDR_3 ;
-		*pUint = uItmp;
-
-		uItmp = ( serno >> 16 ) & 0xFF ;
-		uItmp <<= 8 ;
-		uItmp += NETARM_OUI_BYTE3 ;
-		pUint = (unsigned int *)NA_SAL_STATION_ADDR_2 ;
-		*pUint = uItmp;
-
-		uItmp = NETARM_OUI_BYTE2 ;
-		uItmp <<= 8 ;
-		uItmp += NETARM_OUI_BYTE1 ;
-		pUint = (unsigned int *)NA_SAL_STATION_ADDR_1 ;
-		*pUint = uItmp;
-	}
-#endif
-#endif
-
-#endif
-
-	init_task.mm->start_code = TASK_SIZE;
-	init_task.mm->end_code	 = TASK_SIZE + (unsigned long) &_etext;
-	init_task.mm->end_data	 = TASK_SIZE + (unsigned long) &_edata;
-	init_task.mm->brk	 = TASK_SIZE + (unsigned long) &_end;
-
-	/* Save unparsed command line copy for /proc/cmdline */
-	memcpy(saved_command_line, from, COMMAND_LINE_SIZE);
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+/*
+ * Initial parsing of the command line.  We need to pick out the
+ * memory size.  We look for mem=size@start, where start and size
+ * are "size[KkMm]"
+ */
+static void __init
+parse_cmdline(struct meminfo *mi, char **cmdline_p, char *from)
+{
+	char c = ' ', *to = command_line;
+	int usermem = 0, len = 0;
 
 	for (;;) {
-		if (c == ' ' &&
-		    from[0] == 'm' &&
-		    from[1] == 'e' &&
-		    from[2] == 'm' &&
-		    from[3] == '=') {
-			memory_end = simple_strtoul(from+4, &from, 0);
-			if (*from == 'K' || *from == 'k') {
-				memory_end = memory_end << 10;
-				from++;
-			} else if (*from == 'M' || *from == 'm') {
-				memory_end = memory_end << 20;
-				from++;
+		if (c == ' ' && !memcmp(from, "mem=", 4)) {
+			unsigned long start;
+			unsigned long long size;
+
+			if (to != command_line)
+				to -= 1;
+
+			/*
+			 * If the user specifies memory size, we
+			 * blow away any automatically generated
+			 * size.
+			 */
+			if (usermem == 0) {
+				usermem = 1;
+				mi->nr_banks = 0;
 			}
-			memory_end = memory_end + PAGE_OFFSET;
+
+			start = PHYS_OFFSET;
+			size  = memparse(from + 4, &from);
+			if (*from == '@')
+				start = memparse(from + 1, &from);
+
+			mi->bank[mi->nr_banks].start = start;
+			mi->bank[mi->nr_banks].size  = size;
+			mi->bank[mi->nr_banks].node  = 0;
+			mi->nr_banks += 1;
+#ifdef CONFIG_BLK_DEV_INITRD
+		} else if (c == ' ' && !memcmp(from, "initrd=", 7)) {
+			unsigned long start, size;
+
+			/*
+			 * Remove space character
+			 */
+			if (to != command_line)
+				to -= 1;
+
+			start = memparse(from + 7, &from);
+			if (*from == ',') {
+				size = memparse(from + 1, &from);
+
+				initrd_start = start;
+				initrd_end   = start + size;
+			}
+#endif /* CONFIG_BLK_DEV_INITRD */
 		}
-#if defined( CONFIG_ARCH_TRIO)
-		else if (c == ' ' &&
-				from[0] == 'r' &&
-				from[1] == 'o' &&
-				from[2] == 'm' &&
-				from[3] == '=') {
-				trio_romdisk_addr = simple_strtoul(from+4, &from, 0);
-				if (*from == 'K' || *from == 'k') {
-					trio_romdisk_addr = trio_romdisk_addr << 10;
-					from++;
-				} else if (*from == 'M' || *from == 'm') {
-					trio_romdisk_addr = trio_romdisk_addr << 20;
-					from++;
-				}
-			}
-#endif						
 		c = *from++;
 		if (!c)
 			break;
@@ -534,79 +263,462 @@ void setup_arch(char **cmdline_p,
 			break;
 		*to++ = c;
 	}
-
 	*to = '\0';
-	*cmdline_p = /* command_line */ "root=/dev/rom0";
+	*cmdline_p = command_line;
+}
 
-#if defined(CONFIG_CHR_DEV_FLASH) || defined(CONFIG_BLK_DEV_FLASH)
-	/* we need to initialize the Flashrom device here since we might
-	 * do things with flash early on in the boot
-	 */
-	flash_probe();
-#endif
+void __init
+setup_ramdisk(int doload, int prompt, int image_start, unsigned int rd_sz)
+{
+#ifdef CONFIG_BLK_DEV_RAM
+	extern int rd_doload, rd_prompt, rd_image_start, rd_size;
 
-	*memory_start_p = memory_start;
-	*memory_end_p = memory_end;
+	rd_image_start = image_start;
+	rd_prompt = prompt;
+	rd_doload = doload;
 
-	setup_initrd (params, memory_end);
-
-	strcpy (system_utsname.machine, armidlist[armidindex].name);
-#ifdef CONFIG_SERIAL_TRIO
-	{
-		extern void register_console(void (*proc)(const char *));
-		extern void console_print_trio(const char * b);
-		register_console(console_print_trio);
-	}
-
-#elif defined(CONFIG_CONSOLE_ON_SC28L91)
-	{
-		extern void register_console(void (*proc)(const char *));
-		extern void console_print_sc28l91(const char * b);
-		register_console(console_print_sc28l91);
-	}
-#elif defined(CONFIG_CONSOLE_ON_ATMEL)
-	{
-		extern void register_console(void (*proc)(const char *));
-		extern void console_print_atmel(const char * b);
-		atmel_console_initialized = 0;
-		register_console(console_print_atmel);
-	}
-#elif CONFIG_ARCH_NETARM
-	{
-		extern void register_console(void (*proc)(const char *));
-		extern void netarm_console_print(const char * b);
-		register_console(netarm_console_print);
-		
-		printk("NET+ARM console enabled\n");
-	}
+	if (rd_sz)
+		rd_size = rd_sz;
 #endif
 }
 
-#define ISSET(bit) (armidlist[armidindex].features & bit)
+/*
+ * initial ram disk
+ */
+void __init setup_initrd(unsigned int start, unsigned int size)
+{
+#ifdef CONFIG_BLK_DEV_INITRD
+	if (start == 0)
+		size = 0;
+	initrd_start = start;
+	initrd_end   = start + size;
+#endif
+}
+
+static void __init
+request_standard_resources(struct meminfo *mi, struct machine_desc *mdesc)
+{
+	struct resource *res;
+	int i;
+
+	kernel_code.start  = __virt_to_bus(init_mm.start_code);
+	kernel_code.end    = __virt_to_bus(init_mm.end_code - 1);
+	kernel_data.start  = __virt_to_bus(init_mm.end_code);
+	kernel_data.end    = __virt_to_bus(init_mm.brk - 1);
+
+	for (i = 0; i < mi->nr_banks; i++) {
+		unsigned long virt_start, virt_end;
+
+		if (mi->bank[i].size == 0)
+			continue;
+
+		virt_start = __phys_to_virt(mi->bank[i].start);
+		virt_end   = virt_start + mi->bank[i].size - 1;
+
+		res = alloc_bootmem_low(sizeof(*res));
+		res->name  = "System RAM";
+		res->start = __virt_to_bus(virt_start);
+		res->end   = __virt_to_bus(virt_end);
+		res->flags = IORESOURCE_MEM | IORESOURCE_BUSY;
+
+		request_resource(&iomem_resource, res);
+
+		if (kernel_code.start >= res->start &&
+		    kernel_code.end <= res->end)
+			request_resource(res, &kernel_code);
+		if (kernel_data.start >= res->start &&
+		    kernel_data.end <= res->end)
+			request_resource(res, &kernel_data);
+	}
+
+	if (mdesc->video_start) {
+		video_ram.start = mdesc->video_start;
+		video_ram.end   = mdesc->video_end;
+		request_resource(&iomem_resource, &video_ram);
+	}
+
+	/*
+	 * Some machines don't have the possibility of ever
+	 * possessing lp0, lp1 or lp2
+	 */
+	if (mdesc->reserve_lp0)
+		request_resource(&ioport_resource, &lp0);
+	if (mdesc->reserve_lp1)
+		request_resource(&ioport_resource, &lp1);
+	if (mdesc->reserve_lp2)
+		request_resource(&ioport_resource, &lp2);
+}
+
+/*
+ *  Tag parsing.
+ *
+ * This is the new way of passing data to the kernel at boot time.  Rather
+ * than passing a fixed inflexible structure to the kernel, we pass a list
+ * of variable-sized tags to the kernel.  The first tag must be a ATAG_CORE
+ * tag for the list to be recognised (to distinguish the tagged list from
+ * a param_struct).  The list is terminated with a zero-length tag (this tag
+ * is not parsed in any way).
+ */
+static int __init parse_tag_core(const struct tag *tag)
+{
+	if ((tag->u.core.flags & 1) == 0)
+		root_mountflags &= ~MS_RDONLY;
+	ROOT_DEV = to_kdev_t(tag->u.core.rootdev);
+	return 0;
+}
+
+__tagtable(ATAG_CORE, parse_tag_core);
+
+static int __init parse_tag_mem32(const struct tag *tag)
+{
+	if (meminfo.nr_banks >= NR_BANKS) {
+		printk(KERN_WARNING
+		       "Ignoring memory bank 0x%08x size %dKB\n",
+			tag->u.mem.start, tag->u.mem.size / 1024);
+		return -EINVAL;
+	}
+	meminfo.bank[meminfo.nr_banks].start = tag->u.mem.start;
+	meminfo.bank[meminfo.nr_banks].size  = tag->u.mem.size;
+	meminfo.bank[meminfo.nr_banks].node  = 0;
+	meminfo.nr_banks += 1;
+
+	return 0;
+}
+
+__tagtable(ATAG_MEM, parse_tag_mem32);
+
+static int __init parse_tag_videotext(const struct tag *tag)
+{
+	screen_info.orig_x            = tag->u.videotext.x;
+	screen_info.orig_y            = tag->u.videotext.y;
+	screen_info.orig_video_page   = tag->u.videotext.video_page;
+	screen_info.orig_video_mode   = tag->u.videotext.video_mode;
+	screen_info.orig_video_cols   = tag->u.videotext.video_cols;
+	screen_info.orig_video_ega_bx = tag->u.videotext.video_ega_bx;
+	screen_info.orig_video_lines  = tag->u.videotext.video_lines;
+	screen_info.orig_video_isVGA  = tag->u.videotext.video_isvga;
+	screen_info.orig_video_points = tag->u.videotext.video_points;
+	return 0;
+}
+
+__tagtable(ATAG_VIDEOTEXT, parse_tag_videotext);
+
+static int __init parse_tag_ramdisk(const struct tag *tag)
+{
+	setup_ramdisk((tag->u.ramdisk.flags & 1) == 0,
+		      (tag->u.ramdisk.flags & 2) == 0,
+		      tag->u.ramdisk.start, tag->u.ramdisk.size);
+	return 0;
+}
+
+__tagtable(ATAG_RAMDISK, parse_tag_ramdisk);
+
+static int __init parse_tag_initrd(const struct tag *tag)
+{
+	setup_initrd(tag->u.initrd.start, tag->u.initrd.size);
+	return 0;
+}
+
+__tagtable(ATAG_INITRD, parse_tag_initrd);
+
+static int __init parse_tag_initrd2(const struct tag *tag)
+{
+	setup_initrd(tag->u.initrd.start, tag->u.initrd.size);
+	return 0;
+}
+
+__tagtable(ATAG_INITRD2, parse_tag_initrd2);
+
+static int __init parse_tag_serialnr(const struct tag *tag)
+{
+	system_serial_low = tag->u.serialnr.low;
+	system_serial_high = tag->u.serialnr.high;
+	return 0;
+}
+
+__tagtable(ATAG_SERIAL, parse_tag_serialnr);
+
+static int __init parse_tag_revision(const struct tag *tag)
+{
+	system_rev = tag->u.revision.rev;
+	return 0;
+}
+
+__tagtable(ATAG_REVISION, parse_tag_revision);
+
+static int __init parse_tag_cmdline(const struct tag *tag)
+{
+	strncpy(default_command_line, tag->u.cmdline.cmdline, COMMAND_LINE_SIZE);
+	default_command_line[COMMAND_LINE_SIZE - 1] = '\0';
+	return 0;
+}
+
+__tagtable(ATAG_CMDLINE, parse_tag_cmdline);
+
+/*
+ * Scan one tag table for this tag, and call its parse function.
+ * The tag table is built by the linker from all the __tagtable
+ * declarations.
+ */
+static int __init parse_tag(const struct tag *tag)
+{
+	extern struct tagtable __tagtable_begin, __tagtable_end;
+	struct tagtable *t;
+
+	for (t = &__tagtable_begin; t < &__tagtable_end; t++)
+		if (tag->hdr.tag == t->tag) {
+			t->parse(tag);
+			break;
+		}
+
+	return t < &__tagtable_end;
+}
+
+/*
+ * Parse all tags in the list, checking both the global and architecture
+ * specific tag tables.
+ */
+static void __init parse_tags(const struct tag *t)
+{
+	for (; t->hdr.size; t = tag_next(t)) 
+		if (!parse_tag(t))
+			printk(KERN_WARNING
+				"Ignoring unrecognised tag 0x%08x\n", 
+				t->hdr.tag);
+}
+
+static struct init_tags {
+	struct tag_header hdr1;
+	struct tag_core   core;
+	struct tag_header hdr2;
+	struct tag_mem32  mem;
+	struct tag_header hdr3;
+} init_tags __initdata = {
+	{ tag_size(tag_core), ATAG_CORE },
+	{ 1, PAGE_SIZE, 0xff },
+	{ tag_size(tag_mem32), ATAG_MEM },
+	{ MEM_SIZE, PHYS_OFFSET },
+	{ 0, ATAG_NONE }
+};
+
+#ifdef CONFIG_CMDLINE_FROM_BOOTLOADER
+char __initdata *cmdline_from_bootloader = 0;
+#endif
+
+void __init setup_arch(char **cmdline_p)
+{
+	struct tag *tags = (struct tag *)&init_tags;
+	struct machine_desc *mdesc;
+	char *from = default_command_line;
+	int bootmap_size;
+
+#ifdef CONFIG_CMDLINE_FROM_BOOTLOADER
+	if (cmdline_from_bootloader) {
+		from = cmdline_from_bootloader;
+		printk("cmdline from bootloader = '%s'\r\n", from);
+	} else {
+		printk("no cmdline from bootloader, using default\r\n");
+	}
+#endif
+
+#ifndef CONFIG_RAM_ATTACHED_ROMFS
+	unsigned long memory_start = (unsigned long)&_end_kernel;
+#else
+	unsigned long memory_start = PAGE_ALIGN(_ramstart);
+#endif  
+	extern  void    config_BSP(void);
+#ifdef  CONFIG_UCBOOTSTRAP
+	extern  char    *getbenv(char * a);
+#endif
+#ifdef CONFIG_ARCH_CNXT
+	unsigned long memory_end = END_MEM;
+#endif
+#ifdef CONFIG_MACH_EB67XDIP
+	tags = (struct tag *)0x100;    /* tags in RAM from bootloader */
+#endif
+	
+	ROOT_DEV = MKDEV(0, 255);
+
+#if 	defined(CONFIG_BOARD_EVS3C4530HEI) || \
+	defined(CONFIG_BOARD_SMDK2500)     || \
+	defined(CONFIG_MACH_UC5471DSP)	   || \
+	defined(CONFIG_MACH_SJ5471ENG)	   || \
+	defined(CONFIG_BOARD_S3C2500REFRGP)
+	
+	config_BSP();
+#endif
+
+#ifdef	CONFIG_UCBOOTSTRAP
+	from = (char *) getbenv("KERNEL_ARGS");
+	if  ( from == NULL )
+	    from = default_command_line;
+#endif
+
+#ifdef CONFIG_ARCH_CNXT
+	syshwinit();
+#endif
+
+	setup_processor();
+	mdesc = setup_architecture(machine_arch_type);
+	machine_name = mdesc->name;
+
+	if (mdesc->soft_reboot)
+		reboot_setup("s");
+
+	if (mdesc->param_offset)
+		tags = phys_to_virt(mdesc->param_offset);
+
+	/*
+	 * Do the machine-specific fixups before we parse the
+	 * parameters or tags.
+	 */
+	if (mdesc->fixup)
+		mdesc->fixup(mdesc, (struct param_struct *)tags,
+			     &from, &meminfo);
+
+	/*
+	 * If we have the old style parameters, convert them to
+	 * a tag list.
+	 */
+	if (tags->hdr.tag != ATAG_CORE)
+		convert_to_tag_list(tags);
+
+	if (tags->hdr.tag == ATAG_CORE) {
+		if (meminfo.nr_banks != 0)
+			squash_mem_tags(tags);
+		parse_tags(tags);
+	}
+
+	if (meminfo.nr_banks == 0) {
+		meminfo.nr_banks      = 1;
+		meminfo.bank[0].start = PAGE_OFFSET;//PHYS_OFFSET;
+		meminfo.bank[0].size  = MEM_SIZE;
+	}
+
+	init_mm.start_code = (unsigned long) &_text;
+	init_mm.end_code   = (unsigned long) &_etext;
+#ifndef CONFIG_RAM_ATTACHED_ROMFS  
+	init_mm.end_data   = (unsigned long) &_edata;
+	init_mm.brk	   = (unsigned long) &_end;
+#else
+	init_mm.end_data   = (unsigned long) _ramstart;
+	init_mm.brk	   = (unsigned long) _ramstart;
+#endif
+
+	memcpy(saved_command_line, from, COMMAND_LINE_SIZE);
+	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
+	parse_cmdline(&meminfo, cmdline_p, from);
+
+#if 1
+	bootmem_init(&meminfo);
+#else
+	bootmap_size= init_bootmem_node(
+			  NODE_DATA(0),
+			  memory_start >> PAGE_SHIFT,
+			  PAGE_OFFSET >> PAGE_SHIFT,
+			  END_MEM >> PAGE_SHIFT);
+ 
+	free_bootmem(memory_start, END_MEM - memory_start);
+	reserve_bootmem(memory_start, bootmap_size);
+#endif
+
+	if (DRAM_BASE == 0x00) {
+		/* reserve page zero for the vectors if we have
+		 * DRAM starting at zero, otherwise we end up
+		 * trying to give page zero to other parts of the
+		 * kernel (bjd)
+		 */
+
+		printk("Reserving page zero for vector table\n");
+		reserve_bootmem(0x0000, 0x07fff);
+	}
+
+	paging_init(&meminfo, mdesc);		// mem_map is set up here! 
+	request_standard_resources(&meminfo, mdesc);
+
+	/*
+	 * Set up various architecture-specific pointers
+	 */
+	init_arch_irq = mdesc->init_irq;
+
+#ifdef CONFIG_VT
+#if defined(CONFIG_VGA_CONSOLE)
+	conswitchp = &vga_con;
+#elif defined(CONFIG_DUMMY_CONSOLE)
+	conswitchp = &dummy_con;
+#endif
+#endif
+}
 
 int get_cpuinfo(char * buffer)
 {
-	int len;
+	char *p = buffer;
 
-	len = sprintf (buffer,  "CPU:\n"
-				"Type\t\t: %s\n"
-				"Revision\t: %d\n"
-				"Manufacturer\t: %s\n"
-				"32bit modes\t: %s\n"
-				"BogoMips\t: %lu.%02lu\n",
-				armidlist[armidindex].name,
-				(int)arm_id & 15,
-				armidlist[armidindex].manu,
-				ISSET (F_32BIT) ? "yes" : "no",
-				(loops_per_sec+2500) / 500000,
-				((loops_per_sec+2500) / 5000) % 100);
-	len += sprintf (buffer + len,
-				"\nHardware:\n"
-				"Mem System\t: %s\n"
-				"IOEB\t\t: %s\n",
-				ISSET(F_MEMC)  ? "MEMC" : 
-				ISSET(F_MMU)   ? "MMU"  : "*unknown*",
-				ISSET(F_IOEB)  ? "present" : "absent"
-				);
-	return len;
+	p += sprintf(p, "Processor\t: %s %s rev %d (%s)\n",
+		     proc_info.manufacturer, proc_info.cpu_name,
+		     (int)processor_id & 15, elf_platform);
+
+	p += sprintf(p, "BogoMIPS\t: %lu.%02lu\n",
+		     loops_per_jiffy / (500000/HZ),
+		     (loops_per_jiffy / (5000/HZ)) % 100);
+
+	p += sprintf(p, "Hardware\t: %s\n", machine_name);
+
+	p += sprintf(p, "Revision\t: %04x\n",
+		     system_rev);
+
+	p += sprintf(p, "Serial\t\t: %08x%08x\n",
+		     system_serial_high,
+		     system_serial_low);
+
+	return p - buffer;
 }
+
+
+/*
+ *	Get CPU information for use by the procfs.
+ */
+
+static int show_cpuinfo(struct seq_file *m, void *v)
+{
+	seq_printf(m, "Processor\t: %s %s rev %d (%s)\n",
+		     proc_info.manufacturer, proc_info.cpu_name,
+		     (int)processor_id & 15, elf_platform);
+
+	seq_printf(m, "BogoMIPS\t: %lu.%02lu\n",
+		     loops_per_jiffy / (500000/HZ),
+		     (loops_per_jiffy / (5000/HZ)) % 100);
+
+	seq_printf(m, "Hardware\t: %s\n", machine_name);
+
+	seq_printf(m, "Revision\t: %04x\n",
+		     system_rev);
+
+	seq_printf(m, "Serial\t\t: %08x%08x\n",
+		     system_serial_high,
+		     system_serial_low);
+
+	return 0;
+}
+
+static void *c_start(struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? ((void *) 0x12345678) : NULL;
+}
+
+static void *c_next(struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return c_start(m, pos);
+}
+
+static void c_stop(struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	c_start,
+	next:	c_next,
+	stop:	c_stop,
+	show:	show_cpuinfo,
+};

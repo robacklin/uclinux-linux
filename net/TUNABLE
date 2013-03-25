@@ -1,15 +1,11 @@
-The following parameters should be tunable but aren't, until we get sysctl
-or similar schemes. For now you'll have to dig around. Various CONFIG_xxx
-items that should be configurable using sysctl omitted.
+The following parameters should be tunable at compile time. Some of them
+exist as sysctls too.
 
 This is far from complete
 
 Item			Description
 ----------------------------------------------------------------------------
-MAX_SOCKETS		Tunable on boot, maximum sockets we will allocate
-NUM_PROTO		Maximum loadable address family, will need recompile
 MAX_LINKS		Maximum number of netlink minor devices. (1-32)
-MAX_QBYTES		Size of a netlink device queue (tunable)
 RIF_TABLE_SIZE		Token ring RIF cache size (tunable)
 AARP_HASH_SIZE		Size of Appletalk hash table (tunable)
 AX25_DEF_T1		AX.25 parameters. These are all tunable via
@@ -35,18 +31,9 @@ MAX_WINDOW		Offered maximum window (tunable)
 MAX_HEADER		Largest physical header (tunable)
 MAX_ADDR_LEN		Largest physical address (tunable)
 SOCK_ARRAY_SIZE		IP socket array hash size (tunable)
-ARP_RES_TIME		Time we try to resolve (tunable)
-ARP_DEAD_RES_TIME	Time the entry stays dead (tunable)
-ARP_MAX_TRIES		Maximum tries (tunable)
-ARP_TIMEOUT		Timeout on an ARP (tunable)
-ARP_CHECK_INTERVAL	Check interval to refresh an arp (tunable)
-ARP_CONFIRM_INTERVAL	Confirm poll time (tunable)
-ARP_TABLE_SIZE		Hash table size for ARP (tunable)
-IP_MAX_MEMBERSHIPS	Largest number of groups per socket (BSD style)
+IP_MAX_MEMBERSHIPS	Largest number of groups per socket (BSD style) (tunable)
 16			Hard coded constant for amount of room allowed for
 			cache align and faster forwarding (tunable)
-IPFRAG_HIGH_THRESH	Limit on fragments, we free fragments until we reach
-IPFRAG_LOW_THRESH	which provides some breathing space. (tunable)
 IP_FRAG_TIME		Time we hold a fragment for. (tunable)
 PORT_MASQ_BEGIN		First port reserved for masquerade (tunable)
 PORT_MASQ_END		Last port used for masquerade	(tunable)
@@ -54,8 +41,6 @@ MASQUERADE_EXPIRE_TCP_FIN	Time we keep a masquerade for after a FIN
 MASQUERADE_EXPIRE_UDP	Time we keep a UDP masquerade for (tunable)
 MAXVIFS			Maximum mrouted vifs (1-32)
 MFC_LINES		Lines in the multicast router cache (tunable)
-SK_RMEM_MAX		Max memory a socket owns for receive (tunable)
-SK_WMEM_MAX		Max memory a socket owns for send (tunable)
 
 NetROM parameters are tunable via an ioctl passing a struct
 

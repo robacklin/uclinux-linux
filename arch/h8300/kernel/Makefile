@@ -7,11 +7,14 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
-
 all: kernel.o
+
 O_TARGET := kernel.o
-O_OBJS := setup.o process.o traps.o ptrace.o sys_h8300.o arch_time.o ksyms.o entry.o signal.o
+obj-y := process.o traps.o ptrace.o ints.o \
+	 sys_h8300.o time.o semaphore.o signal.o \
+         setup.o h8300_ksyms.o gpio.o syscalls.o
+
+export-objs := h8300_ksyms.o
 
 include $(TOPDIR)/Rules.make
+

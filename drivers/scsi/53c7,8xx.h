@@ -38,14 +38,7 @@
 
 #ifndef NCR53c7x0_H
 #define NCR53c7x0_H
-#if !defined(LINUX_1_2) && !defined(LINUX_1_3)
 #include <linux/version.h>
-#if LINUX_VERSION_CODE > 65536 + 3 * 256
-#define LINUX_1_3
-#else
-#define LINUX_1_2
-#endif
-#endif
 
 /* 
  * Prevent name space pollution in hosts.c, and only provide the 
@@ -53,7 +46,6 @@
  * array.
  */
 
-#if defined(HOSTS_C) || defined(MODULE)
 #include <scsi/scsicam.h>
 
 extern int NCR53c7xx_abort(Scsi_Cmnd *);
@@ -66,66 +58,20 @@ extern int NCR53c7xx_release(struct Scsi_Host *);
 #define NCR53c7xx_release NULL
 #endif
 
-#ifdef LINUX_1_2
-#define NCR53c7xx {NULL, NULL, "NCR53c{7,8}xx (rel 17)", NCR53c7xx_detect,\
-	NULL, /* info */ NULL, /* command, deprecated */ NULL, 		\
-	NCR53c7xx_queue_command, NCR53c7xx_abort, NCR53c7xx_reset,	\
-	NULL /* slave attach */, scsicam_bios_param, /* can queue */ 24, \
-	/* id */ 7, 127 /* old SG_ALL */, /* cmd per lun */ 3, 		\
-	/* present */ 0, /* unchecked isa dma */ 0, DISABLE_CLUSTERING} 
-#else
-#define NCR53c7xx {NULL, NULL, NULL, NULL, \
-        "NCR53c{7,8}xx (rel 17)", NCR53c7xx_detect,\
-        NULL, /* info */ NULL, /* command, deprecated */ NULL,		\
-	NCR53c7xx_queue_command, NCR53c7xx_abort, NCR53c7xx_reset,	\
-	NULL /* slave attach */, scsicam_bios_param, /* can queue */ 24, \
-	/* id */ 7, 127 /* old SG_ALL */, /* cmd per lun */ 3, 		\
-	/* present */ 0, /* unchecked isa dma */ 0, DISABLE_CLUSTERING} 
-#endif
-
-#endif /* defined(HOSTS_C) || defined(MODULE) */ 
+#define NCR53c7xx {					\
+          name:           "NCR53c{7,8}xx (rel 17)",	\
+	  detect:         NCR53c7xx_detect,		\
+	  queuecommand:   NCR53c7xx_queue_command,	\
+	  abort:          NCR53c7xx_abort,		\
+	  reset:          NCR53c7xx_reset,		\
+	  bios_param:     scsicam_bios_param,		\
+	  can_queue:      24,				\
+	  this_id:        7,				\
+	  sg_tablesize:   127,				\
+	  cmd_per_lun:    3,				\
+	  use_clustering: DISABLE_CLUSTERING} 
 
 #ifndef HOSTS_C
-#ifdef LINUX_1_2
-/*
- * Change virtual addresses to physical addresses and vv.
- * These are trivial on the 1:1 Linux/i386 mapping (but if we ever
- * make the kernel segment mapped at 0, we need to do translation
- * on the i386 as well)
- */
-extern inline unsigned long virt_to_phys(volatile void * address)
-{       
-	return (unsigned long) address;
-}       
-
-extern inline void * phys_to_virt(unsigned long address)
-{
-	return (void *) address;      
-}
-
-/*
- * IO bus memory addresses are also 1:1 with the physical address
- */
-#define virt_to_bus virt_to_phys
-#define bus_to_virt phys_to_virt
-
-/*
- * readX/writeX() are used to access memory mapped devices. On some
- * architectures the memory mapped IO stuff needs to be accessed
- * differently. On the x86 architecture, we just read/write the
- * memory location directly.
- */
-#define readb(addr) (*(volatile unsigned char *) (addr))
-#define readw(addr) (*(volatile unsigned short *) (addr))
-#define readl(addr) (*(volatile unsigned int *) (addr))
-
-#define writeb(b,addr) ((*(volatile unsigned char *) (addr)) = (b))
-#define writew(b,addr) ((*(volatile unsigned short *) (addr)) = (b))
-#define writel(b,addr) ((*(volatile unsigned int *) (addr)) = (b))
-
-#define mb()
-
-#endif /* def LINUX_1_2 */
 
 /* Register addresses, ordered numerically */
 
@@ -1394,7 +1340,7 @@ struct NCR53c7x0_hostdata {
 						/* commands running, maintained
 						   by Linux driver */
 
-    volatile struct NCR53c7x0_cmd *current;	/* currently connected 
+    volatile struct NCR53c7x0_cmd *curr;	/* currently connected 
 						   nexus, ONLY valid for
 						   NCR53c700/NCR53c700-66
 						 */
@@ -1482,7 +1428,7 @@ struct NCR53c7x0_hostdata {
 
 };
 
-#define IRQ_NONE	255
+#define SCSI_IRQ_NONE	255
 #define DMA_NONE	255
 #define IRQ_AUTO	254
 #define DMA_AUTO	254
@@ -1569,12 +1515,12 @@ struct NCR53c7x0_hostdata {
 /* Patch field in dsa structure (assignment should be +=?) */
 #define patch_dsa_32(dsa, symbol, word, value)				\
 	{								\
-	(dsa)[(hostdata->##symbol - hostdata->dsa_start) / sizeof(u32)	\
+	(dsa)[(hostdata->symbol - hostdata->dsa_start) / sizeof(u32)	\
 	    + (word)] = (value);					\
 	if (hostdata->options & OPTION_DEBUG_DSA)			\
 	    printk("scsi : dsa %s symbol %s(%d) word %d now 0x%x\n",	\
-		#dsa, #symbol, hostdata->##symbol, 			\
-		(word), (u32) (value));					\
+		#dsa, #symbol, hostdata->symbol, 			\
+		(word), (u32) le32_to_cpu(value));			\
 	}
 
 /* Paranoid people could use panic() here. */

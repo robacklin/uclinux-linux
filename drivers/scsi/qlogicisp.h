@@ -17,13 +17,10 @@
 /* Renamed and updated to 1.3.x by Michael Griffith <grif@cs.ucr.edu> */
 
 /*
- * $Date: 1999-11-22 03:47:27 $
- * $Revision: 1.1.1.1 $
+ * $Date: 1995/09/22 02:32:56 $
+ * $Revision: 0.5 $
  *
- * $Log: qlogicisp.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:27  christ
- * Importing new-wave v1.0.4
- *
+ * $Log: isp1020.h,v $
  * Revision 0.5  1995/09/22  02:32:56  root
  * do auto request sense
  *
@@ -73,30 +70,21 @@ int isp1020_biosparam(Disk *, kdev_t, int[]);
 #define NULL (0)
 #endif
 
-extern struct proc_dir_entry proc_scsi_isp1020;
-
 #define QLOGICISP {							   \
-	/* next */		NULL,					   \
-	/* usage_count */	NULL,					   \
-	/* proc dir */		NULL,					   \
-	/* procfs info */	NULL,					   \
-	/* name */		NULL,					   \
-	/* detect */		isp1020_detect,				   \
-	/* release */		isp1020_release,			   \
-	/* info */		isp1020_info,				   \
-	/* command */		NULL,					   \
-	/* queuecommand */	isp1020_queuecommand,			   \
-	/* abort */		isp1020_abort,				   \
-	/* reset */		isp1020_reset,				   \
-	/* slave_attach */	NULL,					   \
-	/* bios_param */	isp1020_biosparam,			   \
-	/* can_queue */		QLOGICISP_REQ_QUEUE_LEN,		   \
-	/* this_id */		-1,					   \
-	/* sg_tablesize */	QLOGICISP_MAX_SG(QLOGICISP_REQ_QUEUE_LEN), \
-	/* cmd_per_lun */	1,					   \
-	/* present */		0,					   \
-	/* unchecked_isa_dma */	0,					   \
-	/* use_clustering */	DISABLE_CLUSTERING			   \
+	detect:			isp1020_detect,				   \
+	release:		isp1020_release,			   \
+	info:			isp1020_info,				   \
+	queuecommand:		isp1020_queuecommand,			   \
+	abort:			isp1020_abort,				   \
+	reset:			isp1020_reset,				   \
+	bios_param:		isp1020_biosparam,			   \
+	can_queue:		QLOGICISP_REQ_QUEUE_LEN,		   \
+	this_id:		-1,					   \
+	sg_tablesize:		QLOGICISP_MAX_SG(QLOGICISP_REQ_QUEUE_LEN), \
+	cmd_per_lun:		1,					   \
+	present:		0,					   \
+	unchecked_isa_dma:	0,					   \
+	use_clustering:		DISABLE_CLUSTERING			   \
 }
 
 #endif /* _QLOGICISP_H */

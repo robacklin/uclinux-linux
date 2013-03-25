@@ -5,14 +5,14 @@
  *
  *		Global definitions for the ANSI FDDI interface.
  *
- * Version:	@(#)if_fddi.h	1.0.1	09/16/96
+ * Version:	@(#)if_fddi.h	1.0.2	Sep 29 2004
  *
  * Author:	Lawrence V. Stefani, <stefani@lkg.dec.com>
  *
  *		if_fddi.h is based on previous if_ether.h and if_tr.h work by
  *			Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *			Donald Becker, <becker@super.org>
- *			Alan Cox, <alan@cymru.net>
+ *			Alan Cox, <alan@redhat.com>
  *			Steve Whitehouse, <gw7rrm@eeshack3.swan.ac.uk>
  *			Peter De Schrijver, <stud11@cc4.kuleuven.ac.be>
  *
@@ -103,16 +103,11 @@ struct fddihdr
 	} __attribute__ ((packed));
 
 /* Define FDDI statistics structure */
-struct fddi_statistics
-	{
-	__u32	rx_packets;				/* total packets received */
-	__u32	tx_packets;				/* total packets transmitted */
-	__u32	rx_errors;				/* bad packets received	*/
-	__u32	tx_errors;				/* packet transmit problems	*/
-	__u32	rx_dropped;				/* no space in linux buffers */
-	__u32	tx_dropped;				/* no space available in linux */
-	__u32	multicast;				/* multicast packets received */
-	__u32	transmit_collision;		/* always 0 for FDDI */
+struct fddi_statistics {
+
+	/* Generic statistics. */
+
+	struct net_device_stats gen;
 
 	/* Detailed FDDI statistics.  Adopted from RFC 1512 */
 

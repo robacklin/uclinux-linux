@@ -1,30 +1,20 @@
-/* $Id: avm_a1p.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
+/* $Id: avm_a1p.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * avm_a1p.c    low level stuff for the following AVM cards:
- *              A1 PCMCIA
- *		FRITZ!Card PCMCIA
- *		FRITZ!Card PCMCIA 2.0
+ * low level stuff for the following AVM cards:
+ * A1 PCMCIA
+ * FRITZ!Card PCMCIA
+ * FRITZ!Card PCMCIA 2.0
  *
- * Author       Carsten Paeth (calle@calle.in-berlin.de)
+ * Author       Carsten Paeth
+ * Copyright    by Carsten Paeth     <calle@calle.de>
  *
- * $Log: avm_a1p.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.3  1998/11/03 00:05:47  keil
- * certification related changes
- * fixed logging for smaller stack use
- *
- * Revision 1.1.2.2  1998/09/27 13:05:33  keil
- * Apply most changes from 2.1.X (HiSax 3.1)
- *
- * Revision 1.1.2.1  1998/07/15 14:43:26  calle
- * Support for AVM passive PCMCIA cards:
- *    A1 PCMCIA, FRITZ!Card PCMCIA and FRITZ!Card PCMCIA 2.0
- *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -67,7 +57,7 @@
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
 
-static const char *avm_revision = "$Revision: 1.1.1.1 $";
+static const char *avm_revision = "$Revision: 1.1.4.1 $";
 
 static inline u_char
 ReadISAC(struct IsdnCardState *cs, u_char offset)
@@ -195,7 +185,7 @@ static void
 avm_a1p_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, sval, stat = 0;
+	u_char val, sval;
 
 	if (!cs) {
 		printk(KERN_WARNING "AVM A1 PCMCIA: Spurious interrupt!\n");
@@ -206,35 +196,26 @@ avm_a1p_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "avm IntStatus %x", sval);
 		if (sval & ASL0_R_HSCX) {
                         val = ReadHSCX(cs, 1, HSCX_ISTA);
-			if (val) {
+			if (val)
 				hscx_int_main(cs, val);
-				stat |= 1;
-			}
 		}
 		if (sval & ASL0_R_ISAC) {
 			val = ReadISAC(cs, ISAC_ISTA);
-			if (val) {
+			if (val)
 				isac_interrupt(cs, val);
-				stat |= 2;
-			}
 		}
 	}
-	if (stat & 1) {
-		WriteHSCX(cs, 0, HSCX_MASK, 0xff);
-		WriteHSCX(cs, 1, HSCX_MASK, 0xff);
-		WriteHSCX(cs, 0, HSCX_MASK, 0x00);
-		WriteHSCX(cs, 1, HSCX_MASK, 0x00);
-	}
-	if (stat & 2) {
-		WriteISAC(cs, ISAC_MASK, 0xff);
-		WriteISAC(cs, ISAC_MASK, 0x00);
-	}
+	WriteHSCX(cs, 0, HSCX_MASK, 0xff);
+	WriteHSCX(cs, 1, HSCX_MASK, 0xff);
+	WriteISAC(cs, ISAC_MASK, 0xff);
+	WriteISAC(cs, ISAC_MASK, 0x00);
+	WriteHSCX(cs, 0, HSCX_MASK, 0x00);
+	WriteHSCX(cs, 1, HSCX_MASK, 0x00);
 }
 
 static int
 AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
-	int ret;
 	switch (mt) {
 		case CARD_RESET:
 			byteout(cs->hw.avm.cfg_reg+ASL0_OFFSET,0x00);
@@ -249,16 +230,8 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		        /* free_irq(cs->irq, cs); */
 			return 0;
 
-		case CARD_SETIRQ:
-			ret = request_irq(cs->irq, &avm_a1p_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs);
-			if (ret)
-				return ret;
-			byteout(cs->hw.avm.cfg_reg+ASL0_OFFSET,
-				ASL0_W_TDISABLE|ASL0_W_TRESET|ASL0_W_IRQENABLE);
-                        return 0;
-
 		case CARD_INIT:
+			byteout(cs->hw.avm.cfg_reg+ASL0_OFFSET,ASL0_W_TDISABLE|ASL0_W_TRESET|ASL0_W_IRQENABLE);
 			clear_pending_isac_ints(cs);
 			clear_pending_hscx_ints(cs);
 			inithscxisac(cs, 1);
@@ -276,8 +249,8 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return 0;
 }
 
-__initfunc(int
-setup_avm_a1_pcmcia(struct IsdnCard *card))
+int __devinit
+setup_avm_a1_pcmcia(struct IsdnCard *card)
 {
 	u_char model, vers;
 	struct IsdnCardState *cs = card->cs;
@@ -323,6 +296,7 @@ setup_avm_a1_pcmcia(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &AVM_card_msg;
+	cs->irq_func = &avm_a1p_interrupt;
 
 	ISACVersion(cs, "AVM A1 PCMCIA:");
 	if (HscxVersion(cs, "AVM A1 PCMCIA:")) {

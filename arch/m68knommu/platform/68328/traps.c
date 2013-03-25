@@ -6,17 +6,21 @@
  * No original Copyright holder listed,
  * Probabily original (C) Roman Zippel (assigned DJD, 1999)
  *
- * Copyright 1999-2000 D. Jeff Dionne, <jeff@rt-control.com>
+ * Copyright 2000-2001 Lineo, Inc. D. Jeff Dionne <jeff@uClinux.org>
+ * Copyright 1999-2000 D. Jeff Dionne, <jeff@uclinux.org>
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
+ *
+ * VZ Support/Fixes             Evan Stawnyczy <e@lineo.ca>
  */
 
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/errno.h>
+#include <linux/config.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
@@ -38,30 +42,41 @@ volatile unsigned int num_spurious;
 #define NUM_IRQ_NODES 16
 static irq_node_t nodes[NUM_IRQ_NODES];
 
-#if defined( CONFIG_M68328 ) || defined ( CONFIG_M68EZ328 )
+/* (es) */
+/* note: maybe EZ and VZ should just also define CONFIG_M68328? */
+#if defined( CONFIG_M68328 ) || defined ( CONFIG_M68EZ328 ) || defined ( CONFIG_M68VZ328 )
  
-asm ("
-	.global _start, _ramend
-	.section .romvec
- 
-e_vectors:
-	.long _ramend-4, _start, buserr, trap, trap, trap, trap, trap
-	.long trap, trap, trap, trap, trap, trap, trap, trap
-	.long trap, trap, trap, trap, trap, trap, trap, trap
-	.long trap, trap, trap, trap
-	.long trap, trap, trap, trap
-	/*.long inthandler, inthandler, inthandler, inthandler
-	.long inthandler4, inthandler, inthandler, inthandler   */
+asm (
+	"\t.global _start, __ramend\n"
+#ifdef CONFIG_RELOCATE
+	"\t.global __rom_start\n"
+#endif
+	"\t.section .romvec\n"
+"e_vectors:\n"
+	"\t.long __ramend-4,"
+#ifdef CONFIG_RELOCATE
+		"__rom_start,"
+#else
+		"_start,"
+#endif
+		"buserr, trap, trap, trap, trap, trap\n"
+	"\t.long trap, trap, trap, trap, trap, trap, trap, trap\n"
+	"\t.long trap, trap, trap, trap, trap, trap, trap, trap\n"
+	"\t.long trap, trap, trap, trap\n"
+	"\t.long trap, trap, trap, trap\n"
+	/*"\t.long inthandler, inthandler, inthandler, inthandler\n"
+	  "\t.long inthandler4, inthandler, inthandler, inthandler\n" */
 	/* TRAP #0-15 */
-	.long system_call, trap, trap, trap, trap, trap, trap, trap
-	.long trap, trap, trap, trap, trap, trap, trap, trap
-	.long 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-	.text
+	"\t.long system_call, trap, trap, trap, trap, trap, trap, trap\n"
+	"\t.long trap, trap, trap, trap, trap, trap, trap, trap\n"
+	"\t.long 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0\n"
+	"\t.text\n"
 
-ignore: rte
+"ignore: rte"
+	);
 
-");
-#endif /* CONFIG_M68328 || CONFIG_M68EZ328 */
+#endif /* CONFIG_M68328 || CONFIG_M68EZ328 || CONFIG_M68VZ328 */
+/* (/es) */
 
 /*
  * void init_IRQ(void)
@@ -110,56 +125,13 @@ irq_node_t *new_irq_node(void)
 int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
                 unsigned long flags, const char *devname, void *dev_id)
 {
-	if (irq & IRQ_MACHSPEC)
-		return mach_request_irq(IRQ_IDX(irq), handler, flags, devname, dev_id);
-
-	if (irq < IRQ1 || irq > IRQ7) {
-		printk("%s: Incorrect IRQ %d from %s\n", __FUNCTION__, irq, devname);
-		return -ENXIO;
-	}
-
-	if (!(irq_list[irq].flags & IRQ_FLG_STD)) {
-		if (irq_list[irq].flags & IRQ_FLG_LOCK) {
-			printk("%s: IRQ %d from %s is not replaceable\n",
-			       __FUNCTION__, irq, irq_list[irq].devname);
-			return -EBUSY;
-		}
-		if (flags & IRQ_FLG_REPLACE) {
-			printk("%s: %s can't replace IRQ %d from %s\n",
-			       __FUNCTION__, devname, irq, irq_list[irq].devname);
-			return -EBUSY;
-		}
-	}
-	irq_list[irq].handler = handler;
-	irq_list[irq].flags   = flags;
-	irq_list[irq].dev_id  = dev_id;
-	irq_list[irq].devname = devname;
-	return 0;
+    return mach_request_irq(irq, handler, flags, devname, dev_id);
 }
 
 void free_irq(unsigned int irq, void *dev_id)
 {
-	if (irq & IRQ_MACHSPEC) {
-		mach_free_irq(IRQ_IDX(irq), dev_id);
-		return;
-	}
-
-	if (irq < IRQ1 || irq > IRQ7) {
-		printk("%s: Incorrect IRQ %d\n", __FUNCTION__, irq);
-		return;
-	}
-
-	if (irq_list[irq].dev_id != dev_id)
-		printk("%s: Removing probably wrong IRQ %d from %s\n",
-		       __FUNCTION__, irq, irq_list[irq].devname);
-
-	if (mach_default_handler)
-		irq_list[irq].handler = (*mach_default_handler)[irq];
-	else
-		irq_list[irq].handler = NULL;
-	irq_list[irq].flags   = IRQ_FLG_STD;
-	irq_list[irq].dev_id  = NULL;
-	irq_list[irq].devname = default_names[irq];
+    mach_free_irq(irq, dev_id);
+    return;
 }
 
 /*
@@ -175,56 +147,37 @@ int probe_irq_off (unsigned long irqs)
 	return 0;
 }
 
-void enable_irq(unsigned int irq)
-{
-	if ((irq & IRQ_MACHSPEC) && mach_enable_irq)
-		mach_enable_irq(IRQ_IDX(irq));
-}
-
-void disable_irq(unsigned int irq)
-{
-	if ((irq & IRQ_MACHSPEC) && mach_disable_irq)
-		mach_disable_irq(IRQ_IDX(irq));
-}
-
 asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 {
-	/* give the machine specific code a crack at it first */
-	if (mach_process_int)
-		if (!mach_process_int(vec, fp))
-			return;
-
-	if (vec < VEC_SPUR || vec > VEC_INT7)
-		panic("No interrupt handler for vector %ld\n", vec);
-
-	vec -= VEC_SPUR;
-	kstat.interrupts[vec]++;
-	if (irq_list[vec].handler)
-		irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
-	else
-		panic("No interrupt handler for autovector %ld\n", vec);
+	if (vec >= VEC_INT1 && vec <= VEC_INT7) {
+                vec -= VEC_SPUR;
+                kstat.irqs[0][vec]++;
+                irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
+	} else {
+                if (mach_process_int)
+                        mach_process_int(vec, fp);
+                else
+                        panic("Can't process interrupt vector %ld\n", vec);
+                return;
+	}
 }
 
 int get_irq_list(char *buf)
 {
-	int i, len = 0;
+        int i, len = 0;
+	
+        /* autovector interrupts */
+        if (mach_default_handler) {
+                for (i = 0; i < SYS_IRQS; i++) {
+                       len += sprintf(buf+len, "auto %2d: %10u ", i,
+		       i ? kstat.irqs[0][i] : num_spurious);
+                       len += sprintf(buf+len, "  ");
+                       len += sprintf(buf+len, "%s\n", irq_list[i].devname);
 
-	/* autovector interrupts */
-	for (i = 0; i < SYS_IRQS; i++) {
-		if (irq_list[i].handler) {
-			len += sprintf(buf+len, "auto %2d: %10u ", i,
-			               i ? kstat.interrupts[i] : num_spurious);
-			if (irq_list[i].flags & IRQ_FLG_LOCK)
-				len += sprintf(buf+len, "L ");
-			else
-				len += sprintf(buf+len, "  ");
-			len += sprintf(buf+len, "%s\n", irq_list[i].devname);
 		}
-	}
-
-	if (mach_get_irq_list)
-		len += mach_get_irq_list(buf+len);
-	return len;
+        }
+        len += mach_get_irq_list(buf+len);
+        return len;
 }
 
 /*
@@ -255,9 +208,8 @@ void dump(struct pt_regs *fp)
 			(int) current->mm->end_data,
 			(int) current->mm->end_data,
 			(int) current->mm->brk);
-		printk("USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
-			(int) current->mm->start_stack,
-			(int) current->kernel_stack_page);
+		printk("USER-STACK=%08x\n\n",
+			(int) current->mm->start_stack);
 	}
 
 	printk("PC: %08lx\n", fp->pc);
@@ -267,7 +219,7 @@ void dump(struct pt_regs *fp)
 	printk("d4: %08lx    d5: %08lx    a0: %08lx    a1: %08lx\n",
 		fp->d4, fp->d5, fp->a0, fp->a1);
 	printk("\nUSP: %08x   TRAPFRAME: %08x\n",
-		rdusp(), (unsigned int) fp);
+			(unsigned int) rdusp(), (unsigned int) fp);
 
 	printk("\nCODE:");
 	tp = ((unsigned char *) fp->pc) - 0x20;
@@ -286,10 +238,11 @@ void dump(struct pt_regs *fp)
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n");
-	if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
+/*
+       if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
                 printk("(Possibly corrupted stack page??)\n");
 	printk("\n");
-
+*/
 	printk("\nUSER STACK:");
 	tp = (unsigned char *) (rdusp() - 0x10);
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x80); i += 4) {

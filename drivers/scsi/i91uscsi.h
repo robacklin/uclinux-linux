@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -54,6 +54,7 @@
  **************************************************************************/
 
 #include <linux/config.h>
+#include <linux/types.h>
 
 #define ULONG   unsigned long
 #define USHORT  unsigned short
@@ -64,11 +65,7 @@
 #define UBYTE   unsigned char
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32     unsigned int
-#else
-#define U32     unsigned long
-#endif
+#define U32     u32
 
 #ifndef NULL
 #define NULL     0		/* zero          */

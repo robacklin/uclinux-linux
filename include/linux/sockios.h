@@ -20,9 +20,14 @@
 
 #include <asm/sockios.h>
 
+/* Linux-specific socket ioctls */
+#define SIOCINQ		FIONREAD
+#define SIOCOUTQ	TIOCOUTQ
+
 /* Routing table calls. */
 #define SIOCADDRT	0x890B		/* add routing table entry	*/
 #define SIOCDELRT	0x890C		/* delete routing table entry	*/
+#define SIOCRTMSG	0x890D		/* call to routing system	*/
 
 /* Socket configuration controls. */
 #define SIOCGIFNAME	0x8910		/* get iface name		*/
@@ -44,22 +49,42 @@
 #define SIOCSIFMEM	0x8920		/* set memory address (BSD)	*/
 #define SIOCGIFMTU	0x8921		/* get MTU size			*/
 #define SIOCSIFMTU	0x8922		/* set MTU size			*/
-#define	SIOCSIFHWADDR	0x8924		/* set hardware address (NI)	*/
-#define SIOCGIFENCAP	0x8925		/* get/set slip encapsulation   */
+#define SIOCSIFNAME	0x8923		/* set interface name */
+#define	SIOCSIFHWADDR	0x8924		/* set hardware address 	*/
+#define SIOCGIFENCAP	0x8925		/* get/set encapsulations       */
 #define SIOCSIFENCAP	0x8926		
 #define SIOCGIFHWADDR	0x8927		/* Get hardware address		*/
 #define SIOCGIFSLAVE	0x8929		/* Driver slaving support	*/
 #define SIOCSIFSLAVE	0x8930
 #define SIOCADDMULTI	0x8931		/* Multicast address lists	*/
 #define SIOCDELMULTI	0x8932
+#define SIOCGIFINDEX	0x8933		/* name -> if_index mapping	*/
+#define SIOGIFINDEX	SIOCGIFINDEX	/* misprint compatibility :-)	*/
+#define SIOCSIFPFLAGS	0x8934		/* set/get extended flags set	*/
+#define SIOCGIFPFLAGS	0x8935
+#define SIOCDIFADDR	0x8936		/* delete PA address		*/
+#define	SIOCSIFHWBROADCAST	0x8937	/* set hardware broadcast addr	*/
+#define SIOCGIFCOUNT	0x8938		/* get number of devices */
 
 #define SIOCGIFBR	0x8940		/* Bridging support		*/
 #define SIOCSIFBR	0x8941		/* Set bridging options 	*/
 
+#define SIOCGIFTXQLEN	0x8942		/* Get the tx queue length	*/
+#define SIOCSIFTXQLEN	0x8943		/* Set the tx queue length 	*/
+
+#define SIOCGIFDIVERT	0x8944		/* Frame diversion support */
+#define SIOCSIFDIVERT	0x8945		/* Set frame diversion options */
+
+#define SIOCETHTOOL	0x8946		/* Ethtool interface		*/
+
+#define SIOCGMIIPHY	0x8947		/* Get address of MII PHY in use. */
+#define SIOCGMIIREG	0x8948		/* Read MII PHY register.	*/
+#define SIOCSMIIREG	0x8949		/* Write MII PHY register.	*/
+
+#define SIOCWANDEV	0x894A		/* get/set netdev parameters	*/
+
 /* ARP cache control calls. */
-#define OLD_SIOCDARP	0x8950		/* old delete ARP table entry	*/
-#define OLD_SIOCGARP	0x8951		/* old get ARP table entry	*/
-#define OLD_SIOCSARP	0x8952		/* old set ARP table entry	*/
+		    /*  0x8950 - 0x8952  * obsolete calls, don't re-use */
 #define SIOCDARP	0x8953		/* delete ARP table entry	*/
 #define SIOCGARP	0x8954		/* get ARP table entry		*/
 #define SIOCSARP	0x8955		/* set ARP table entry		*/
@@ -79,6 +104,18 @@
 #define SIOCADDDLCI	0x8980		/* Create new DLCI device	*/
 #define SIOCDELDLCI	0x8981		/* Delete DLCI device		*/
 
+#define SIOCGIFVLAN	0x8982		/* 802.1Q VLAN support		*/
+#define SIOCSIFVLAN	0x8983		/* Set 802.1Q VLAN options 	*/
+
+/* bonding calls */
+
+#define SIOCBONDENSLAVE	0x8990		/* enslave a device to the bond */
+#define SIOCBONDRELEASE 0x8991		/* release a slave from the bond*/
+#define SIOCBONDSETHWADDR      0x8992	/* set the hw addr of the bond  */
+#define SIOCBONDSLAVEINFOQUERY 0x8993   /* rtn info about slave state   */
+#define SIOCBONDINFOQUERY      0x8994	/* rtn info about bond state    */
+#define SIOCBONDCHANGEACTIVE   0x8995   /* update to a new active slave */
+			
 /* Device private ioctl calls */
 
 /*
@@ -86,6 +123,8 @@
  *	vector. Each device should include this file and redefine these names
  *	as their own. Because these are device dependent it is a good idea
  *	_NOT_ to issue them to random objects and hope.
+ *
+ *	THESE IOCTLS ARE _DEPRECATED_ AND WILL DISAPPEAR IN 2.5.X -DaveM
  */
  
 #define SIOCDEVPRIVATE	0x89F0	/* to 89FF */

@@ -1,53 +1,66 @@
-/* Support for the latches on the old Archimedes which control the floppy,
- * hard disc and printer
+/*
+ *  linux/arch/arm/kernel/oldlatches.c
  *
- * (c) David Alan Gilbert 1995/1996
+ *  Copyright (C) David Alan Gilbert 1995/1996,2000
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Support for the latches on the old Archimedes which control the floppy,
+ *  hard disc and printer
  */
+#include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
+#include <linux/sched.h>
 
 #include <asm/io.h>
 #include <asm/hardware.h>
+#include <asm/mach-types.h>
+#include <asm/arch/oldlatches.h>
 
-#ifdef LATCHAADDR
-/*
- * They are static so that everyone who accesses them has to go through here
- */
-static unsigned char LatchACopy;
+static unsigned char latch_a_copy;
+static unsigned char latch_b_copy;
 
 /* newval=(oldval & ~mask)|newdata */
 void oldlatch_aupdate(unsigned char mask,unsigned char newdata)
 {
-    LatchACopy=(LatchACopy & ~mask)|newdata;
-    outb(LatchACopy, LATCHAADDR);
-#ifdef DEBUG
-    printk("oldlatch_A:0x%2x\n",LatchACopy);
-#endif
+	if (machine_is_archimedes()) {
+		latch_a_copy = (latch_a_copy & ~mask) | newdata;
 
+		printk("Latch: A = 0x%02x\n", latch_a_copy);
+
+		__raw_writeb(latch_a_copy, LATCHA_BASE);
+	} else
+		BUG();
 }
-#endif
 
-#ifdef LATCHBADDR
-static unsigned char LatchBCopy;
 
 /* newval=(oldval & ~mask)|newdata */
 void oldlatch_bupdate(unsigned char mask,unsigned char newdata)
 {
-    LatchBCopy=(LatchBCopy & ~mask)|newdata;
-    outb(LatchBCopy, LATCHBADDR);
-#ifdef DEBUG
-    printk("oldlatch_B:0x%2x\n",LatchBCopy);
-#endif
-}
-#endif
+	if (machine_is_archimedes()) {
+		latch_b_copy = (latch_b_copy & ~mask) | newdata;
 
-void oldlatch_init(void)
-{
-    printk("oldlatch: init\n");
-#ifdef LATCHAADDR
-    oldlatch_aupdate(0xff,0xff);
-#endif
-#ifdef LATCHBADDR
-    oldlatch_bupdate(0xff,0x8); /* Thats no FDC reset...*/
-#endif
-    return ;
+		printk("Latch: B = 0x%02x\n", latch_b_copy);
+
+		__raw_writeb(latch_b_copy, LATCHB_BASE);
+	} else
+		BUG();
 }
+
+static int __init oldlatch_init(void)
+{
+	if (machine_is_archimedes()) {
+		oldlatch_aupdate(0xff, 0xff);
+		/* Thats no FDC reset...*/
+		oldlatch_bupdate(0xff, LATCHB_FDCRESET);
+	}
+	return 0;
+}
+
+__initcall(oldlatch_init);
+
+EXPORT_SYMBOL(oldlatch_aupdate);
+EXPORT_SYMBOL(oldlatch_bupdate);

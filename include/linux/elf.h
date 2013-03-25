@@ -1,13 +1,26 @@
 #ifndef _LINUX_ELF_H
 #define _LINUX_ELF_H
 
+#include <linux/sched.h>
+#include <linux/types.h>
 #include <asm/elf.h>
 
-typedef unsigned long	Elf32_Addr;
-typedef unsigned short	Elf32_Half;
-typedef unsigned long	Elf32_Off;
-typedef long		Elf32_Sword;
-typedef unsigned long	Elf32_Word;
+/* 32-bit ELF base types. */
+typedef __u32	Elf32_Addr;
+typedef __u16	Elf32_Half;
+typedef __u32	Elf32_Off;
+typedef __s32	Elf32_Sword;
+typedef __u32	Elf32_Word;
+
+/* 64-bit ELF base types. */
+typedef __u64	Elf64_Addr;
+typedef __u16	Elf64_Half;
+typedef __s16	Elf64_SHalf;
+typedef __u64	Elf64_Off;
+typedef __s32	Elf64_Sword;
+typedef __u32	Elf64_Word;
+typedef __u64	Elf64_Xword;
+typedef __s64	Elf64_Sxword;
 
 /* These constants are for the segment types stored in the image headers */
 #define PT_NULL    0
@@ -17,8 +30,55 @@ typedef unsigned long	Elf32_Word;
 #define PT_NOTE    4
 #define PT_SHLIB   5
 #define PT_PHDR    6
+#define PT_TLS     7               /* Thread local storage segment */
+#define PT_LOOS    0x60000000      /* OS-specific */
+#define PT_HIOS    0x6fffffff      /* OS-specific */
 #define PT_LOPROC  0x70000000
 #define PT_HIPROC  0x7fffffff
+#define PT_GNU_EH_FRAME		0x6474e550
+#define PT_MIPS_REGINFO		0x70000000
+#define PT_MIPS_OPTIONS		0x70000001
+
+/* Flags in the e_flags field of the header */
+#define EF_MIPS_NOREORDER 0x00000001
+#define EF_MIPS_PIC       0x00000002
+#define EF_MIPS_CPIC      0x00000004
+#define EF_MIPS_ABI2      0x00000020
+#define EF_MIPS_OPTIONS_FIRST 0x00000080
+#define EF_MIPS_32BITMODE 0x00000100
+#define EF_MIPS_ABI       0x0000f000
+#define EF_MIPS_ARCH      0xf0000000
+
+#define EF_FRV_GPR_MASK         0x00000003 /* mask for # of gprs */
+#define EF_FRV_GPR32		0x00000001 /* Only uses GR on 32-register */
+#define EF_FRV_GPR64		0x00000002 /* Only uses GR on 64-register */
+#define EF_FRV_FPR_MASK         0x0000000c /* mask for # of fprs */
+#define EF_FRV_FPR32		0x00000004 /* Only uses FR on 32-register */
+#define EF_FRV_FPR64		0x00000008 /* Only uses FR on 64-register */
+#define EF_FRV_FPR_NONE		0x0000000C /* Uses software floating-point */
+#define EF_FRV_DWORD_MASK       0x00000030 /* mask for dword support */
+#define EF_FRV_DWORD_YES	0x00000010 /* Assumes stack aligned to 8-byte boundaries. */
+#define EF_FRV_DWORD_NO		0x00000020 /* Assumes stack aligned to 4-byte boundaries. */
+#define EF_FRV_DOUBLE		0x00000040 /* Uses double instructions. */
+#define EF_FRV_MEDIA		0x00000080 /* Uses media instructions. */
+#define EF_FRV_PIC		0x00000100 /* Uses position independent code. */
+#define EF_FRV_NON_PIC_RELOCS	0x00000200 /* Does not use position Independent code. */
+#define EF_FRV_MULADD           0x00000400 /* -mmuladd */
+#define EF_FRV_BIGPIC           0x00000800 /* -fPIC */
+#define EF_FRV_LIBPIC           0x00001000 /* -mlibrary-pic */
+#define EF_FRV_G0               0x00002000 /* -G 0, no small data ptr */
+#define EF_FRV_NOPACK           0x00004000 /* -mnopack */
+#define EF_FRV_FDPIC            0x00008000 /* -mfdpic */
+#define EF_FRV_CPU_MASK         0xff000000 /* specific cpu bits */
+#define EF_FRV_CPU_GENERIC	0x00000000 /* Set CPU type is FR-V */
+#define EF_FRV_CPU_FR500	0x01000000 /* Set CPU type is FR500 */
+#define EF_FRV_CPU_FR300	0x02000000 /* Set CPU type is FR300 */
+#define EF_FRV_CPU_SIMPLE       0x03000000 /* SIMPLE */
+#define EF_FRV_CPU_TOMCAT       0x04000000 /* Tomcat, FR500 prototype */
+#define EF_FRV_CPU_FR400	0x05000000 /* Set CPU type is FR400 */
+#define EF_FRV_CPU_FR550        0x06000000 /* Set CPU type is FR550 */
+#define EF_FRV_CPU_FR405	0x07000000 /* Set CPU type is FR405 */
+#define EF_FRV_CPU_FR450	0x08000000 /* Set CPU type is FR450 */
 
 /* These constants define the different elf file types */
 #define ET_NONE   0
@@ -26,8 +86,8 @@ typedef unsigned long	Elf32_Word;
 #define ET_EXEC   2
 #define ET_DYN    3
 #define ET_CORE   4
-#define ET_LOPROC 5
-#define ET_HIPROC 6
+#define ET_LOPROC 0xff00
+#define ET_HIPROC 0xffff
 
 /* These constants define the various ELF target machines */
 #define EM_NONE  0
@@ -41,15 +101,31 @@ typedef unsigned long	Elf32_Word;
 
 #define EM_MIPS		8	/* MIPS R3000 (officially, big-endian only) */
 
-#define EM_MIPS_RS4_BE 10	/* MIPS R4000 big-endian */
-
-#define EM_SPARC64     11	/* SPARC v9 (not official) 64-bit */
+#define EM_MIPS_RS3_LE 10	/* MIPS R3000 little-endian */
 
 #define EM_PARISC      15	/* HPPA */
 
 #define EM_SPARC32PLUS 18	/* Sun's "v8plus" */
 
 #define EM_PPC	       20	/* PowerPC */
+#define EM_PPC64       21       /* PowerPC64 */
+
+#define EM_SH	       42	/* SuperH */
+
+#define EM_SPARCV9     43	/* SPARC v9 64-bit */
+
+#define EM_H8_300H     47       /* Hitachi H8/300H */ 
+#define EM_H8_S        48       /* Hitachi H8S */
+
+#define EM_IA_64	50	/* HP/Intel IA-64 */
+
+#define EM_X86_64	62	/* AMD x86-64 */
+
+#define EM_S390		22	/* IBM S/390 */
+
+#define EM_CRIS         76      /* Axis Communications 32-bit embedded processor */
+
+#define EM_V850		87	/* NEC v850 */
 
 /*
  * This is an interim value that we will use until the committee comes
@@ -57,6 +133,15 @@ typedef unsigned long	Elf32_Word;
  */
 #define EM_ALPHA	0x9026
 
+/*
+ * This is the old interim value for S/390 architecture
+ */
+#define EM_S390_OLD     0xA390
+
+#define EM_NIOS32	0xfebb		/* Altera NIOS 32 */
+#define EM_NIOS		EM_NIOS32	/* Altera NIOS */
+
+#define EM_FRV		0x5441		/* Fujitsu FR-V */
 
 /* This is the info that is needed to parse the dynamic section of the file */
 #define DT_NULL		0
@@ -85,6 +170,25 @@ typedef unsigned long	Elf32_Word;
 #define DT_JMPREL	23
 #define DT_LOPROC	0x70000000
 #define DT_HIPROC	0x7fffffff
+#define DT_MIPS_RLD_VERSION	0x70000001
+#define DT_MIPS_TIME_STAMP	0x70000002
+#define DT_MIPS_ICHECKSUM	0x70000003
+#define DT_MIPS_IVERSION	0x70000004
+#define DT_MIPS_FLAGS		0x70000005
+  #define RHF_NONE		  0
+  #define RHF_HARDWAY		  1
+  #define RHF_NOTPOT		  2
+#define DT_MIPS_BASE_ADDRESS	0x70000006
+#define DT_MIPS_CONFLICT	0x70000008
+#define DT_MIPS_LIBLIST		0x70000009
+#define DT_MIPS_LOCAL_GOTNO	0x7000000a
+#define DT_MIPS_CONFLICTNO	0x7000000b
+#define DT_MIPS_LIBLISTNO	0x70000010
+#define DT_MIPS_SYMTABNO	0x70000011
+#define DT_MIPS_UNREFEXTNO	0x70000012
+#define DT_MIPS_GOTSYM		0x70000013
+#define DT_MIPS_HIPAGENO	0x70000014
+#define DT_MIPS_RLD_MAP		0x70000016
 
 /* This info is needed when parsing the symbol table */
 #define STB_LOCAL  0
@@ -117,7 +221,9 @@ typedef unsigned long	Elf32_Word;
 #define AT_EUID   12	/* effective uid */
 #define AT_GID    13	/* real gid */
 #define AT_EGID   14	/* effective gid */
-
+#define AT_PLATFORM 15  /* string identifying CPU for optimizations */
+#define AT_HWCAP  16    /* arch dependent hints at CPU capabilities */
+#define AT_CLKTCK 17	/* frequency at which times() increments */
 
 typedef struct dynamic{
   Elf32_Sword d_tag;
@@ -128,10 +234,10 @@ typedef struct dynamic{
 } Elf32_Dyn;
 
 typedef struct {
-  unsigned long long d_tag;		/* entry tag value */
+  Elf64_Sxword d_tag;		/* entry tag value */
   union {
-    unsigned long long d_val;
-    unsigned long long d_ptr;
+    Elf64_Xword d_val;
+    Elf64_Addr d_ptr;
   } d_un;
 } Elf64_Dyn;
 
@@ -152,6 +258,108 @@ typedef struct {
 #define R_386_GOTPC	10
 #define R_386_NUM	11
 
+#define R_MIPS_NONE		0
+#define R_MIPS_16		1
+#define R_MIPS_32		2
+#define R_MIPS_REL32		3
+#define R_MIPS_26		4
+#define R_MIPS_HI16		5
+#define R_MIPS_LO16		6
+#define R_MIPS_GPREL16		7
+#define R_MIPS_LITERAL		8
+#define R_MIPS_GOT16		9
+#define R_MIPS_PC16		10
+#define R_MIPS_CALL16		11
+#define R_MIPS_GPREL32		12
+/* The remaining relocs are defined on Irix, although they are not
+   in the MIPS ELF ABI.  */
+#define R_MIPS_UNUSED1		13
+#define R_MIPS_UNUSED2		14
+#define R_MIPS_UNUSED3		15
+#define R_MIPS_SHIFT5		16
+#define R_MIPS_SHIFT6		17
+#define R_MIPS_64		18
+#define R_MIPS_GOT_DISP		19
+#define R_MIPS_GOT_PAGE		20
+#define R_MIPS_GOT_OFST		21
+/*
+ * The following two relocation types are specified in the MIPS ABI
+ * conformance guide version 1.2 but not yet in the psABI.
+ */
+#define R_MIPS_GOTHI16		22
+#define R_MIPS_GOTLO16		23
+#define R_MIPS_SUB		24
+#define R_MIPS_INSERT_A		25
+#define R_MIPS_INSERT_B		26
+#define R_MIPS_DELETE		27
+#define R_MIPS_HIGHER		28
+#define R_MIPS_HIGHEST		29
+/*
+ * The following two relocation types are specified in the MIPS ABI
+ * conformance guide version 1.2 but not yet in the psABI.
+ */
+#define R_MIPS_CALLHI16		30
+#define R_MIPS_CALLLO16		31
+/*
+ * This range is reserved for vendor specific relocations.
+ */
+#define R_MIPS_LOVENDOR		100
+#define R_MIPS_HIVENDOR		127
+
+
+/*
+ * Sparc ELF relocation types
+ */
+#define	R_SPARC_NONE		0
+#define	R_SPARC_8		1
+#define	R_SPARC_16		2
+#define	R_SPARC_32		3
+#define	R_SPARC_DISP8		4
+#define	R_SPARC_DISP16		5
+#define	R_SPARC_DISP32		6
+#define	R_SPARC_WDISP30		7
+#define	R_SPARC_WDISP22		8
+#define	R_SPARC_HI22		9
+#define	R_SPARC_22		10
+#define	R_SPARC_13		11
+#define	R_SPARC_LO10		12
+#define	R_SPARC_GOT10		13
+#define	R_SPARC_GOT13		14
+#define	R_SPARC_GOT22		15
+#define	R_SPARC_PC10		16
+#define	R_SPARC_PC22		17
+#define	R_SPARC_WPLT30		18
+#define	R_SPARC_COPY		19
+#define	R_SPARC_GLOB_DAT	20
+#define	R_SPARC_JMP_SLOT	21
+#define	R_SPARC_RELATIVE	22
+#define	R_SPARC_UA32		23
+#define R_SPARC_PLT32		24
+#define R_SPARC_HIPLT22		25
+#define R_SPARC_LOPLT10		26
+#define R_SPARC_PCPLT32		27
+#define R_SPARC_PCPLT22		28
+#define R_SPARC_PCPLT10		29
+#define R_SPARC_10		30
+#define R_SPARC_11		31
+#define R_SPARC_WDISP16		40
+#define R_SPARC_WDISP19		41
+#define R_SPARC_7		43
+#define R_SPARC_5		44
+#define R_SPARC_6		45
+
+/* Bits present in AT_HWCAP, primarily for Sparc32.  */
+
+#define HWCAP_SPARC_FLUSH       1    /* CPU supports flush instruction. */
+#define HWCAP_SPARC_STBAR       2
+#define HWCAP_SPARC_SWAP        4
+#define HWCAP_SPARC_MULDIV      8
+#define HWCAP_SPARC_V9		16
+#define HWCAP_SPARC_ULTRA3	32
+
+/*
+ * 68k ELF relocation types
+ */
 #define R_68K_NONE	0
 #define R_68K_32	1
 #define R_68K_16	2
@@ -176,14 +384,51 @@ typedef struct {
 #define R_68K_JMP_SLOT	21
 #define R_68K_RELATIVE	22
 
+/*
+ * Alpha ELF relocation types
+ */
+#define R_ALPHA_NONE            0       /* No reloc */
+#define R_ALPHA_REFLONG         1       /* Direct 32 bit */
+#define R_ALPHA_REFQUAD         2       /* Direct 64 bit */
+#define R_ALPHA_GPREL32         3       /* GP relative 32 bit */
+#define R_ALPHA_LITERAL         4       /* GP relative 16 bit w/optimization */
+#define R_ALPHA_LITUSE          5       /* Optimization hint for LITERAL */
+#define R_ALPHA_GPDISP          6       /* Add displacement to GP */
+#define R_ALPHA_BRADDR          7       /* PC+4 relative 23 bit shifted */
+#define R_ALPHA_HINT            8       /* PC+4 relative 16 bit shifted */
+#define R_ALPHA_SREL16          9       /* PC relative 16 bit */
+#define R_ALPHA_SREL32          10      /* PC relative 32 bit */
+#define R_ALPHA_SREL64          11      /* PC relative 64 bit */
+#define R_ALPHA_OP_PUSH         12      /* OP stack push */
+#define R_ALPHA_OP_STORE        13      /* OP stack pop and store */
+#define R_ALPHA_OP_PSUB         14      /* OP stack subtract */
+#define R_ALPHA_OP_PRSHIFT      15      /* OP stack right shift */
+#define R_ALPHA_GPVALUE         16
+#define R_ALPHA_GPRELHIGH       17
+#define R_ALPHA_GPRELLOW        18
+#define R_ALPHA_IMMED_GP_16     19
+#define R_ALPHA_IMMED_GP_HI32   20
+#define R_ALPHA_IMMED_SCN_HI32  21
+#define R_ALPHA_IMMED_BR_HI32   22
+#define R_ALPHA_IMMED_LO32      23
+#define R_ALPHA_COPY            24      /* Copy symbol at runtime */
+#define R_ALPHA_GLOB_DAT        25      /* Create GOT entry */
+#define R_ALPHA_JMP_SLOT        26      /* Create PLT entry */
+#define R_ALPHA_RELATIVE        27      /* Adjust by program base */
+
+/* Legal values for e_flags field of Elf64_Ehdr.  */
+
+#define EF_ALPHA_32BIT		1	/* All addresses are below 2GB */
+
+
 typedef struct elf32_rel {
   Elf32_Addr	r_offset;
   Elf32_Word	r_info;
 } Elf32_Rel;
 
 typedef struct elf64_rel {
-  unsigned long long r_offset;	/* Location at which to apply the action */
-  unsigned long long r_info;	/* index and type of relocation */
+  Elf64_Addr r_offset;	/* Location at which to apply the action */
+  Elf64_Xword r_info;	/* index and type of relocation */
 } Elf64_Rel;
 
 typedef struct elf32_rela{
@@ -193,9 +438,9 @@ typedef struct elf32_rela{
 } Elf32_Rela;
 
 typedef struct elf64_rela {
-  unsigned long long r_offset;	/* Location at which to apply the action */
-  unsigned long long r_info;	/* index and type of relocation */
-  unsigned long long r_addend;	/* Constant addend used to compute value */
+  Elf64_Addr r_offset;	/* Location at which to apply the action */
+  Elf64_Xword r_info;	/* index and type of relocation */
+  Elf64_Sxword r_addend;	/* Constant addend used to compute value */
 } Elf64_Rela;
 
 typedef struct elf32_sym{
@@ -208,12 +453,12 @@ typedef struct elf32_sym{
 } Elf32_Sym;
 
 typedef struct elf64_sym {
-  unsigned int	st_name;		/* Symbol name, index in string tbl */
-  unsigned char	st_info;		/* Type and binding attributes */
-  unsigned char	st_other;		/* No defined meaning, 0 */
-  unsigned short st_shndx;		/* Associated section index */
-  unsigned long long st_value;		/* Value of the symbol */
-  unsigned long long st_size;		/* Associated symbol size */
+  Elf64_Word st_name;		/* Symbol name, index in string tbl */
+  unsigned char	st_info;	/* Type and binding attributes */
+  unsigned char	st_other;	/* No defined meaning, 0 */
+  Elf64_Half st_shndx;		/* Associated section index */
+  Elf64_Addr st_value;		/* Value of the symbol */
+  Elf64_Xword st_size;		/* Associated symbol size */
 } Elf64_Sym;
 
 
@@ -238,19 +483,19 @@ typedef struct elf32_hdr{
 
 typedef struct elf64_hdr {
   unsigned char	e_ident[16];		/* ELF "magic number" */
-  short int e_type;
-  short unsigned int e_machine;
-  int   e_version;
-  unsigned long long e_entry;		/* Entry point virtual address */
-  unsigned long long e_phoff;		/* Program header table file offset */
-  unsigned long long e_shoff;		/* Section header table file offset */
-  int   e_flags;
-  short int e_ehsize;
-  short int e_phentsize;
-  short int e_phnum;
-  short int e_shentsize;
-  short int e_shnum;
-  short int e_shstrndx;
+  Elf64_Half e_type;
+  Elf64_Half e_machine;
+  Elf64_Word e_version;
+  Elf64_Addr e_entry;		/* Entry point virtual address */
+  Elf64_Off e_phoff;		/* Program header table file offset */
+  Elf64_Off e_shoff;		/* Section header table file offset */
+  Elf64_Word e_flags;
+  Elf64_Half e_ehsize;
+  Elf64_Half e_phentsize;
+  Elf64_Half e_phnum;
+  Elf64_Half e_shentsize;
+  Elf64_Half e_shnum;
+  Elf64_Half e_shstrndx;
 } Elf64_Ehdr;
 
 /* These constants define the permissions on sections in the program
@@ -271,14 +516,14 @@ typedef struct elf32_phdr{
 } Elf32_Phdr;
 
 typedef struct elf64_phdr {
-  int p_type;
-  int p_flags;
-  unsigned long long p_offset;		/* Segment file offset */
-  unsigned long long p_vaddr;		/* Segment virtual address */
-  unsigned long long p_paddr;		/* Segment physical address */
-  unsigned long long p_filesz;		/* Segment size in file */
-  unsigned long long p_memsz;		/* Segment size in memory */
-  unsigned long long p_align;		/* Segment alignment, file & memory */
+  Elf64_Word p_type;
+  Elf64_Word p_flags;
+  Elf64_Off p_offset;		/* Segment file offset */
+  Elf64_Addr p_vaddr;		/* Segment virtual address */
+  Elf64_Addr p_paddr;		/* Segment physical address */
+  Elf64_Xword p_filesz;		/* Segment size in file */
+  Elf64_Xword p_memsz;		/* Segment size in memory */
+  Elf64_Xword p_align;		/* Segment alignment, file & memory */
 } Elf64_Phdr;
 
 /* sh_type */
@@ -299,12 +544,17 @@ typedef struct elf64_phdr {
 #define SHT_HIPROC	0x7fffffff
 #define SHT_LOUSER	0x80000000
 #define SHT_HIUSER	0xffffffff
+#define SHT_MIPS_LIST		0x70000000
+#define SHT_MIPS_CONFLICT	0x70000002
+#define SHT_MIPS_GPTAB		0x70000003
+#define SHT_MIPS_UCODE		0x70000004
 
 /* sh_flags */
 #define SHF_WRITE	0x1
 #define SHF_ALLOC	0x2
 #define SHF_EXECINSTR	0x4
 #define SHF_MASKPROC	0xf0000000
+#define SHF_MIPS_GPREL	0x10000000
 
 /* special section indexes */
 #define SHN_UNDEF	0
@@ -314,6 +564,7 @@ typedef struct elf64_phdr {
 #define SHN_ABS		0xfff1
 #define SHN_COMMON	0xfff2
 #define SHN_HIRESERVE	0xffff
+#define SHN_MIPS_ACCOMON	0xff00
  
 typedef struct {
   Elf32_Word	sh_name;
@@ -329,16 +580,16 @@ typedef struct {
 } Elf32_Shdr;
 
 typedef struct elf64_shdr {
-  unsigned int	sh_name;		/* Section name, index in string tbl */
-  unsigned int	sh_type;		/* Type of section */
-  unsigned long long sh_flags;		/* Miscellaneous section attributes */
-  unsigned long long sh_addr;		/* Section virtual addr at execution */
-  unsigned long long sh_offset;		/* Section file offset */
-  unsigned long long sh_size;		/* Size of section in bytes */
-  unsigned int	sh_link;		/* Index of another section */
-  unsigned int	sh_info;		/* Additional section information */
-  unsigned long long sh_addralign;	/* Section alignment */
-  unsigned long long sh_entsize;	/* Entry size if section holds table */
+  Elf64_Word sh_name;		/* Section name, index in string tbl */
+  Elf64_Word sh_type;		/* Type of section */
+  Elf64_Xword sh_flags;		/* Miscellaneous section attributes */
+  Elf64_Addr sh_addr;		/* Section virtual addr at execution */
+  Elf64_Off sh_offset;		/* Section file offset */
+  Elf64_Xword sh_size;		/* Size of section in bytes */
+  Elf64_Word sh_link;		/* Index of another section */
+  Elf64_Word sh_info;		/* Additional section information */
+  Elf64_Xword sh_addralign;	/* Section alignment */
+  Elf64_Xword sh_entsize;	/* Entry size if section holds table */
 } Elf64_Shdr;
 
 #define	EI_MAG0		0		/* e_ident[] indexes */
@@ -375,6 +626,8 @@ typedef struct elf64_shdr {
 #define NT_PRFPREG	2
 #define NT_PRPSINFO	3
 #define NT_TASKSTRUCT	4
+#define NT_PRXFPREG     0x46e62b7f      /* copied from gdb5.1/include/elf/common.h */
+
 
 /* Note header in a PT_NOTE section */
 typedef struct elf32_note {
@@ -384,23 +637,11 @@ typedef struct elf32_note {
 } Elf32_Nhdr;
 
 /* Note header in a PT_NOTE section */
-/*
- * For now we use the 32 bit version of the structure until we figure
- * out whether we need anything better.  Note - on the Alpha, "unsigned int"
- * is only 32 bits.
- */
 typedef struct elf64_note {
-  unsigned int	n_namesz;	/* Name size */
-  unsigned int	n_descsz;	/* Content size */
-  unsigned int	n_type;		/* Content type */
+  Elf64_Word n_namesz;	/* Name size */
+  Elf64_Word n_descsz;	/* Content size */
+  Elf64_Word n_type;	/* Content type */
 } Elf64_Nhdr;
-
-#ifdef __mc68000__
-#define ELF_START_MMAP 0xC0000000
-#endif
-#ifdef __i386__
-#define ELF_START_MMAP 0x80000000
-#endif
 
 #if ELF_CLASS == ELFCLASS32
 
@@ -418,5 +659,39 @@ extern Elf64_Dyn _DYNAMIC [];
 
 #endif
 
+
+/* Altera NIOS specific */
+#define R_NIOS_NONE		0
+#define R_NIOS_32		1	/* A 32 bit absolute relocation.*/
+#define R_NIOS_LO16_LO5		2	/* A LO-16 5 bit absolute relocation.  */
+#define R_NIOS_LO16_HI11	3	/* A LO-16 top 11 bit absolute relocation.  */
+#define R_NIOS_HI16_LO5		4	/* A HI-16 5 bit absolute relocation.  */
+#define R_NIOS_HI16_HI11	5	/* A HI-16 top 11 bit absolute relocation.  */
+#define R_NIOS_PCREL6		6	/* A 6 bit relative relocation.  */
+#define R_NIOS_PCREL8		7	/* An 8 bit relative relocation.  */
+#define R_NIOS_PCREL11		8	/* An 11 bit relative relocation.  */
+#define R_NIOS_16		9	/* A 16 bit absolute relocation.  */
+#define R_NIOS_H_LO5		10	/* Low 5-bits of absolute relocation in halfwords.  */
+#define R_NIOS_H_HI11		11	/* Top 11 bits of 16-bit absolute relocation in halfwords.  */
+#define R_NIOS_H_XLO5		12	/* Low 5 bits of top 16-bits of 32-bit absolute relocation in halfwords.  */
+#define R_NIOS_H_XHI11		13	/* Top 11 bits of top 16-bits of 32-bit absolute relocation in halfwords.  */
+#define R_NIOS_H_16		14	/* Half-word @h value */
+#define R_NIOS_H_32		15	/* Word @h value */
+#define R_NIOS_GNU_VTINHERIT	200	/* GNU extension to record C++ vtable hierarchy */
+#define R_NIOS_GNU_VTENTRY	201	/* GNU extension to record C++ vtable member usage */
+#define R_NIOS_NUM		202
+
+/* Fujitsu FR-V specific */
+#define R_FRV_NONE		0 /* none */
+#define R_FRV_32		1 /* 32 bit relocation. */
+#define R_FRV_LABEL16		2 /* Used with Bicc instructions. */
+#define R_FRV_LABEL24		3 /* Used with CALL instructions. */
+#define R_FRV_LO16		4 /* Used with SETLO and setlos. */
+#define R_FRV_HI16		5 /* Used with SETHI. */
+#define R_FRV_GPREL12		6 /* Used with immediate instructions for gp(GR16,GR17)-relative
+				   * references. */
+#define R_FRV_GPREL32		7 /* - */
+#define R_FRV_GPRELHI		8 /* Used with sethi for gp(GR16,GR17)-relative references. */
+#define R_FRV_GPRELLO		9 /* Used with setlo for gp(GR16,GR17)-relative references. */
 
 #endif /* _LINUX_ELF_H */

@@ -22,22 +22,30 @@
 #include <linux/timex.h>
 
 #if defined(CONFIG_H83007) || defined(CONFIG_H83068)
-#define TMR8CMA2 0x00ffff94
-#define TMR8TCSR2 0x00ffff92
-#define TMR8TCNT2 0x00ffff90
+#include <asm/regs306x.h>
+
+#define CMFA 6
 
 int platform_timer_setup(void (*timer_int)(int, void *, struct pt_regs *))
 {
-	outb(CONFIG_CLK_FREQ*10/8192,TMR8CMA2);
-	outb(0x00,TMR8TCSR2);
-	request_irq(40,timer_int,IRQ_FLG_FAST,"timer",0);
-	outb(0x40|0x08|0x03,TMR8TCNT2);
+	outb(CONFIG_CLK_FREQ*10/8192,TCORA2);
+	outb(0x00,_8TCSR2);
+	request_irq(40,timer_int,0,"timer",0);
+	outb(0x40|0x08|0x03,_8TCR2);
+	return 0;
 }
 
 void platform_timer_eoi(void)
 {
-        __asm__("bclr #6,@0xffff92:8");
+	*(unsigned char *)_8TCSR2 &= ~(1 << CMFA);
 }
+
+#define CNT_PER_USEC (1000000 / (CONFIG_CLK_FREQ * 1000 / 8192))
+unsigned long platform_get_usec(void)
+{
+	return inb(_8TCNT2) * CNT_PER_USEC;
+}
+
 #endif
 
 #if defined(H8_3002) || defined(CONFIG_H83048)
@@ -61,17 +69,25 @@ int platform_timer_setup(void (*timer_int)(int, void *, struct pt_regs *))
 	*(unsigned short *)TCNT=0;
 	outb(0x23,TCR);
 	outb(0x00,TIOR);
-	request_irq(26,timer_int,IRQ_FLG_FAST,"timer",0);
+	request_irq_boot(26,timer_int,0,"timer",0);
 	outb(inb(TIER) | 0x01,TIER);
 	outb(inb(TSNC) & ~0x01,TSNC);
 	outb(inb(TMDR) & ~0x01,TMDR);
 	outb(inb(TSTR) | 0x01,TSTR);
+	return 0;
 }
 
 void platform_timer_eoi(void)
 {
 	outb(inb(TSR) & ~0x01,TSR);
 }
+
+#define CNT_PER_USEC (1000000 / (CONFIG_CLK_FREQ * 1000 / 8))
+unsigned long platform_get_usec(void)
+{
+	return *(unsigned short *)TCNT * CNT_PER_USEC;
+}
+
 #endif
 
 void platform_gettod(int *year, int *mon, int *day, int *hour,

@@ -7,7 +7,7 @@ Sources:
 	version of the card by Paul Gortmaker and Leonard N. Zubkoff.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 Theory of Operation:
 
@@ -51,6 +51,7 @@ static const char *version = "smc-ultra32.c: 06/97 v1.00\n";
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -59,17 +60,18 @@ static const char *version = "smc-ultra32.c: 06/97 v1.00\n";
 #include <linux/etherdevice.h>
 #include "8390.h"
 
-int ultra32_probe(struct device *dev);
-int ultra32_probe1(struct device *dev, int ioaddr);
-static int ultra32_open(struct device *dev);
-static void ultra32_reset_8390(struct device *dev);
-static void ultra32_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+int ultra32_probe(struct net_device *dev);
+static int ultra32_probe1(struct net_device *dev, int ioaddr);
+static int ultra32_open(struct net_device *dev);
+static void ultra32_reset_8390(struct net_device *dev);
+static void ultra32_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 				 int ring_page);
-static void ultra32_block_input(struct device *dev, int count,
+static void ultra32_block_input(struct net_device *dev, int count,
 				struct sk_buff *skb, int ring_offset);
-static void ultra32_block_output(struct device *dev, int count,
-				 const unsigned char *buf, const int start_page);
-static int ultra32_close(struct device *dev);
+static void ultra32_block_output(struct net_device *dev, int count,
+				 const unsigned char *buf,
+				 const int start_page);
+static int ultra32_close(struct net_device *dev);
 
 #define ULTRA32_CMDREG	0	/* Offset to ASIC command register. */
 #define	 ULTRA32_RESET	0x80	/* Board reset, in ULTRA32_CMDREG. */
@@ -101,55 +103,65 @@ static int ultra32_close(struct device *dev);
 	following.
 */
 
-int ultra32_probe(struct device *dev)
+int __init ultra32_probe(struct net_device *dev)
 {
-	const char *ifmap[] = {"UTP No Link", "", "UTP/AUI", "UTP/BNC"};
-	int ioaddr, edge, media;
+	int ioaddr;
 
-	if (!EISA_bus) return ENODEV;
+	if (!EISA_bus) return -ENODEV;
+
+	SET_MODULE_OWNER(dev);
 
 	/* EISA spec allows for up to 16 slots, but 8 is typical. */
 	for (ioaddr = 0x1000 + ULTRA32_BASE; ioaddr < 0x9000; ioaddr += 0x1000)
-	if (check_region(ioaddr, ULTRA32_IO_EXTENT) == 0 &&
-	    inb(ioaddr + ULTRA32_IDPORT) != 0xff &&
-	    inl(ioaddr + ULTRA32_IDPORT) == ULTRA32_ID) {
-		media = inb(ioaddr + ULTRA32_CFG7) & 0x03;
-		edge = inb(ioaddr + ULTRA32_CFG5) & 0x08;
-		printk("SMC Ultra32 in EISA Slot %d, Media: %s, %s IRQs.\n",
-		       ioaddr >> 12, ifmap[media],
-		       (edge ? "Edge Triggered" : "Level Sensitive"));
 		if (ultra32_probe1(dev, ioaddr) == 0)
-		  return 0;
-	}
-	return ENODEV;
+			return 0;
+
+	return -ENODEV;
 }
 
-int ultra32_probe1(struct device *dev, int ioaddr)
+static int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 {
-	int i;
+	int i, edge, media, retval;
 	int checksum = 0;
 	const char *model_name;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
 	/* Values from various config regs. */
-	unsigned char idreg = inb(ioaddr + 7);
-	unsigned char reg4 = inb(ioaddr + 4) & 0x7f;
+	unsigned char idreg;
+	unsigned char reg4;
+	const char *ifmap[] = {"UTP No Link", "", "UTP/AUI", "UTP/BNC"};
+
+	if (!request_region(ioaddr, ULTRA32_IO_EXTENT, dev->name))
+		return -EBUSY;
+
+	if (inb(ioaddr + ULTRA32_IDPORT) == 0xff ||
+	    inl(ioaddr + ULTRA32_IDPORT) != ULTRA32_ID) {
+		retval = -ENODEV;
+		goto out;
+	}
+
+	media = inb(ioaddr + ULTRA32_CFG7) & 0x03;
+	edge = inb(ioaddr + ULTRA32_CFG5) & 0x08;
+	printk("SMC Ultra32 in EISA Slot %d, Media: %s, %s IRQs.\n",
+		ioaddr >> 12, ifmap[media],
+		(edge ? "Edge Triggered" : "Level Sensitive"));
+
+	idreg = inb(ioaddr + 7);
+	reg4 = inb(ioaddr + 4) & 0x7f;
 
 	/* Check the ID nibble. */
-	if ((idreg & 0xf0) != 0x20) 			/* SMC Ultra */
-		return ENODEV;
+	if ((idreg & 0xf0) != 0x20) {			/* SMC Ultra */
+		retval = -ENODEV;
+		goto out;
+	}
 
 	/* Select the station address register set. */
 	outb(reg4, ioaddr + 4);
 
 	for (i = 0; i < 8; i++)
 		checksum += inb(ioaddr + 8 + i);
-	if ((checksum & 0xff) != 0xff)
-		return ENODEV;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("smc-ultra32.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
+	if ((checksum & 0xff) != 0xff) {
+		retval = -ENODEV;
+		goto out;
 	}
 
 	if (ei_debug  &&  version_printed++ == 0)
@@ -179,7 +191,8 @@ int ultra32_probe1(struct device *dev, int ioaddr)
 	if ((inb(ioaddr + ULTRA32_CFG5) & 0x40) == 0) {
 		printk("\nsmc-ultra32: Card RAM is disabled!  "
 		       "Run EISA config utility.\n");
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 	if ((inb(ioaddr + ULTRA32_CFG2) & 0x04) == 0)
 		printk("\nsmc-ultra32: Ignoring Bus-Master enable bit.  "
@@ -190,7 +203,8 @@ int ultra32_probe1(struct device *dev, int ioaddr)
 		int irq = irqmap[inb(ioaddr + ULTRA32_CFG5) & 0x07];
 		if (irq == 0) {
 			printk(", failed to detect IRQ line.\n");
-			return -EAGAIN;
+			retval = -EAGAIN;
+			goto out;
 		}
 		dev->irq = irq;
 	}
@@ -198,11 +212,9 @@ int ultra32_probe1(struct device *dev, int ioaddr)
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk (", no memory for dev->priv.\n");
-                return -ENOMEM;
+                retval = -ENOMEM;
+		goto out;
         }
-
-	/* OK, we are certain this is going to work.  Setup the device. */
-	request_region(ioaddr, ULTRA32_IO_EXTENT, model_name);
 
 	/* The 8390 isn't at the base address, so fake the offset */
 	dev->base_addr = ioaddr + ULTRA32_NIC_OFFSET;
@@ -233,14 +245,20 @@ int ultra32_probe1(struct device *dev, int ioaddr)
 	NS8390_init(dev, 0);
 
 	return 0;
+out:
+	release_region(ioaddr, ULTRA32_IO_EXTENT);
+	return retval;
 }
 
-static int ultra32_open(struct device *dev)
+static int ultra32_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* ASIC addr */
+	int irq_flags = (inb(ioaddr + ULTRA32_CFG5) & 0x08) ? 0 : SA_SHIRQ;
+	int retval;
 
-	if (request_irq(dev->irq, ei_interrupt, 0, ei_status.name, dev))
-		return -EAGAIN;
+	retval = request_irq(dev->irq, ei_interrupt, irq_flags, dev->name, dev);
+	if (retval)
+		return retval;
 
 	outb(ULTRA32_MEMENB, ioaddr); /* Enable Shared Memory. */
 	outb(0x80, ioaddr + ULTRA32_CFG6); /* Enable Interrupts. */
@@ -251,33 +269,28 @@ static int ultra32_open(struct device *dev)
 	outb_p(E8390_NODMA+E8390_PAGE0, dev->base_addr);
 	outb(0xff, dev->base_addr + EN0_ERWCNT);
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-static int ultra32_close(struct device *dev)
+static int ultra32_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* CMDREG */
 
-	dev->start = 0;
-	dev->tbusy = 1;
-
+	netif_stop_queue(dev);
+	
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
 	outb(0x00, ioaddr + ULTRA32_CFG6); /* Disable Interrupts. */
 	outb(0x00, ioaddr + 6);		/* Disable interrupts. */
 	free_irq(dev->irq, dev);
-	irq2dev_map[dev->irq] = 0;
 
 	NS8390_init(dev, 0);
-
-	MOD_DEC_USE_COUNT;
 
 	return 0;
 }
 
-static void ultra32_reset_8390(struct device *dev)
+static void ultra32_reset_8390(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET; /* ASIC base addr */
 
@@ -297,7 +310,7 @@ static void ultra32_reset_8390(struct device *dev)
    we don't need to be concerned with ring wrap as the header will be at
    the start of a page, so we optimize accordingly. */
 
-static void ultra32_get_8390_hdr(struct device *dev,
+static void ultra32_get_8390_hdr(struct net_device *dev,
 				 struct e8390_pkt_hdr *hdr,
 				 int ring_page)
 {
@@ -307,11 +320,13 @@ static void ultra32_get_8390_hdr(struct device *dev,
 	/* Select correct 8KB Window. */
 	outb(ei_status.reg0 | ((ring_page & 0x60) >> 5), RamReg);
 
-#ifdef notdef
+#ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	/* unfortunately it isn't endian aware of the struct               */
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 #else
-	((unsigned int*)hdr)[0] = readl(hdr_start);
+	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
 }
 
@@ -320,7 +335,7 @@ static void ultra32_get_8390_hdr(struct device *dev,
    packet spans an 8KB boundary. Note that the current 8KB segment is
    already set by the get_8390_hdr routine. */
 
-static void ultra32_block_input(struct device *dev,
+static void ultra32_block_input(struct net_device *dev,
 				int count,
 				struct sk_buff *skb,
 				int ring_offset)
@@ -330,25 +345,25 @@ static void ultra32_block_input(struct device *dev,
 
 	if ((ring_offset & ~0x1fff) != ((ring_offset + count - 1) & ~0x1fff)) {
 		int semi_count = 8192 - (ring_offset & 0x1FFF);
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
 		if (ring_offset < 96*256) {
 			/* Select next 8KB Window. */
 			ring_offset += semi_count;
 			outb(ei_status.reg0 | ((ring_offset & 0x6000) >> 13), RamReg);
-			memcpy_fromio(skb->data + semi_count, dev->mem_start, count);
+			isa_memcpy_fromio(skb->data + semi_count, dev->mem_start, count);
 		} else {
 			/* Select first 8KB Window. */
 			outb(ei_status.reg0, RamReg);
-			memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+			isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 		}
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
-		eth_io_copy_and_sum(skb, xfer_start, count, 0);
+		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
 	}
 }
 
-static void ultra32_block_output(struct device *dev,
+static void ultra32_block_output(struct net_device *dev,
 				 int count,
 				 const unsigned char *buf,
 				 int start_page)
@@ -359,38 +374,32 @@ static void ultra32_block_output(struct device *dev,
 	/* Select first 8KB Window. */
 	outb(ei_status.reg0, RamReg);
 
-	memcpy_toio(xfer_start, buf, count);
+	isa_memcpy_toio(xfer_start, buf, count);
 }
 
 #ifdef MODULE
 #define MAX_ULTRA32_CARDS   4	/* Max number of Ultra cards per module */
-#define NAMELEN		    8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_ULTRA32_CARDS] = { 0, };
-static struct device dev_ultra[MAX_ULTRA32_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
+static struct net_device dev_ultra[MAX_ULTRA32_CARDS];
+
+MODULE_DESCRIPTION("SMC Ultra32 EISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA32_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
+		struct net_device *dev = &dev_ultra[this_dev];
 		dev->init = ultra32_probe;
 		if (register_netdev(dev) != 0) {
-			if (found > 0) return 0; /* Got at least one. */
+			if (found > 0) { /* Got at least one. */
+				return 0;
+			}
 			printk(KERN_WARNING "smc-ultra32.c: No SMC Ultra32 found.\n");
 			return -ENXIO;
 		}
 		found++;
 	}
-
 	return 0;
 }
 
@@ -399,15 +408,16 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_ULTRA32_CARDS; this_dev++) {
-		struct device *dev = &dev_ultra[this_dev];
+		struct net_device *dev = &dev_ultra[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: ultra32_close_card() does free_irq + irq2dev */
 			int ioaddr = dev->base_addr - ULTRA32_NIC_OFFSET;
-			kfree(dev->priv);
-			dev->priv = NULL;
+			void *priv = dev->priv;
+			/* NB: ultra32_close_card() does free_irq */
 			release_region(ioaddr, ULTRA32_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
 		}
 	}
 }
 #endif /* MODULE */
+

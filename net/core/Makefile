@@ -1,5 +1,5 @@
 #
-# Makefile for the Linux TCP/IP (INET) layer.
+# Makefile for the Linux networking core.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -9,23 +9,27 @@
 
 O_TARGET := core.o
 
-O_OBJS	:= sock.o skbuff.o iovec.o datagram.o sysctl_net_core.o
+export-objs := netfilter.o profile.o ethtool.o neighbour.o dev.o
 
-ifdef CONFIG_NET
+obj-y := sock.o skbuff.o iovec.o datagram.o scm.o
 
-O_OBJS	+= dev.o dev_mcast.o
-
-ifdef CONFIG_FIREWALL
-OX_OBJS += firewall.o
+ifeq ($(CONFIG_SYSCTL),y)
+ifeq ($(CONFIG_NET),y)
+obj-y += sysctl_net_core.o
+endif
 endif
 
-ifdef CONFIG_NET_ALIAS
-O_OBJS += net_alias.o
-endif
+obj-$(CONFIG_FILTER) += filter.o
 
-endif
+obj-$(CONFIG_NET) +=	dev.o ethtool.o dev_mcast.o dst.o neighbour.o \
+			rtnetlink.o utils.o
+
+obj-$(CONFIG_NETFILTER) += netfilter.o
+obj-$(CONFIG_NET_DIVERT) += dv.o
+obj-$(CONFIG_NET_PROFILE) += profile.o
+obj-$(CONFIG_NET_PKTGEN) += pktgen.o
+obj-$(CONFIG_NET_RADIO) += wireless.o
+# Ugly. I wish all wireless drivers were moved in drivers/net/wireless
+obj-$(CONFIG_NET_PCMCIA_RADIO) += wireless.o
 
 include $(TOPDIR)/Rules.make
-
-tar:
-		tar -cvf /dev/f1 .

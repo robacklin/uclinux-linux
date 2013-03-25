@@ -1,14 +1,17 @@
 #
-# Makefile for the linux affs-filesystem routines.
+# Makefile for the Linux affs filesystem routines.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# unless it's something special (not a .c file).
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
+# Note 2! The CFLAGS definitions are now in the main makefile.
+
+#EXTRA_CFLAGS=-DDEBUG=1
 
 O_TARGET := affs.o
-O_OBJS   := namei.o inode.o file.o dir.o amigaffs.o bitmap.o symlink.o
-M_OBJS   := $(O_TARGET)
+
+obj-y   := super.o namei.o inode.o file.o dir.o amigaffs.o bitmap.o symlink.o
+obj-m   := $(O_TARGET)
 
 include $(TOPDIR)/Rules.make

@@ -1,6 +1,6 @@
 /* 
         on26.c    (c) 1997-8  Grant R. Guenther <grant@torque.net>
-                              Under the terms of the GNU public license.
+                              Under the terms of the GNU General Public License.
 
         on26.c is a low-level protocol driver for the 
         OnSpec 90c26 parallel to IDE adapter chip.
@@ -22,6 +22,7 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 #include <asm/io.h>
 
 #include "paride.h"
@@ -124,7 +125,7 @@ static void on26_disconnect ( PIA *pi )
 
 static int on26_test_port( PIA *pi)  /* hard reset */
 
-{       int     i, m, d, x, y;
+{       int     i, m, d, x=0, y=0;
 
         pi->saved_r0 = r0();
         pi->saved_r2 = r2();
@@ -161,7 +162,7 @@ static int on26_test_port( PIA *pi)  /* hard reset */
                 on26_write_regr(pi,0,6,0xb0);
                 y = on26_read_regr(pi,0,7);
                 if (!((x&0x80)||(y&0x80))) break;
-                udelay(100000);
+                mdelay(100);
             }
 
 	    if (i == RESET_WAIT) 
@@ -327,3 +328,4 @@ void    cleanup_module(void)
 
 /* end of on26.c */
 
+MODULE_LICENSE("GPL");

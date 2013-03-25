@@ -9,15 +9,43 @@
 
 #include <linux/config.h>
 #include <asm/system.h>
+#include <asm/machvec.h>
+
+/*
+ * Force a context reload. This is needed when we change the page
+ * table pointer or when we update the ASN of the current process.
+ */
+
+/* Don't get into trouble with dueling __EXTERN_INLINEs.  */
+#ifndef __EXTERN_INLINE
+#include <asm/io.h>
+#endif
+
+extern inline unsigned long
+__reload_thread(struct thread_struct *pcb)
+{
+	register unsigned long a0 __asm__("$16");
+	register unsigned long v0 __asm__("$0");
+
+	a0 = virt_to_phys(pcb);
+	__asm__ __volatile__(
+		"call_pal %2 #__reload_thread"
+		: "=r"(v0), "=r"(a0)
+		: "i"(PAL_swpctx), "r"(a0)
+		: "$1", "$22", "$23", "$24", "$25");
+
+	return v0;
+}
+
 
 /*
  * The maximum ASN's the processor supports.  On the EV4 this is 63
  * but the PAL-code doesn't actually use this information.  On the
- * EV5 this is 127.
+ * EV5 this is 127, and EV6 has 255.
  *
  * On the EV4, the ASNs are more-or-less useless anyway, as they are
- * only used as a icache tag, not for TB entries.  On the EV5 ASN's
- * also validate the TB entries, and thus make a lot more sense.
+ * only used as an icache tag, not for TB entries.  On the EV5 and EV6,
+ * ASN's also validate the TB entries, and thus make a lot more sense.
  *
  * The EV4 ASN's don't even match the architecture manual, ugh.  And
  * I quote: "If a processor implements address space numbers (ASNs),
@@ -25,42 +53,47 @@
  * in use) and the Valid bit set, then entries can also effectively be
  * made coherent by assigning a new, unused ASN to the currently
  * running process and not reusing the previous ASN before calling the
- * appropriate PALcode routine to invalidate the translation buffer
- * (TB)". 
+ * appropriate PALcode routine to invalidate the translation buffer (TB)". 
  *
  * In short, the EV4 has a "kind of" ASN capability, but it doesn't actually
  * work correctly and can thus not be used (explaining the lack of PAL-code
  * support).
  */
-#ifdef CONFIG_ALPHA_EV5
-#define MAX_ASN 127
+#define EV4_MAX_ASN 63
+#define EV5_MAX_ASN 127
+#define EV6_MAX_ASN 255
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define MAX_ASN	(alpha_mv.max_asn)
 #else
-#define MAX_ASN 63
-#define BROKEN_ASN 1
+# ifdef CONFIG_ALPHA_EV4
+#  define MAX_ASN	EV4_MAX_ASN
+# elif defined(CONFIG_ALPHA_EV5)
+#  define MAX_ASN	EV5_MAX_ASN
+# else
+#  define MAX_ASN	EV6_MAX_ASN
+# endif
 #endif
 
-extern unsigned long asn_cache;
+/*
+ * cpu_last_asn(processor):
+ * 63                                            0
+ * +-------------+----------------+--------------+
+ * | asn version | this processor | hardware asn |
+ * +-------------+----------------+--------------+
+ */
 
-#define ASN_VERSION_SHIFT 16
-#define ASN_VERSION_MASK ((~0UL) << ASN_VERSION_SHIFT)
-#define ASN_FIRST_VERSION (1UL << ASN_VERSION_SHIFT)
+#ifdef CONFIG_SMP
+#include <asm/smp.h>
+#define cpu_last_asn(cpuid)	(cpu_data[cpuid].last_asn)
+#else
+extern unsigned long last_asn;
+#define cpu_last_asn(cpuid)	last_asn
+#endif /* CONFIG_SMP */
 
-extern inline void get_new_mmu_context(struct task_struct *p,
-	struct mm_struct *mm,
-	unsigned long asn)
-{
-	/* check if it's legal.. */
-	if ((asn & ~ASN_VERSION_MASK) > MAX_ASN) {
-		/* start a new version, invalidate all old asn's */
-		tbiap(); imb();
-		asn = (asn & ASN_VERSION_MASK) + ASN_FIRST_VERSION;
-		if (!asn)
-			asn = ASN_FIRST_VERSION;
-	}
-	asn_cache = asn + 1;
-	mm->context = asn;			/* full version + asn */
-	p->tss.asn = asn & ~ASN_VERSION_MASK;	/* just asn */
-}
+#define WIDTH_HARDWARE_ASN	8
+#define ASN_FIRST_VERSION (1UL << WIDTH_HARDWARE_ASN)
+#define HARDWARE_ASN_MASK ((1UL << WIDTH_HARDWARE_ASN) - 1)
 
 /*
  * NOTE! The way this is set up, the high bits of the "asn_cache" (and
@@ -73,18 +106,147 @@ extern inline void get_new_mmu_context(struct task_struct *p,
  * force a new asn for any other processes the next time they want to
  * run.
  */
-extern inline void get_mmu_context(struct task_struct *p)
-{
-#ifndef BROKEN_ASN
-	struct mm_struct * mm = p->mm;
 
-	if (mm) {
-		unsigned long asn = asn_cache;
-		/* Check if our ASN is of an older version and thus invalid */
-		if ((mm->context ^ asn) & ASN_VERSION_MASK)
-			get_new_mmu_context(p, mm, asn);
-	}
+#ifndef __EXTERN_INLINE
+#define __EXTERN_INLINE extern inline
+#define __MMU_EXTERN_INLINE
 #endif
+
+static inline unsigned long
+__get_new_mm_context(struct mm_struct *mm, long cpu)
+{
+	unsigned long asn = cpu_last_asn(cpu);
+	unsigned long next = asn + 1;
+
+	if ((asn & HARDWARE_ASN_MASK) >= MAX_ASN) {
+		tbiap();
+		imb();
+		next = (asn & ~HARDWARE_ASN_MASK) + ASN_FIRST_VERSION;
+	}
+	cpu_last_asn(cpu) = next;
+	return next;
 }
 
+__EXTERN_INLINE void
+ev5_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
+	      struct task_struct *next, long cpu)
+{
+	/* Check if our ASN is of an older version, and thus invalid. */
+	unsigned long asn;
+	unsigned long mmc;
+
+#ifdef CONFIG_SMP
+	cpu_data[cpu].asn_lock = 1;
+	barrier();
 #endif
+	asn = cpu_last_asn(cpu);
+	mmc = next_mm->context[cpu];
+	if ((mmc ^ asn) & ~HARDWARE_ASN_MASK) {
+		mmc = __get_new_mm_context(next_mm, cpu);
+		next_mm->context[cpu] = mmc;
+	}
+#ifdef CONFIG_SMP
+	else
+		cpu_data[cpu].need_new_asn = 1;
+#endif
+
+	/* Always update the PCB ASN.  Another thread may have allocated
+	   a new mm->context (via flush_tlb_mm) without the ASN serial
+	   number wrapping.  We have no way to detect when this is needed.  */
+	next->thread.asn = mmc & HARDWARE_ASN_MASK;
+}
+
+__EXTERN_INLINE void
+ev4_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
+	      struct task_struct *next, long cpu)
+{
+	/* As described, ASN's are broken for TLB usage.  But we can
+	   optimize for switching between threads -- if the mm is
+	   unchanged from current we needn't flush.  */
+	/* ??? May not be needed because EV4 PALcode recognizes that
+	   ASN's are broken and does a tbiap itself on swpctx, under
+	   the "Must set ASN or flush" rule.  At least this is true
+	   for a 1992 SRM, reports Joseph Martin (jmartin@hlo.dec.com).
+	   I'm going to leave this here anyway, just to Be Sure.  -- r~  */
+	if (prev_mm != next_mm)
+		tbiap();
+
+	/* Do continue to allocate ASNs, because we can still use them
+	   to avoid flushing the icache.  */
+	ev5_switch_mm(prev_mm, next_mm, next, cpu);
+}
+
+extern void __load_new_mm_context(struct mm_struct *);
+
+#ifdef CONFIG_SMP
+#define check_mmu_context()					\
+do {								\
+	int cpu = smp_processor_id();				\
+	cpu_data[cpu].asn_lock = 0;				\
+	barrier();						\
+	if (cpu_data[cpu].need_new_asn) {			\
+		struct mm_struct * mm = current->active_mm;	\
+		cpu_data[cpu].need_new_asn = 0;			\
+		if (!mm->context[cpu])			\
+			__load_new_mm_context(mm);		\
+	}							\
+} while(0)
+#else
+#define check_mmu_context()  do { } while(0)
+#endif
+
+__EXTERN_INLINE void
+ev5_activate_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm)
+{
+	__load_new_mm_context(next_mm);
+}
+
+__EXTERN_INLINE void
+ev4_activate_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm)
+{
+	__load_new_mm_context(next_mm);
+	tbiap();
+}
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define switch_mm(a,b,c,d)	alpha_mv.mv_switch_mm((a),(b),(c),(d))
+# define activate_mm(x,y)	alpha_mv.mv_activate_mm((x),(y))
+#else
+# ifdef CONFIG_ALPHA_EV4
+#  define switch_mm(a,b,c,d)	ev4_switch_mm((a),(b),(c),(d))
+#  define activate_mm(x,y)	ev4_activate_mm((x),(y))
+# else
+#  define switch_mm(a,b,c,d)	ev5_switch_mm((a),(b),(c),(d))
+#  define activate_mm(x,y)	ev5_activate_mm((x),(y))
+# endif
+#endif
+
+extern inline int
+init_new_context(struct task_struct *tsk, struct mm_struct *mm)
+{
+	int i;
+
+	for (i = 0; i < smp_num_cpus; i++)
+		mm->context[cpu_logical_map(i)] = 0;
+        tsk->thread.ptbr = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+	return 0;
+}
+
+extern inline void
+destroy_context(struct mm_struct *mm)
+{
+	/* Nothing to do.  */
+}
+
+static inline void
+enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+{
+	tsk->thread.ptbr = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+}
+
+#ifdef __MMU_EXTERN_INLINE
+#undef __EXTERN_INLINE
+#undef __MMU_EXTERN_INLINE
+#endif
+
+#endif /* __ALPHA_MMU_CONTEXT_H */

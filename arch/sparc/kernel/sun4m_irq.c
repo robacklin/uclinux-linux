@@ -5,10 +5,11 @@
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *  Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
- *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@ipmce.su)
+ *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@yahoo.com)
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
  */
 
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -17,7 +18,9 @@
 #include <linux/sched.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
+#include <linux/init.h>
+#include <linux/ioport.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -28,13 +31,15 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/traps.h>
+#include <asm/pgalloc.h>
+#include <asm/pgtable.h>
 #include <asm/smp.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/sbus.h>
 
 static unsigned long dummy;
 
-extern int linux_num_cpus;
 struct sun4m_intregs *sun4m_interrupts;
 unsigned long *irq_rcvreg = &dummy;
 
@@ -46,10 +51,12 @@ unsigned long *irq_rcvreg = &dummy;
  *
  * take an encoded intr value and lookup if it's valid
  * then get the mask bits that match from irq_mask
+ *
+ * P3: Translation from irq 0x0d to mask 0x2000 is for MrCoffee.
  */
 static unsigned char irq_xlate[32] = {
     /*  0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  a,  b,  c,  d,  e,  f */
-	0,  0,  0,  0,  1,  0,  2,  0,  3,  0,  4,  5,  6,  0,  0,  7,
+	0,  0,  0,  0,  1,  0,  2,  0,  3,  0,  4,  5,  6, 14,  0,  7,
 	0,  0,  8,  9,  0, 10,  0, 11,  0, 12,  0, 13,  0, 14,  0,  0
 };
 
@@ -62,14 +69,25 @@ static unsigned long irq_mask[] = {
 	SUN4M_INT_FLOPPY,				  /*  5 irq 11 */
 	(SUN4M_INT_SERIAL | SUN4M_INT_KBDMS),	  	  /*  6 irq 12 */
 	SUN4M_INT_MODULE_ERR,			  	  /*  7 irq 15 */
-	SUN4M_INT_SBUS(1),				  /*  8 irq 2 */
-	SUN4M_INT_SBUS(2),				  /*  9 irq 3 */
-	SUN4M_INT_SBUS(3),				  /* 10 irq 5 */
-	SUN4M_INT_SBUS(4),				  /* 11 irq 7 */
-	SUN4M_INT_SBUS(5),				  /* 12 irq 9 */
-	SUN4M_INT_SBUS(6),				  /* 13 irq 11 */
-	SUN4M_INT_SBUS(7)				  /* 14 irq 13 */
+	SUN4M_INT_SBUS(0),				  /*  8 irq 2 */
+	SUN4M_INT_SBUS(1),				  /*  9 irq 3 */
+	SUN4M_INT_SBUS(2),				  /* 10 irq 5 */
+	SUN4M_INT_SBUS(3),				  /* 11 irq 7 */
+	SUN4M_INT_SBUS(4),				  /* 12 irq 9 */
+	SUN4M_INT_SBUS(5),				  /* 13 irq 11 */
+	SUN4M_INT_SBUS(6)				  /* 14 irq 13 */
 };
+
+static int sun4m_pil_map[] = { 0, 2, 3, 5, 7, 9, 11, 13 };
+
+unsigned int sun4m_sbint_to_irq(struct sbus_dev *sdev, unsigned int sbint) 
+{
+	if (sbint >= sizeof(sun4m_pil_map)) {
+		printk(KERN_ERR "%s: bogus SBINT %d\n", sdev->prom_name, sbint);
+		BUG();
+	}
+	return sun4m_pil_map[sbint] | 0x30;
+}
 
 inline unsigned long sun4m_get_irqmask(unsigned int irq)
 {
@@ -82,9 +100,9 @@ inline unsigned long sun4m_get_irqmask(unsigned int irq)
 		if (!mask)
 			printk("sun4m_get_irqmask: IRQ%d has no valid mask!\n",irq);
 	} else {
-		/* Soft Interrupts will come here
-		 * Currently there is no way to trigger them but I'm sure something
-		 * could be cooked up.
+		/* Soft Interrupts will come here.
+		 * Currently there is no way to trigger them but I'm sure
+		 * something could be cooked up.
 		 */
 		irq &= 0xf;
 		mask = SUN4M_SOFT_INT(irq);
@@ -98,7 +116,7 @@ static void sun4m_disable_irq(unsigned int irq_nr)
 	int cpu = smp_processor_id();
 
 	mask = sun4m_get_irqmask(irq_nr);
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	if (irq_nr > 15)
 		sun4m_interrupts->set = mask;
 	else
@@ -117,20 +135,53 @@ static void sun4m_enable_irq(unsigned int irq_nr)
          */
         if (irq_nr != 0x0b) {
 		mask = sun4m_get_irqmask(irq_nr);
-		save_flags(flags); cli();
+		save_and_cli(flags);
 		if (irq_nr > 15)
 			sun4m_interrupts->clear = mask;
 		else
 			sun4m_interrupts->cpu_intregs[cpu].clear = mask;
 		restore_flags(flags);    
 	} else {
-		save_flags(flags); cli();
+		save_and_cli(flags);
 		sun4m_interrupts->clear = SUN4M_INT_FLOPPY;
 		restore_flags(flags);
 	}
 }
 
-void sun4m_send_ipi(int cpu, int level)
+static unsigned long cpu_pil_to_imask[16] = {
+/*0*/	0x00000000,
+/*1*/	0x00000000,
+/*2*/	SUN4M_INT_SBUS(0) | SUN4M_INT_VME(0),
+/*3*/	SUN4M_INT_SBUS(1) | SUN4M_INT_VME(1),
+/*4*/	SUN4M_INT_SCSI,
+/*5*/	SUN4M_INT_SBUS(2) | SUN4M_INT_VME(2),
+/*6*/	SUN4M_INT_ETHERNET,
+/*7*/	SUN4M_INT_SBUS(3) | SUN4M_INT_VME(3),
+/*8*/	SUN4M_INT_VIDEO,
+/*9*/	SUN4M_INT_SBUS(4) | SUN4M_INT_VME(4) | SUN4M_INT_MODULE_ERR,
+/*10*/	SUN4M_INT_REALTIME,
+/*11*/	SUN4M_INT_SBUS(5) | SUN4M_INT_VME(5) | SUN4M_INT_FLOPPY,
+/*12*/	SUN4M_INT_SERIAL | SUN4M_INT_KBDMS,
+/*13*/	SUN4M_INT_AUDIO,
+/*14*/	SUN4M_INT_E14,
+/*15*/	0x00000000
+};
+
+/* We assume the caller is local cli()'d when these are called, or else
+ * very bizarre behavior will result.
+ */
+static void sun4m_disable_pil_irq(unsigned int pil)
+{
+	sun4m_interrupts->set = cpu_pil_to_imask[pil];
+}
+
+static void sun4m_enable_pil_irq(unsigned int pil)
+{
+	sun4m_interrupts->clear = cpu_pil_to_imask[pil];
+}
+
+#ifdef CONFIG_SMP
+static void sun4m_send_ipi(int cpu, int level)
 {
 	unsigned long mask;
 
@@ -138,7 +189,7 @@ void sun4m_send_ipi(int cpu, int level)
 	sun4m_interrupts->cpu_intregs[cpu].set = mask;
 }
 
-void sun4m_clear_ipi(int cpu, int level)
+static void sun4m_clear_ipi(int cpu, int level)
 {
 	unsigned long mask;
 
@@ -146,10 +197,11 @@ void sun4m_clear_ipi(int cpu, int level)
 	sun4m_interrupts->cpu_intregs[cpu].clear = mask;
 }
 
-void sun4m_set_udt(int cpu)
+static void sun4m_set_udt(int cpu)
 {
 	sun4m_interrupts->undirected_target = cpu;
 }
+#endif
 
 #define OBIO_INTR	0x20
 #define TIMER_IRQ  	(OBIO_INTR | 10)
@@ -164,40 +216,31 @@ static void sun4m_clear_clock_irq(void)
 	clear_intr = sun4m_timers->l10_timer_limit;
 }
 
-static void sun4m_clear_profile_irq(void)
+static void sun4m_clear_profile_irq(int cpu)
 {
 	volatile unsigned int clear;
     
-	clear = sun4m_timers->cpu_timers[0].l14_timer_limit;
+	clear = sun4m_timers->cpu_timers[cpu].l14_timer_limit;
 }
 
-static void sun4m_load_profile_irq(unsigned int limit)
+static void sun4m_load_profile_irq(int cpu, unsigned int limit)
 {
-	sun4m_timers->cpu_timers[0].l14_timer_limit = limit;
+	sun4m_timers->cpu_timers[cpu].l14_timer_limit = limit;
 }
 
-static void sun4m_lvl14_handler(int irq, void *dev_id, struct pt_regs * regs)
+char *sun4m_irq_itoa(unsigned int irq)
 {
-	volatile unsigned int clear;
-    
-	printk("CPU[%d]: TOOK A LEVEL14!\n", smp_processor_id());
-	/* we do nothing with this at present
-	 * this is purely to prevent OBP getting its mucky paws
-	 * in linux.
-	 */
-	clear = sun4m_timers->cpu_timers[0].l14_timer_limit; /* clear interrupt */
-    
-	/* reload with value, this allows on the fly retuning of the level14
-	 * timer
-	 */
-	sun4m_timers->cpu_timers[0].l14_timer_limit = lvl14_resolution;
+	static char buff[16];
+	sprintf(buff, "%d", irq);
+	return buff;
 }
 
-static void sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
+static void __init sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 {
 	int reg_count, irq, cpu;
 	struct linux_prom_registers cnt_regs[PROMREG_MAX];
 	int obio_node, cnt_node;
+	struct resource r;
 
 	cnt_node = 0;
 	if((obio_node =
@@ -223,19 +266,22 @@ static void sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 		cnt_regs[obio_node].reg_size = cnt_regs[obio_node-1].reg_size;
 		cnt_regs[obio_node].which_io = cnt_regs[obio_node-1].which_io;
 	}
-    
+
+	memset((char*)&r, 0, sizeof(struct resource));
 	/* Map the per-cpu Counter registers. */
-	sun4m_timers = sparc_alloc_io(cnt_regs[0].phys_addr, 0,
-				      PAGE_SIZE*NCPUS, "counters_percpu",
-				      cnt_regs[0].which_io, 0x0);
-    
+	r.flags = cnt_regs[0].which_io;
+	r.start = cnt_regs[0].phys_addr;
+	sun4m_timers = (struct sun4m_timer_regs *) sbus_ioremap(&r, 0,
+	    PAGE_SIZE*SUN4M_NCPUS, "sun4m_cpu_cnt");
 	/* Map the system Counter register. */
-	sparc_alloc_io(cnt_regs[4].phys_addr, 0,
-		       cnt_regs[4].reg_size,
-		       "counters_system",
-		       cnt_regs[4].which_io, 0x0);
-    
+	/* XXX Here we expect consequent calls to yeld adjusent maps. */
+	r.flags = cnt_regs[4].which_io;
+	r.start = cnt_regs[4].phys_addr;
+	sbus_ioremap(&r, 0, cnt_regs[4].reg_size, "sun4m_sys_cnt");
+
 	sun4m_timers->l10_timer_limit =  (((1000000/HZ) + 1) << 10);
+	master_l10_counter = &sun4m_timers->l10_cur_count;
+	master_l10_limit = &sun4m_timers->l10_timer_limit;
 
 	irq = request_irq(TIMER_IRQ,
 			  counter_fn,
@@ -246,13 +292,6 @@ static void sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 		prom_halt();
 	}
     
-	/* Can't cope with multiple CPUS yet so no level14 tick events */
-#if 0
-	if (linux_num_cpus > 1)
-		claim_ticker14(NULL, PROFILE_IRQ, 0);
-	else
-		claim_ticker14(sun4m_lvl14_handler, PROFILE_IRQ, lvl14_resolution);
-#endif
 	if(linux_num_cpus > 1) {
 		for(cpu = 0; cpu < 4; cpu++)
 			sun4m_timers->cpu_timers[cpu].l14_timer_limit = 0;
@@ -260,15 +299,35 @@ static void sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 	} else {
 		sun4m_timers->cpu_timers[0].l14_timer_limit = 0;
 	}
+#ifdef CONFIG_SMP
+	{
+		unsigned long flags;
+		extern unsigned long lvl14_save[4];
+		struct tt_entry *trap_table = &sparc_ttable[SP_TRAP_IRQ1 + (14 - 1)];
+
+		/* For SMP we use the level 14 ticker, however the bootup code
+		 * has copied the firmwares level 14 vector into boot cpu's
+		 * trap table, we must fix this now or we get squashed.
+		 */
+		__save_and_cli(flags);
+		trap_table->inst_one = lvl14_save[0];
+		trap_table->inst_two = lvl14_save[1];
+		trap_table->inst_three = lvl14_save[2];
+		trap_table->inst_four = lvl14_save[3];
+		local_flush_cache_all();
+		__restore_flags(flags);
+	}
+#endif
 }
 
-void sun4m_init_IRQ(void)
+void __init sun4m_init_IRQ(void)
 {
 	int ie_node,i;
 	struct linux_prom_registers int_regs[PROMREG_MAX];
 	int num_regs;
+	struct resource r;
     
-	cli();
+	__cli();
 	if((ie_node = prom_searchsiblings(prom_getchild(prom_root_node), "obio")) == 0 ||
 	   (ie_node = prom_getchild (ie_node)) == 0 ||
 	   (ie_node = prom_searchsiblings (ie_node, "interrupt")) == 0) {
@@ -291,16 +350,18 @@ void sun4m_init_IRQ(void)
 		int_regs[ie_node].which_io = int_regs[ie_node-1].which_io;
 	}
 
+	memset((char *)&r, 0, sizeof(struct resource));
 	/* Map the interrupt registers for all possible cpus. */
-	sun4m_interrupts = sparc_alloc_io(int_regs[0].phys_addr, 0,
-					  PAGE_SIZE*NCPUS, "interrupts_percpu",
-					  int_regs[0].which_io, 0x0);
-    
+	r.flags = int_regs[0].which_io;
+	r.start = int_regs[0].phys_addr;
+	sun4m_interrupts = (struct sun4m_intregs *) sbus_ioremap(&r, 0,
+	    PAGE_SIZE*SUN4M_NCPUS, "interrupts_percpu");
+
 	/* Map the system interrupt control registers. */
-	sparc_alloc_io(int_regs[4].phys_addr, 0,
-		       int_regs[4].reg_size, "interrupts_system",
-		       int_regs[4].which_io, 0x0);
-    
+	r.flags = int_regs[4].which_io;
+	r.start = int_regs[4].phys_addr;
+	sbus_ioremap(&r, 0, int_regs[4].reg_size, "interrupts_system");
+
 	sun4m_interrupts->set = ~SUN4M_INT_MASKALL;
 	for (i=0; i<linux_num_cpus; i++)
 		sun4m_interrupts->cpu_intregs[i].clear = ~0x17fff;
@@ -313,23 +374,24 @@ void sun4m_init_IRQ(void)
 		 * Not sure, but writing here on SLAVIO systems may puke
 		 * so I don't do it unless there is more than 1 cpu.
 		 */
-#if 0
-		printk("Warning:"
-		       "sun4m multiple CPU interrupt code requires work\n");
-#endif
-		irq_rcvreg = &sun4m_interrupts->undirected_target;
+		irq_rcvreg = (unsigned long *)
+				&sun4m_interrupts->undirected_target;
 		sun4m_interrupts->undirected_target = 0;
 	}
-	enable_irq = sun4m_enable_irq;
-	disable_irq = sun4m_disable_irq;
-	clear_clock_irq = sun4m_clear_clock_irq;
-	clear_profile_irq = sun4m_clear_profile_irq;
-	load_profile_irq = sun4m_load_profile_irq;
-	init_timers = sun4m_init_timers;
-#ifdef __SMP__
-	set_cpu_int = sun4m_send_ipi;
-	clear_cpu_int = sun4m_clear_ipi;
-	set_irq_udt = sun4m_set_udt;
+	BTFIXUPSET_CALL(sbint_to_irq, sun4m_sbint_to_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(enable_irq, sun4m_enable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(disable_irq, sun4m_disable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(enable_pil_irq, sun4m_enable_pil_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(disable_pil_irq, sun4m_disable_pil_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(clear_clock_irq, sun4m_clear_clock_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(clear_profile_irq, sun4m_clear_profile_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(load_profile_irq, sun4m_load_profile_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(__irq_itoa, sun4m_irq_itoa, BTFIXUPCALL_NORM);
+	sparc_init_timers = sun4m_init_timers;
+#ifdef CONFIG_SMP
+	BTFIXUPSET_CALL(set_cpu_int, sun4m_send_ipi, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(clear_cpu_int, sun4m_clear_ipi, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(set_irq_udt, sun4m_set_udt, BTFIXUPCALL_NORM);
 #endif
-	sti();
+	/* Cannot enable interrupts until OBP ticker is disabled. */
 }

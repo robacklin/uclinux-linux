@@ -7,26 +7,32 @@
 #
 # Copyright (C) 1994 by Linus Torvalds
 #
+# Creating a compressed kernel image (arch/alpha/boot/vmlinux.gz)
+# is done via:
+#
+#	make boot
+#
+# Creating a BOOTP image (arch/alpha/boot/bootpfile or bootpzfile)
+# is done via:
+#
+#	make bootpfile		# using an uncompressed kernel
+#	make bootpzfile		# using a compressed kernel
+#
+# Adding an INITRD image to a BOOTP file (arch/alpha/boot/bootpzfile)
+# can be done, e.g, via:
+#
+# INITRD=`pwd`/initrd.img make bootpzfile
 
-ifdef CONFIG_CROSSCOMPILE
-# enable this for linking under OSF/1:
-LINKFLAGS = -non_shared -T 0x20000000 -N
-else
- elf=$(shell if $(LD) --help | grep elf64alpha >/dev/null; then echo yes; fi)
- ifeq ($(elf),yes)
-  LINKFLAGS = -static -Ttext 0x20000000 -N
- else
-  LINKFLAGS = -static -T bootloader.lds -N
- endif
-endif
+LINKFLAGS = -static -T bootloader.lds #-N -relax
 
 .S.s:
-	$(CC) -D__ASSEMBLY__ -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 OBJECTS = head.o main.o
 BPOBJECTS = head.o bootp.o
+BPZOBJECTS = head.o bootpz.o misc.o
 TARGETS = vmlinux.gz tools/objstrip # also needed by aboot & milo
 VMLINUX = $(TOPDIR)/vmlinux
 OBJSTRIP = tools/objstrip
@@ -46,7 +52,16 @@ bootimage:	tools/mkbb tools/lxboot tools/bootlx vmlinux.nh
 	tools/mkbb bootimage tools/lxboot
 
 bootpfile:	tools/bootph vmlinux.nh
-	( cat tools/bootph vmlinux.nh ) > bootpfile
+	cat tools/bootph vmlinux.nh > bootpfile
+ifdef INITRD
+	cat $(INITRD) >> bootpfile
+endif
+
+bootpzfile:	tools/bootpzh vmlinux.nh.gz
+	cat tools/bootpzh vmlinux.nh.gz > bootpzfile
+ifdef INITRD
+	cat $(INITRD) >> bootpzfile
+endif
 
 srmboot:	bootdevice bootimage
 	dd if=bootimage of=$(BOOTDEV) bs=512 seek=1 skip=1
@@ -55,32 +70,42 @@ srmboot:	bootdevice bootimage
 bootdevice:
 	@test "$(BOOTDEV)" != ""  || (echo You must specify BOOTDEV ; exit -1)
 
-vmlinux.gz: vmlinux
-	gzip -fv vmlinux
+vmlinux.gz: $(TOPDIR)/vmlinux
+	gzip -fv9c $(TOPDIR)/vmlinux > vmlinux.gz
 
-#
-# A raw binary without header.  Used by raw boot.
-#
+vmlinux.nh.gz: vmlinux.nh
+	gzip -fv9c vmlinux.nh > vmlinux.nh.gz
+
 main.o: ksize.h
 
 bootp.o: ksize.h
 
-ksize.h: $(OBJSTRIP) vmlinux.nh
-	echo "#define KERNEL_SIZE `$(OBJSTRIP) -p vmlinux.nh /dev/null`" > $@
+bootpz.o: kzsize.h
+
+ksize.h: vmlinux.nh dummy
+	echo "#define KERNEL_SIZE `ls -l vmlinux.nh | awk '{print $$5}'`" > $@T
+ifdef INITRD
+	[ ! \( -f $(INITRD) \) ] || exit 1
+	echo "#define INITRD_IMAGE_SIZE `ls -l $(INITRD) | awk '{print $$5}'`" >> $@T
+endif
+	cmp -s $@T $@ || mv -f $@T $@
+	rm -f $@T
+
+kzsize.h: vmlinux.nh.gz dummy
+	echo "#define KERNEL_SIZE `ls -l vmlinux.nh | awk '{print $$5}'`" > $@T
+	echo "#define KERNEL_Z_SIZE `ls -l vmlinux.nh.gz | awk '{print $$5}'`" >> $@T
+ifdef INITRD
+	[ -f $(INITRD) ] || exit 1
+	echo "#define INITRD_IMAGE_SIZE `ls -l $(INITRD) | awk '{print $$5}'`" >> $@T
+endif
+	cmp -s $@T $@ || mv -f $@T $@
+	rm -f $@T
 
 vmlinux.nh: $(VMLINUX) $(OBJSTRIP)
-ifeq ($(elf),yes)
-	cp $(VMLINUX) vmlinux.stripped
-	strip vmlinux.stripped		# work around ELF binutils bug...
-	$(OBJSTRIP) -v vmlinux.stripped vmlinux.nh
-	rm -f vmlinux.stripped
-else
 	$(OBJSTRIP) -v $(VMLINUX) vmlinux.nh
-endif
 
-vmlinux: $(TOPDIR)/vmlinux
-	cp $(TOPDIR)/vmlinux vmlinux
-	strip vmlinux
+vmlinux: $(VMLINUX)
+	$(STRIP) -o vmlinux $(VMLINUX)
 
 tools/lxboot: $(OBJSTRIP) bootloader
 	$(OBJSTRIP) -p bootloader tools/lxboot
@@ -91,28 +116,31 @@ tools/bootlx: bootloader $(OBJSTRIP)
 tools/bootph: bootpheader $(OBJSTRIP)
 	$(OBJSTRIP) -vb bootpheader tools/bootph
 
+tools/bootpzh: bootpzheader $(OBJSTRIP)
+	$(OBJSTRIP) -vb bootpzheader tools/bootpzh
+
 $(OBJSTRIP): $(OBJSTRIP).c
-	$(HOSTCC) $(OBJSTRIP).c -o $(OBJSTRIP)
+	$(HOSTCC) $(HOSTCFLAGS) -I$(HPATH) $(OBJSTRIP).c -o $(OBJSTRIP)
 
 tools/mkbb: tools/mkbb.c
 	$(HOSTCC) tools/mkbb.c -o tools/mkbb
 
 bootloader: $(OBJECTS)
-	$(LD) $(LINKFLAGS) \
-		$(OBJECTS) \
-		$(LIBS) \
-		-o bootloader && strip bootloader || \
-		(rm -f bootloader && exit 1)
+	$(LD) $(LINKFLAGS) $(OBJECTS) $(LIBS) -o bootloader
 
 bootpheader: $(BPOBJECTS)
-	$(LD) $(LINKFLAGS) \
-		$(BPOBJECTS) \
-		$(LIBS) \
-		-o bootpheader && strip bootpheader || \
-		(rm -f bootpheader && exit 1)
+	$(LD) $(LINKFLAGS) $(BPOBJECTS) $(LIBS) -o bootpheader
+
+bootpzheader: $(BPZOBJECTS)
+	$(LD) $(LINKFLAGS) $(BPZOBJECTS) $(LIBS) -o bootpzheader
+
+misc.o: misc.c $(TOPDIR)/lib/inflate.c
 
 clean:
-	rm -f $(TARGETS) bootloader bootimage vmlinux.nh \
-		tools/mkbb tools/bootlx tools/lxboot ksize.h
+	rm -f $(TARGETS) bootloader bootimage bootpfile bootpheader
+	rm -f tools/mkbb tools/bootlx tools/lxboot tools/bootph
+	rm -f vmlinux.nh ksize.h
 
 dep:
+
+dummy:

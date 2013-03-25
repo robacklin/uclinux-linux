@@ -56,14 +56,17 @@
  *                Changed the specialix=... format to include interrupt.
  * Revision 1.7:  May 27 1997
  *                Made many more debug printk's a compile time option.
- * Revision 1.8:  Port to 2.1 kernel. -- Not here.
- *
- * Revision 1.9:  October 1 1998
- *                Support for the PCI version of the card.
+ * Revision 1.8:  Jul 1  1997
+ *                port to linux-2.1.43 kernel.
+ * Revision 1.9:  Oct 9  1998
+ *                Added stuff for the IO8+/PCI version.
+ * Revision 1.10: Oct 22  1999 / Jan 21 2000. 
+ *                Added stuff for setserial. 
+ *                Nicolas Mailhot (Nicolas.Mailhot@email.enst.fr)
  * 
  */
 
-#define VERSION "1.9"
+#define VERSION "1.10"
 
 
 /*
@@ -72,8 +75,9 @@
  * ../../Documentation/specialix.txt 
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
-#include <linux/config.h> /* CONFIG_SPECIALIX_RTSCTS */
+
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -89,7 +93,7 @@
 #include <linux/tqueue.h>
 #include <linux/version.h>
 #include <linux/pci.h>
-#include <linux/bios32.h>
+
 
 /* ************************************************************** */
 /* * This section can be removed when 2.0 becomes outdated....  * */
@@ -98,10 +102,10 @@
 #if LINUX_VERSION_CODE < 131328    /* Less than 2.1.0 */
 #define TWO_ZERO
 #else
-#if LINUX_VERSION_CODE < 131368   /* less than 2.1.40 */
+#if LINUX_VERSION_CODE < 131371   /* less than 2.1.43 */
 /* This has not been extensively tested yet. Sorry. */
-#warning "You're on your own between 2.1.0 and 2.1.40.... "
-#warning "Please use 2.1.40 or higher."
+#warning "You're on your own between 2.1.0 and 2.1.43.... "
+#warning "Please use a recent kernel."
 #endif
 #endif
 
@@ -170,18 +174,19 @@
 
 DECLARE_TASK_QUEUE(tq_specialix);
 
-
+#undef RS_EVENT_WRITE_WAKEUP
+#define RS_EVENT_WRITE_WAKEUP	0
 
 #define SPECIALIX_TYPE_NORMAL	1
 #define SPECIALIX_TYPE_CALLOUT	2
 
 static struct tty_driver specialix_driver, specialix_callout_driver;
-static int    specialix_refcount = 0;
-static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT] = { NULL, };
-static struct termios * specialix_termios[SX_NBOARD * SX_NPORT] = { NULL, };
-static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT] = { NULL, };
-static unsigned char * tmp_buf = NULL;
-static struct semaphore tmp_buf_sem = MUTEX;
+static int    specialix_refcount;
+static struct tty_struct * specialix_table[SX_NBOARD * SX_NPORT];
+static struct termios * specialix_termios[SX_NBOARD * SX_NPORT];
+static struct termios * specialix_termios_locked[SX_NBOARD * SX_NPORT];
+static unsigned char * tmp_buf;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static unsigned long baud_table[] =  {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
@@ -195,9 +200,7 @@ static struct specialix_board sx_board[SX_NBOARD] =  {
 	{ 0, SX_IOBASE4, 15, },
 };
 
-static struct specialix_port sx_port[SX_NBOARD * SX_NPORT] =  {
-	{ 0, },
-};
+static struct specialix_port sx_port[SX_NBOARD * SX_NPORT];
 		
 
 #ifdef SPECIALIX_TIMER
@@ -236,28 +239,28 @@ static inline int sx_paranoia_check(struct specialix_port const * port,
  */
 
 /* Get board number from pointer */
-extern inline int board_No (struct specialix_board * bp)
+static inline int board_No (struct specialix_board * bp)
 {
 	return bp - sx_board;
 }
 
 
 /* Get port number from pointer */
-extern inline int port_No (struct specialix_port const * port)
+static inline int port_No (struct specialix_port const * port)
 {
 	return SX_PORT(port - sx_port); 
 }
 
 
 /* Get pointer to board from pointer to port */
-extern inline struct specialix_board * port_Board(struct specialix_port const * port)
+static inline struct specialix_board * port_Board(struct specialix_port const * port)
 {
 	return &sx_board[SX_BOARD(port - sx_port)];
 }
 
 
 /* Input Byte from CL CD186x register */
-extern inline unsigned char sx_in(struct specialix_board  * bp, unsigned short reg)
+static inline unsigned char sx_in(struct specialix_board  * bp, unsigned short reg)
 {
 	bp->reg = reg | 0x80;
 	outb (reg | 0x80, bp->base + SX_ADDR_REG);
@@ -266,7 +269,7 @@ extern inline unsigned char sx_in(struct specialix_board  * bp, unsigned short r
 
 
 /* Output Byte to CL CD186x register */
-extern inline void sx_out(struct specialix_board  * bp, unsigned short reg,
+static inline void sx_out(struct specialix_board  * bp, unsigned short reg,
 			  unsigned char val)
 {
 	bp->reg = reg | 0x80;
@@ -276,7 +279,7 @@ extern inline void sx_out(struct specialix_board  * bp, unsigned short reg,
 
 
 /* Input Byte from CL CD186x register */
-extern inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned short reg)
+static inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned short reg)
 {
 	bp->reg = reg;
 	outb (reg, bp->base + SX_ADDR_REG);
@@ -285,7 +288,7 @@ extern inline unsigned char sx_in_off(struct specialix_board  * bp, unsigned sho
 
 
 /* Output Byte to CL CD186x register */
-extern inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
+static inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
 			  unsigned char val)
 {
 	bp->reg = reg;
@@ -295,7 +298,7 @@ extern inline void sx_out_off(struct specialix_board  * bp, unsigned short reg,
 
 
 /* Wait for Channel Command Register ready */
-extern inline void sx_wait_CCR(struct specialix_board  * bp)
+static inline void sx_wait_CCR(struct specialix_board  * bp)
 {
 	unsigned long delay;
 
@@ -308,7 +311,7 @@ extern inline void sx_wait_CCR(struct specialix_board  * bp)
 
 
 /* Wait for Channel Command Register ready */
-extern inline void sx_wait_CCR_off(struct specialix_board  * bp)
+static inline void sx_wait_CCR_off(struct specialix_board  * bp)
 {
 	unsigned long delay;
 
@@ -324,35 +327,35 @@ extern inline void sx_wait_CCR_off(struct specialix_board  * bp)
  *  specialix IO8+ IO range functions.
  */
 
-extern inline int sx_check_io_range(struct specialix_board * bp)
+static inline int sx_check_io_range(struct specialix_board * bp)
 {
-	return check_region (bp->base, 
-	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE);
+	return check_region (bp->base, SX_IO_SPACE);
 }
 
 
-extern inline void sx_request_io_range(struct specialix_board * bp)
+static inline void sx_request_io_range(struct specialix_board * bp)
 {
-	request_region(bp->base,
-	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE, 
+	request_region(bp->base, 
+	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE,
 	               "specialix IO8+" );
 }
 
 
-extern inline void sx_release_io_range(struct specialix_board * bp)
+static inline void sx_release_io_range(struct specialix_board * bp)
 {
-	release_region(bp->base,
+	release_region(bp->base, 
 	               bp->flags&SX_BOARD_IS_PCI?SX_PCI_IO_SPACE:SX_IO_SPACE);
 }
 
 	
 /* Must be called with enabled interrupts */
-/* Ugly. Don't use this for anything else than initialization code */
-extern inline void sx_long_delay(unsigned long delay)
+/* Ugly. Very ugly. Don't use this for anything else than initialization 
+   code */
+static inline void sx_long_delay(unsigned long delay)
 {
 	unsigned long i;
 	
-	for (i = jiffies + delay; i > jiffies; ) ;
+	for (i = jiffies + delay; time_after(i, jiffies); ) ;
 }
 
 
@@ -596,7 +599,7 @@ static int sx_probe(struct specialix_board *bp)
  *  Interrupt processing routines.
  * */
 
-extern inline void sx_mark_event(struct specialix_port * port, int event)
+static inline void sx_mark_event(struct specialix_port * port, int event)
 {
 	/* 
 	 * I'm not quite happy with current scheme all serial
@@ -613,7 +616,7 @@ extern inline void sx_mark_event(struct specialix_port * port, int event)
 }
 
 
-extern inline struct specialix_port * sx_get_port(struct specialix_board * bp,
+static inline struct specialix_port * sx_get_port(struct specialix_board * bp,
 					       unsigned char const * what)
 {
 	unsigned char channel;
@@ -632,7 +635,7 @@ extern inline struct specialix_port * sx_get_port(struct specialix_board * bp,
 }
 
 
-extern inline void sx_receive_exc(struct specialix_board * bp)
+static inline void sx_receive_exc(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -698,7 +701,7 @@ extern inline void sx_receive_exc(struct specialix_board * bp)
 }
 
 
-extern inline void sx_receive(struct specialix_board * bp)
+static inline void sx_receive(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -729,7 +732,7 @@ extern inline void sx_receive(struct specialix_board * bp)
 }
 
 
-extern inline void sx_transmit(struct specialix_board * bp)
+static inline void sx_transmit(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -799,7 +802,7 @@ extern inline void sx_transmit(struct specialix_board * bp)
 }
 
 
-extern inline void sx_check_modem(struct specialix_board * bp)
+static inline void sx_check_modem(struct specialix_board * bp)
 {
 	struct specialix_port *port;
 	struct tty_struct *tty;
@@ -831,8 +834,9 @@ extern inline void sx_check_modem(struct specialix_board * bp)
 #ifdef SPECIALIX_DEBUG
 			printk ( "Sending HUP.\n");
 #endif
-			queue_task(&port->tqueue_hangup,  
-			           &tq_scheduler);      
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&port->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
 		} else {
 #ifdef SPECIALIX_DEBUG
 			printk ( "Don't need to send HUP.\n");
@@ -951,21 +955,24 @@ void turn_ints_off (struct specialix_board *bp)
 void turn_ints_on (struct specialix_board *bp)
 {
 	if (bp->flags & SX_BOARD_IS_PCI) {
-		/* play with the PCI chip. See comment above */
+		/* play with the PCI chip. See comment above. */
 	}
 	(void) sx_in (bp, 0); /* Turn ON interrupts. */
 }
 
 
 /* Called with disabled interrupts */
-extern inline int sx_setup_board(struct specialix_board * bp)
+static inline int sx_setup_board(struct specialix_board * bp)
 {
 	int error;
 
 	if (bp->flags & SX_BOARD_ACTIVE) 
 		return 0;
 
-	error = request_irq(bp->irq, sx_interrupt, SA_INTERRUPT, "specialix IO8+", bp);
+	if (bp->flags & SX_BOARD_IS_PCI)
+		error = request_irq(bp->irq, sx_interrupt, SA_INTERRUPT | SA_SHIRQ, "specialix IO8+", bp);
+	else
+		error = request_irq(bp->irq, sx_interrupt, SA_INTERRUPT, "specialix IO8+", bp);
 
 	if (error) 
 		return error;
@@ -979,7 +986,7 @@ extern inline int sx_setup_board(struct specialix_board * bp)
 
 
 /* Called with disabled interrupts */
-extern inline void sx_shutdown_board(struct specialix_board *bp)
+static inline void sx_shutdown_board(struct specialix_board *bp)
 {
 	if (!(bp->flags & SX_BOARD_ACTIVE))
 		return;
@@ -1008,7 +1015,7 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	long tmp;
 	unsigned char cor1 = 0, cor3 = 0;
 	unsigned char mcor1 = 0, mcor2 = 0;
-	static int again=0;
+	static int again;
 	
 	if (!(tty = port->tty) || !tty->termios)
 		return;
@@ -1068,11 +1075,18 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	/*
 	 * Now we must calculate some speed depended things 
 	 */
-	
+
 	/* Set baud rate for port */
-	tmp = (((SX_OSCFREQ + baud_table[baud]/2) / baud_table[baud] +
-		CD186x_TPC/2) / CD186x_TPC);
-	if ((tmp < 0x10) && (again < jiffies)) { 
+	tmp = port->custom_divisor ;
+	if ( tmp )
+		printk (KERN_INFO "sx%d: Using custom baud rate divisor %ld. \n"
+		                  "This is an untested option, please be carefull.\n",
+		                  port_No (port), tmp);
+	else
+		tmp = (((SX_OSCFREQ + baud_table[baud]/2) / baud_table[baud] +
+		         CD186x_TPC/2) / CD186x_TPC);
+
+	if ((tmp < 0x10) && time_before(again, jiffies)) { 
 		again = jiffies + HZ * 60;
 		/* Page 48 of version 2.0 of the CL-CD1865 databook */
 		if (tmp >= 12) {
@@ -1093,9 +1107,13 @@ static void sx_change_speed(struct specialix_board *bp, struct specialix_port *p
 	sx_out(bp, CD186x_TBPRH, (tmp >> 8) & 0xff); 
 	sx_out(bp, CD186x_RBPRL, tmp & 0xff); 
 	sx_out(bp, CD186x_TBPRL, tmp & 0xff);
-	
-	baud = (baud_table[baud] + 5) / 10;   /* Estimated CPS */
-	
+
+	if (port->custom_divisor) {
+		baud = (SX_OSCFREQ + port->custom_divisor/2) / port->custom_divisor;
+		baud = ( baud + 5 ) / 10;
+	} else 
+		baud = (baud_table[baud] + 5) / 10;   /* Estimated CPS */
+
 	/* Two timer ticks seems enough to wakeup something like SLIP driver */
 	tmp = ((baud + HZ/2) / HZ) * 2 - CD186x_NFIFO;		
 	port->wakeup_chars = (tmp < 0) ? 0 : ((tmp >= SERIAL_XMIT_SIZE) ?
@@ -1310,7 +1328,7 @@ static void sx_shutdown_port(struct specialix_board *bp, struct specialix_port *
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
                            struct specialix_port *port)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait,  current);
 	struct specialix_board *bp = port_Board(port);
 	int    retval;
 	int    do_clocal = 0;
@@ -1397,7 +1415,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			} 
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(port->flags & ASYNC_INITIALIZED)) {
 			if (port->flags & ASYNC_HUP_NOTIFY)
@@ -1410,7 +1428,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		    !(port->flags & ASYNC_CLOSING) &&
 		    (do_clocal || CD))
 			break;
-		if (current->signal & ~current->blocked) {
+		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1550,9 +1568,8 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 		timeout = jiffies+HZ;
 		while(port->IER & IER_TXEMPTY) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->timeout;
-			schedule();
-			if (jiffies > timeout) {
+ 			schedule_timeout(port->timeout);
+			if (time_after(jiffies, timeout)) {
 				printk (KERN_INFO "Timeout waiting for close\n");
 				break;
 			}
@@ -1562,16 +1579,14 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 	sx_shutdown_port(bp, port);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	port->event = 0;
 	port->tty = 0;
 	if (port->blocked_open) {
 		if (port->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->close_delay;
-			schedule();
+			schedule_timeout(port->close_delay);
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
@@ -1585,46 +1600,74 @@ static void sx_close(struct tty_struct * tty, struct file * filp)
 static int sx_write(struct tty_struct * tty, int from_user, 
                     const unsigned char *buf, int count)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port;
 	struct specialix_board *bp;
 	int c, total = 0;
 	unsigned long flags;
+
+	if (!tty)
+		return 0;
+
+	port = (struct specialix_port *)tty->driver_data;
 				
 	if (sx_paranoia_check(port, tty->device, "sx_write"))
 		return 0;
 	
 	bp = port_Board(port);
 
-	if (!tty || !port->xmit_buf || !tmp_buf)
+	if (!port->xmit_buf || !tmp_buf)
 		return 0;
 
-	if (from_user)
-		down(&tmp_buf_sem);
-
 	save_flags(flags);
-	while (1) {
-		cli();		
-		c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-		                   SERIAL_XMIT_SIZE - port->xmit_head));
-		if (c <= 0)
-			break;
+	if (from_user) {
+		down(&tmp_buf_sem);
+		while (1) {
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - port->xmit_head));
+			if (c <= 0)
+				break;
 
-		if (from_user) {
-			copy_from_user(tmp_buf, buf, c);
+			c -= copy_from_user(tmp_buf, buf, c);
+			if (!c) {
+				if (!total)
+					total = -EFAULT;
+				break;
+			}
+
+			cli();
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-			               SERIAL_XMIT_SIZE - port->xmit_head));
+				       SERIAL_XMIT_SIZE - port->xmit_head));
 			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
-		} else
-			memcpy(port->xmit_buf + port->xmit_head, buf, c);
-		port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-		port->xmit_cnt += c;
-		restore_flags(flags);
-		buf += c;
-		count -= c;
-		total += c;
-	}
-	if (from_user)
+			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+			port->xmit_cnt += c;
+			restore_flags(flags);
+
+			buf += c;
+			count -= c;
+			total += c;
+		}
 		up(&tmp_buf_sem);
+	} else {
+		while (1) {
+			cli();
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - port->xmit_head));
+			if (c <= 0) {
+				restore_flags(flags);
+				break;
+			}
+			memcpy(port->xmit_buf + port->xmit_head, buf, c);
+			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+			port->xmit_cnt += c;
+			restore_flags(flags);
+
+			buf += c;
+			count -= c;
+			total += c;
+		}
+	}
+
+	cli();
 	if (port->xmit_cnt && !tty->stopped && !tty->hw_stopped &&
 	    !(port->IER & IER_TXRDY)) {
 		port->IER |= IER_TXRDY;
@@ -1638,13 +1681,18 @@ static int sx_write(struct tty_struct * tty, int from_user,
 
 static void sx_put_char(struct tty_struct * tty, unsigned char ch)
 {
-	struct specialix_port *port = (struct specialix_port *)tty->driver_data;
+	struct specialix_port *port;
 	unsigned long flags;
+
+	if (!tty)
+		return;
+
+	port = (struct specialix_port *)tty->driver_data;
 
 	if (sx_paranoia_check(port, tty->device, "sx_put_char"))
 		return;
 
-	if (!tty || !port->xmit_buf)
+	if (!port->xmit_buf)
 		return;
 
 	save_flags(flags); cli();
@@ -1719,10 +1767,7 @@ static void sx_flush_buffer(struct tty_struct *tty)
 	port->xmit_cnt = port->xmit_head = port->xmit_tail = 0;
 	restore_flags(flags);
 	
-	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 
@@ -1756,7 +1801,7 @@ static int sx_get_modem_info(struct specialix_port * port, unsigned int *value)
 		          |/* ((status & MSVR_DSR) ? */ TIOCM_DSR /* : 0) */
 		          |   ((status & MSVR_CTS) ? TIOCM_CTS : 0);
 	}
-	put_user(result,(unsigned long *) value);
+	put_user(result,(unsigned int *) value);
 	return 0;
 }
 
@@ -1828,7 +1873,7 @@ static int sx_set_modem_info(struct specialix_port * port, unsigned int cmd,
 }
 
 
-extern inline void sx_send_break(struct specialix_port * port, unsigned long length)
+static inline void sx_send_break(struct specialix_port * port, unsigned long length)
 {
 	struct specialix_board *bp = port_Board(port);
 	unsigned long flags;
@@ -1847,7 +1892,7 @@ extern inline void sx_send_break(struct specialix_port * port, unsigned long len
 }
 
 
-extern inline int sx_set_serial_info(struct specialix_port * port,
+static inline int sx_set_serial_info(struct specialix_port * port,
                                      struct serial_struct * newinfo)
 {
 	struct serial_struct tmp;
@@ -1860,7 +1905,8 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 	if (error)
 		return error;
 
-	copy_from_user(&tmp, newinfo, sizeof(tmp));
+	if (copy_from_user(&tmp, newinfo, sizeof(tmp)))
+		return -EFAULT;
 	
 #if 0	
 	if ((tmp.irq != bp->irq) ||
@@ -1875,8 +1921,9 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 
 	change_speed = ((port->flags & ASYNC_SPD_MASK) !=
 			(tmp.flags & ASYNC_SPD_MASK));
+	change_speed |= (tmp.custom_divisor != port->custom_divisor);
 	
-	if (!suser()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		if ((tmp.close_delay != port->close_delay) ||
 		    (tmp.closing_wait != port->closing_wait) ||
 		    ((tmp.flags & ~ASYNC_USR_MASK) !=
@@ -1884,11 +1931,13 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 			return -EPERM;
 		port->flags = ((port->flags & ~ASYNC_USR_MASK) |
 		                  (tmp.flags & ASYNC_USR_MASK));
+		port->custom_divisor = tmp.custom_divisor;
 	} else {
 		port->flags = ((port->flags & ~ASYNC_FLAGS) |
 		                  (tmp.flags & ASYNC_FLAGS));
 		port->close_delay = tmp.close_delay;
 		port->closing_wait = tmp.closing_wait;
+		port->custom_divisor = tmp.custom_divisor;
 	}
 	if (change_speed) {
 		save_flags(flags); cli();
@@ -1899,7 +1948,7 @@ extern inline int sx_set_serial_info(struct specialix_port * port,
 }
 
 
-extern inline int sx_get_serial_info(struct specialix_port * port,
+static inline int sx_get_serial_info(struct specialix_port * port,
 				     struct serial_struct * retinfo)
 {
 	struct serial_struct tmp;
@@ -1919,8 +1968,10 @@ extern inline int sx_get_serial_info(struct specialix_port * port,
 	tmp.baud_base = (SX_OSCFREQ + CD186x_TPC/2) / CD186x_TPC;
 	tmp.close_delay = port->close_delay * HZ/100;
 	tmp.closing_wait = port->closing_wait * HZ/100;
+	tmp.custom_divisor =  port->custom_divisor;
 	tmp.xmit_fifo_size = CD186x_NFIFO;
-	copy_to_user(retinfo, &tmp, sizeof(tmp));
+	if (copy_to_user(retinfo, &tmp, sizeof(tmp)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -2103,10 +2154,9 @@ static void do_sx_hangup(void *private_)
 	struct tty_struct	*tty;
 	
 	tty = port->tty;
-	if (!tty)
-		return;
-
-	tty_hangup(tty);
+	if (tty)
+		tty_hangup(tty);	/* FIXME: module removal race here */
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -2167,12 +2217,8 @@ static void do_softint(void *private_)
 	if(!(tty = port->tty)) 
 		return;
 
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
-	}
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) 
+		tty_wakeup(tty);
 }
 
 
@@ -2249,6 +2295,8 @@ static int sx_init_drivers(void)
 		sx_port[i].tqueue_hangup.data = &sx_port[i];
 		sx_port[i].close_delay = 50 * HZ/100;
 		sx_port[i].closing_wait = 3000 * HZ/100;
+		init_waitqueue_head(&sx_port[i].open_wait);
+		init_waitqueue_head(&sx_port[i].close_wait);
 	}
 	
 	return 0;
@@ -2276,7 +2324,7 @@ static void sx_release_drivers(void)
 void specialix_setup(char *str, int * ints)
 {
 	int i;
-	
+        
 	for (i=0;i<SX_NBOARD;i++) {
 		sx_board[i].base = 0;
 	}
@@ -2297,10 +2345,6 @@ int specialix_init(void)
 {
 	int i;
 	int found = 0;
-#ifdef CONFIG_PCI
-	int pci_index;
-	unsigned char pci_bus, pci_device_fn;
-#endif
 
 	printk(KERN_INFO "sx: Specialix IO8+ driver v" VERSION ", (c) R.E.Wolff 1997/1998.\n");
 	printk(KERN_INFO "sx: derived from work (c) D.Gorodchanin 1994-1996.\n");
@@ -2318,32 +2362,31 @@ int specialix_init(void)
 			found++;
 
 #ifdef CONFIG_PCI
-	i=0;
-	pci_index = 0;
-	while ((i < SX_NBOARD) && (pci_index < 0xff)) {
-		unsigned char tbyte;
-		unsigned int tint;
-		if (sx_board[i].flags & SX_BOARD_PRESENT) {
-			i++;
-			continue;
-		}
-		if (pcibios_find_device (PCI_VENDOR_ID_SPECIALIX, 
-		                         PCI_DEVICE_ID_SPECIALIX_IO8,
-		                         pci_index, &pci_bus, &pci_device_fn)
-		    != PCIBIOS_SUCCESSFUL)
-			break;
-		pcibios_read_config_byte(pci_bus, pci_device_fn,
-		                         PCI_INTERRUPT_LINE, &tbyte);
-		sx_board[i].irq = tbyte;
+	if (pci_present()) {
+		struct pci_dev *pdev = NULL;
 
-		pcibios_read_config_dword(pci_bus, pci_device_fn,
-		                          PCI_BASE_ADDRESS_2, &tint);
-		/* Mask out the fact that it's IO-space */
-		sx_board[i].base = tint & PCI_BASE_ADDRESS_IO_MASK; 
-		sx_board[i].flags |= SX_BOARD_IS_PCI;
-		if (!sx_probe(&sx_board[i]))
-			found ++;
-		pci_index++;
+		i=0;
+		while (i <= SX_NBOARD) {
+			if (sx_board[i].flags & SX_BOARD_PRESENT) {
+				i++;
+				continue;
+			}
+			pdev = pci_find_device (PCI_VENDOR_ID_SPECIALIX, 
+			                        PCI_DEVICE_ID_SPECIALIX_IO8, 
+			                        pdev);
+			if (!pdev) break;
+
+			if (pci_enable_device(pdev))
+				continue;
+
+			sx_board[i].irq = pdev->irq;
+
+			sx_board[i].base = pci_resource_start (pdev, 2);
+
+			sx_board[i].flags |= SX_BOARD_IS_PCI;
+			if (!sx_probe(&sx_board[i]))
+				found ++;
+		}
 	}
 #endif
 
@@ -2360,6 +2403,9 @@ int specialix_init(void)
 int iobase[SX_NBOARD]  = {0,};
 
 int irq [SX_NBOARD] = {0,};
+
+MODULE_PARM(iobase,"1-" __MODULE_STRING(SX_NBOARD) "i");
+MODULE_PARM(irq,"1-" __MODULE_STRING(SX_NBOARD) "i");
 
 /*
  * You can setup up to 4 boards.
@@ -2399,3 +2445,5 @@ void cleanup_module(void)
 	
 }
 #endif /* MODULE */
+
+MODULE_LICENSE("GPL");

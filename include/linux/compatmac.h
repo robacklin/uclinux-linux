@@ -71,10 +71,7 @@
 /* Some 200 days (on intel) */
 #define MAX_SCHEDULE_TIMEOUT     ((long)(~0UL>>1))
 
-#define mdelay(n) (\
-        {unsigned long msec=(n); while (msec--) udelay(1000);})
-
-/* #include <linux/bios32.h> */
+#include <linux/bios32.h>
 
 #define Get_user(a,b)                a = get_user(b)
 #define Put_user(a,b)                0,put_user(a,b)
@@ -86,37 +83,35 @@ static inline int copy_from_user(void *to,const void *from, int c)
   return 0;
 }
 
-/* #define pci_present                  pcibios_present */
-/* #define pci_read_config_word         pcibios_read_config_word */
-/* #define pci_read_config_dword        pcibios_read_config_dword */
+#define pci_present                  pcibios_present
+#define pci_read_config_word         pcibios_read_config_word
+#define pci_read_config_dword        pcibios_read_config_dword
 
-/* static inline unsigned char get_irq (unsigned char bus, unsigned char fn) */
-/* { */
-/* 	unsigned char t;  */
-/* 	pcibios_read_config_byte (bus, fn, PCI_INTERRUPT_LINE, &t); */
-/* 	return t; */
-/* } */
+static inline unsigned char get_irq (unsigned char bus, unsigned char fn)
+{
+	unsigned char t; 
+	pcibios_read_config_byte (bus, fn, PCI_INTERRUPT_LINE, &t);
+	return t;
+}
 
-/* static inline void *ioremap(unsigned long base, long length) */
-/* { */
-/* 	if (base < 0x100000) return (void *)base; */
-/* 	return vremap (base, length); */
-/* } */
+static inline void *ioremap(unsigned long base, long length)
+{
+	if (base < 0x100000) return (void *)base;
+	return vremap (base, length);
+}
 
-/* #define my_iounmap(x, b)             (((long)x<0x100000)?0:vfree ((void*)x)) */
+#define my_iounmap(x, b)             (((long)x<0x100000)?0:vfree ((void*)x))
 
 #define capable(x)                   suser()
 
-#define queue_task                   queue_task_irq_off
 #define tty_flip_buffer_push(tty)    queue_task(&tty->flip.tqueue, &tq_timer)
 #define signal_pending(current)      (current->signal & ~current->blocked)
 #define schedule_timeout(to)         do {current->timeout = jiffies + (to);schedule ();} while (0)
 #define time_after(t1,t2)            (((long)t1-t2) > 0)
 
 
-/* #define test_and_set_bit(nr, addr)   set_bit(nr, addr) */
-#include<asm/compatmac.h>
-/* #define test_and_clear_bit(nr, addr) clear_bit(nr, addr) */
+#define test_and_set_bit(nr, addr)   set_bit(nr, addr)
+#define test_and_clear_bit(nr, addr) clear_bit(nr, addr)
 
 /* Not yet implemented on 2.0 */
 #define ASYNC_SPD_SHI  -1
@@ -160,7 +155,6 @@ static inline int copy_from_user(void *to,const void *from, int c)
 #define DECLARE_MUTEX(name)   struct semaphore name = MUTEX
 #define DECLARE_WAITQUEUE(wait, current) \
                               struct wait_queue wait = { current, NULL }
-#define init_waitqueue_head init_waitqueue                                                                      
 
 #endif
 

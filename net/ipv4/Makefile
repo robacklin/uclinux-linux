@@ -8,62 +8,22 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := ipv4.o
-IPV4_OBJS := utils.o route.o proc.o timer.o protocol.o packet.o \
+
+export-objs = ipip.o ip_gre.o
+
+obj-y     := utils.o route.o inetpeer.o proc.o protocol.o \
 	     ip_input.o ip_fragment.o ip_forward.o ip_options.o \
 	     ip_output.o ip_sockglue.o \
-	     tcp.o tcp_input.o tcp_output.o tcp_timer.o \
-	     raw.o udp.o arp.o icmp.o devinet.o af_inet.o igmp.o \
-	     sysctl_net_ipv4.o
+	     tcp.o tcp_input.o tcp_output.o tcp_timer.o tcp_ipv4.o tcp_minisocks.o \
+	     tcp_diag.o raw.o udp.o arp.o icmp.o devinet.o af_inet.o igmp.o \
+	     sysctl_net_ipv4.o fib_frontend.o fib_semantics.o fib_hash.o
 
-MOD_LIST_NAME := IPV4_MODULES
-M_OBJS :=
-
-IPV4_OBJS += ip_fw.o
-
-ifeq ($(CONFIG_IP_MROUTE),y)
-IPV4_OBJS += ipmr.o
-endif
-
-ifeq ($(CONFIG_INET_RARP),y)
-IPV4_OBJS += rarp.o
-else
-  ifeq ($(CONFIG_INET_RARP),m)
-  M_OBJS += rarp.o
-  endif
-endif
-
-ifeq ($(CONFIG_NET_IPIP),y)
-IPV4_OBJS += ipip.o
-else
-  ifeq ($(CONFIG_NET_IPIP),m)
-  M_OBJS += ipip.o
-  endif
-endif
-
-ifeq ($(CONFIG_IP_MASQUERADE),y)
-IPV4_OBJS += ip_masq.o ip_masq_app.o
-ifeq ($(CONFIG_UCLINUX),y)
-  IPV4_OBJS += ip_masq_ftp.o ip_masq_irc.o ip_masq_raudio.o ip_masq_cuseeme.o 
-  IPV4_OBJS += ip_masq_vdolive.o ip_masq_quake.o
-else
-  M_OBJS += ip_masq_ftp.o ip_masq_irc.o ip_masq_raudio.o ip_masq_cuseeme.o 
-  M_OBJS += ip_masq_vdolive.o ip_masq_quake.o
-endif
-endif
-
-ifeq ($(CONFIG_IP_ALIAS),y)
-IPV4_OBJS += ip_alias.o
-else
-  ifeq ($(CONFIG_IP_ALIAS),m)
-  M_OBJS += ip_alias.o
-  endif
-endif
-
-ifdef CONFIG_INET
-O_OBJS := $(IPV4_OBJS)
-endif
+obj-$(CONFIG_IP_MULTIPLE_TABLES) += fib_rules.o
+obj-$(CONFIG_IP_ROUTE_NAT) += ip_nat_dumb.o
+obj-$(CONFIG_IP_MROUTE) += ipmr.o
+obj-$(CONFIG_NET_IPIP) += ipip.o
+obj-$(CONFIG_NET_IPGRE) += ip_gre.o
+obj-$(CONFIG_SYN_COOKIES) += syncookies.o
+obj-$(CONFIG_IP_PNP) += ipconfig.o
 
 include $(TOPDIR)/Rules.make
-
-tar:
-		tar -cvf /dev/f1 .

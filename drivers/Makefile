@@ -1,60 +1,57 @@
 #
-# Makefile for the linux kernel device drivers.
+# Makefile for the Linux kernel device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# 15 Sep 2000, Christoph Hellwig <hch@infradead.org>
+# Rewritten to use lists instead of if-statements.
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
 
-SUB_DIRS     := block char net #streams
-MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS) pci sbus scsi sound cdrom isdn
 
-ifdef CONFIG_PCI
-SUB_DIRS += pci
-endif
+mod-subdirs :=	dio hil mtd sbus video macintosh usb input telephony ide \
+		message/i2o message/fusion scsi md ieee1394 pnp isdn atm \
+		fc4 net/hamradio i2c acpi bluetooth usb/gadget pcmcia
 
-ifdef CONFIG_SBUS
-SUB_DIRS += sbus
-endif
+subdir-y :=	parport serial char block net sound misc media cdrom hotplug 
+subdir-m :=	$(subdir-y)
 
-# If CONFIG_SCSI is set, the core of scsi support will be added to the kernel,
-# but some of the low-level things may also be modules.
-ifeq ($(CONFIG_SCSI),y)
-SUB_DIRS += scsi
-MOD_SUB_DIRS += scsi
-else
-  ifeq ($(CONFIG_SCSI),m)
-  MOD_SUB_DIRS += scsi
-  endif
-endif
 
-ifeq ($(CONFIG_SOUND),y)
-SUB_DIRS += sound
-else
-  ifeq ($(CONFIG_SOUND),m)
-  MOD_SUB_DIRS += sound
-  endif
-endif
+subdir-$(CONFIG_DIO)		+= dio
+subdir-$(CONFIG_PCI)		+= pci
+subdir-$(CONFIG_GSC)		+= gsc
+subdir-$(CONFIG_HIL)		+= hil
+subdir-$(CONFIG_PCMCIA)		+= pcmcia
+subdir-$(CONFIG_MTD)		+= mtd
+subdir-$(CONFIG_SBUS)		+= sbus
+subdir-$(CONFIG_ZORRO)		+= zorro
+subdir-$(CONFIG_NUBUS)		+= nubus
+subdir-$(CONFIG_TC)		+= tc
+subdir-$(CONFIG_VT)		+= video
+subdir-$(CONFIG_MAC)		+= macintosh
+subdir-$(CONFIG_PPC32)		+= macintosh
+subdir-$(CONFIG_USB)		+= usb
+subdir-$(CONFIG_USB_GADGET)	+= usb/gadget
+subdir-$(CONFIG_INPUT)		+= input
+subdir-$(CONFIG_PHONE)		+= telephony
+subdir-$(CONFIG_IDE)		+= ide
+subdir-$(CONFIG_SCSI)		+= scsi
+subdir-$(CONFIG_I2O)		+= message/i2o
+subdir-$(CONFIG_FUSION)		+= message/fusion
+subdir-$(CONFIG_MD)		+= md
+subdir-$(CONFIG_IEEE1394)	+= ieee1394
+subdir-$(CONFIG_PNP)		+= pnp
+subdir-$(CONFIG_ISDN_BOOL)	+= isdn
+subdir-$(CONFIG_ATM)		+= atm
+subdir-$(CONFIG_FC4)		+= fc4
+subdir-$(CONFIG_FUJITSU)	+= fujitsu
+subdir-$(CONFIG_FRV_ACPI_EMU)	+= frv_acpi
 
-ifdef CONFIG_CD_NO_IDESCSI
-SUB_DIRS += cdrom
-MOD_SUB_DIRS += cdrom
-endif
+# CONFIG_HAMRADIO can be set without CONFIG_NETDEVICE being set  -- ch
+subdir-$(CONFIG_HAMRADIO)	+= net/hamradio
+subdir-$(CONFIG_I2C)		+= i2c
+subdir-$(CONFIG_SPI)		+= spi
+subdir-$(CONFIG_ACPI_BOOT)	+= acpi
 
-ifeq ($(CONFIG_ISDN),y)
-SUB_DIRS += isdn
-MOD_SUB_DIRS += isdn
-else
-  ifeq ($(CONFIG_ISDN),m)
-  MOD_SUB_DIRS += isdn
-  endif
-endif
+subdir-$(CONFIG_BLUEZ)		+= bluetooth
 
-ifeq ($(CONFIG_AP1000),y)
-SUB_DIRS += ap1000
-ALL_SUB_DIRS += ap1000
-endif
+subdir-$(CONFIG_ARCH_AT91RM9200)+= at91
 
 include $(TOPDIR)/Rules.make

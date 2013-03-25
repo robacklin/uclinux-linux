@@ -1,6 +1,246 @@
+2002-09-21  Marek Michalkiewicz  <marekm@amelek.gda.pl>
+
+	* parport_serial.c: Move from ../parport/ here, must be initialised
+	after serial.c for register_serial to work.
+
+2001-08-11  Tim Waugh  <twaugh@redhat.com>
+
+	* serial.c (get_pci_port): Deal with awkward Titan cards.
+
+1998-08-26  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (rs_open): Correctly decrement the module in-use count
+		on errors.
+
+Thu Feb 19 14:24:08 1998  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* tty_io.c (tty_name): Remove the non-reentrant (and non-SMP safe)
+		version of tty_name, and rename the reentrant _tty_name
+		function to be tty_name.
+		(tty_open): Add a warning message stating callout devices
+		are deprecated.
+
+Mon Dec  1 08:24:15 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* tty_io.c (tty_get_baud_rate): Print a warning syslog if the
+		tty->alt_speed kludge is used; this means the system is
+		using the deprecated SPD_HI ioctls.
+
+Mon Nov 24 10:37:49 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c, esp.c, rocket.c: Change drivers to take advantage of
+	 	tty_get_baud_rate().
+	
+	* tty_io.c (tty_get_baud_rate): New function which computes the
+		correct baud rate for the tty.  More factoring out of
+		common code out of the serial driver to the high-level tty
+		functions....
+
+Sat Nov 22 07:53:36 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c, esp.c, rocket.c: Add tty->driver.break() routine, and
+ 		allow high-level tty code to handle the break and soft
+ 		carrier ioctls.
+	
+	* tty_ioctl.c (n_tty_ioctl): Support TIOCGSOFTCAR and
+ 		TIOCSSOFTCAR, so that device drivers don't have to support
+ 		it.
+
+	* serial.c (autoconfig): Change 16750 test to hopefully eliminate
+		false results by people with strange 16550As being
+		detected as 16750s.  Hopefully 16750s will still be
+		detected as 16750, and other weird UARTs won't get poorly
+		autodetected.  If this doesn't work, I'll have to disable
+		the auto identification for the 16750.
+
+	* tty_io.c (tty_hangup): Now actually do the tty hangup
+		processing during the timer processing, and disable
+		interrupts while doing the hangup processing.  This avoids
+		several nasty race conditions which happened when the
+		hangup processing was done asynchronously.
+		(tty_ioctl): Do break handling in the tty driver if
+		driver's break function is supported.  
+		(tty_flip_buffer_push): New exported function which should
+		be used by drivers to push characters in the flip buffer
+		to the tty handler.  This may either be done using a task
+		queue function for better CPU efficiency, or directly for
+		low latency operation.
+
+	* serial.c (rs_set_termios): Fix bug rs_set_termios when
+		transitioning away from B0, submitted by Stanislav
+		Voronyi. 
+
+Thu Jun 19 20:05:58 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (begin_break, end_break, rs_ioctl): Applied patch
+		to support BSD ioctls to set and clear the break
+		condition explicitly.
+
+	* console.c (scrup, scrdown, insert_line, delete_line): Applied
+		fix suggested by Aaron Tiensivu to speed up block scrolls
+		up and down.
+
+	* n_tty.c (opost_block, write_chan): Added a modified "fast
+ 		console" patch which processes a block of text via
+		"cooking" efficiently.
+
+Wed Jun 18 15:25:50 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* tty_io.c (init_dev, release_dev): Applied fix suggested by Bill
+		Hawes to prevent race conditions in the tty code.
+
+	* n_tty.c (n_tty_chars_in_buffer): Applied fix suggested by Bill
+		Hawes so that n_tty_chars_in_buffer returns the correct
+		value in the case when the tty is in cannonical mode.  (To
+		avoid a pty deadlock with telnetd.)
+
+Thu Feb 27 01:53:08 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (change_speed): Add support for the termios flag
+		CMSPAR, which allows the user to select stick parity.
+		(i.e, if PARODD is set, the parity bit is always 1; if
+		PARRODD is not set, then the parity bit is always 0).
+
+Wed Feb 26 19:03:10 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (cleanup_module): Fix memory leak when using the serial
+		driver as a module; make sure tmp_buf gets freed!
+
+Tue Feb 25 11:01:59 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (set_modem_info): Add support for setting and clearing
+		the OUT1 and OUT2 bits.  (For special case UART's, usually
+		for half-duplex.)
+		(autoconfig, change_speed): Fix TI 16750 support.
+
+Sun Feb 16 00:14:43 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* tty_io.c (release_dev): Add sanity check to make sure there are
+		no waiters on tty->read_wait or tty->write_wait.
+
+	* serial.c (rs_init): Don't autoconfig a device if the I/O region
+		is already reserved.
+
+	* serial.c (serial_proc_info): Add support for /proc/serial.
+
+Thu Feb 13 00:49:10 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (receive_chars): When the UART repotrs an overrun
+ 		condition, it does so with a valid character.  Changed to
+ 		not throw away the valid character, but instead report the
+		overrun after the valid character.
+
+	* serial.c: Added new #ifdef's for some of the advanced serial
+		driver features.  A minimal driver that only supports COM
+		1/2/3/4 without sharing serial interrupts only takes 17k;
+		the full driver takes 32k.
+		
+Wed Feb 12 14:50:44 1997  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* vt.c:
+	* pty.c: 
+	* tty_ioctl.c: 
+	* serial.c: Update routines to use the new 2.1 memory access
+	 	routines.
+
+Wed Dec  4 07:51:52 1996  Theodore Ts'o  <tytso@localhost.mit.edu>
+
+	* serial.c (change_speed): Use save_flags(); cli() and
+		restore_flags() in order to ensure we don't accidentally
+		turn on interrupts when starting up the port.
+		(startup): Move the insertion of serial structure into the
+		IRQ chain earlier into the startup processing.  Interrupts
+		should be off this whole time, but we eventually will want
+		to reduce this window.
+
+Thu Nov 21 10:05:22 1996  Theodore Ts'o  <tytso@localhost.mit.edu>
+
+	* tty_ioctl.c (tty_wait_until_sent): Always check the driver
+ 		wait_until_ready routine, even if there are no characters
+ 		in the xmit buffer.  (There may be charactes in the device
+ 		FIFO.)
+		(n_tty_ioctl): Add new flag tty->flow_stopped which
+ 		indicates whether the tty is stopped due to a request by
+ 		the TCXONC ioctl (used by tcflow).  If so, don't let an
+ 		incoming XOFF character restart the tty.  The tty can only
+ 		be restarted by another TCXONC request.
+
+	* tty_io.c (start_tty): Don't allow the tty to be restarted if
+		tty->flow_stopped is true.
+
+	* n_tty.c (n_tty_receive_char): If tty->flow_stopped is true, and
+ 		IXANY is set, don't eat a character trying to restart the
+ 		tty.
+
+	* serial.c (startup): Remove need for MCR_noint from the
+ 		async_struct structure.  Only turn on DTR and RTS if the
+ 		baud rate is not zero.
+		(change_speed): More accurately calculate the timeout
+ 		value based on the word size.  Move responsibility of
+ 		hangup when speed becomes B0 to rs_set_termios()
+		(set_serial_info): When changing the UART type set the
+ 		current xmit_fifo_size as well as the permanent
+ 		xmit_fifo_size.
+		(rs_ioctl): Fix TCSBRK (used by tcdrain) and TCSBRKP
+ 		ioctls to return EINTR if interrupted by a signal.
+		(rs_set_termios): If the baud rate changes to or from B0,
+ 		this function is now responsible for setting or clearing
+ 		DTR and RTS.  DTR and RTS are only be changed on the
+ 		transition to or from the B0 state.
+		(rs_close): Wait for the characters to drain based on
+ 		info->timeout.  At low baud rates (50 bps), it may take a
+ 		long time for the FIFO to completely drain out!
+		(rs_wait_until_sent): Fixed timeout handling.  Now
+ 		releases control to the scheduler, but checks frequently
+ 		enough so that the function is sensitive enough to pass
+ 		the timing requirements of the NIST-PCTS.
+		(block_til_ready): When opening the device, don't turn on
+ 		DTR and RTS if the baud rate is B0.
+
+Thu Nov 14 00:06:09 1996  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c (autoconfig): Fix autoconfiguration problems;
+		info->flags wasn't getting initialized from the state
+		structure.  Put in more paranoid test for the 16750.
+
+Fri Nov  8 20:19:50 1996  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* n_tty.c (n_tty_flush_buffer): Only call driver->unthrottle() if
+ 		the tty was previous throttled.
+		(n_tty_set_termios, write_chan): Add changes suggested by
+ 			Simon P. Allen to allow hardware cooking.
+
+	* tty_ioctl.c (set_termios): If we get a signal while waiting for
+		the tty to drain, return -EINTR.
+	
+	* serial.c (change_speed): Add support for CREAD, as required by
+	 	POSIX.
+
+Sat Nov  2 20:43:10 1996  Theodore Ts'o  <tytso@rsts-11.mit.edu>
+
+	* serial.c: Wholesale changes.  Added support for the Startech
+ 		16650 and 16650V2 chips.  (WARNING: the new startech
+ 		16650A may or may not work!)  Added support for the
+ 		TI16750 (not yet tested).  Split async_struct into a
+ 		transient part (async_struct) and a permanent part
+		(serial_state) which contains the configuration
+ 		information for the ports.  Added new driver routines
+ 		wait_until_sent() and send_xchar() to help with POSIX
+ 		compliance.  Added support for radio clocks which waggle
+		the carrier detect line (CONFIG_HARD_PPS).
+	
+	* tty_ioctl.c (tty_wait_until_sent): Added call to new driver
+		function tty->driver.wait_until_sent(), which returns when
+		the tty's device xmit buffers are drained.  Needed for
+		full POSIX compliance.
+
+		(send_prio_char): New function, called by the ioctl's
+		TCIOFF and TCION; uses the new driver call send_xchar(),
+		which will send the XON or XOFF character at high priority
+		(and even if tty output is stopped).
+
 Wed Jun  5 18:52:04 1996  Theodore Ts'o  <tytso@rsts-11.mit.edu>
 
-	* tty_io.c (do_tty_hangup): 
 	* pty.c (pty_close): When closing a pty, make sure packet mode is
 	 	cleared.
 
@@ -315,7 +555,7 @@ Thu Jan 17 01:17:20 1995  Theodore Y. Ts'o  (tytso@rt-11)
 		the StarTech 16650 chip.  Treat it as a 16450 for now,
 		because of its FIFO bugs.
 
-Thu Jan  5 21:21:57 1995  <dhinds@allegro.stanford.edu>
+Thu Jan  5 21:21:57 1995  <dahinds@users.sourceforge.net>
 
 	* serial.c: (receive_char): Added counter to prevent infinite loop
 		when a PCMCIA serial device is ejected.

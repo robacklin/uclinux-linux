@@ -3,23 +3,20 @@
  *
  *  (C) Copyright 1995 Linus Torvalds
  */
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
 #include <linux/shm.h>
-#include <linux/errno.h>
 #include <linux/mman.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
+#include <linux/smp_lock.h>
+#include <linux/pagemap.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 
 static inline int mlock_fixup_all(struct vm_area_struct * vma, int newflags)
 {
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_flags = newflags;
+	spin_unlock(&vma->vm_mm->page_table_lock);
 	return 0;
 }
 
@@ -28,19 +25,24 @@ static inline int mlock_fixup_start(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!n)
 		return -EAGAIN;
 	*n = *vma;
-	vma->vm_start = end;
 	n->vm_end = end;
-	vma->vm_offset += vma->vm_start - n->vm_start;
 	n->vm_flags = newflags;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	n->vm_raend = 0;
+	if (n->vm_file)
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current->mm, n);
+	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_start = end;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -49,19 +51,24 @@ static inline int mlock_fixup_end(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!n)
 		return -EAGAIN;
 	*n = *vma;
-	vma->vm_end = start;
 	n->vm_start = start;
-	n->vm_offset += n->vm_start - vma->vm_start;
+	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
 	n->vm_flags = newflags;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	n->vm_raend = 0;
+	if (n->vm_file)
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current->mm, n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_end = start;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -70,31 +77,40 @@ static inline int mlock_fixup_middle(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * left, * right;
 
-	left = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	left = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!left)
 		return -EAGAIN;
-	right = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	right = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!right) {
-		kfree(left);
+		kmem_cache_free(vm_area_cachep, left);
 		return -EAGAIN;
 	}
 	*left = *vma;
 	*right = *vma;
 	left->vm_end = start;
-	vma->vm_start = start;
-	vma->vm_end = end;
 	right->vm_start = end;
-	vma->vm_offset += vma->vm_start - left->vm_start;
-	right->vm_offset += right->vm_start - left->vm_start;
+	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
 	vma->vm_flags = newflags;
-	if (vma->vm_inode)
-		vma->vm_inode->i_count += 2;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
+	if (vma->vm_file)
+		atomic_add(2, &vma->vm_file->f_count);
+
 	if (vma->vm_ops && vma->vm_ops->open) {
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	insert_vm_struct(current->mm, left);
-	insert_vm_struct(current->mm, right);
+	vma->vm_raend = 0;
+	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_start = start;
+	vma->vm_end = end;
+	vma->vm_flags = newflags;
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -120,16 +136,11 @@ static int mlock_fixup(struct vm_area_struct * vma,
 	if (!retval) {
 		/* keep track of amount of locked VM */
 		pages = (end - start) >> PAGE_SHIFT;
-		if (!(newflags & VM_LOCKED))
+		if (newflags & VM_LOCKED) {
 			pages = -pages;
-		vma->vm_mm->locked_vm += pages;
-
-		if ((newflags & VM_LOCKED) && (newflags & VM_READ))
-			while (start < end) {
-				int c = get_user((int *) start);
-				__asm__ __volatile__("": :"r" (c));
-				start += PAGE_SIZE;
-			}
+			make_pages_present(start, end);
+		}
+		vma->vm_mm->locked_vm -= pages;
 	}
 	return retval;
 }
@@ -140,9 +151,9 @@ static int do_mlock(unsigned long start, size_t len, int on)
 	struct vm_area_struct * vma, * next;
 	int error;
 
-	if (!suser())
+	if (on && !capable(CAP_IPC_LOCK))
 		return -EPERM;
-	len = (len + ~PAGE_MASK) & PAGE_MASK;
+	len = PAGE_ALIGN(len);
 	end = start + len;
 	if (end < start)
 		return -EINVAL;
@@ -178,16 +189,17 @@ static int do_mlock(unsigned long start, size_t len, int on)
 			break;
 		}
 	}
-	merge_segments(current->mm, start, end);
 	return error;
 }
 
-asmlinkage int sys_mlock(unsigned long start, size_t len)
+asmlinkage long sys_mlock(unsigned long start, size_t len)
 {
 	unsigned long locked;
 	unsigned long lock_limit;
+	int error = -ENOMEM;
 
-	len = (len + (start & ~PAGE_MASK) + ~PAGE_MASK) & PAGE_MASK;
+	down_write(&current->mm->mmap_sem);
+	len = PAGE_ALIGN(len + (start & ~PAGE_MASK));
 	start &= PAGE_MASK;
 
 	locked = len >> PAGE_SHIFT;
@@ -198,21 +210,29 @@ asmlinkage int sys_mlock(unsigned long start, size_t len)
 
 	/* check against resource limits */
 	if (locked > lock_limit)
-		return -ENOMEM;
+		goto out;
 
 	/* we may lock at most half of physical memory... */
 	/* (this check is pretty bogus, but doesn't hurt) */
-	if (locked > (MAP_NR(high_memory) >> 1))
-		return -ENOMEM;
+	if (locked > num_physpages/2)
+		goto out;
 
-	return do_mlock(start, len, 1);
+	error = do_mlock(start, len, 1);
+out:
+	up_write(&current->mm->mmap_sem);
+	return error;
 }
 
-asmlinkage int sys_munlock(unsigned long start, size_t len)
+asmlinkage long sys_munlock(unsigned long start, size_t len)
 {
-	len = (len + (start & ~PAGE_MASK) + ~PAGE_MASK) & PAGE_MASK;
+	int ret;
+
+	down_write(&current->mm->mmap_sem);
+	len = PAGE_ALIGN(len + (start & ~PAGE_MASK));
 	start &= PAGE_MASK;
-	return do_mlock(start, len, 0);
+	ret = do_mlock(start, len, 0);
+	up_write(&current->mm->mmap_sem);
+	return ret;
 }
 
 static int do_mlockall(int flags)
@@ -221,7 +241,7 @@ static int do_mlockall(int flags)
 	unsigned int def_flags;
 	struct vm_area_struct * vma;
 
-	if (!suser())
+	if (!capable(CAP_IPC_LOCK))
 		return -EPERM;
 
 	def_flags = 0;
@@ -240,32 +260,42 @@ static int do_mlockall(int flags)
 		if (error)
 			break;
 	}
-	merge_segments(current->mm, 0, TASK_SIZE);
 	return error;
 }
 
-asmlinkage int sys_mlockall(int flags)
+asmlinkage long sys_mlockall(int flags)
 {
 	unsigned long lock_limit;
+	int ret = -EINVAL;
 
+	down_write(&current->mm->mmap_sem);
 	if (!flags || (flags & ~(MCL_CURRENT | MCL_FUTURE)))
-		return -EINVAL;
+		goto out;
 
 	lock_limit = current->rlim[RLIMIT_MEMLOCK].rlim_cur;
 	lock_limit >>= PAGE_SHIFT;
 
+	ret = -ENOMEM;
 	if (current->mm->total_vm > lock_limit)
-		return -ENOMEM;
+		goto out;
 
 	/* we may lock at most half of physical memory... */
 	/* (this check is pretty bogus, but doesn't hurt) */
-	if (current->mm->total_vm > (MAP_NR(high_memory) >> 1))
-		return -ENOMEM;
+	if (current->mm->total_vm > num_physpages/2)
+		goto out;
 
-	return do_mlockall(flags);
+	ret = do_mlockall(flags);
+out:
+	up_write(&current->mm->mmap_sem);
+	return ret;
 }
 
-asmlinkage int sys_munlockall(void)
+asmlinkage long sys_munlockall(void)
 {
-	return do_mlockall(0);
+	int ret;
+
+	down_write(&current->mm->mmap_sem);
+	ret = do_mlockall(0);
+	up_write(&current->mm->mmap_sem);
+	return ret;
 }

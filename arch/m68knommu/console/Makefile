@@ -7,7 +7,6 @@
 #
 
 L_TARGET = console.a
-L_OBJS = 68328fb.o fbcon.o fonts.o font_8x16.o font_8x8.o pearl_8x8.o mini_4x6.o
-M_OBJS =
+obj-y = 68328fb.o fbcon.o fonts.o font_8x16.o font_8x8.o pearl_8x8.o mini_4x6.o
 
 include $(TOPDIR)/Rules.make

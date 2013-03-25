@@ -1,6 +1,5 @@
-/*---------------------------------------------------------------------------*/
-/* $Id: mc68328digi.h,v 1.1 2001-11-21 14:54:30 gerg Exp $
- *
+/*----------------------------------------------------------------------------*/
+/*
  * linux/drivers/char/mc68328digi.h - Touch screen driver.
  *                                    Header file.
  *
@@ -105,17 +104,17 @@
  *                         -----------------> generate PEN_DOWN
  *
  */
-/*---------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 
 #ifndef _MC68328DIGI_H
 #define _MC68328DIGI_H
 
 #ifdef __KERNEL__
 #include <linux/time.h>   /* for timeval struct */
-#include <linux/ioctl.h>  /* for the _IOR macro to define the ioctl commands */
+#include <linux/ioctl.h>  /* for the _IOR macro to define the ioctl commands  */
 #endif
 
-/*---------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 /* Used to check the driver vs. userland program.
  *
  * If they have the same number, it means that 'struct ts_pen_info' and
@@ -134,7 +133,7 @@
  * version compatibility by setting version_req to MC68328DIGI_VERSION before
  * doing  ioctl(fd, TS_PARAMS_SET, &params).
  *
- * If version_req does not match, ioctl(fd,TS_PARAMS_SET,&params) would return
+ * If version_req does not match, ioctl(fd, TS_PARAMS_SET, &params) would return
  * EBADRQC ('Invalid request code').
  *
  * Note:
@@ -143,7 +142,7 @@
  *   ioctl(fd, TS_PARAMS_SET, &params)!
  */
 
-/*---------------------------------------------------------------------------*/
+/*----------------------------------------------------------------------------*/
 
 /* Pen events */
 #define EV_PEN_DOWN    0
@@ -162,20 +161,23 @@
 /* Device is type misc then major=10 */
 #define MC68328DIGI_MAJOR  10
 
-#define TS_PARAMS_GET _IOR(MC68328DIGI_MAJOR, 0, struct ts_drv_params)
-#define TS_PARAMS_SET _IOW(MC68328DIGI_MAJOR, 1, struct ts_drv_params)
-#define TS_SEQU_CONV _IOWR(MC68328DIGI_MAJOR, 2, struct ts_sequ_conv_params )
-
-/*---------------------------------------------------------------------------*/
+#define TS_PARAMS_GET (0x00000001)
+#define TS_PARAMS_SET (0x00000002)
+#define TS_INFO_ID    (0xaa55aa55)
+ 
+/*----------------------------------------------------------------------------*/
 
 /* Available info from pen position and status */
 struct ts_pen_info {
+  unsigned int id;
   int x,y;    /* pen position                                      */
   int dx,dy;  /* delta move from last position                     */
   int event;  /* event from pen (DOWN,UP,CLICK,MOVE)               */
   int state;  /* state of pen (DOWN,UP,ERROR)                      */
   int ev_no;  /* no of the event                                   */
   unsigned long ev_time;  /* time of the event (ms) since ts_open  */
+  unsigned int portd;
+  unsigned int portk;
 };
 
 /* Structure that define touch screen parameters */
@@ -202,17 +204,12 @@ struct ts_drv_params {
                     * is moving
 		    */
   int sample_ms;   /* time between sampling (ms) */
-  int deglitch_ms; /* time to filter glitches at pen down */
+  int deglitch_on; /* whether to filter glitches at pen down */
   int event_queue_on; /* switch on and off the event queue */
 };
 
-/* structure that define the parameters of the sequential converter */
-struct ts_sequ_conv_params {
-  int io_channel;  /* input channel of the Burr-Brown ADS7843 (3 or 4)     */
-  int ret_val;     /* returned value = result of the sequential conversion */
-};
 
-/*-----------------------------------------------------------------------------
+/*------------------------------------------------------------------------------
 ** The following sample code illustrates the usage of the ts driver:
 ** 
 ** #include <string.h>
@@ -222,13 +219,13 @@ struct ts_sequ_conv_params {
 ** #include <linux/mc68328digi.h>
 ** 
 ** 
-** //--------------------------------------------------------------------------
+**
 ** 
 ** const char *ts_device_name = "/dev/ts";
 ** 
-** //--------------------------------------------------------------------------
-** // driver utility routines
-** //--------------------------------------------------------------------------
+**
+**
+**
 ** 
 ** 
 ** void tsdrv_params_fprint(FILE *f, struct ts_drv_params *p)
@@ -283,20 +280,20 @@ struct ts_sequ_conv_params {
 **   drv_params.sample_ms      = 10;
 **   drv_params.follow_thrs    = 0;
 **   drv_params.mv_thrs        = 2;
-**   drv_params.y_max          = 159 + 66;  // to allow scribble area
+**   drv_params.y_max          = 159 + 66; 
 **   drv_params.y_min          = 0;
 **   drv_params.x_max          = 159;
 **   drv_params.x_min          = 0;
 **   drv_params.xy_swap        = 0;
 ** 
-**   // according to mc68328digi.h 'How to calculate the parameters', we have
-**   // measured:
+**  
+**  
 **   mx1 = 508; ux1 =   0;
 **   my1 = 508; uy1 =   0;
 **   mx2 = 188; ux2 = 159;
 **   my2 = 188; uy2 = 159;
 ** 
-**   // now calculate the params:
+**  
 **   drv_params.x_ratio_num    = ux1 - ux2;
 **   drv_params.x_ratio_den    = mx1 - mx2;
 **   drv_params.x_offset       =
@@ -322,9 +319,9 @@ struct ts_sequ_conv_params {
 **   return ts_fd;
 ** }
 ** 
-** //--------------------------------------------------------------------------
-** // Main
-** //--------------------------------------------------------------------------
+**
+**
+**
 ** 
 ** main(int argc, char *argv[])
 ** {
@@ -370,14 +367,14 @@ struct ts_sequ_conv_params {
 **     printf("\n");
 **   }
 ** 
-**   // if we would exit the loop, we'd do:
+**  
 **   close(ts_fd);
 **   exit(0);
 ** }
 ** 
-** //--------------------------------------------------------------------------
+**
 ** 
-** <<< End of example ---------------------------------------------------------
+** <<< End of example ----------------------------------------------------------
 */
 
 

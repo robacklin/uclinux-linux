@@ -1,9 +1,9 @@
 #ifndef _ASMAXP_SIGCONTEXT_H
 #define _ASMAXP_SIGCONTEXT_H
 
-struct sigcontext_struct {
+struct sigcontext {
 	/*
-	 * what should we have here? I'd probably better use the same
+	 * What should we have here? I'd probably better use the same
 	 * stack layout as OSF/1, just in case we ever want to try
 	 * running their binaries.. 
 	 *
@@ -28,7 +28,7 @@ struct sigcontext_struct {
 	 unsigned long	sc_fp_trap_pc;
 	 unsigned long	sc_fp_trigger_sum;
 	 unsigned long	sc_fp_trigger_inst;
-	 unsigned long	sc_retcode[2];
 };
+
 
 #endif

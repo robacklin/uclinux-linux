@@ -19,4 +19,8 @@
 
 #define MAXHOSTNAMELEN	64	/* max length of hostname */
 
+#ifdef __KERNEL__
+#define CLOCKS_PER_SEC HZ
+#endif
+
 #endif /* _H8300_PARAM_H */

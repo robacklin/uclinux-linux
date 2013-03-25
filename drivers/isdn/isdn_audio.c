@@ -1,69 +1,21 @@
-/* $Id: isdn_audio.c,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
-
+/* $Id: isdn_audio.c,v 1.1.4.1 2001/11/20 14:19:33 kai Exp $
+ *
  * Linux ISDN subsystem, audio conversion and compression (linklevel).
  *
- * Copyright 1994-1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1994-1999 by Fritz Elfert (fritz@isdn4linux.de)
  * DTMF code (c) 1996 by Christian Mock (cm@kukuruz.ping.at)
  * Silence detection (c) 1998 by Armin Schindler (mac@gismo.telekom.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: isdn_audio.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.8.2.2  1998/11/05 22:11:35  fritz
- * Changed mail-address.
- *
- * Revision 1.8.2.1  1998/08/22 16:43:04  armin
- * Added silence detection in audio receive mode (AT+VSD).
- *
- * Revision 1.8  1997/03/02 14:29:16  fritz
- * More ttyI related cleanup.
- *
- * Revision 1.7  1997/02/03 22:44:11  fritz
- * Reformatted according CodingStyle
- *
- * Revision 1.6  1996/06/06 14:43:31  fritz
- * Changed to support DTMF decoding on audio playback also.
- *
- * Revision 1.5  1996/06/05 02:24:08  fritz
- * Added DTMF decoder for audio mode.
- *
- * Revision 1.4  1996/05/17 03:48:01  fritz
- * Removed some test statements.
- * Added revision string.
- *
- * Revision 1.3  1996/05/10 08:48:11  fritz
- * Corrected adpcm bugs.
- *
- * Revision 1.2  1996/04/30 09:31:17  fritz
- * General rewrite.
- *
- * Revision 1.1.1.1  1996/04/28 12:25:40  fritz
- * Taken under CVS control
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
-#define __NO_VERSION__
-#include <linux/module.h>
 #include <linux/isdn.h>
 #include "isdn_audio.h"
 #include "isdn_common.h"
 
-char *isdn_audio_revision = "$Revision: 1.1.1.1 $";
+char *isdn_audio_revision = "$Revision: 1.1.4.1 $";
 
 /*
  * Misc. lookup-tables.
@@ -217,39 +169,19 @@ static char isdn_audio_ulaw_to_alaw[] =
 	0x8a, 0x8a, 0x6a, 0x6a, 0xea, 0xea, 0x2a, 0x2a
 };
 
-#define NCOEFF           16     /* number of frequencies to be analyzed       */
-#define DTMF_TRESH    50000     /* above this is dtmf                         */
-#define SILENCE_TRESH   100     /* below this is silence                      */
-#define H2_TRESH      10000     /* 2nd harmonic                               */
+#define NCOEFF            8     /* number of frequencies to be analyzed       */
+#define DTMF_TRESH     4000     /* above this is dtmf                         */
+#define SILENCE_TRESH   200     /* below this is silence                      */
 #define AMP_BITS          9     /* bits per sample, reduced to avoid overflow */
 #define LOGRP             0
 #define HIGRP             1
-
-typedef struct {
-	int grp;                /* low/high group     */
-	int k;                  /* k                  */
-	int k2;                 /* k fuer 2. harmonic */
-} dtmf_t;
 
 /* For DTMF recognition:
  * 2 * cos(2 * PI * k / N) precalculated for all k
  */
 static int cos2pik[NCOEFF] =
 {
-	55812, 29528, 53603, 24032, 51193, 14443, 48590, 6517,
-	38113, -21204, 33057, -32186, 25889, -45081, 18332, -55279
-};
-
-static dtmf_t dtmf_tones[8] =
-{
-	{LOGRP, 0, 1},          /*  697 Hz */
-	{LOGRP, 2, 3},          /*  770 Hz */
-	{LOGRP, 4, 5},          /*  852 Hz */
-	{LOGRP, 6, 7},          /*  941 Hz */
-	{HIGRP, 8, 9},          /* 1209 Hz */
-	{HIGRP, 10, 11},        /* 1336 Hz */
-	{HIGRP, 12, 13},        /* 1477 Hz */
-	{HIGRP, 14, 15}         /* 1633 Hz */
+	55813, 53604, 51193, 48591, 38114, 33057, 25889, 18332
 };
 
 static char dtmf_matrix[4][4] =
@@ -260,27 +192,25 @@ static char dtmf_matrix[4][4] =
 	{'*', '0', '#', 'D'}
 };
 
-#if ((CPU == 386) || (CPU == 486) || (CPU == 586))
 static inline void
-isdn_audio_tlookup(const void *table, void *buff, unsigned long n)
+isdn_audio_tlookup(const u_char *table, u_char *buff, unsigned long n)
 {
-	__asm__("cld\n"
+#ifdef __i386__
+	unsigned long d0, d1, d2, d3;
+	__asm__ __volatile__(
+		"cld\n"
 		"1:\tlodsb\n\t"
 		"xlatb\n\t"
 		"stosb\n\t"
 		"loop 1b\n\t"
-      : :  "b"((long) table), "c"(n), "D"((long) buff), "S"((long) buff)
-      :        "bx", "cx", "di", "si", "ax");
-}
-
+	:	"=&b"(d0), "=&c"(d1), "=&D"(d2), "=&S"(d3)
+	:	"0"((long) table), "1"(n), "2"((long) buff), "3"((long) buff)
+	:	"memory", "ax");
 #else
-static inline void
-isdn_audio_tlookup(const char *table, char *buff, unsigned long n)
-{
 	while (n--)
-		*buff++ = table[*buff];
-}
+		*buff = table[*(unsigned char *)buff], buff++;
 #endif
+}
 
 void
 isdn_audio_ulaw2alaw(unsigned char *buff, unsigned long len)
@@ -541,7 +471,6 @@ isdn_audio_goertzel(int *sample, modem_info * info)
 		       info->line);
 		return;
 	}
-	SET_SKB_FREE(skb);
 	result = (int *) skb_put(skb, sizeof(int) * NCOEFF);
 	for (k = 0; k < NCOEFF; k++) {
 		sk = sk1 = sk2 = 0;
@@ -550,6 +479,18 @@ isdn_audio_goertzel(int *sample, modem_info * info)
 			sk2 = sk1;
 			sk1 = sk;
 		}
+		/* Avoid overflows */
+		sk >>= 1;
+		sk2 >>= 1;
+		/* compute |X(k)|**2 */
+		/* report overflows. This should not happen. */
+		/* Comment this out if desired */
+		if (sk < -32768 || sk > 32767)
+			printk(KERN_DEBUG
+			       "isdn_audio: dtmf goertzel overflow, sk=%d\n", sk);
+		if (sk2 < -32768 || sk2 > 32767)
+			printk(KERN_DEBUG
+			       "isdn_audio: dtmf goertzel overflow, sk2=%d\n", sk2);
 		result[k] =
 		    ((sk * sk) >> AMP_BITS) -
 		    ((((cos2pik[k] * sk) >> 15) * sk2) >> AMP_BITS) +
@@ -573,28 +514,58 @@ isdn_audio_eval_dtmf(modem_info * info)
 	int grp[2];
 	char what;
 	char *p;
+	int thresh;
 
 	while ((skb = skb_dequeue(&info->dtmf_queue))) {
 		result = (int *) skb->data;
 		s = info->dtmf_state;
-		grp[LOGRP] = grp[HIGRP] = -2;
+		grp[LOGRP] = grp[HIGRP] = -1;
 		silence = 0;
-		for (i = 0; i < 8; i++) {
-			if ((result[dtmf_tones[i].k] > DTMF_TRESH) &&
-			    (result[dtmf_tones[i].k2] < H2_TRESH))
-				grp[dtmf_tones[i].grp] = (grp[dtmf_tones[i].grp] == -2) ? i : -1;
-			else if ((result[dtmf_tones[i].k] < SILENCE_TRESH) &&
-			      (result[dtmf_tones[i].k2] < SILENCE_TRESH))
+		thresh = 0;
+		for (i = 0; i < NCOEFF; i++) {
+			if (result[i] > DTMF_TRESH) {
+				if (result[i] > thresh)
+					thresh = result[i];
+			}
+			else if (result[i] < SILENCE_TRESH)
 				silence++;
 		}
-		if (silence == 8)
+		if (silence == NCOEFF)
 			what = ' ';
 		else {
-			if ((grp[LOGRP] >= 0) && (grp[HIGRP] >= 0)) {
-				what = dtmf_matrix[grp[LOGRP]][grp[HIGRP] - 4];
-				if (s->last != ' ' && s->last != '.')
-					s->last = what;	/* min. 1 non-DTMF between DTMF */
-			} else
+			if (thresh > 0)	{
+				thresh = thresh >> 4;  /* touchtones must match within 12 dB */
+				for (i = 0; i < NCOEFF; i++) {
+					if (result[i] < thresh)
+						continue;  /* ignore */
+					/* good level found. This is allowed only one time per group */
+					if (i < NCOEFF / 2) {
+						/* lowgroup*/
+						if (grp[LOGRP] >= 0) {
+							// Bad. Another tone found. */
+							grp[LOGRP] = -1;
+							break;
+						}
+						else
+							grp[LOGRP] = i;
+					}
+					else { /* higroup */
+						if (grp[HIGRP] >= 0) { // Bad. Another tone found. */
+							grp[HIGRP] = -1;
+							break;
+						}
+						else
+							grp[HIGRP] = i - NCOEFF/2;
+					}
+				}
+				if ((grp[LOGRP] >= 0) && (grp[HIGRP] >= 0)) {
+					what = dtmf_matrix[grp[LOGRP]][grp[HIGRP]];
+					if (s->last != ' ' && s->last != '.')
+						s->last = what;	/* min. 1 non-DTMF between DTMF */
+				} else
+					what = '.';
+			}
+			else
 				what = '.';
 		}
 		if ((what != s->last) && (what != ' ') && (what != '.')) {
@@ -606,7 +577,7 @@ isdn_audio_eval_dtmf(modem_info * info)
 			if (skb_headroom(skb) < sizeof(isdn_audio_skb)) {
 				printk(KERN_WARNING
 				       "isdn_audio: insufficient skb_headroom, dropping\n");
-				kfree_skb(skb, FREE_READ);
+				kfree_skb(skb);
 				return;
 			}
 			ISDN_AUDIO_SKB_DLECOUNT(skb) = 0;
@@ -623,7 +594,7 @@ isdn_audio_eval_dtmf(modem_info * info)
 				isdn_timer_ctrl(ISDN_TIMER_MODEMREAD, 1);
 			wake_up_interruptible(&dev->drv[di]->rcv_waitq[ch]);
 		} else
-			kfree_skb(skb, FREE_READ);
+			kfree_skb(skb);
 		s->last = what;
 	}
 }
@@ -645,7 +616,9 @@ isdn_audio_calc_dtmf(modem_info * info, unsigned char *buf, int len, int fmt)
 	int c;
 
 	while (len) {
-		c = MIN(len, (DTMF_NPOINTS - s->idx));
+		c = DTMF_NPOINTS - s->idx;
+		if (c > len)
+			c = len;
 		if (c <= 0)
 			break;
 		for (i = 0; i < c; i++) {
@@ -667,88 +640,101 @@ isdn_audio_calc_dtmf(modem_info * info, unsigned char *buf, int len, int fmt)
 silence_state *
 isdn_audio_silence_init(silence_state * s)
 {
-        if (!s)
-                s = (silence_state *) kmalloc(sizeof(silence_state), GFP_ATOMIC);
-        if (s) {
-                s->idx = 0;
-                s->state = 0;
-        }
-        return s;
+	if (!s)
+		s = (silence_state *) kmalloc(sizeof(silence_state), GFP_ATOMIC);
+	if (s) {
+		s->idx = 0;
+		s->state = 0;
+	}
+	return s;
 }
 
 void
 isdn_audio_calc_silence(modem_info * info, unsigned char *buf, int len, int fmt)
 {
-        silence_state *s = info->silence_state;
-        int i;
-        signed char c;
+	silence_state *s = info->silence_state;
+	int i;
+	signed char c;
 
-        if ((!s) || (!info->emu.vpar[1])) return;
+	if (!info->emu.vpar[1]) return;
 
-        for (i = 0; i < len; i++) {
-                if (fmt)
-                    c = isdn_audio_alaw_to_ulaw[*buf++];
-                        else
-                    c = *buf++;
+	for (i = 0; i < len; i++) {
+		if (fmt)
+		    c = isdn_audio_alaw_to_ulaw[*buf++];
+			else
+		    c = *buf++;
 
-                if (c > 0) c -= 128;
-                c = abs(c);
+		if (c > 0) c -= 128;
+		c = abs(c);
 
-                if (c > (info->emu.vpar[1] * 4)) {
-                        s->idx = 0;
-                        s->state = 1;
-                } else {
-                        if (s->idx < 210000) s->idx++;
-                }
-        }
+		if (c > (info->emu.vpar[1] * 4)) { 
+			s->idx = 0;
+			s->state = 1; 
+		} else {
+			if (s->idx < 210000) s->idx++; 
+		}
+	}
+}
+
+void
+isdn_audio_put_dle_code(modem_info * info, u_char code)
+{
+	struct sk_buff *skb;
+	unsigned long flags;
+	int di;
+	int ch;
+	char *p;
+
+	skb = dev_alloc_skb(2);
+	if (!skb) {
+		printk(KERN_WARNING
+		  "isdn_audio: Could not alloc skb for ttyI%d\n",
+		       info->line);
+		return;
+	}
+	p = (char *) skb_put(skb, 2);
+	p[0] = 0x10;
+	p[1] = code;
+	if (skb_headroom(skb) < sizeof(isdn_audio_skb)) {
+		printk(KERN_WARNING
+		       "isdn_audio: insufficient skb_headroom, dropping\n");
+		kfree_skb(skb);
+		return;
+	}
+	ISDN_AUDIO_SKB_DLECOUNT(skb) = 0;
+	ISDN_AUDIO_SKB_LOCK(skb) = 0;
+	save_flags(flags);
+	cli();
+	di = info->isdn_driver;
+	ch = info->isdn_channel;
+	__skb_queue_tail(&dev->drv[di]->rpqueue[ch], skb);
+	dev->drv[di]->rcvcount[ch] += 2;
+	restore_flags(flags);
+	/* Schedule dequeuing */
+	if ((dev->modempoll) && (info->rcvsched))
+		isdn_timer_ctrl(ISDN_TIMER_MODEMREAD, 1);
+	wake_up_interruptible(&dev->drv[di]->rcv_waitq[ch]);
 }
 
 void
 isdn_audio_eval_silence(modem_info * info)
 {
-        silence_state *s = info->silence_state;
-        struct sk_buff *skb;
-        unsigned long flags;
-        int di;
-        int ch;
-        char what;
-        char *p;
+	silence_state *s = info->silence_state;
+	char what;
 
-	if (!s) return;
-        what = ' ';
-        if (s->idx > (info->emu.vpar[2] * 800)) {
-                s->idx = 0;
-                if (!s->state) {        /* silence from beginning of rec */
-                        what = 's';
-                } else {
-                        what = 'q';
-                }
-        }
-                if ((what == 's') || (what == 'q')) {
-                        printk(KERN_DEBUG "ttyI%d: %s\n", info->line,
-                                (what=='s') ? "silence":"quiet");
-                        skb = dev_alloc_skb(2);
-                        p = (char *) skb_put(skb, 2);
-                        p[0] = 0x10;
-                        p[1] = what;
-                        if (skb_headroom(skb) < sizeof(isdn_audio_skb)) {
-                                printk(KERN_WARNING
-                                       "isdn_audio: insufficient skb_headroom, dropping\n");
-				kfree_skb(skb, FREE_READ);
-                                return;
-                        }
-                        ISDN_AUDIO_SKB_DLECOUNT(skb) = 0;
-                        ISDN_AUDIO_SKB_LOCK(skb) = 0;
-                        save_flags(flags);
-                        cli();
-                        di = info->isdn_driver;
-                        ch = info->isdn_channel;
-                        __skb_queue_tail(&dev->drv[di]->rpqueue[ch], skb);
-                        dev->drv[di]->rcvcount[ch] += 2;
-                        restore_flags(flags);
-                        /* Schedule dequeuing */
-                        if ((dev->modempoll) && (info->rcvsched))
-                                isdn_timer_ctrl(ISDN_TIMER_MODEMREAD, 1);
-                        wake_up_interruptible(&dev->drv[di]->rcv_waitq[ch]);
-                }
+	what = ' ';
+
+	if (s->idx > (info->emu.vpar[2] * 800)) { 
+		s->idx = 0;
+		if (!s->state) {	/* silence from beginning of rec */ 
+			what = 's';
+		} else {
+			what = 'q';
+		}
+	}
+		if ((what == 's') || (what == 'q')) {
+			printk(KERN_DEBUG "ttyI%d: %s\n", info->line,
+				(what=='s') ? "silence":"quiet");
+			isdn_audio_put_dle_code(info, what);
+		} 
 }

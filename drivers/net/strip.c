@@ -81,12 +81,12 @@ static const char StripVersion[] = "1.3-STUART.CHESHIRE";
 /************************************************************************/
 /* Header files								*/
 
-#ifdef MODULE
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/version.h>
-#endif
-
+#include <linux/init.h>
 #include <asm/system.h>
+#include <asm/uaccess.h>
 #include <asm/segment.h>
 #include <asm/bitops.h>
 
@@ -109,12 +109,14 @@ static const char StripVersion[] = "1.3-STUART.CHESHIRE";
 #include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
+#include <linux/inetdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/if_strip.h>
 #include <linux/proc_fs.h>
 #include <linux/serial.h>
+#include <linux/serialP.h>
 #include <net/arp.h>
 
 #include <linux/ip.h>
@@ -306,8 +308,7 @@ struct strip
      */
 
     struct tty_struct *tty;			/* ptr to TTY structure		*/
-    char8              if_name;			/* Dynamically generated name	*/
-    struct device      dev;			/* Our device structure		*/
+    struct net_device      dev;			/* Our device structure		*/
 
     /*
      * Neighbour radio records
@@ -455,7 +456,7 @@ static const long            LongTime               = 0x7FFFFFFF;
 /************************************************************************/
 /* Global variables							*/
 
-static struct strip *struct_strip_list = NULL;
+static struct strip *struct_strip_list;
 
 
 /************************************************************************/
@@ -488,7 +489,7 @@ static struct strip *struct_strip_list = NULL;
 
 typedef unsigned long InterruptStatus;
 
-extern __inline__ InterruptStatus DisableInterrupts(void)
+static inline InterruptStatus DisableInterrupts(void)
 {
     InterruptStatus x;
     save_flags(x);
@@ -496,9 +497,27 @@ extern __inline__ InterruptStatus DisableInterrupts(void)
     return(x);
 }
 
-extern __inline__ void RestoreInterrupts(InterruptStatus x)
+static inline void RestoreInterrupts(InterruptStatus x)
 {
     restore_flags(x);
+}
+
+static int arp_query(unsigned char *haddr, u32 paddr, struct net_device * dev)
+{
+    struct neighbour *neighbor_entry;
+
+    neighbor_entry = neigh_lookup(&arp_tbl, &paddr, dev);
+
+    if (neighbor_entry != NULL)
+    {
+	neighbor_entry->used = jiffies;
+	if (neighbor_entry->nud_state & NUD_VALID)
+	{
+	    memcpy(haddr, neighbor_entry->ha, dev->addr_len);
+	    return 1;
+	}
+    }
+    return 0;
 }
 
 static void DumpData(char *msg, struct strip *strip_info, __u8 *ptr, __u8 *end)
@@ -910,7 +929,7 @@ static __u8 *radio_address_to_string(const MetricomAddress *addr, MetricomAddres
 
 static int allocate_buffers(struct strip *strip_info)
 {
-    struct device *dev = &strip_info->dev;
+    struct net_device *dev = &strip_info->dev;
     int sx_size    = MAX(STRIP_ENCAP_SIZE(MAX_RECV_MTU), 4096);
     int tx_size    = STRIP_ENCAP_SIZE(dev->mtu) + MaxCommandStringLength;
     __u8 *r = kmalloc(MAX_RECV_MTU, GFP_ATOMIC);
@@ -941,7 +960,7 @@ static int allocate_buffers(struct strip *strip_info)
 static void strip_changedmtu(struct strip *strip_info)
 {
     int old_mtu           = strip_info->mtu;
-    struct device *dev    = &strip_info->dev;
+    struct net_device *dev    = &strip_info->dev;
     unsigned char *orbuff = strip_info->rx_buff;
     unsigned char *osbuff = strip_info->sx_buff;
     unsigned char *otbuff = strip_info->tx_buff;
@@ -1013,9 +1032,7 @@ static void strip_unlock(struct strip *strip_info)
      */
     strip_info->idle_timer.expires = jiffies + 1*HZ;
     add_timer(&strip_info->idle_timer);
-    if (!clear_bit(0, (void *)&strip_info->dev.tbusy))
-        printk(KERN_ERR "%s: trying to unlock already unlocked device!\n",
-            strip_info->dev.name);
+    netif_wake_queue(&strip_info->dev);
 }
 
 
@@ -1159,7 +1176,7 @@ sprintf_status_info(char *buffer, struct strip *strip_info)
     FirmwareVersion    firmware_version    = strip_info->firmware_version;
     SerialNumber       serial_number       = strip_info->serial_number;
     BatteryVoltage     battery_voltage     = strip_info->battery_voltage;
-    char8              if_name             = strip_info->if_name;
+    char*              if_name             = strip_info->dev.name;
     MetricomAddress    true_dev_addr       = strip_info->true_dev_addr;
     MetricomAddress    dev_dev_addr        = *(MetricomAddress*)strip_info->dev.dev_addr;
     int                manual_dev_addr     = strip_info->manual_dev_addr;
@@ -1175,7 +1192,7 @@ sprintf_status_info(char *buffer, struct strip *strip_info)
 #endif
     RestoreInterrupts(intstat);
 
-    p += sprintf(p, "\nInterface name\t\t%s\n", if_name.c);
+    p += sprintf(p, "\nInterface name\t\t%s\n", if_name);
     p += sprintf(p, " Radio working:\t\t%s\n", working ? "Yes" : "No");
     radio_address_to_string(&true_dev_addr, &addr_string);
     p += sprintf(p, " Radio address:\t\t%s\n", addr_string.c);
@@ -1228,7 +1245,7 @@ sprintf_status_info(char *buffer, struct strip *strip_info)
  * the /proc file system.
  */
 
-static int get_status_info(char *buffer, char **start, off_t req_offset, int req_len, int dummy)
+static int get_status_info(char *buffer, char **start, off_t req_offset, int req_len)
 {
     int           total = 0, slop = 0;
     struct strip *strip_info = struct_strip_list;
@@ -1246,23 +1263,6 @@ static int get_status_info(char *buffer, char **start, off_t req_offset, int req
     exit:
     return(calc_start_len(buffer, start, req_offset, req_len, total, buf));
 }
-
-static const char proc_strip_status_name[] = "strip";
-static struct proc_dir_entry proc_strip_get_status_info =
-{
-    PROC_NET_STRIP_STATUS,		/* unsigned short low_ino */
-    sizeof(proc_strip_status_name)-1,	/* unsigned short namelen */
-    proc_strip_status_name,		/* const char *name */
-    S_IFREG | S_IRUGO,			/* mode_t mode */
-    1,					/* nlink_t nlink */
-    0, 0, 0,				/* uid_t uid, gid_t gid, unsigned long size */
-    &proc_net_inode_operations,		/* struct inode_operations * ops */
-    &get_status_info,			/* int (*get_info)(...) */
-    NULL,				/* void (*fill_inode)(struct inode *); */
-    NULL, NULL, NULL,			/* struct proc_dir_entry *next, *parent, *subdir; */
-    NULL				/* void *data; */
-};
-
 
 /************************************************************************/
 /* Sending routines							*/
@@ -1349,7 +1349,8 @@ static void strip_write_some_more(struct tty_struct *tty)
     struct strip *strip_info = (struct strip *) tty->disc_data;
 
     /* First make sure we're connected. */
-    if (!strip_info || strip_info->magic != STRIP_MAGIC || !strip_info->dev.start)
+    if (!strip_info || strip_info->magic != STRIP_MAGIC || 
+    	!netif_running(&strip_info->dev))
         return;
 
     if (strip_info->tx_left > 0)
@@ -1381,7 +1382,6 @@ static void strip_write_some_more(struct tty_struct *tty)
     {
         tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
         strip_unlock(strip_info);
-        mark_bh(NET_BH);
     }
 }
 
@@ -1440,8 +1440,18 @@ static unsigned char *strip_make_packet(unsigned char *buffer, struct strip *str
      */
     if (haddr.c[0] == 0xFF)
     {
-        /* arp_query returns 1 if it succeeds in looking up the address, 0 if it fails */
-        if (!arp_query(haddr.c, strip_info->dev.pa_brdaddr, &strip_info->dev))
+	u32 brd = 0;
+ 	struct in_device *in_dev = in_dev_get(&strip_info->dev);
+	if (in_dev == NULL)
+		return NULL;
+	read_lock(&in_dev->lock);
+	if (in_dev->ifa_list)
+		brd = in_dev->ifa_list->ifa_broadcast;
+	read_unlock(&in_dev->lock);
+	in_dev_put(in_dev);
+
+	/* arp_query returns 1 if it succeeds in looking up the address, 0 if it fails */
+        if (!arp_query(haddr.c, brd, &strip_info->dev))
         {
             printk(KERN_ERR "%s: Unable to send packet (no broadcast hub configured)\n",
                 strip_info->dev.name);
@@ -1485,6 +1495,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
     unsigned char *ptr = strip_info->tx_buff;
     int doreset = (long)jiffies - strip_info->watchdog_doreset >= 0;
     int doprobe = (long)jiffies - strip_info->watchdog_doprobe >= 0 && !doreset;
+    u32 addr, brd;
 
     /*
      * 1. If we have a packet, encapsulate it and put it in the buffer
@@ -1568,6 +1579,21 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
      */
     if (doreset) { ResetRadio(strip_info); return; }
 
+    if (1) {
+	    struct in_device *in_dev = in_dev_get(&strip_info->dev);
+	    brd = addr = 0;
+	    if (in_dev) {
+		    read_lock(&in_dev->lock);
+		    if (in_dev->ifa_list) {
+			    brd = in_dev->ifa_list->ifa_broadcast;
+			    addr = in_dev->ifa_list->ifa_local;
+		    }
+		    read_unlock(&in_dev->lock);
+		    in_dev_put(in_dev);
+	    }
+    }
+    
+
     /*
      * 6. If it is time for a periodic ARP, queue one up to be sent.
      * We only do this if:
@@ -1584,7 +1610,7 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
      */
     if (strip_info->working && (long)jiffies - strip_info->gratuitous_arp >= 0 &&
         memcmp(strip_info->dev.dev_addr, zero_address.c, sizeof(zero_address)) &&
-        arp_query(haddr.c, strip_info->dev.pa_brdaddr, &strip_info->dev))
+        arp_query(haddr.c, brd, &strip_info->dev))
     {
         /*printk(KERN_INFO "%s: Sending gratuitous ARP with interval %ld\n",
             strip_info->dev.name, strip_info->arp_interval / HZ);*/
@@ -1592,13 +1618,15 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
         strip_info->arp_interval *= 2;
         if (strip_info->arp_interval > MaxARPInterval)
             strip_info->arp_interval = MaxARPInterval;
-        arp_send(ARPOP_REPLY, ETH_P_ARP,
-            strip_info->dev.pa_addr,	/* Target address of ARP packet is our address */
-            &strip_info->dev,		/* Device to send packet on */
-            strip_info->dev.pa_addr,	/* Source IP address this ARP packet comes from */
-            NULL,			/* Destination HW address is NULL (broadcast it) */
-            strip_info->dev.dev_addr,	/* Source HW address is our HW address */
-            strip_info->dev.dev_addr);	/* Target HW address is our HW address (redundant) */
+	if (addr)
+	    arp_send(
+		ARPOP_REPLY, ETH_P_ARP,
+		addr, /* Target address of ARP packet is our address */
+		&strip_info->dev,	       /* Device to send packet on */
+		addr, /* Source IP address this ARP packet comes from */
+		NULL,			       /* Destination HW address is NULL (broadcast it) */
+		strip_info->dev.dev_addr,      /* Source HW address is our HW address */
+		strip_info->dev.dev_addr);     /* Target HW address is our HW address (redundant) */
     }
 
     /*
@@ -1608,16 +1636,18 @@ static void strip_send(struct strip *strip_info, struct sk_buff *skb)
 }
 
 /* Encapsulate a datagram and kick it into a TTY queue. */
-static int strip_xmit(struct sk_buff *skb, struct device *dev)
+static int strip_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct strip *strip_info = (struct strip *)(dev->priv);
 
-    if (!dev->start)
+    if (!netif_running(dev))
     {
         printk(KERN_ERR "%s: xmit call when iface is down\n", dev->name);
         return(1);
     }
-    if (set_bit(0, (void *) &strip_info->dev.tbusy)) return(1);
+
+    netif_stop_queue(dev);
+    
     del_timer(&strip_info->idle_timer);
 
     /* See if someone has been ifconfigging */
@@ -1653,7 +1683,8 @@ static int strip_xmit(struct sk_buff *skb, struct device *dev)
 
     strip_send(strip_info, skb);
 
-    if (skb) dev_kfree_skb(skb, FREE_WRITE);
+    if (skb)
+    	dev_kfree_skb(skb);
     return(0);
 }
 
@@ -1665,7 +1696,7 @@ static int strip_xmit(struct sk_buff *skb, struct device *dev)
 
 static void strip_IdleTask(unsigned long parameter)
 {
-    strip_xmit(NULL, (struct device *)parameter);
+    strip_xmit(NULL, (struct net_device *)parameter);
 }
 
 /*
@@ -1679,7 +1710,7 @@ static void strip_IdleTask(unsigned long parameter)
  *                 rebuild_header later to fill in the address)
  */
 
-static int strip_header(struct sk_buff *skb, struct device *dev,
+static int strip_header(struct sk_buff *skb, struct net_device *dev,
         unsigned short type, void *daddr, void *saddr, unsigned len)
 {
     struct strip *strip_info = (struct strip *)(dev->priv);
@@ -1707,24 +1738,17 @@ static int strip_header(struct sk_buff *skb, struct device *dev,
  * or non-zero if it needs more time to do an address lookup
  */
 
-static int strip_rebuild_header(void *buff, struct device *dev,
-        unsigned long dst, struct sk_buff *skb)
+static int strip_rebuild_header(struct sk_buff *skb)
 {
-    struct strip *strip_info = (struct strip *)(dev->priv);
-    STRIP_Header *header = (STRIP_Header *)buff;
-    /* Arp find returns zero if it knows the address, */
+#ifdef CONFIG_INET
+    STRIP_Header *header = (STRIP_Header *) skb->data;
+
+    /* Arp find returns zero if if knows the address, */
     /* or if it doesn't know the address it sends an ARP packet and returns non-zero */
-    int arp_result = arp_find(header->dst_addr.c, dst, dev, dev->pa_addr, skb);
-
-    if (arp_result == 0 && !memcmp(header->dst_addr.c, strip_info->true_dev_addr.c, sizeof(header->dst_addr.c)))
-    {
-        IPaddr x;
-        x.l = dst;
-        printk(KERN_ERR "%s: ARP lookup %d.%d.%d.%d returned own address\n",
-            strip_info->dev.name, x.b[0], x.b[1], x.b[2], x.b[3]);
-    }
-
-    return(arp_result);
+    return arp_find(header->dst_addr.c, skb)? 1 : 0;
+#else
+    return 0;
+#endif
 }
 
 
@@ -1997,7 +2021,7 @@ static void process_Info(struct strip *strip_info, __u8 *ptr, __u8 *end)
     if (ptr+16 > end) RecvErr("Bad Info Msg:", strip_info);
 }
 
-static struct device *get_strip_dev(struct strip *strip_info)
+static struct net_device *get_strip_dev(struct strip *strip_info)
 {
     /* If our hardware address is *manually set* to zero, and we know our */
     /* real radio hardware address, try to find another strip device that has been */
@@ -2006,7 +2030,9 @@ static struct device *get_strip_dev(struct strip *strip_info)
         !memcmp(strip_info->dev.dev_addr, zero_address.c, sizeof(zero_address)) &&
         memcmp(&strip_info->true_dev_addr, zero_address.c, sizeof(zero_address)))
     {
-        struct device *dev = dev_base;
+        struct net_device *dev;
+	read_lock_bh(&dev_base_lock);
+	dev = dev_base;
         while (dev)
         {
             if (dev->type == strip_info->dev.type &&
@@ -2014,10 +2040,12 @@ static struct device *get_strip_dev(struct strip *strip_info)
             {
                 printk(KERN_INFO "%s: Transferred packet ownership to %s.\n",
                     strip_info->dev.name, dev->name);
+		read_unlock_bh(&dev_base_lock);
                 return(dev);
             }
             dev = dev->next;
         }
+	read_unlock_bh(&dev_base_lock);
     }
     return(&strip_info->dev);
 }
@@ -2305,7 +2333,8 @@ strip_receive_buf(struct tty_struct *tty, const unsigned char *cp, char *fp, int
     struct strip *strip_info = (struct strip *) tty->disc_data;
     const unsigned char *end = cp + count;
 
-    if (!strip_info || strip_info->magic != STRIP_MAGIC || !strip_info->dev.start)
+    if (!strip_info || strip_info->magic != STRIP_MAGIC 
+    	|| !netif_running(&strip_info->dev))
         return;
 
     /* Argh! mtu change time! - costs us the packet part received at the change */
@@ -2389,7 +2418,7 @@ static int set_mac_address(struct strip *strip_info, MetricomAddress *addr)
     return 0;
 }
 
-static int dev_set_mac_address(struct device *dev, void *addr)
+static int dev_set_mac_address(struct net_device *dev, void *addr)
 {
     struct strip *strip_info = (struct strip *)(dev->priv);
     struct sockaddr *sa = addr;
@@ -2398,12 +2427,12 @@ static int dev_set_mac_address(struct device *dev, void *addr)
     return 0;
 }
 
-static struct enet_statistics *strip_get_stats(struct device *dev)
+static struct net_device_stats *strip_get_stats(struct net_device *dev)
 {
-    static struct enet_statistics stats;
+    static struct net_device_stats stats;
     struct strip *strip_info = (struct strip *)(dev->priv);
 
-    memset(&stats, 0, sizeof(struct enet_statistics));
+    memset(&stats, 0, sizeof(struct net_device_stats));
 
     stats.rx_packets     = strip_info->rx_packets;
     stats.tx_packets     = strip_info->tx_packets;
@@ -2443,9 +2472,12 @@ static struct enet_statistics *strip_get_stats(struct device *dev)
 
 /* Open the low-level part of the STRIP channel. Easy! */
 
-static int strip_open_low(struct device *dev)
+static int strip_open_low(struct net_device *dev)
 {
     struct strip *strip_info = (struct strip *)(dev->priv);
+#if 0
+    struct in_device *in_dev = dev->ip_ptr;
+#endif
 
     if (strip_info->tty == NULL)
         return(-ENODEV);
@@ -2462,19 +2494,22 @@ static int strip_open_low(struct device *dev)
     strip_info->next_command   = CompatibilityCommand;
     strip_info->user_baud      = get_baud(strip_info->tty);
 
+#if 0
     /*
      * Needed because address '0' is special
+     *
+     * --ANK Needed it or not needed, it does not matter at all.
+     *	     Make it at user level, guys.
      */
 
-    if (dev->pa_addr == 0)
-        dev->pa_addr=ntohl(0xC0A80001);
-    dev->tbusy  = 0;
-    dev->start  = 1;
-
+    if (in_dev->ifa_list->ifa_address == 0)
+        in_dev->ifa_list->ifa_address = ntohl(0xC0A80001);
+#endif
     printk(KERN_INFO "%s: Initializing Radio.\n", strip_info->dev.name);
     ResetRadio(strip_info);
     strip_info->idle_timer.expires = jiffies + 1*HZ;
     add_timer(&strip_info->idle_timer);
+    netif_wake_queue(dev);
     return(0);
 }
 
@@ -2483,16 +2518,16 @@ static int strip_open_low(struct device *dev)
  * Close the low-level part of the STRIP channel. Easy!
  */
 
-static int strip_close_low(struct device *dev)
+static int strip_close_low(struct net_device *dev)
 {
     struct strip *strip_info = (struct strip *)(dev->priv);
 
     if (strip_info->tty == NULL)
         return -EBUSY;
     strip_info->tty->flags &= ~(1 << TTY_DO_WRITE_WAKEUP);
-    dev->tbusy = 1;
-    dev->start = 0;
 
+    netif_stop_queue(dev);
+    
     /*
      * Free all STRIP frame buffers.
      */
@@ -2520,10 +2555,8 @@ static int strip_close_low(struct device *dev)
  * (dynamically assigned) device is registered
  */
 
-static int strip_dev_init(struct device *dev)
+static int strip_dev_init(struct net_device *dev)
 {
-    int i;
-
     /*
      * Finish setting up the DEVICE info.
      */
@@ -2533,8 +2566,6 @@ static int strip_dev_init(struct device *dev)
     dev->tx_queue_len       = 30;         /* Drop after 30 frames queued */
 
     dev->flags              = 0;
-    dev->family             = AF_INET;
-    dev->metric             = 0;
     dev->mtu                = DEFAULT_STRIP_MTU;
     dev->type               = ARPHRD_METRICOM;        /* dtang */
     dev->hard_header_len    = sizeof(STRIP_Header);
@@ -2545,17 +2576,6 @@ static int strip_dev_init(struct device *dev)
     *(MetricomAddress*)&dev->broadcast = broadcast_address;
     dev->dev_addr[0]        = 0;
     dev->addr_len           = sizeof(MetricomAddress);
-    dev->pa_addr            = 0;
-    dev->pa_brdaddr         = 0;
-    dev->pa_mask            = 0;
-    dev->pa_alen            = sizeof(unsigned long);
-
-    /*
-     * Pointer to the interface buffers.
-     */
-
-    for (i = 0; i < DEV_NUMBUFFS; i++)
-        skb_queue_head_init(&dev->buffs[i]);
 
     /*
      * Pointers to interface service routines.
@@ -2566,11 +2586,7 @@ static int strip_dev_init(struct device *dev)
     dev->hard_start_xmit    = strip_xmit;
     dev->hard_header        = strip_header;
     dev->rebuild_header     = strip_rebuild_header;
-    /*  dev->type_trans            unused */
-    /*  dev->set_multicast_list   unused */
     dev->set_mac_address    = dev_set_mac_address;
-    /*  dev->do_ioctl             unused */
-    /*  dev->set_config           unused */
     dev->get_stats          = strip_get_stats;
     return 0;
 }
@@ -2640,8 +2656,7 @@ static struct strip *strip_alloc(void)
     strip_info->idle_timer.function = strip_IdleTask;
 
     /* Note: strip_info->if_name is currently 8 characters long */
-    sprintf(strip_info->if_name.c, "st%d", channel_id);
-    strip_info->dev.name         = strip_info->if_name.c;
+    sprintf(strip_info->dev.name, "st%d", channel_id);
     strip_info->dev.base_addr    = channel_id;
     strip_info->dev.priv         = (void*)strip_info;
     strip_info->dev.next         = NULL;
@@ -2691,8 +2706,7 @@ static int strip_open(struct tty_struct *tty)
     tty->disc_data = strip_info;
     if (tty->driver.flush_buffer)
         tty->driver.flush_buffer(tty);
-    if (tty->ldisc.flush_buffer)
-        tty->ldisc.flush_buffer(tty);
+    tty_ldisc_flush(tty);
 
     /*
      * Restore default settings
@@ -2708,11 +2722,9 @@ static int strip_open(struct tty_struct *tty)
     tty->termios->c_cflag |= CLOCAL;    /* Ignore modem control signals. */
     tty->termios->c_cflag &= ~HUPCL;    /* Don't close on hup */
 
-#ifdef MODULE
     MOD_INC_USE_COUNT;
-#endif
 
-    printk(KERN_INFO "STRIP: device \"%s\" activated\n", strip_info->if_name.c);
+    printk(KERN_INFO "STRIP: device \"%s\" activated\n", strip_info->dev.name);
 
     /*
      * Done.  We have linked the TTY line to a channel.
@@ -2738,17 +2750,14 @@ static void strip_close(struct tty_struct *tty)
     if (!strip_info || strip_info->magic != STRIP_MAGIC)
         return;
 
-    dev_close(&strip_info->dev);
     unregister_netdev(&strip_info->dev);
 
     tty->disc_data = 0;
     strip_info->tty = NULL;
-    printk(KERN_INFO "STRIP: device \"%s\" closed down\n", strip_info->if_name.c);
+    printk(KERN_INFO "STRIP: device \"%s\" closed down\n", strip_info->dev.name);
     strip_free(strip_info);
     tty->disc_data = NULL;
-#ifdef MODULE
     MOD_DEC_USE_COUNT;
-#endif
 }
 
 
@@ -2759,7 +2768,6 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
     unsigned int cmd, unsigned long arg)
 {
     struct strip *strip_info = (struct strip *) tty->disc_data;
-    int err;
 
     /*
      * First make sure we're connected.
@@ -2771,23 +2779,18 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
     switch(cmd)
     {
         case SIOCGIFNAME:
-            err = verify_area(VERIFY_WRITE, (void*)arg, 16);
-            if (err)
-                return -err;
-            memcpy_tofs((void*)arg, strip_info->dev.name,
-                strlen(strip_info->dev.name) + 1);
-            return 0;
-
+	    return copy_to_user((void*)arg, strip_info->dev.name,
+				strlen(strip_info->dev.name) + 1) ? 
+		-EFAULT : 0;
+	    break;
         case SIOCSIFHWADDR:
             {
             MetricomAddress addr;
             printk(KERN_INFO "%s: SIOCSIFHWADDR\n", strip_info->dev.name);
-            err = verify_area(VERIFY_READ, (void*)arg, sizeof(MetricomAddress));
-            if (err) return -err;
-            memcpy_fromfs(&addr, (void*)arg, sizeof(MetricomAddress));
-            return(set_mac_address(strip_info, &addr));
-            }
-
+	    return copy_from_user(&addr, (void*)arg, sizeof(MetricomAddress)) ?
+		-EFAULT : set_mac_address(strip_info, &addr);
+	    break;
+	    }
         /*
          * Allow stty to read, but not set, the serial port
          */
@@ -2796,9 +2799,10 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
         case TCGETA:
             return n_tty_ioctl(tty, (struct file *) file, cmd,
                 (unsigned long) arg);
-
+	    break;
         default:
             return -ENOIOCTLCMD;
+	    break;
     }
 }
 
@@ -2806,86 +2810,67 @@ static int strip_ioctl(struct tty_struct *tty, struct file *file,
 /************************************************************************/
 /* Initialization							*/
 
+static struct tty_ldisc strip_ldisc = {
+	magic:		TTY_LDISC_MAGIC,
+	name:		"strip",
+	open:		strip_open,
+	close:		strip_close,
+	ioctl:		strip_ioctl,
+	receive_buf:	strip_receive_buf,
+	receive_room:	strip_receive_room,
+	write_wakeup:	strip_write_some_more,
+};
+
 /*
  * Initialize the STRIP driver.
  * This routine is called at boot time, to bootstrap the multi-channel
  * STRIP driver
  */
 
-#ifdef MODULE
-static
-#endif
-int strip_init_ctrl_dev(struct device *dummy)
+static char signon[] __initdata = KERN_INFO "STRIP: Version %s (unlimited channels)\n";
+
+static int __init strip_init_driver(void)
 {
-    static struct tty_ldisc strip_ldisc;
     int status;
 
-    printk(KERN_INFO "STRIP: Version %s (unlimited channels)\n", StripVersion);
+    printk(signon, StripVersion);
 
     /*
      * Fill in our line protocol discipline, and register it
      */
-
-    memset(&strip_ldisc, 0, sizeof(strip_ldisc));
-    strip_ldisc.magic        = TTY_LDISC_MAGIC;
-    strip_ldisc.flags        = 0;
-    strip_ldisc.open         = strip_open;
-    strip_ldisc.close        = strip_close;
-    strip_ldisc.read         = NULL;
-    strip_ldisc.write        = NULL;
-    strip_ldisc.ioctl        = strip_ioctl;
-    strip_ldisc.select       = NULL;
-    strip_ldisc.receive_buf  = strip_receive_buf;
-    strip_ldisc.receive_room = strip_receive_room;
-    strip_ldisc.write_wakeup = strip_write_some_more;
-    status = tty_register_ldisc(N_STRIP, &strip_ldisc);
-    if (status != 0)
-    {
+    if ((status = tty_register_ldisc(N_STRIP, &strip_ldisc)))
         printk(KERN_ERR "STRIP: can't register line discipline (err = %d)\n", status);
-    }
 
     /*
      * Register the status file with /proc
      */
-    if (proc_net_register(&proc_strip_get_status_info) != 0)
-    {
-        printk(KERN_ERR "strip: status proc_net_register() failed.\n");
-    }
+    proc_net_create("strip", S_IFREG | S_IRUGO, get_status_info);
 
-#ifdef MODULE
-     return status;
-#else
-
-    /* Return "not found", so that dev_init() will unlink
-     * the placeholder device entry for us.
-     */
-    return ENODEV;
-#endif
+    return status;
 }
+module_init(strip_init_driver);
 
+static const char signoff[] __exitdata = KERN_INFO "STRIP: Module Unloaded\n";
 
-/************************************************************************/
-/* From here down is only used when compiled as an external module	*/
-
-#ifdef MODULE
-
-int init_module(void)
-{
-    return strip_init_ctrl_dev(0);
-}
-
-void cleanup_module(void)
+static void __exit strip_exit_driver(void)
 {
     int i;
     while (struct_strip_list)
         strip_free(struct_strip_list);
 
     /* Unregister with the /proc/net file here. */
-    proc_net_unregister(PROC_NET_STRIP_STATUS);
+    proc_net_remove("strip");
 
     if ((i = tty_register_ldisc(N_STRIP, NULL)))
         printk(KERN_ERR "STRIP: can't unregister line discipline (err = %d)\n", i);
 
-    printk(KERN_INFO "STRIP: Module Unloaded\n");
+    printk(signoff);
 }
-#endif /* MODULE */
+module_exit(strip_exit_driver);
+
+MODULE_AUTHOR("Stuart Cheshire <cheshire@cs.stanford.edu>");
+MODULE_DESCRIPTION("Starmode Radio IP (STRIP) Device Driver");
+MODULE_LICENSE("Dual BSD/GPL");
+
+MODULE_SUPPORTED_DEVICE("Starmode Radio IP (STRIP) modem");
+

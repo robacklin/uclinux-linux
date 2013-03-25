@@ -4,14 +4,7 @@
  *  Yoshinori Sato <qzb04471@nifty.ne.jp>
  *
  *  Based on:
- *
- *  linux/arch/m68knommu/kernel/ptrace.c
- *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@ryeham.ee.ryerson.ca>,
- *                      Kenneth Albanowski <kjahds@kjahds.com>,
- *                      The Silver Hammer Group, Ltd.
- *
- *  linux/arch/m68k/kernel/ptrace
+ *  linux/arch/m68k/kernel/ptrace.c
  *
  *  Copyright (C) 1994 by Hamish Macdonald
  *  Taken from linux/kernel/ptrace.c and modified for M680x0.
@@ -22,116 +15,33 @@
  * this archive for more details.
  */
 
-#include <stddef.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/string.h>
-
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/config.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
+#include <asm/processor.h>
+#include <asm/signal.h>
+
+/* cpu depend functions */
+extern long h8300_get_reg(struct task_struct *task, int regno);
+extern int  h8300_put_reg(struct task_struct *task, int regno, unsigned long data);
+extern void h8300_disable_trace(struct task_struct *child);
+extern void h8300_enable_trace(struct task_struct *child);
 
 /*
  * does not yet catch signals sent when the child dies.
  * in exit.c or in signal.c.
  */
-
-/* determines which bits in the SR the user has access to. */
-/* 1 = access 0 = no access */
-#define SR_MASK 0x006f
-
-/* Find the stack offset for a register, relative to tss.esp0. */
-#define PT_REG(reg)	((long)&((struct pt_regs *)0)->reg)
-#define SW_REG(reg)	((long)&((struct switch_stack *)0)->reg \
-			 - sizeof(struct switch_stack))
-/* Mapping from PT_xxx to the stack offset at which the register is
-   saved.  Notice that usp has no stack-slot and needs to be treated
-   specially (see get_reg/put_reg below). */
-static const int pt_regs_offset[] = {
-	PT_REG(er1), PT_REG(er2), PT_REG(er3), PT_REG(er4),
-	PT_REG(er5), SW_REG(er6), PT_REG(er0), PT_REG(orig_er0),
-	PT_REG(ccr), PT_REG(pc)
-};
-
-/* change a pid into a task struct. */
-static inline struct task_struct * get_task(int pid)
-{
-	int i;
-
-	for (i = 1; i < NR_TASKS; i++) {
-		if (task[i] != NULL && (task[i]->pid == pid))
-			return task[i];
-	}
-	return NULL;
-}
-
-/*
- * Get contents of register REGNO in task TASK.
- */
-static inline long get_reg(struct task_struct *task, int regno)
-{
-	unsigned long *addr;
-
-	if (regno == PT_CCR)
-		return *(unsigned short *)(task->tss.esp0 + pt_regs_offset[regno]);
-	if (regno == PT_USP)
-		addr = &task->tss.usp;
-	else if (regno < sizeof(pt_regs_offset)/sizeof(pt_regs_offset[0]))
-		addr = (unsigned long *)(task->tss.esp0 + pt_regs_offset[regno]);
-	else
-		return 0;
-	return *addr;
-}
-
-/*
- * Write contents of register REGNO in task TASK.
- */
-static inline int put_reg(struct task_struct *task, int regno,
-			  unsigned long data)
-{
-	unsigned long *addr;
-
-	if (regno == PT_CCR) {
-		addr = (unsigned long *)task->tss.usp;
-		*addr &= 0xffffff;
-		*addr |= data << 24;
-		return 0;
-	}
-	if (regno == PT_PC) {
-		addr = (unsigned long *)task->tss.usp;
-		*addr |= data & 0xffffff;
-		return 0;
-	}
-	else if (regno == PT_USP)
-		addr = &task->tss.usp;
-	else if (regno < sizeof(pt_regs_offset)/sizeof(pt_regs_offset[0]))
-		addr = (unsigned long *) (task->tss.esp0 + pt_regs_offset[regno]);
-	else
-		return -1;
-	*addr = data;
-	return 0;
-}
-
-inline
-static unsigned long get_long(struct task_struct * tsk, 
-	struct vm_area_struct * vma, unsigned long addr)
-{
-	return *(unsigned long*)addr;
-}
-
-inline
-static void put_long(struct task_struct * tsk, struct vm_area_struct * vma, unsigned long addr,
-	unsigned long data)
-{
-	*(unsigned long*)addr = data;
-}
-
 
 inline
 static int read_long(struct task_struct * tsk, unsigned long addr,
@@ -141,268 +51,146 @@ static int read_long(struct task_struct * tsk, unsigned long addr,
 	return 0;
 }
 
-inline
-static int write_long(struct task_struct * tsk, unsigned long addr,
-	unsigned long data)
+void ptrace_disable(struct task_struct *child)
 {
-	*(unsigned long *)addr = data;
-	return 0;
-}
-
-#define ENABLE_PTRACE
-
-#ifdef ENABLE_PTRACE
-int ptrace_cancel_bpt(struct task_struct *child)
-{
-        int i,r=0;
-
-	for(i=0; i<4; i++) {
-	        if (child->debugreg[i]) {
-		        if (child->debugreg[i]!=-1)
-		                put_fs_word(child->debugreg[i+4],child->debugreg[i]);
-			r = 1;
-			child->debugreg[i] = 0;
-		}
-	}
-	return r;
-}
-
-const static unsigned char opcode0[]={
-  0x04,0x02,0x04,0x02,0x04,0x02,0x04,0x02,  /* 0x58 */
-  0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,  /* 0x60 */
-  0x02,0x02,0x11,0x11,0x02,0x02,0x04,0x04,  /* 0x68 */
-  0x02,0x02,0x02,0x02,0x02,0x02,0x02,0x02,  /* 0x70 */
-  0x08,0x04,0x06,0x04,0x04,0x04,0x04,0x04}; /* 0x78 */
-
-static int table_parser01(unsigned char *pc);
-static int table_parser02(unsigned char *pc);
-static int table_parser100(unsigned char *pc);
-static int table_parser101(unsigned char *pc);
-
-const static int (*parsers[])(unsigned char *pc)={table_parser01,table_parser02};
-
-static int insn_length(unsigned char *pc)
-{
-  if (*pc == 0x01)
-    return table_parser01(pc+1);
-  if (*pc < 0x58 || *pc>=0x80) 
-    return 2;
-  else
-    if (opcode0[*pc-0x58]<0x10)
-      return opcode0[*pc-0x58];
-    else
-      return (*parsers[opcode0[*pc-0x58]-0x10])(pc+1);
-}
-
-static int table_parser01(unsigned char *pc)
-{
-  const unsigned char codelen[]={0x10,0x00,0x00,0x00,0x11,0x00,0x00,0x00,
-                                 0x02,0x00,0x00,0x00,0x04,0x04,0x00,0x04};
-  const static int (*parsers[])(unsigned char *)={table_parser100,table_parser101};
-  unsigned char second_index;
-  second_index = (*pc) >> 4;
-  if (codelen[second_index]<0x10)
-    return codelen[second_index];
-  else
-    return parsers[codelen[second_index]-0x10](pc);
-}
-
-static int table_parser02(unsigned char *pc)
-{
-  return (*pc & 0x20)?0x06:0x04;
-}
-
-static int table_parser100(unsigned char *pc)
-{
-  return (*(pc+2) & 0x02)?0x08:0x06;
-}
-
-static int table_parser101(unsigned char *pc)
-{
-  return (*(pc+2) & 0x02)?0x08:0x06;
-}
-
-#define BREAK_INST 0x5730 /* TRAPA #3 */
-
-int ptrace_set_bpt(struct task_struct *child)
-{
-        unsigned long pc,next;
-	unsigned short insn;
-	pc = get_reg(child,PT_PC);
-	next = insn_length((unsigned char *)pc) + pc;
-	insn = get_fs_word(pc);
-	if (insn == 0x5470) {
-	        /* rts */ 
-	        unsigned long sp;
-		sp = get_reg(child,PT_USP);
-		next = get_fs_long(sp);
-	} else if ((insn & 0xfb00) != 0x5800) {
-	        /* jmp / jsr */
-	        int regs;
-		const short reg_tbl[]={PT_ER0,PT_ER1,PT_ER2,PT_ER3,
-                                       PT_ER4,PT_ER5,PT_ER6,PT_USP};
-	        switch(insn & 0xfb00) {
-		        case 0x5900:
-			       regs = (insn & 0x0070) >> 8;
-                               next = get_reg(child,reg_tbl[regs]);
-			       break;
-		        case 0x5a00:
-			       next = get_fs_long(pc+2) & 0x00ffffff;
-			       break;
-		        case 0x5b00:
-			       /* unneccessary? */
-			       next = *(unsigned long *)(insn & 0xff);
-                               break;
-		}
-	} else if (((insn & 0xf000) == 0x4000) || ((insn &0xff00) == 0x5500)) { 
-	        /* b**:8 */
-	        unsigned long dsp;
-		dsp = (long)(insn && 0xff)+pc+2;
-		child->debugreg[1] = dsp;
-		child->debugreg[5] = get_fs_word(dsp);
-		put_fs_word(dsp,BREAK_INST);
-	} else if (((insn & 0xff00) == 0x5800) || ((insn &0xff00) == 0x5c00)) { 
-	        /* b**:16 */
-	        unsigned long dsp;
-		dsp = (long)get_fs_word(pc+2)+pc+4;
-		child->debugreg[1] = dsp;
-		child->debugreg[5] = get_fs_word(dsp);
-		put_fs_word(dsp,BREAK_INST);
-	}
-	child->debugreg[0] = next;
-	child->debugreg[4] = get_fs_word(next);
-	put_fs_word(BREAK_INST,next);
-	return 0;
+	h8300_disable_trace(child);
 }
 
 asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 {
 	struct task_struct *child;
-	struct user * dummy;
+	int ret;
 
-	dummy = NULL;
-
+	lock_kernel();
+	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
-			return -EPERM;
+		if (current->ptrace & PT_PTRACED)
+			goto out;
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
-		return 0;
+		current->ptrace |= PT_PTRACED;
+		ret = 0;
+		goto out;
 	}
+	ret = -ESRCH;
+	read_lock(&tasklist_lock);
+	child = find_task_by_pid(pid);
+	if (child)
+		get_task_struct(child);
+	read_unlock(&tasklist_lock);
+	if (!child)
+		goto out;
 
+	ret = -EPERM;
 	if (pid == 1)		/* you may not mess with init */
-		return -EPERM;
-	if (!(child = get_task(pid)))
-		return -ESRCH;
+		goto out_tsk;
+
 	if (request == PTRACE_ATTACH) {
-		if (child == current)
-			return -EPERM;
-		if ((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->suid) ||
-		    (current->uid != child->uid) ||
-	 	    (current->gid != child->egid) ||
-		    (current->gid != child->sgid) ||
-	 	    (current->gid != child->gid)) && !suser())
-			return -EPERM;
-		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
-			return -EPERM;
-		child->flags |= PF_PTRACED;
-		if (child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		send_sig(SIGSTOP, child, 1);
-		return 0;
+		ret = ptrace_attach(child);
+		goto out_tsk;
 	}
-	if (!(child->flags & PF_PTRACED))
-		return -ESRCH;
+	ret = -ESRCH;
+	if (!(child->ptrace & PT_PTRACED))
+		goto out_tsk;
 	if (child->state != TASK_STOPPED) {
 		if (request != PTRACE_KILL)
-			return -ESRCH;
+			goto out_tsk;
 	}
 	if (child->p_pptr != current)
-		return -ESRCH;
+		goto out_tsk;
 
 	switch (request) {
-	/* when I and D space are separate, these will need to be fixed. */
 		case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 		case PTRACE_PEEKDATA: {
 			unsigned long tmp;
-			int res;
 
-			res = read_long(child, addr, &tmp);
-			if (res < 0)
-				return res;
-			res = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
-			if (!res)
-				put_fs_long(tmp, (unsigned long *) data);
-			return res;
+			ret = -EIO;
+			if (access_process_vm(child, addr, &tmp, sizeof(tmp), 0) != sizeof(tmp))
+				break;
+			ret = verify_area(VERIFY_WRITE, (void *) data, sizeof(long));
+			if (!ret)
+				put_user(tmp, (unsigned long *) data);
+			break ;
 		}
 
 	/* read the word at location addr in the USER area. */
 		case PTRACE_PEEKUSR: {
 			unsigned long tmp;
-			int res;
 			
 			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
-				return -EIO;
+				ret = -EIO;
 			
-			res = verify_area(VERIFY_WRITE, (void *) data,
+			ret = verify_area(VERIFY_WRITE, (void *) data,
 					  sizeof(long));
-			if (res)
-				return res;
+			if (ret)
+				break ;
 			tmp = 0;  /* Default return condition */
 			addr = addr >> 2; /* temporary hack. */
-			if (addr < 10)
-				tmp = get_reg(child, addr);
-			else
-				return -EIO;
-			put_fs_long(tmp,(unsigned long *) data);
-			return 0;
+			if (addr < H8300_REGS_NO)
+				tmp = h8300_get_reg(child, addr);
+			else {
+				switch(addr) {
+				case 49:
+					tmp = child->mm->start_code;
+					break ;
+				case 50:
+					tmp = child->mm->start_data;
+					break ;
+				case 51:
+					tmp = child->mm->end_code;
+					break ;
+				case 52:
+					tmp = child->mm->end_data;
+					break ;
+				default:
+					ret = -EIO;
+				}
+			}
+			if (!ret)
+				put_user(tmp,(unsigned long *) data);
+			break ;
 		}
 
       /* when I and D space are separate, this will have to be fixed. */
 		case PTRACE_POKETEXT: /* write the word at location addr. */
 		case PTRACE_POKEDATA:
-			return write_long(child,addr,data);
+			ret = 0;
+			if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
+				break;
+			ret = -EIO;
+			break;
 
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
-			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user))
-				return -EIO;
-
+			if ((addr & 3) || addr < 0 || addr >= sizeof(struct user)) {
+				ret = -EIO;
+				break ;
+			}
 			addr = addr >> 2; /* temporary hack. */
 			    
-			if (addr == PT_ORIG_ER0)
-				return -EIO;
-			if (addr == PT_CCR) {
-				data &= SR_MASK;
+			if (addr == PT_ORIG_ER0) {
+				ret = -EIO;
+				break ;
 			}
-			if (addr < 10) {
-				if (put_reg(child, addr, data))
-					return -EIO;
-				return 0;
+			if (addr < H8300_REGS_NO) {
+				ret = h8300_put_reg(child, addr, data);
+				break ;
 			}
-			return -EIO;
-
+			ret = -EIO;
+			break ;
 		case PTRACE_SYSCALL: /* continue and stop at next (return from) syscall */
 		case PTRACE_CONT: { /* restart after signal. */
-			long tmp;
-
-			if ((unsigned long) data >= NSIG)
-				return -EIO;
+			ret = -EIO;
+			if ((unsigned long) data >= _NSIG)
+				break ;
 			if (request == PTRACE_SYSCALL)
-				child->flags |= PF_TRACESYS;
+				child->flags |= PT_TRACESYS;
 			else
-				child->flags &= ~PF_TRACESYS;
+				child->flags &= ~PT_TRACESYS;
 			child->exit_code = data;
 			wake_up_process(child);
 			/* make sure the single step bit is not set. */
-			ptrace_cancel_bpt(child);
-			return 0;
+			h8300_disable_trace(child);
+			ret = 0;
 		}
 
 /*
@@ -411,71 +199,77 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
  * exit.
  */
 		case PTRACE_KILL: {
-			long tmp;
 
+			ret = 0;
 			if (child->state == TASK_ZOMBIE) /* already dead */
-				return 0;
-			wake_up_process(child);
+				break;
 			child->exit_code = SIGKILL;
-	/* make sure the single step bit is not set. */
-			ptrace_cancel_bpt(child);
-			return 0;
+			h8300_disable_trace(child);
+			wake_up_process(child);
+			break;
 		}
 
 		case PTRACE_SINGLESTEP: {  /* set the trap flag. */
-			long tmp;
-
-			if ((unsigned long) data >= NSIG)
-				return -EIO;
-			child->flags &= ~PF_TRACESYS;
-			child->debugreg[0]=-1;
-			wake_up_process(child);
+			ret = -EIO;
+			if ((unsigned long) data > _NSIG)
+				break;
+			child->ptrace &= ~PT_TRACESYS;
 			child->exit_code = data;
-	/* give it a chance to run. */
-			return 0;
+			h8300_enable_trace(child);
+			wake_up_process(child);
+			ret = 0;
+			break;
 		}
 
-		case PTRACE_DETACH: { /* detach a process that was attached. */
-			long tmp;
+		case PTRACE_DETACH:	/* detach a process that was attached. */
+			ret = ptrace_detach(child, data);
+			break;
 
-			if ((unsigned long) data >= NSIG)
-				return -EIO;
-			child->flags &= ~(PF_PTRACED|PF_TRACESYS);
-			wake_up_process(child);
-			child->exit_code = data;
-			REMOVE_LINKS(child);
-			child->p_pptr = child->p_opptr;
-			SET_LINKS(child);
-			/* make sure the single step bit is not set. */
-			ptrace_cancel_bpt(child);
-			return 0;
+		case PTRACE_GETREGS: { /* Get all gp regs from the child. */
+		  	int i;
+			unsigned long tmp;
+			for (i = 0; i < H8300_REGS_NO; i++) {
+			    tmp = h8300_get_reg(child, i);
+			    if (put_user(tmp, (unsigned long *) data)) {
+				ret = -EFAULT;
+				break;
+			    }
+			    data += sizeof(long);
+			}
+			ret = 0;
+			break;
+		}
+
+		case PTRACE_SETREGS: { /* Set all gp regs in the child. */
+			int i;
+			unsigned long tmp;
+			for (i = 0; i < H8300_REGS_NO; i++) {
+			    if (get_user(tmp, (unsigned long *) data)) {
+				ret = -EFAULT;
+				break;
+			    }
+			    h8300_put_reg(child, i, tmp);
+			    data += sizeof(long);
+			}
+			ret = 0;
+			break;
 		}
 
 		default:
-			return -EIO;
+			ret = -EIO;
+			break;
 	}
+out_tsk:
+	free_task_struct(child);
+out:
+	unlock_kernel();
+	return ret;
 }
-#else
-int ptrace_cancel_bpt(struct task_struct *child)
-{
-        return 0;
-}
-
-int ptrace_set_bpt(struct task_struct *child)
-{
-        return 0;
-}
-
-asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
-{
-        return -EIO;
-}
-#endif
 
 asmlinkage void syscall_trace(void)
 {
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+			!= (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
@@ -486,8 +280,8 @@ asmlinkage void syscall_trace(void)
 	 * for normal use.  strace only continues with a signal if the
 	 * stopping signal is not SIGTRAP.  -brl
 	 */
-	if (current->exit_code)
-		current->signal |= (1 << (current->exit_code - 1));
-	current->exit_code = 0;
-	return;
+	if (current->exit_code) {
+		send_sig(current->exit_code, current, 1);
+		current->exit_code = 0;
+	}
 }

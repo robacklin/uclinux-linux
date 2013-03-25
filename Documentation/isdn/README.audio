@@ -1,4 +1,4 @@
-$Id: README.audio,v 1.1.1.1 1999-11-22 03:47:43 christ Exp $
+$Id: README.audio,v 1.1.4.1 2001/11/20 14:19:33 kai Exp $
 
 ISDN subsystem for Linux.
   Description of audio mode.
@@ -22,7 +22,7 @@ Commands for enabling/disabling audio mode:
 
 Commands supported in audio mode:
 
-All audio mode commands have the one of the following form:
+All audio mode commands have one of the following forms:
 
         AT+Vxx?          Show current setting.
         AT+Vxx=?         Show possible settings.
@@ -57,6 +57,17 @@ The following commands are supported:
                                          of 0.1 second. (default 70)
         AT+VSD=?         Report possible parameters.
         AT+VSD?          Show current parameters.
+
+        AT+VDD=x,y       Set DTMF-detection parameters.
+                         Only possible if online and during this connection.
+                         Possible parameters:
+                           x = 0 ... 15  sensitivity threshold level.
+                                         (default 0 , I4L soft-decode)
+                                         (1-15 soft-decode off, hardware on)
+                           y = 0 ... 255 tone duration in units of 5ms.
+                                         Not for I4L soft decode (default 8, 40ms)
+        AT+VDD=?         Report possible parameters.
+        AT+VDD?          Show current parameters.
 
         AT+VSM=x         Select audio data format.
                          Possible parameters:

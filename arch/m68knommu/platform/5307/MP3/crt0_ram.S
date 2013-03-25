@@ -1,10 +1,10 @@
 /*****************************************************************************/
 
 /*
- *	crt0_ram.S -- startup code for MCF5307 ColdFire based MP3 board.
+ *	crt0_ram.S -- startup code for MCF5307 ColdFire based MP3.
  *
- *	(C) Copyright 1999-2002 Greg Ungerer (gerg@snapgear.com).
- * 	(C) Copyright 2000-2001 Lineo Inc. (www.lineo.com) 
+ *	(C) Copyright 1999-2001, Greg Ungerer.
+ * 	Copyright (C) 2000-2001  Lineo Inc. (www.lineo.com) 
  *
  * 	1999/02/24 Modified for the 5307 processor David W. Miller
  */
@@ -19,17 +19,15 @@
 /*****************************************************************************/
 
 /*
- *	SnapGear MP3 board memory setup.
+ *	Lineo NETtel board memory setup.
  */
 #define	MEM_BASE	0x00000000	/* Memory base at address 0 */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
 
 #if defined(CONFIG_RAM16MB)
 #define	MEM_SIZE	0x01000000	/* Memory size 16Mb */
-#elif defined(CONFIG_RAM8MB)
-#define	MEM_SIZE	0x00800000	/* Memory size 8Mb */
 #else
-#define	MEM_SIZE	0x00400000	/* Memory size 8Mb */
+#define	MEM_SIZE	0x00800000	/* Memory size 8Mb */
 #endif
 
 /*****************************************************************************/
@@ -57,22 +55,6 @@ _ramstart:
 _ramend:
 .long	0
 
-#if CONFIG_BLK_DEV_INITRD
-/*
- *	Setup initial RAM disk limits of using INITRD.
- */
-.extern	initrd_start
-.extern initrd_end
-#endif
-
-/*
- *	Software copy of the parallel port IO lines.
- *	(Used by UARTs for extra signals.
- */
-.global ppdata
-ppdata:
-.short	0x0000
-
 /*****************************************************************************/
 
 .text
@@ -85,7 +67,6 @@ ppdata:
 _start:
 	nop					/* Filler */
 	move.w	#0x2700, %sr			/* No interrupts */
-
 
 	/*
 	 *	Disable watchdog timer.
@@ -127,15 +108,13 @@ _start:
 	/*
 	 *	Enable CPU internal cache.
 	 */
-	move.l	#0x01000000, %d0		/* Invalidate whole cache */
+	move.l	#0x01000000, %d0		/* invalidate whole cache */
 	movec	%d0,%CACR
 	nop
 
-	/*
-	 *	MUST be write-through for DMA to work...
-	 *	This also makes this debugger safe.
-	 */
-	move.l	#0x0000c000, %d0		/* SDRAM cached only */
+	/* MUST be write-through for DMA to work... */
+	/* This also makes this debugger safe */
+	move.l	#0x0000c000, %d0		/* Set SDRAM cached only */
 	movec	%d0, %ACR0
 	move.l	#0x00000000, %d0		/* No other regions cached */
 	movec	%d0, %ACR1
@@ -152,19 +131,12 @@ _start:
 	lea.l	_ebss, %a1			/* Set up destination  */
 	move.l	%a0, %a2			/* Copy of bss start */
 
-#if CONFIG_BLK_DEV_INITRD
-	move.l	%a1, %d2
-	add.l	#0xfff, %d2			/* Round ROMfs start to page */
-	and.l	#0xfffff000, %d2
-	move.l	%d2, %a1			/* Save result for later */
-#endif
+	move.l	8(%a0), %d0			/* Get size of ROMFS */
+	addq.l	#8, %d0				/* Allow for rounding */
+	and.l	#0xfffffffc, %d0		/* Whole words */
 
-	move.l	8(%a0), %d1			/* Get size of ROMFS */
-	addq.l	#8, %d1				/* Allow for rounding */
-	and.l	#0xfffffffc, %d1		/* Whole words */
-
-	add.l	%d1, %a0			/* Copy from end */
-	add.l	%d1, %a1			/* Copy from end */
+	add.l	%d0, %a0			/* Copy from end */
+	add.l	%d0, %a1			/* Copy from end */
 	move.l	%a1, _ramstart			/* Set start of ram */
 
 _copy_romfs:
@@ -184,16 +156,12 @@ _clear_bss:
 	cmp.l	%a0, %a1			/* Check if at end */
 	bne	_clear_bss
 
-#if CONFIG_BLK_DEV_INITRD
 	/*
-	 *	Setup up RAMdisk info if using it.
-	 *	(Must do this after clearing the bss :-)
+	 * load the current task pointer and stack
 	 */
-	move.l	%d2, initrd_start		/* Set up start of initrd */
-	add.l	%d1, %d2			/* Calculate end of initrd */
-	move.l	%d2, initrd_end
-#endif
-
+	lea		init_task_union,%a0
+	movel	%a0, _current_task
+	lea		0x2000(%a0),%sp
 	/*
 	 *	Assember start up done, start code proper.
 	 */

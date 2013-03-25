@@ -1,8 +1,8 @@
 /*
  *			Simple traffic shaper for Linux NET3.
  *
- *	(c) Copyright 1996 Alan Cox <alan@cymru.net>, All Rights Reserved.
- *				http://www.cymru.net
+ *	(c) Copyright 1996 Alan Cox <alan@redhat.com>, All Rights Reserved.
+ *				http://www.redhat.com
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -51,28 +51,55 @@
  *		will render your machine defunct. Don't for now shape over
  *		PPP or SLIP therefore!
  *		This will be fixed in BETA4
+ *
+ * Update History :
+ *
+ *              bh_atomic() SMP races fixes and rewritten the locking code to
+ *              be SMP safe and irq-mask friendly.
+ *              NOTE: we can't use start_bh_atomic() in kick_shaper()
+ *              because it's going to be recalled from an irq handler,
+ *              and synchronize_bh() is a nono if called from irq context.
+ *						1999  Andrea Arcangeli
+ *
+ *              Device statistics (tx_pakets, tx_bytes,
+ *              tx_drops: queue_over_time and collisions: max_queue_exceded)
+ *                               1999/06/18 Jordi Murgo <savage@apostols.org>
+ *
+ *		Use skb->cb for private data.
+ *				 2000/03 Andi Kleen
  */
  
- 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/fcntl.h>
-#include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
+#include <linux/init.h>
+#include <net/dst.h>
+#include <net/arp.h>
 #include <linux/if_shaper.h>
+
+struct shaper_cb { 
+	unsigned long	shapeclock;		/* Time it should go out */
+	unsigned long	shapestamp;		/* Stamp for shaper */ 
+	__u32		shapelatency;		/* Latency on frame */
+	__u32		shapelen;		/* Frame length in clocks */
+	__u16		shapepend;		/* Pending */
+}; 
+#define SHAPERCB(skb) ((struct shaper_cb *) ((skb)->cb))
 
 int sh_debug;		/* Debug flag */
 
-#define SHAPER_BANNER	"Traffic Shaper 0.05 for Linux 2.0 <alan@redhat.com>\n"
+#define SHAPER_BANNER	"CymruNet Traffic Shaper BETA 0.04 for Linux 2.1\n"
 
 /*
  *	Locking
@@ -80,21 +107,17 @@ int sh_debug;		/* Debug flag */
  
 static int shaper_lock(struct shaper *sh)
 {
-	unsigned long flags;
-	save_flags(flags);
-	cli();
 	/*
-	 *	Lock in an interrupt may fail
+	 *	Lock in an interrupt must fail
 	 */
-	if(sh->locked && intr_count)
+	while (test_and_set_bit(0, &sh->locked))
 	{
-		restore_flags(flags);
-		return 0;
+		if (!in_interrupt())
+			sleep_on(&sh->wait_queue);
+		else
+			return 0;
+			
 	}
-	while(sh->locked)
-		sleep_on(&sh->wait_queue);
-	sh->locked=1;
-	restore_flags(flags);
 	return 1;
 }
 
@@ -102,7 +125,7 @@ static void shaper_kick(struct shaper *sh);
 
 static void shaper_unlock(struct shaper *sh)
 {
-	sh->locked=0;
+	clear_bit(0, &sh->locked);
 	wake_up(&sh->wait_queue);
 	shaper_kick(sh);
 }
@@ -138,7 +161,7 @@ static void shaper_setspeed(struct shaper *shaper, int bitspersec)
 static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
 {
  	struct sk_buff *ptr;
- 	
+   
  	/*
  	 *	Get ready to work on this shaper. Lock may fail if its
  	 *	an interrupt and locked.
@@ -152,24 +175,25 @@ static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
  	 *	Set up our packet details
  	 */
  	 
- 	skb->shapelatency=0;
- 	skb->shapeclock=shaper->recovery;
- 	if(skb->shapeclock<jiffies)
- 		skb->shapeclock=jiffies;
- 	skb->shapestamp=jiffies;
+ 	SHAPERCB(skb)->shapelatency=0;
+ 	SHAPERCB(skb)->shapeclock=shaper->recovery;
+ 	if(time_before(SHAPERCB(skb)->shapeclock, jiffies))
+ 		SHAPERCB(skb)->shapeclock=jiffies;
+ 	skb->priority=0;	/* short term bug fix */
+ 	SHAPERCB(skb)->shapestamp=jiffies;
  	
  	/*
  	 *	Time slots for this packet.
  	 */
  	 
- 	skb->shapelen= shaper_clocks(shaper,skb);
+ 	SHAPERCB(skb)->shapelen= shaper_clocks(shaper,skb);
  	
 #ifdef SHAPER_COMPLEX /* and broken.. */
 
  	while(ptr && ptr!=(struct sk_buff *)&shaper->sendq)
  	{
  		if(ptr->pri<skb->pri 
- 			&& jiffies - ptr->shapeclock < SHAPER_MAXSLIP)
+ 			&& jiffies - SHAPERCB(ptr)->shapeclock < SHAPER_MAXSLIP)
  		{
  			struct sk_buff *tmp=ptr->prev;
 
@@ -178,17 +202,17 @@ static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
  			 *	of the new frame.
  			 */
 
- 			ptr->shapeclock+=skb->shapelen;
- 			ptr->shapelatency+=skb->shapelen;
+ 			SHAPERCB(ptr)->shapeclock+=SHAPERCB(skb)->shapelen;
+ 			SHAPERCB(ptr)->shapelatency+=SHAPERCB(skb)->shapelen;
 
  			/*
  			 *	The packet may have slipped so far back it
  			 *	fell off.
  			 */
- 			if(ptr->shapelatency > SHAPER_LATENCY)
+ 			if(SHAPERCB(ptr)->shapelatency > SHAPER_LATENCY)
  			{
  				skb_unlink(ptr);
- 				dev_kfree_skb(ptr, FREE_WRITE);
+ 				dev_kfree_skb(ptr);
  			}
  			ptr=tmp;
  		}
@@ -206,7 +230,7 @@ static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
  		 *	this loop.
  		 */
  		for(tmp=skb_peek(&shaper->sendq); tmp!=NULL && tmp!=ptr; tmp=tmp->next)
- 			skb->shapeclock+=tmp->shapelen;
+ 			SHAPERCB(skb)->shapeclock+=tmp->shapelen;
  		skb_append(ptr,skb);
  	}
 #else
@@ -218,25 +242,26 @@ static int shaper_qframe(struct shaper *shaper, struct sk_buff *skb)
 		 */
 		for(tmp=skb_peek(&shaper->sendq); tmp!=NULL && 
 			tmp!=(struct sk_buff *)&shaper->sendq; tmp=tmp->next)
-			skb->shapeclock+=tmp->shapelen;
+			SHAPERCB(skb)->shapeclock+=SHAPERCB(tmp)->shapelen;
 		/*
 		 *	Queue over time. Spill packet.
 		 */
-		if(skb->shapeclock-jiffies > SHAPER_LATENCY)
-			dev_kfree_skb(skb, FREE_WRITE);
-		else
+		if(SHAPERCB(skb)->shapeclock-jiffies > SHAPER_LATENCY) {
+			dev_kfree_skb(skb);
+			shaper->stats.tx_dropped++;
+		} else
 			skb_queue_tail(&shaper->sendq, skb);
 	}
 #endif 	
- 	if(sh_debug)
+	if(sh_debug)
  		printk("Frame queued.\n");
  	if(skb_queue_len(&shaper->sendq)>SHAPER_QLEN)
  	{
  		ptr=skb_dequeue(&shaper->sendq);
- 		dev_kfree_skb(ptr, FREE_WRITE);
+                dev_kfree_skb(ptr);
+                shaper->stats.collisions++;
  	}
  	shaper_unlock(shaper);
- 	shaper_kick(shaper);
  	return 0;
 }
 
@@ -252,14 +277,18 @@ static void shaper_queue_xmit(struct shaper *shaper, struct sk_buff *skb)
 	if(newskb)
 	{
 		newskb->dev=shaper->dev;
-		newskb->arp=1;
+		newskb->priority=2;
 		if(sh_debug)
-			printk("Kick new frame to %s\n",
-				shaper->dev->name);
-		dev_queue_xmit(newskb,shaper->dev,2);
-		if(sh_debug)
+			printk("Kick new frame to %s, %d\n",
+				shaper->dev->name,newskb->priority);
+		dev_queue_xmit(newskb);
+
+                shaper->stats.tx_bytes += skb->len;
+		shaper->stats.tx_packets++;
+
+                if(sh_debug)
 			printk("Kicked new frame out.\n");
-		dev_kfree_skb(skb, FREE_WRITE);
+		dev_kfree_skb(skb);
 	}
 }
 
@@ -281,24 +310,16 @@ static void shaper_timer(unsigned long data)
 static void shaper_kick(struct shaper *shaper)
 {
 	struct sk_buff *skb;
-	unsigned long flags;
 	
-	save_flags(flags);
-	cli();
-
-	del_timer(&shaper->timer);
-
 	/*
 	 *	Shaper unlock will kick
 	 */
 	 
-	if(shaper->locked)
-	{	
+	if (test_and_set_bit(0, &shaper->locked))
+	{
 		if(sh_debug)
 			printk("Shaper locked.\n");
-		shaper->timer.expires=jiffies+1;
-		add_timer(&shaper->timer);
-		restore_flags(flags);
+		mod_timer(&shaper->timer, jiffies);
 		return;
 	}
 
@@ -315,26 +336,24 @@ static void shaper_kick(struct shaper *shaper)
 		 */
 		 
 		if(sh_debug)
-			printk("Clock = %d, jiffies = %ld\n", skb->shapeclock, jiffies);
-		if(skb->shapeclock <= jiffies + SHAPER_BURST)
+			printk("Clock = %ld, jiffies = %ld\n", SHAPERCB(skb)->shapeclock, jiffies);
+		if(time_before_eq(SHAPERCB(skb)->shapeclock - jiffies, SHAPER_BURST))
 		{
 			/*
 			 *	Pull the frame and get interrupts back on.
 			 */
 			 
 			skb_unlink(skb);
-			if (shaper->recovery < skb->shapeclock + skb->shapelen)
-				shaper->recovery = skb->shapeclock + skb->shapelen;
-			restore_flags(flags);
-
+			if (shaper->recovery < 
+			    SHAPERCB(skb)->shapeclock + SHAPERCB(skb)->shapelen)
+				shaper->recovery = SHAPERCB(skb)->shapeclock + SHAPERCB(skb)->shapelen;
 			/*
 			 *	Pass on to the physical target device via
 			 *	our low level packet thrower.
 			 */
 			
-			skb->shapepend=0;
+			SHAPERCB(skb)->shapepend=0;
 			shaper_queue_xmit(shaper, skb);	/* Fire */
-			cli();
 		}
 		else
 			break;
@@ -345,17 +364,9 @@ static void shaper_kick(struct shaper *shaper)
 	 */
 	 
 	if(skb!=NULL)
-	{
-		del_timer(&shaper->timer);
-		shaper->timer.expires=skb->shapeclock;
-		add_timer(&shaper->timer);
-	}
-		
-	/*
-	 *	Interrupts on, mission complete
-	 */
-		
-	restore_flags(flags);
+		mod_timer(&shaper->timer, SHAPERCB(skb)->shapeclock);
+
+	clear_bit(0, &shaper->locked);
 }
 
 
@@ -366,8 +377,14 @@ static void shaper_kick(struct shaper *shaper)
 static void shaper_flush(struct shaper *shaper)
 {
 	struct sk_buff *skb;
+ 	if(!shaper_lock(shaper))
+	{
+		printk(KERN_ERR "shaper: shaper_flush() called by an irq!\n");
+ 		return;
+	}
 	while((skb=skb_dequeue(&shaper->sendq))!=NULL)
-		dev_kfree_skb(skb, FREE_WRITE);
+		dev_kfree_skb(skb);
+	shaper_unlock(shaper);
 }
 
 /*
@@ -375,7 +392,7 @@ static void shaper_flush(struct shaper *shaper)
  *	bind.
  */
 
-static int shaper_open(struct device *dev)
+static int shaper_open(struct net_device *dev)
 {
 	struct shaper *shaper=dev->priv;
 	
@@ -389,7 +406,6 @@ static int shaper_open(struct device *dev)
 		return -ENODEV;
 	if(shaper->bitspersec==0)
 		return -EINVAL;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -397,12 +413,11 @@ static int shaper_open(struct device *dev)
  *	Closing a shaper flushes the queues.
  */
  
-static int shaper_close(struct device *dev)
+static int shaper_close(struct net_device *dev)
 {
 	struct shaper *shaper=dev->priv;
 	shaper_flush(shaper);
-	del_timer(&shaper->timer);
-	MOD_DEC_USE_COUNT;
+	del_timer_sync(&shaper->timer);
 	return 0;
 }
 
@@ -413,35 +428,104 @@ static int shaper_close(struct device *dev)
  */
 
 
-static int shaper_start_xmit(struct sk_buff *skb, struct device *dev)
+static int shaper_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct shaper *sh=dev->priv;
 	return shaper_qframe(sh, skb);
 }
 
-static struct enet_statistics *shaper_get_stats(struct device *dev)
+static struct net_device_stats *shaper_get_stats(struct net_device *dev)
 {
-	return NULL;
+     	struct shaper *sh=dev->priv;
+	return &sh->stats;
 }
 
-static int shaper_header(struct sk_buff *skb, struct device *dev, 
+static int shaper_header(struct sk_buff *skb, struct net_device *dev, 
 	unsigned short type, void *daddr, void *saddr, unsigned len)
 {
 	struct shaper *sh=dev->priv;
+	int v;
 	if(sh_debug)
 		printk("Shaper header\n");
-	return sh->hard_header(skb,sh->dev,type,daddr,saddr,len);
+	skb->dev=sh->dev;
+	v=sh->hard_header(skb,sh->dev,type,daddr,saddr,len);
+	skb->dev=dev;
+	return v;
 }
 
-static int shaper_rebuild_header(void *eth, struct device *dev, unsigned long raddr, struct sk_buff *skb)
+static int shaper_rebuild_header(struct sk_buff *skb)
+{
+	struct shaper *sh=skb->dev->priv;
+	struct net_device *dev=skb->dev;
+	int v;
+	if(sh_debug)
+		printk("Shaper rebuild header\n");
+	skb->dev=sh->dev;
+	v=sh->rebuild_header(skb);
+	skb->dev=dev;
+	return v;
+}
+
+#if 0
+static int shaper_cache(struct neighbour *neigh, struct hh_cache *hh)
+{
+	struct shaper *sh=neigh->dev->priv;
+	struct net_device *tmp;
+	int ret;
+	if(sh_debug)
+		printk("Shaper header cache bind\n");
+	tmp=neigh->dev;
+	neigh->dev=sh->dev;
+	ret=sh->hard_header_cache(neigh,hh);
+	neigh->dev=tmp;
+	return ret;
+}
+
+static void shaper_cache_update(struct hh_cache *hh, struct net_device *dev,
+	unsigned char *haddr)
 {
 	struct shaper *sh=dev->priv;
 	if(sh_debug)
-		printk("Shaper rebuild header\n");
-	return sh->rebuild_header(eth,sh->dev,raddr,skb);
+		printk("Shaper cache update\n");
+	sh->header_cache_update(hh, sh->dev, haddr);
+}
+#endif
+
+#ifdef CONFIG_INET
+
+static int shaper_neigh_setup(struct neighbour *n)
+{
+#ifdef CONFIG_INET
+	if (n->nud_state == NUD_NONE) {
+		n->ops = &arp_broken_ops;
+		n->output = n->ops->output;
+	}
+#endif	
+	return 0;
 }
 
-static int shaper_attach(struct device *shdev, struct shaper *sh, struct device *dev)
+static int shaper_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
+{
+#ifdef CONFIG_INET
+	if (p->tbl->family == AF_INET) {
+		p->neigh_setup = shaper_neigh_setup;
+		p->ucast_probes = 0;
+		p->mcast_probes = 0;
+	}
+#endif	
+	return 0;
+}
+
+#else /* !(CONFIG_INET) */
+
+static int shaper_neigh_setup_dev(struct net_device *dev, struct neigh_parms *p)
+{
+	return 0;
+}
+
+#endif
+
+static int shaper_attach(struct net_device *shdev, struct shaper *sh, struct net_device *dev)
 {
 	sh->dev = dev;
 	sh->hard_start_xmit=dev->hard_start_xmit;
@@ -462,6 +546,30 @@ static int shaper_attach(struct device *shdev, struct shaper *sh, struct device 
 	else
 		shdev->rebuild_header	= NULL;
 	
+#if 0
+	if(dev->hard_header_cache)
+	{
+		sh->hard_header_cache	= dev->hard_header_cache;
+		shdev->hard_header_cache= shaper_cache;
+	}
+	else
+	{
+		shdev->hard_header_cache= NULL;
+	}
+			
+	if(dev->header_cache_update)
+	{
+		sh->header_cache_update	= dev->header_cache_update;
+		shdev->header_cache_update = shaper_cache_update;
+	}
+	else
+		shdev->header_cache_update= NULL;
+#else
+	shdev->header_cache_update = NULL;
+	shdev->hard_header_cache = NULL;
+#endif
+	shdev->neigh_setup = shaper_neigh_setup_dev;
+	
 	shdev->hard_header_len=dev->hard_header_len;
 	shdev->type=dev->type;
 	shdev->addr_len=dev->addr_len;
@@ -470,15 +578,22 @@ static int shaper_attach(struct device *shdev, struct shaper *sh, struct device 
 	return 0;
 }
 
-static int shaper_ioctl(struct device *dev,  struct ifreq *ifr, int cmd)
+static int shaper_ioctl(struct net_device *dev,  struct ifreq *ifr, int cmd)
 {
 	struct shaperconf *ss= (struct shaperconf *)&ifr->ifr_data;
 	struct shaper *sh=dev->priv;
+	
+	if(ss->ss_cmd == SHAPER_SET_DEV || ss->ss_cmd == SHAPER_SET_SPEED)
+	{
+		if(!capable(CAP_NET_ADMIN))
+			return -EPERM;
+	}
+	
 	switch(ss->ss_cmd)
 	{
 		case SHAPER_SET_DEV:
 		{
-			struct device *them=dev_get(ss->ss_name);
+			struct net_device *them=__dev_get_by_name(ss->ss_name);
 			if(them==NULL)
 				return -ENODEV;
 			if(sh->dev)
@@ -501,35 +616,31 @@ static int shaper_ioctl(struct device *dev,  struct ifreq *ifr, int cmd)
 	}
 }
 
-static struct shaper *shaper_alloc(struct device *dev)
+static void shaper_init_priv(struct net_device *dev)
 {
-	struct shaper *sh=kmalloc(sizeof(struct shaper), GFP_KERNEL);
-	if(sh==NULL)
-		return NULL;
-	memset(sh,0,sizeof(*sh));
+	struct shaper *sh = dev->priv;
+
 	skb_queue_head_init(&sh->sendq);
 	init_timer(&sh->timer);
 	sh->timer.function=shaper_timer;
 	sh->timer.data=(unsigned long)sh;
-	return sh;
+	init_waitqueue_head(&sh->wait_queue);
 }
 
 /*
  *	Add a shaper device to the system
  */
  
-int shaper_probe(struct device *dev)
+static int __init shaper_probe(struct net_device *dev)
 {
-	int i;
-	
 	/*
 	 *	Set up the shaper.
 	 */
-	
-	dev->priv = shaper_alloc(dev);
-	if(dev->priv==NULL)
-		return -ENOMEM;
-		
+
+	SET_MODULE_OWNER(dev);
+
+	shaper_init_priv(dev);
+
 	dev->open		= shaper_open;
 	dev->stop		= shaper_close;
 	dev->hard_start_xmit 	= shaper_start_xmit;
@@ -540,15 +651,17 @@ int shaper_probe(struct device *dev)
 	 *	Intialise the packet queues
 	 */
 	 
-	for(i=0;i<DEV_NUMBUFFS;i++)
-		skb_queue_head_init(&dev->buffs[i]);
-	
 	/*
 	 *	Handlers for when we attach to a device.
 	 */
 
 	dev->hard_header 	= shaper_header;
 	dev->rebuild_header 	= shaper_rebuild_header;
+#if 0
+	dev->hard_header_cache	= shaper_cache;
+	dev->header_cache_update= shaper_cache_update;
+#endif
+	dev->neigh_setup	= shaper_neigh_setup_dev;
 	dev->do_ioctl		= shaper_ioctl;
 	dev->hard_header_len	= 0;
 	dev->type		= ARPHRD_ETHER;	/* initially */
@@ -557,11 +670,6 @@ int shaper_probe(struct device *dev)
 	dev->addr_len		= 0;
 	dev->tx_queue_len	= 10;
 	dev->flags		= 0;
-	dev->family		= AF_INET;
-	dev->pa_addr		= 0;
-	dev->pa_brdaddr		= 0;
-	dev->pa_mask		= 0;
-	dev->pa_alen		= 4;
 		
 	/*
 	 *	Shaper is ok
@@ -570,97 +678,75 @@ int shaper_probe(struct device *dev)
 	return 0;
 }
  
+static int shapers = 1;
 #ifdef MODULE
 
-static char devicename[9];
+MODULE_PARM(shapers, "i");
+MODULE_PARM_DESC(shapers, "Traffic shaper: maximum nuber of shapers");
 
-static struct device dev_shape = 
-{
-	devicename,
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, shaper_probe 
-};
+#else /* MODULE */
 
-int init_module(void)
+static int __init set_num_shapers(char *str)
 {
-	int i;
-	for(i=0;i<99;i++)
-	{
-		sprintf(devicename,"shaper%d",i);
-		if(dev_get(devicename)==NULL)
-			break;
-	}
-	if(i==100)
-		return -ENFILE;
-	
-	printk(SHAPER_BANNER);	
-	if (register_netdev(&dev_shape) != 0)
-		return -EIO;
-	printk("Traffic shaper initialised.\n");
-	return 0;
+	shapers = simple_strtol(str, NULL, 0);
+	return 1;
 }
 
-void cleanup_module(void)
-{
-	/*
-	 *	No need to check MOD_IN_USE, as sys_delete_module() checks.
-	 *	To be unloadable we must be closed and detached so we don't
-	 *	need to flush things.
-	 */
-	 
-	unregister_netdev(&dev_shape);
-
-	/*
-	 *	Free up the private structure, or leak memory :-) 
-	 */
-	 
-	kfree(dev_shape.priv);
-	dev_shape.priv = NULL;
-}
-
-#else
-
-static struct device dev_sh0 = 
-{
-	"shaper0",
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, shaper_probe 
-};
-
-
-static struct device dev_sh1 = 
-{
-	"shaper1",
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, shaper_probe 
-};
-
-
-static struct device dev_sh2 = 
-{
-	"shaper2",
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, shaper_probe 
-};
-
-static struct device dev_sh3 = 
-{
-	"shaper3",
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, shaper_probe 
-};
-
-void shaper_init(void)
-{
-	register_netdev(&dev_sh0);
-	register_netdev(&dev_sh1);
-	register_netdev(&dev_sh2);
-	register_netdev(&dev_sh3);
-}
+__setup("shapers=", set_num_shapers);
 
 #endif /* MODULE */
+
+static struct net_device *devs;
+
+static int __init shaper_init(void)
+{
+	int i, err;
+	size_t alloc_size;
+	struct shaper *sp;
+	unsigned int shapers_registered = 0;
+
+	if (shapers < 1)
+		return -ENODEV;
+
+	alloc_size = (sizeof(*devs) * shapers) +
+		     (sizeof(struct shaper) * shapers);
+	devs = kmalloc(alloc_size, GFP_KERNEL);
+	if (!devs)
+		return -ENOMEM;
+	memset(devs, 0, alloc_size);
+	sp = (struct shaper *) &devs[shapers];
+
+	for (i = 0; i < shapers; i++) {
+		err = dev_alloc_name(&devs[i], "shaper%d");
+		if (err < 0)
+			break;
+		devs[i].init = shaper_probe;
+		devs[i].priv = &sp[i];
+		if (register_netdev(&devs[i]))
+			break;
+		shapers_registered++;
+	}
+
+	if (!shapers_registered) {
+		kfree(devs);
+		devs = NULL;
+	}
+
+	return (shapers_registered ? 0 : -ENODEV);
+}
+
+static void __exit shaper_exit (void)
+{
+	int i;
+
+	for (i = 0; i < shapers; i++)
+		unregister_netdev(&devs[i]);
+
+	kfree(devs);
+	devs = NULL;
+}
+
+module_init(shaper_init);
+module_exit(shaper_exit);
+MODULE_LICENSE("GPL");
+

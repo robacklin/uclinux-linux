@@ -6,12 +6,11 @@
  
 #ifndef _AX25_H
 #define _AX25_H 
+#include <linux/config.h>
 #include <linux/ax25.h>
 
-#define AX25_SLOWHZ			10	/* Run timing at 1/10 second - gives us better resolution for 56kbit links */
-
-#define	AX25_T1CLAMPLO  		(1 * AX25_SLOWHZ)	/* If defined, clamp at 1 second **/
-#define	AX25_T1CLAMPHI 			(30 * AX25_SLOWHZ)	/* If defined, clamp at 30 seconds **/
+#define	AX25_T1CLAMPLO  		1
+#define	AX25_T1CLAMPHI 			(30 * HZ)
 
 #define	AX25_BPQ_HEADER_LEN		16
 #define	AX25_KISS_HEADER_LEN		1
@@ -45,31 +44,11 @@
 #define	AX25_COND_REJECT		0x02
 #define	AX25_COND_PEER_RX_BUSY		0x04
 #define	AX25_COND_OWN_RX_BUSY		0x08
+#define	AX25_COND_DAMA_MODE		0x10
 
 #ifndef _LINUX_NETDEVICE_H
 #include <linux/netdevice.h>
 #endif
-
-/*
- * These headers are taken from the KA9Q package by Phil Karn. These specific
- * files have been placed under the GPL (not the whole package) by Phil.
- *
- *
- * Copyright 1991 Phil Karn, KA9Q
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; version 2 dated June, 1991.
- * 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- * 
- * You should have received a copy of the GNU General Public License
- * along with this program;  if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave., Cambridge, MA 02139, USA.
- */
 
 /* Upper sub-layer (LAPB) definitions */
 
@@ -110,10 +89,15 @@ enum {
 	AX25_STATE_4
 };
 
-#define	AX25_MAX_DEVICES	20	/* Max No of AX.25 devices */
-
 #define AX25_MODULUS 		8	/*  Standard AX.25 modulus */
 #define	AX25_EMODULUS		128	/*  Extended AX.25 modulus */
+
+enum {
+	AX25_PROTO_STD_SIMPLEX,
+	AX25_PROTO_STD_DUPLEX,
+	AX25_PROTO_DAMA_SLAVE,
+	AX25_PROTO_DAMA_MASTER
+};
 
 enum {
 	AX25_VALUES_IPDEFMODE,	/* 0=DG 1=VC */
@@ -128,6 +112,8 @@ enum {
 	AX25_VALUES_IDLE,	/* Connected mode idle timer */
 	AX25_VALUES_N2,		/* Default N2 value */
 	AX25_VALUES_PACLEN,	/* AX.25 MTU */
+	AX25_VALUES_PROTOCOL,	/* Std AX.25, DAMA Slave, DAMA Master */
+	AX25_VALUES_DS_TIMEOUT,	/* DAMA Slave timeout */
 	AX25_MAX_VALUES		/* THIS MUST REMAIN THE LAST ENTRY OF THIS LIST */
 };
 
@@ -137,12 +123,14 @@ enum {
 #define	AX25_DEF_CONMODE	2			/* Connected mode allowed */
 #define	AX25_DEF_WINDOW		2			/* Window=2 */
 #define	AX25_DEF_EWINDOW	32			/* Module-128 Window=32 */
-#define	AX25_DEF_T1		(10 * AX25_SLOWHZ)	/* T1=10s */
-#define	AX25_DEF_T2		(3 * AX25_SLOWHZ)	/* T2=3s  */
-#define	AX25_DEF_T3		(300 * AX25_SLOWHZ)	/* T3=300s */
+#define	AX25_DEF_T1		(10 * HZ)		/* T1=10s */
+#define	AX25_DEF_T2		(3 * HZ)		/* T2=3s  */
+#define	AX25_DEF_T3		(300 * HZ)		/* T3=300s */
 #define	AX25_DEF_N2		10			/* N2=10 */
-#define AX25_DEF_IDLE		(0 * 60 * AX25_SLOWHZ)	/* Idle=None */
+#define AX25_DEF_IDLE		(0 * 60 * HZ)		/* Idle=None */
 #define AX25_DEF_PACLEN		256			/* Paclen=256 */
+#define	AX25_DEF_PROTOCOL	AX25_PROTO_STD_SIMPLEX	/* Standard AX.25 */
+#define AX25_DEF_DS_TIMEOUT	(3 * 60 * HZ)		/* DAMA timeout 3 minutes */
 
 typedef struct ax25_uid_assoc {
 	struct ax25_uid_assoc	*next;
@@ -154,23 +142,49 @@ typedef struct {
 	ax25_address		calls[AX25_MAX_DIGIS];
 	unsigned char		repeated[AX25_MAX_DIGIS];
 	unsigned char		ndigi;
-	char			lastrepeat;
+	signed char		lastrepeat;
 } ax25_digi;
+
+typedef struct ax25_route {
+	struct ax25_route	*next;
+	ax25_address		callsign;
+	struct net_device		*dev;
+	ax25_digi		*digipeat;
+	char			ip_mode;
+} ax25_route;
+
+typedef struct {
+	char			slave;			/* slave_mode?   */
+	struct timer_list	slave_timer;		/* timeout timer */
+	unsigned short		slave_timeout;		/* when? */
+} ax25_dama_info;
+
+struct ctl_table;
+
+typedef struct ax25_dev {
+	struct ax25_dev		*next;
+	struct net_device	*dev;
+	struct net_device	*forward;
+	struct ctl_table	*systable;
+	int			values[AX25_MAX_VALUES];
+#if defined(CONFIG_AX25_DAMA_SLAVE) || defined(CONFIG_AX25_DAMA_MASTER)
+	ax25_dama_info		dama;
+#endif
+} ax25_dev;
 
 typedef struct ax25_cb {
 	struct ax25_cb		*next;
 	ax25_address		source_addr, dest_addr;
-	struct device		*device;
-	unsigned char		dama_slave, iamdigi;
+	ax25_digi		*digipeat;
+	ax25_dev		*ax25_dev;
+	unsigned char		iamdigi;
 	unsigned char		state, modulus, pidincl;
 	unsigned short		vs, vr, va;
 	unsigned char		condition, backoff;
 	unsigned char		n2, n2count;
-	unsigned short		t1, t2, t3, idle, rtt;
-	unsigned short		t1timer, t2timer, t3timer, idletimer;
-	unsigned short		paclen;
-	unsigned short		fragno, fraglen;
-	ax25_digi		*digipeat;
+	struct timer_list	t1timer, t2timer, t3timer, idletimer;
+	unsigned long		t1, t2, t3, idle, rtt;
+	unsigned short		paclen, fragno, fraglen;
 	struct sk_buff_head	write_queue;
 	struct sk_buff_head	reseq_queue;
 	struct sk_buff_head	ack_queue;
@@ -180,70 +194,116 @@ typedef struct ax25_cb {
 	struct sock		*sk;		/* Backlink to socket */
 } ax25_cb;
 
-#ifndef _LINUX_SYSCTL_H
-#include <linux/sysctl.h>
-#endif
-
-struct ax25_dev {
-	char			name[20];
-	struct device		*dev;
-	struct device		*forward;
-	struct ctl_table	systable[AX25_MAX_VALUES+1];
-	int			values[AX25_MAX_VALUES];
-};
-
 /* af_ax25.c */
+extern ax25_cb *volatile ax25_list;
+extern void ax25_free_cb(ax25_cb *);
+extern void ax25_insert_socket(ax25_cb *);
+struct sock *ax25_find_listener(ax25_address *, int, struct net_device *, int);
+struct sock *ax25_find_socket(ax25_address *, ax25_address *, int);
+extern ax25_cb *ax25_find_cb(ax25_address *, ax25_address *, ax25_digi *, struct net_device *);
+extern struct sock *ax25_addr_match(ax25_address *);
+extern void ax25_send_to_raw(struct sock *, struct sk_buff *, int);
+extern void ax25_destroy_socket(ax25_cb *);
+extern ax25_cb *ax25_create_cb(void);
+extern void ax25_fillin_cb(ax25_cb *, ax25_dev *);
+extern int  ax25_create(struct socket *, int);
+extern struct sock *ax25_make_new(struct sock *, struct ax25_dev *);
+
+/* ax25_addr.c */
 extern ax25_address null_ax25_address;
 extern char *ax2asc(ax25_address *);
 extern ax25_address *asc2ax(char *);
 extern int  ax25cmp(ax25_address *, ax25_address *);
-extern ax25_cb *ax25_send_frame(struct sk_buff *, int, ax25_address *, ax25_address *, ax25_digi *, struct device *);
-extern ax25_cb *ax25_find_cb(ax25_address *, ax25_address *, ax25_digi *, struct device *);
-extern void ax25_destroy_socket(ax25_cb *);
-extern struct device *ax25rtr_get_dev(ax25_address *);
-extern int  ax25_encapsulate(struct sk_buff *, struct device *, unsigned short,
-	void *, void *, unsigned int);
-extern int  ax25_rebuild_header(void *, struct device *, unsigned long, struct sk_buff *);
-extern ax25_uid_assoc *ax25_uid_list;
-extern int  ax25_uid_policy;
-extern ax25_address *ax25_findbyuid(uid_t);
-extern void ax25_queue_xmit(struct sk_buff *, struct device *, int);
-extern int  ax25_dev_is_dama_slave(struct device *);	/* dl1bke 951121 */
+extern int  ax25digicmp(ax25_digi *, ax25_digi *);
+extern unsigned char *ax25_addr_parse(unsigned char *, int, ax25_address *, ax25_address *, ax25_digi *, int *, int *);
+extern int  ax25_addr_build(unsigned char *, ax25_address *, ax25_address *, ax25_digi *, int, int);
+extern int  ax25_addr_size(ax25_digi *);
+extern void ax25_digi_invert(ax25_digi *, ax25_digi *);
 
-#include <net/ax25call.h>
+/* ax25_dev.c */
+extern ax25_dev *ax25_dev_list;
+extern ax25_dev *ax25_dev_ax25dev(struct net_device *);
+extern ax25_dev *ax25_addr_ax25dev(ax25_address *);
+extern void ax25_dev_device_up(struct net_device *);
+extern void ax25_dev_device_down(struct net_device *);
+extern int  ax25_fwd_ioctl(unsigned int, struct ax25_fwd_struct *);
+extern struct net_device *ax25_fwd_dev(struct net_device *);
+extern void ax25_dev_free(void);
+
+/* ax25_ds_in.c */
+extern int  ax25_ds_frame_in(ax25_cb *, struct sk_buff *, int);
+
+/* ax25_ds_subr.c */
+extern void ax25_ds_nr_error_recovery(ax25_cb *);
+extern void ax25_ds_enquiry_response(ax25_cb *);
+extern void ax25_ds_establish_data_link(ax25_cb *);
+extern void ax25_dev_dama_on(ax25_dev *);
+extern void ax25_dev_dama_off(ax25_dev *);
+extern void ax25_dama_on(ax25_cb *);
+extern void ax25_dama_off(ax25_cb *);
+
+/* ax25_ds_timer.c */
+extern void ax25_ds_set_timer(ax25_dev *);
+extern void ax25_ds_del_timer(ax25_dev *);
+extern void ax25_ds_timer(ax25_cb *);
+extern void ax25_ds_t1_timeout(ax25_cb *);
+extern void ax25_ds_heartbeat_expiry(ax25_cb *);
+extern void ax25_ds_t3timer_expiry(ax25_cb *);
+extern void ax25_ds_idletimer_expiry(ax25_cb *);
+
+/* ax25_iface.c */
+extern int  ax25_protocol_register(unsigned int, int (*)(struct sk_buff *, ax25_cb *));
+extern void ax25_protocol_release(unsigned int);
+extern int  ax25_linkfail_register(void (*)(ax25_cb *, int));
+extern void ax25_linkfail_release(void (*)(ax25_cb *, int));
+extern int  ax25_listen_register(ax25_address *, struct net_device *);
+extern void ax25_listen_release(ax25_address *, struct net_device *);
+extern int  (*ax25_protocol_function(unsigned int))(struct sk_buff *, ax25_cb *);
+extern int  ax25_listen_mine(ax25_address *, struct net_device *);
+extern void ax25_link_failed(ax25_cb *, int);
+extern int  ax25_protocol_is_registered(unsigned int);
 
 /* ax25_in.c */
-extern int  ax25_process_rx_frame(ax25_cb *, struct sk_buff *, int, int);
+extern int  ax25_rx_iframe(ax25_cb *, struct sk_buff *);
+extern int  ax25_kiss_rcv(struct sk_buff *, struct net_device *, struct packet_type *);
+
+/* ax25_ip.c */
+extern int  ax25_encapsulate(struct sk_buff *, struct net_device *, unsigned short, void *, void *, unsigned int);
+extern int  ax25_rebuild_header(struct sk_buff *);
 
 /* ax25_out.c */
+extern ax25_cb *ax25_send_frame(struct sk_buff *, int, ax25_address *, ax25_address *, ax25_digi *, struct net_device *);
 extern void ax25_output(ax25_cb *, int, struct sk_buff *);
 extern void ax25_kick(ax25_cb *);
 extern void ax25_transmit_buffer(ax25_cb *, struct sk_buff *, int);
-extern void ax25_nr_error_recovery(ax25_cb *);
-extern void ax25_establish_data_link(ax25_cb *);
-extern void ax25_transmit_enquiry(ax25_cb *);
-extern void ax25_enquiry_response(ax25_cb *);
-extern void ax25_timeout_response(ax25_cb *);
-extern void ax25_check_iframes_acked(ax25_cb *, unsigned short);
-extern void dama_enquiry_response(ax25_cb *);			/* dl1bke 960114 */
-extern void dama_establish_data_link(ax25_cb *);
+extern void ax25_queue_xmit(struct sk_buff *);
+extern int  ax25_check_iframes_acked(ax25_cb *, unsigned short);
 
 /* ax25_route.c */
-extern struct ax25_dev ax25_device[];
-extern int  ax25_rt_get_info(char *, char **, off_t, int, int);
-extern int  ax25_cs_get_info(char *, char **, off_t, int, int);
-extern int  ax25_rt_autobind(ax25_cb *, ax25_address *);
-extern ax25_digi *ax25_rt_find_path(ax25_address *, struct device *);
-extern void ax25_rt_build_path(struct sk_buff *, ax25_address *, ax25_address *, ax25_digi *);
-extern void ax25_rt_device_down(struct device *);
+extern void ax25_rt_device_down(struct net_device *);
 extern int  ax25_rt_ioctl(unsigned int, void *);
-extern char ax25_rt_mode_get(ax25_address *, struct device *);
-extern int  ax25_dev_get_value(struct device *, int);
-extern void ax25_dev_device_up(struct device *);
-extern void ax25_dev_device_down(struct device *);
-extern int  ax25_fwd_ioctl(unsigned int, struct ax25_fwd_struct *);
-extern struct device *ax25_fwd_dev(struct device *);
+extern int  ax25_rt_get_info(char *, char **, off_t, int);
+extern int  ax25_rt_autobind(ax25_cb *, ax25_address *);
+extern ax25_route *ax25_rt_find_route(ax25_address *, struct net_device *);
+extern struct sk_buff *ax25_rt_build_path(struct sk_buff *, ax25_address *, ax25_address *, ax25_digi *);
 extern void ax25_rt_free(void);
+
+/* ax25_std_in.c */
+extern int  ax25_std_frame_in(ax25_cb *, struct sk_buff *, int);
+
+/* ax25_std_subr.c */
+extern void ax25_std_nr_error_recovery(ax25_cb *);
+extern void ax25_std_establish_data_link(ax25_cb *);
+extern void ax25_std_transmit_enquiry(ax25_cb *);
+extern void ax25_std_enquiry_response(ax25_cb *);
+extern void ax25_std_timeout_response(ax25_cb *);
+
+/* ax25_std_timer.c */
+extern void ax25_std_heartbeat_expiry(ax25_cb *);
+extern void ax25_std_t1timer_expiry(ax25_cb *);
+extern void ax25_std_t2timer_expiry(ax25_cb *);
+extern void ax25_std_t3timer_expiry(ax25_cb *);
+extern void ax25_std_idletimer_expiry(ax25_cb *);
 
 /* ax25_subr.c */
 extern void ax25_clear_queues(ax25_cb *);
@@ -252,41 +312,39 @@ extern void ax25_requeue_frames(ax25_cb *);
 extern int  ax25_validate_nr(ax25_cb *, unsigned short);
 extern int  ax25_decode(ax25_cb *, struct sk_buff *, int *, int *, int *);
 extern void ax25_send_control(ax25_cb *, int, int, int);
-extern unsigned short ax25_calculate_t1(ax25_cb *);
+extern void ax25_return_dm(struct net_device *, ax25_address *, ax25_address *, ax25_digi *);
+extern void ax25_calculate_t1(ax25_cb *);
 extern void ax25_calculate_rtt(ax25_cb *);
-extern unsigned char *ax25_parse_addr(unsigned char *, int, ax25_address *,
-	ax25_address *, ax25_digi *, int *, int *);	/* dl1bke 951121 */
-extern int  build_ax25_addr(unsigned char *, ax25_address *, ax25_address *,
-	ax25_digi *, int, int);
-extern int  size_ax25_addr(ax25_digi *);
-extern void ax25_digi_invert(ax25_digi *, ax25_digi *);
-extern void ax25_return_dm(struct device *, ax25_address *, ax25_address *, ax25_digi *);
-extern void ax25_dama_on(ax25_cb *);	/* dl1bke 951121 */
-extern void ax25_dama_off(ax25_cb *);	/* dl1bke 951121 */
 extern void ax25_disconnect(ax25_cb *, int);
 
 /* ax25_timer.c */
-extern void ax25_set_timer(ax25_cb *);
-extern void ax25_t1_timeout(ax25_cb *);
-extern void ax25_link_failed(ax25_cb *, int);
-extern int  (*ax25_protocol_function(unsigned int))(struct sk_buff *, ax25_cb *);
-extern int  ax25_listen_mine(ax25_address *, struct device *);
+extern void ax25_start_heartbeat(ax25_cb *);
+extern void ax25_start_t1timer(ax25_cb *);
+extern void ax25_start_t2timer(ax25_cb *);
+extern void ax25_start_t3timer(ax25_cb *);
+extern void ax25_start_idletimer(ax25_cb *);
+extern void ax25_stop_heartbeat(ax25_cb *);
+extern void ax25_stop_t1timer(ax25_cb *);
+extern void ax25_stop_t2timer(ax25_cb *);
+extern void ax25_stop_t3timer(ax25_cb *);
+extern void ax25_stop_idletimer(ax25_cb *);
+extern int  ax25_t1timer_running(ax25_cb *);
+extern unsigned long ax25_display_timer(struct timer_list *);
+
+/* ax25_uid.c */
+extern int  ax25_uid_policy;
+extern ax25_address *ax25_findbyuid(uid_t);
+extern int  ax25_uid_ioctl(int, struct sockaddr_ax25 *);
+extern int  ax25_uid_get_info(char *, char **, off_t, int);
+extern void ax25_uid_free(void);
 
 /* sysctl_net_ax25.c */
+#ifdef CONFIG_SYSCTL
 extern void ax25_register_sysctl(void);
 extern void ax25_unregister_sysctl(void);
-
-/* ... */
-
-extern ax25_cb *volatile ax25_list;
-
-/* support routines for modules that use AX.25, in ax25_timer.c */
-extern int  ax25_protocol_register(unsigned int, int (*)(struct sk_buff *, ax25_cb *));
-extern void ax25_protocol_release(unsigned int);
-extern int  ax25_linkfail_register(void (*)(ax25_cb *, int));
-extern void ax25_linkfail_release(void (*)(ax25_cb *, int));
-extern int  ax25_listen_register(ax25_address *, struct device *);
-extern void ax25_listen_release(ax25_address *, struct device *);
-extern int  ax25_protocol_is_registered(unsigned int);
+#else
+extern inline void ax25_register_sysctl(void) {};
+extern inline void ax25_unregister_sysctl(void) {};
+#endif /* CONFIG_SYSCTL */
 
 #endif

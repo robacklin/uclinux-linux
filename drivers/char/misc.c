@@ -27,243 +27,258 @@
  *  adapted by Bjorn Ekwall <bj0rn@blox.se>
  *  corrected by Alan Cox <alan@lxorguk.ukuu.org.uk>
  *
- * Allow missing f_op->open, and allow console to be configured out,
- * by Kenneth Albanowski <kjahds@kjahds.com>
+ * Changes for kmod (from kerneld):
+ *	Cyrus Durgin <cider@speakeasy.org>
+ *
+ * Added devfs support. Richard Gooch <rgooch@atnf.csiro.au>  10-Jan-1998
  */
 
-#include <linux/config.h>
 #include <linux/module.h>
+#include <linux/config.h>
 
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/proc_fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/stat.h>
-#ifdef CONFIG_APM
-#include <linux/apm_bios.h>
-#endif
+#include <linux/init.h>
 
-#include <linux/tty.h> /* needed by selection.h */
-#include "selection.h" /* export its symbols */
-#ifdef CONFIG_KERNELD
-#include <linux/kerneld.h>
-#endif
+#include <linux/tty.h>
+#include <linux/selection.h>
+#include <linux/kmod.h>
+
+#include "busmouse.h"
 
 /*
  * Head entry for the doubly linked miscdevice list
  */
 static struct miscdevice misc_list = { 0, "head", NULL, &misc_list, &misc_list };
+static DECLARE_MUTEX(misc_sem);
 
 /*
  * Assigned numbers, used for dynamic minors
  */
-#define DYNAMIC_MINORS 64 /* like dynamic majors used to do */
+#define DYNAMIC_MINORS 64 /* like dynamic majors */
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
-#ifndef MODULE
-extern int bus_mouse_init(void);
 extern int psaux_init(void);
-extern int ms_bus_mouse_init(void);
-extern int atixl_busmouse_init(void);
-extern int sun_mouse_init(void);
-extern void watchdog_init(void);
-extern void wdt_init(void);
-#ifdef CONFIG_M68360_SIM_WDT
-extern int  quicc_sim_wdt_init(void);
-#endif
-extern void pcwatchdog_init(void);
-extern int rtc_init(void);
-extern int con_get_info(int *mode, int *shift, int *col, int *row,
-			struct tty_struct **tty);
-extern int mc68328digi_init(void);
+extern int rtc_DP8570A_init(void);
+extern int rtc_MK48T08_init(void);
+extern int ds1286_init(void);
+extern int pmu_device_init(void);
+extern int tosh_init(void);
+extern int i8k_init(void);
+extern int lcd_init(void);
+extern int gio_c5471_init(void);
 
-#ifdef CONFIG_PROC_FS
-static int proc_misc_read(char *buf, char **start, off_t offset, int len, int unused)
+static int misc_read_proc(char *buf, char **start, off_t offset,
+			  int len, int *eof, void *private)
 {
 	struct miscdevice *p;
+	int written;
 
-	len=0;
-	for (p = misc_list.next; p != &misc_list; p = p->next)
-		len += sprintf(buf+len, "%3i %s\n",p->minor, p->name ?: "");
-	return len;
+	written=0;
+	for (p = misc_list.next; p != &misc_list && written < len; p = p->next) {
+		written += sprintf(buf+written, "%3i %s\n",p->minor, p->name ?: "");
+		if (written < offset) {
+			offset -= written;
+			written = 0;
+		}
+	}
+	*start = buf + offset;
+	written -= offset;
+	if(written > len) {
+		*eof = 0;
+		return len;
+	}
+	*eof = 1;
+	return (written<0) ? 0 : written;
 }
 
-#endif /* PROC_FS */
-#endif /* !MODULE */
 
 static int misc_open(struct inode * inode, struct file * file)
 {
 	int minor = MINOR(inode->i_rdev);
-	struct miscdevice *c = misc_list.next;
-	file->f_op = NULL;
+	struct miscdevice *c;
+	int err = -ENODEV;
+	struct file_operations *old_fops, *new_fops = NULL;
+	
+	down(&misc_sem);
+	
+	c = misc_list.next;
 
 	while ((c != &misc_list) && (c->minor != minor))
 		c = c->next;
-	if (c == &misc_list) {
-#ifdef CONFIG_KERNELD
+	if (c != &misc_list)
+		new_fops = fops_get(c->fops);
+	if (!new_fops) {
 		char modname[20];
+		up(&misc_sem);
 		sprintf(modname, "char-major-%d-%d", MISC_MAJOR, minor);
 		request_module(modname);
+		down(&misc_sem);
 		c = misc_list.next;
 		while ((c != &misc_list) && (c->minor != minor))
 			c = c->next;
-		if (c == &misc_list)
-#endif
-			return -ENODEV;
+		if (c == &misc_list || (new_fops = fops_get(c->fops)) == NULL)
+			goto fail;
 	}
 
-	if ((file->f_op = c->fops))
-		if (file->f_op->open)
-			return file->f_op->open(inode,file);
-		else
-			return 0;
-	else
-		return -ENODEV;
+	err = 0;
+	old_fops = file->f_op;
+	file->f_op = new_fops;
+	if (file->f_op->open) {
+		err=file->f_op->open(inode,file);
+		if (err) {
+			fops_put(file->f_op);
+			file->f_op = fops_get(old_fops);
+		}
+	}
+	fops_put(old_fops);
+fail:
+	up(&misc_sem);
+	return err;
 }
 
 static struct file_operations misc_fops = {
-        NULL,		/* seek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* select */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-        misc_open,
-        NULL		/* release */
+	owner:		THIS_MODULE,
+	open:		misc_open,
 };
 
+
+/**
+ *	misc_register	-	register a miscellaneous device
+ *	@misc: device structure
+ *	
+ *	Register a miscellaneous device with the kernel. If the minor
+ *	number is set to %MISC_DYNAMIC_MINOR a minor number is assigned
+ *	and placed in the minor field of the structure. For other cases
+ *	the minor number requested is used.
+ *
+ *	The structure passed is linked into the kernel and may not be
+ *	destroyed until it has been unregistered.
+ *
+ *	A zero is returned on success and a negative errno code for
+ *	failure.
+ */
+ 
 int misc_register(struct miscdevice * misc)
 {
+	static devfs_handle_t devfs_handle, dir;
+	struct miscdevice *c;
+	
 	if (misc->next || misc->prev)
 		return -EBUSY;
+	down(&misc_sem);
+	c = misc_list.next;
+
+	while ((c != &misc_list) && (c->minor != misc->minor))
+		c = c->next;
+	if (c != &misc_list) {
+		up(&misc_sem);
+		return -EBUSY;
+	}
+
 	if (misc->minor == MISC_DYNAMIC_MINOR) {
 		int i = DYNAMIC_MINORS;
 		while (--i >= 0)
 			if ( (misc_minors[i>>3] & (1 << (i&7))) == 0)
 				break;
-		if (i<0) return -EBUSY;
+		if (i<0)
+		{
+			up(&misc_sem);
+			return -EBUSY;
+		}
 		misc->minor = i;
 	}
 	if (misc->minor < DYNAMIC_MINORS)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
-	MOD_INC_USE_COUNT;
-	misc->next = &misc_list;
-	misc->prev = misc_list.prev;
+	if (!devfs_handle)
+		devfs_handle = devfs_mk_dir (NULL, "misc", NULL);
+	dir = strchr (misc->name, '/') ? NULL : devfs_handle;
+	misc->devfs_handle =
+		devfs_register (dir, misc->name, DEVFS_FL_NONE,
+				MISC_MAJOR, misc->minor,
+				S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
+				misc->fops, NULL);
+
+	/*
+	 * Add it to the front, so that later devices can "override"
+	 * earlier defaults
+	 */
+	misc->prev = &misc_list;
+	misc->next = misc_list.next;
 	misc->prev->next = misc;
 	misc->next->prev = misc;
+	up(&misc_sem);
 	return 0;
 }
+
+/**
+ *	misc_deregister - unregister a miscellaneous device
+ *	@misc: device to unregister
+ *
+ *	Unregister a miscellaneous device that was previously
+ *	successfully registered with misc_register(). Success
+ *	is indicated by a zero return, a negative errno code
+ *	indicates an error.
+ */
 
 int misc_deregister(struct miscdevice * misc)
 {
 	int i = misc->minor;
 	if (!misc->next || !misc->prev)
 		return -EINVAL;
-	MOD_DEC_USE_COUNT;
+	down(&misc_sem);
 	misc->prev->next = misc->next;
 	misc->next->prev = misc->prev;
 	misc->next = NULL;
 	misc->prev = NULL;
+	devfs_unregister (misc->devfs_handle);
 	if (i < DYNAMIC_MINORS && i>0) {
 		misc_minors[i>>3] &= ~(1 << (misc->minor & 7));
 	}
+	up(&misc_sem);
 	return 0;
 }
 
-#ifdef MODULE
+EXPORT_SYMBOL(misc_register);
+EXPORT_SYMBOL(misc_deregister);
 
-#define misc_init init_module
-
-void cleanup_module(void)
+int __init misc_init(void)
 {
-	unregister_chrdev(MISC_MAJOR, "misc");
-}
-
+	create_proc_read_entry("misc", 0, 0, misc_read_proc, NULL);
+#ifdef CONFIG_MVME16x
+	rtc_MK48T08_init();
 #endif
-
-static struct symbol_table misc_syms = {
-/* Should this be surrounded with "#ifdef CONFIG_MODULES" ? */
-#include <linux/symtab_begin.h>
-	X(misc_register),
-	X(misc_deregister),
-#if !defined(MODULE) && defined(CONFIG_CONSOLE)
-	X(set_selection),   /* used by the kmouse module, can only */
-	X(paste_selection), /* be exported if misc.c is in linked in */
-	X(con_get_info),
+#ifdef CONFIG_BVME6000
+	rtc_DP8570A_init();
 #endif
-#include <linux/symtab_end.h>
-};
-
-int misc_init(void)
-{
-#ifndef MODULE
-#ifdef CONFIG_PROC_FS
-	proc_register_dynamic(&proc_root, &(struct proc_dir_entry) {
-		0, 4, "misc",
-		S_IFREG | S_IRUGO, 1, 0, 0,
-		0, NULL /* ops -- default to array */,
-		&proc_misc_read /* get_info */,
-	});
-#endif /* PROC_FS */
-#ifdef CONFIG_BUSMOUSE
-	bus_mouse_init();
+#ifdef CONFIG_SGI_DS1286
+	ds1286_init();
 #endif
-#if defined CONFIG_PSMOUSE
-	psaux_init();
+#ifdef CONFIG_PMAC_PBOOK
+	pmu_device_init();
 #endif
-#ifdef CONFIG_MS_BUSMOUSE
-	ms_bus_mouse_init();
+#ifdef CONFIG_TOSHIBA
+	tosh_init();
 #endif
-#ifdef CONFIG_ATIXL_BUSMOUSE
- 	atixl_busmouse_init();
+#ifdef CONFIG_COBALT_LCD
+	lcd_init();
 #endif
-#ifdef CONFIG_AMIGAMOUSE
-	amiga_mouse_init();
+#ifdef CONFIG_I8K
+	i8k_init();
 #endif
-#ifdef CONFIG_ATARIMOUSE
-	atari_mouse_init();
+#ifdef CONFIG_C5471_GIO
+	gio_c5471_init();
 #endif
-#ifdef CONFIG_SUN_MOUSE
-	sun_mouse_init();
-#endif
-#ifdef CONFIG_SOFT_WATCHDOG
-	watchdog_init();
-#endif
-#ifdef CONFIG_WDT
-	wdt_init();
-#endif
-#ifdef CONFIG_M68360_SIM_WDT
-	quicc_sim_wdt_init();
-#endif
-#ifdef CONFIG_PCWATCHDOG
-	pcwatchdog_init();
-#endif
-#ifdef CONFIG_APM
-	apm_bios_init();
-#endif
-#ifdef CONFIG_H8
-	h8_init();
-#endif
-#ifdef CONFIG_RTC
-	rtc_init();
-#endif
-#ifdef CONFIG_68328_DIGI
-	mc68328digi_init();
-#endif
-#endif /* !MODULE */
-	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
-	  printk("unable to get major %d for misc devices\n",
-		 MISC_MAJOR);
-		return -EIO;
-	}
-
-	if(register_symtab(&misc_syms)!=0)
-	{
-		unregister_chrdev(MISC_MAJOR, "misc");
+	if (devfs_register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
+		printk("unable to get major %d for misc devices\n",
+		       MISC_MAJOR);
 		return -EIO;
 	}
 	return 0;

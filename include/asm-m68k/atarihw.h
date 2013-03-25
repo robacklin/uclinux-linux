@@ -7,6 +7,10 @@
 ** 5/1/94 Roman Hodek:
 **   Added definitions for TT specific chips.
 **
+** 1996-09-13 lars brinkhoff <f93labr@dd.chalmers.se>:
+**   Finally added definitions for the matrix/codec and the DSP56001 host
+**   interface.
+**
 ** This file is subject to the terms and conditions of the GNU General Public
 ** License.  See the file COPYING in the main directory of this archive
 ** for more details.
@@ -17,6 +21,93 @@
 #define _LINUX_ATARIHW_H_
 
 #include <linux/types.h>
+#include <asm/bootinfo.h>
+#include <asm/raw_io.h>
+
+extern u_long atari_mch_cookie;
+extern u_long atari_mch_type;
+extern u_long atari_switches;
+extern int atari_rtc_year_offset;
+extern int atari_dont_touch_floppy_select;
+
+/* convenience macros for testing machine type */
+#define MACH_IS_ST	((atari_mch_cookie >> 16) == ATARI_MCH_ST)
+#define MACH_IS_STE	((atari_mch_cookie >> 16) == ATARI_MCH_STE && \
+			 (atari_mch_cookie & 0xffff) == 0)
+#define MACH_IS_MSTE	((atari_mch_cookie >> 16) == ATARI_MCH_STE && \
+			 (atari_mch_cookie & 0xffff) == 0x10)
+#define MACH_IS_TT	((atari_mch_cookie >> 16) == ATARI_MCH_TT)
+#define MACH_IS_FALCON	((atari_mch_cookie >> 16) == ATARI_MCH_FALCON)
+#define MACH_IS_MEDUSA	(atari_mch_type == ATARI_MACH_MEDUSA)
+#define MACH_IS_HADES	(atari_mch_type == ATARI_MACH_HADES)
+#define MACH_IS_AB40	(atari_mch_type == ATARI_MACH_AB40)
+
+/* values for atari_switches */
+#define ATARI_SWITCH_IKBD	0x01
+#define ATARI_SWITCH_MIDI	0x02
+#define ATARI_SWITCH_SND6	0x04
+#define ATARI_SWITCH_SND7	0x08
+#define ATARI_SWITCH_OVSC_SHIFT	16
+#define ATARI_SWITCH_OVSC_IKBD	(ATARI_SWITCH_IKBD << ATARI_SWITCH_OVSC_SHIFT)
+#define ATARI_SWITCH_OVSC_MIDI	(ATARI_SWITCH_MIDI << ATARI_SWITCH_OVSC_SHIFT)
+#define ATARI_SWITCH_OVSC_SND6	(ATARI_SWITCH_SND6 << ATARI_SWITCH_OVSC_SHIFT)
+#define ATARI_SWITCH_OVSC_SND7	(ATARI_SWITCH_SND7 << ATARI_SWITCH_OVSC_SHIFT)
+#define ATARI_SWITCH_OVSC_MASK	0xffff0000
+	
+/*
+ * Define several Hardware-Chips for indication so that for the ATARI we do
+ * no longer decide whether it is a Falcon or other machine . It's just
+ * important what hardware the machine uses
+ */
+
+/* ++roman 08/08/95: rewritten from ORing constants to a C bitfield */
+
+#define ATARIHW_DECLARE(name)	unsigned name : 1
+#define ATARIHW_SET(name)	(atari_hw_present.name = 1)
+#define ATARIHW_PRESENT(name)	(atari_hw_present.name)
+
+struct atari_hw_present {
+    /* video hardware */
+    ATARIHW_DECLARE(STND_SHIFTER);	/* ST-Shifter - no base low ! */
+    ATARIHW_DECLARE(EXTD_SHIFTER);	/* STe-Shifter - 24 bit address */
+    ATARIHW_DECLARE(TT_SHIFTER);	/* TT-Shifter */
+    ATARIHW_DECLARE(VIDEL_SHIFTER);	/* Falcon-Shifter */
+    /* sound hardware */
+    ATARIHW_DECLARE(YM_2149);		/* Yamaha YM 2149 */
+    ATARIHW_DECLARE(PCM_8BIT);		/* PCM-Sound in STe-ATARI */
+    ATARIHW_DECLARE(CODEC);		/* CODEC Sound (Falcon) */
+    /* disk storage interfaces */
+    ATARIHW_DECLARE(TT_SCSI);		/* Directly mapped NCR5380 */
+    ATARIHW_DECLARE(ST_SCSI);		/* NCR5380 via ST-DMA (Falcon) */
+    ATARIHW_DECLARE(ACSI);		/* Standard ACSI like in STs */
+    ATARIHW_DECLARE(IDE);		/* IDE Interface */
+    ATARIHW_DECLARE(FDCSPEED);		/* 8/16 MHz switch for FDC */
+    /* other I/O hardware */
+    ATARIHW_DECLARE(ST_MFP);		/* The ST-MFP (there should be no Atari
+					   without it... but who knows?) */
+    ATARIHW_DECLARE(TT_MFP);		/* 2nd MFP */
+    ATARIHW_DECLARE(SCC);		/* Serial Communications Contr. */
+    ATARIHW_DECLARE(ST_ESCC);		/* SCC Z83230 in an ST */
+    ATARIHW_DECLARE(ANALOG_JOY);	/* Paddle Interface for STe
+					   and Falcon */
+    ATARIHW_DECLARE(MICROWIRE);		/* Microwire Interface */
+    /* DMA */
+    ATARIHW_DECLARE(STND_DMA);		/* 24 Bit limited ST-DMA */
+    ATARIHW_DECLARE(EXTD_DMA);		/* 32 Bit ST-DMA */
+    ATARIHW_DECLARE(SCSI_DMA);		/* DMA for the NCR5380 */
+    ATARIHW_DECLARE(SCC_DMA);		/* DMA for the SCC */
+    /* real time clocks */
+    ATARIHW_DECLARE(TT_CLK);		/* TT compatible clock chip */
+    ATARIHW_DECLARE(MSTE_CLK);		/* Mega ST(E) clock chip */
+    /* supporting hardware */
+    ATARIHW_DECLARE(SCU);		/* System Control Unit */
+    ATARIHW_DECLARE(BLITTER);		/* Blitter */
+    ATARIHW_DECLARE(VME);		/* VME Bus */
+    ATARIHW_DECLARE(DSP56K);		/* DSP56k processor in Falcon */
+};
+
+extern struct atari_hw_present atari_hw_present;
+
 
 /* Reading the MFP port register gives a machine independent delay, since the
  * MFP always has a 8 MHz clock. This avoids problems with the varying length
@@ -25,13 +116,6 @@
 #define	MFPDELAY() \
 	__asm__ __volatile__ ( "tstb %0" : : "m" (mfp.par_dt_reg) : "cc" );
 
-/* Memory used for screen ram and stdma buffers */
-void atari_stram_init (void);
-void *atari_stram_alloc (long size, unsigned long *start_mem );
-void atari_stram_free (void *);
-
-extern int is_medusa;
-
 /* Do cache push/invalidate for DMA read/write. This function obeys the
  * snooping on some machines (Medusa) and processors: The Medusa itself can
  * snoop, but only the '040 can source data from its cache to DMA writes i.e.,
@@ -39,8 +123,17 @@ extern int is_medusa;
  * DMA reads (i.e., writes to memory).
  */
 
+
+#define atari_readb   raw_inb
+#define atari_writeb  raw_outb
+
+#define atari_inb_p   raw_inb
+#define atari_outb_p  raw_outb
+
+
+
 #include <linux/mm.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
 static inline void dma_cache_maintenance( unsigned long paddr,
 					  unsigned long len,
@@ -48,11 +141,11 @@ static inline void dma_cache_maintenance( unsigned long paddr,
 
 {
 	if (writeflag) {
-		if (!is_medusa || m68k_is040or060 == 6)
+		if (!MACH_IS_MEDUSA || CPU_IS_060)
 			cache_push( paddr, len );
 	}
 	else {
-		if (!is_medusa)
+		if (!MACH_IS_MEDUSA)
 			cache_clear( paddr, len );
 	}
 }
@@ -273,8 +366,46 @@ struct TT_5380 {
 
 /* 
 ** Falcon DMA Sound Subsystem
-** not implemented yet
  */     
+
+#define MATRIX_BASE (0xffff8930)
+struct MATRIX
+{
+  u_short source;
+  u_short destination;
+  u_char external_frequency_divider;
+  u_char internal_frequency_divider;
+};
+#define matrix (*(volatile struct MATRIX *)MATRIX_BASE)
+
+#define CODEC_BASE (0xffff8936)
+struct CODEC
+{
+  u_char tracks;
+  u_char input_source;
+#define CODEC_SOURCE_ADC        1
+#define CODEC_SOURCE_MATRIX     2
+  u_char adc_source;
+#define ADC_SOURCE_RIGHT_PSG    1
+#define ADC_SOURCE_LEFT_PSG     2
+  u_char gain;
+#define CODEC_GAIN_RIGHT        0x0f
+#define CODEC_GAIN_LEFT         0xf0
+  u_char attenuation;
+#define CODEC_ATTENUATION_RIGHT 0x0f
+#define CODEC_ATTENUATION_LEFT  0xf0
+  u_char unused1;
+  u_char status;
+#define CODEC_OVERFLOW_RIGHT    1
+#define CODEC_OVERFLOW_LEFT     2
+  u_char unused2, unused3, unused4, unused5;
+  u_char gpio_directions;
+#define GPIO_IN                 0
+#define GPIO_OUT                1
+  u_char unused6;
+  u_char gpio_data;
+};
+#define codec (*(volatile struct CODEC *)CODEC_BASE)
 
 /*
 ** Falcon Blitter
@@ -321,13 +452,13 @@ struct SCC
  };
 # define scc ((*(volatile struct SCC*)SCC_BAS))
 
-/* The ESCC (Z85230) in an Atari ST. The channels are revered! */
+/* The ESCC (Z85230) in an Atari ST. The channels are reversed! */
 # define st_escc ((*(volatile struct SCC*)0xfffffa31))
 # define st_escc_dsr ((*(volatile char *)0xfffffa39))
 
 /* TT SCC DMA Controller (same chip as SCSI DMA) */
 
-#define	TT_SCC_DMA_BAS	(0xffff8c01)
+#define	TT_SCC_DMA_BAS	(0xffff8c00)
 #define	tt_scc_dma	((*(volatile struct TT_DMA *)TT_SCC_DMA_BAS))
 
 /*
@@ -344,8 +475,41 @@ struct VIDEL_PALETTE
 
 /*
 ** Falcon DSP Host Interface
-** not implemented yet
  */
+
+#define DSP56K_HOST_INTERFACE_BASE (0xffffa200)
+struct DSP56K_HOST_INTERFACE {
+  u_char icr;
+#define DSP56K_ICR_RREQ	0x01
+#define DSP56K_ICR_TREQ	0x02
+#define DSP56K_ICR_HF0	0x08
+#define DSP56K_ICR_HF1	0x10
+#define DSP56K_ICR_HM0	0x20
+#define DSP56K_ICR_HM1	0x40
+#define DSP56K_ICR_INIT	0x80
+  
+  u_char cvr;
+#define DSP56K_CVR_HV_MASK 0x1f
+#define DSP56K_CVR_HC	0x80
+
+  u_char isr;
+#define DSP56K_ISR_RXDF	0x01
+#define DSP56K_ISR_TXDE	0x02
+#define DSP56K_ISR_TRDY	0x04
+#define DSP56K_ISR_HF2	0x08
+#define DSP56K_ISR_HF3	0x10
+#define DSP56K_ISR_DMA	0x40
+#define DSP56K_ISR_HREQ	0x80
+  
+  u_char ivr;
+
+  union {
+    u_char b[4];
+    u_short w[2];
+    u_long l;
+  } data;
+};
+#define dsp56k_host_interface ((*(volatile struct DSP56K_HOST_INTERFACE *)DSP56K_HOST_INTERFACE_BASE))
  
 /*
 ** MFP 68901
@@ -536,17 +700,28 @@ struct TT_DMASND {
 };
 # define tt_dmasnd ((*(volatile struct TT_DMASND *)TT_DMASND_BAS))
 
-#define	DMASND_CTRL_OFF		0x00
-#define	DMASND_CTRL_ON		0x01
-#define	DMASND_CTRL_REPEAT	0x02
-#define	DMASND_MODE_MONO	0x80
-#define	DMASND_MODE_STEREO	0x00
-#define DMASND_MODE_8BIT	0x00
-#define DMASND_MODE_16BIT	0x40	/* Falcon only */
-#define	DMASND_MODE_6KHZ	0x00	/* Falcon: mute */
-#define	DMASND_MODE_12KHZ	0x01
-#define	DMASND_MODE_25KHZ	0x02
-#define	DMASND_MODE_50KHZ	0x03
+#define DMASND_MFP_INT_REPLAY     0x01
+#define DMASND_MFP_INT_RECORD     0x02
+#define DMASND_TIMERA_INT_REPLAY  0x04
+#define DMASND_TIMERA_INT_RECORD  0x08
+
+#define	DMASND_CTRL_OFF		  0x00
+#define	DMASND_CTRL_ON		  0x01
+#define	DMASND_CTRL_REPEAT	  0x02
+#define DMASND_CTRL_RECORD_ON     0x10
+#define DMASND_CTRL_RECORD_OFF    0x00
+#define DMASND_CTRL_RECORD_REPEAT 0x20
+#define DMASND_CTRL_SELECT_REPLAY 0x00
+#define DMASND_CTRL_SELECT_RECORD 0x80
+#define	DMASND_MODE_MONO	  0x80
+#define	DMASND_MODE_STEREO	  0x00
+#define DMASND_MODE_8BIT	  0x00
+#define DMASND_MODE_16BIT	  0x40	/* Falcon only */
+#define	DMASND_MODE_6KHZ	  0x00	/* Falcon: mute */
+#define	DMASND_MODE_12KHZ	  0x01
+#define	DMASND_MODE_25KHZ	  0x02
+#define	DMASND_MODE_50KHZ	  0x03
+ 
 
 #define DMASNDSetBase(bufstart)						\
     do {								\

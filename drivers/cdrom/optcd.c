@@ -1,5 +1,5 @@
 /*	linux/drivers/cdrom/optcd.c - Optics Storage 8000 AT CDROM driver
-	$Id: optcd.c,v 1.1.1.1 1999-11-22 03:47:21 christ Exp $
+	$Id: optcd.c,v 1.11 1997/01/26 07:13:00 davem Exp $
 
 	Copyright (C) 1995 Leo Spiekman (spiekman@dutette.et.tudelft.nl)
 
@@ -57,6 +57,11 @@
 				thanks to Luke McFarlane. Also tidied up some
 				printk behaviour. ISP16 initialization
 				is now handled by a separate driver.
+				
+	09-11-99 	  	Make kernel-parameter implementation work with 2.3.x 
+	                 	Removed init_module & cleanup_module in favor of 
+			 	module_init & module_exit.
+			 	Torben Mathiasen <tmm@image.dk>
 */
 
 /* Includes */
@@ -65,13 +70,18 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
+#include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
+
 #include <asm/io.h>
 
 #define MAJOR_NR OPTICS_CDROM_MAJOR
 #include <linux/blk.h>
 
 #include <linux/cdrom.h>
-#include <linux/optcd.h>
+#include "optcd.h"
+
+#include <asm/uaccess.h>
 
 
 /* Debug support */
@@ -97,6 +107,10 @@ static void debug(int debug_this, const char* fmt, ...)
 #else
 #define DEBUG(x)
 #endif
+
+static int blksize = 2048;
+static int hsecsize = 2048;
+
 
 /* Drive hardware/firmware characteristics
    Identifiers in accordance with Optics Storage documentation */
@@ -104,7 +118,7 @@ static void debug(int debug_this, const char* fmt, ...)
 
 #define optcd_port optcd			/* Needed for the modutils. */
 static short optcd_port = OPTCD_PORTBASE;	/* I/O base of drive. */
-
+MODULE_PARM(optcd_port, "h");
 /* Drive registers, read */
 #define DATA_PORT	optcd_port	/* Read data/status */
 #define STATUS_PORT	optcd_port+1	/* Indicate data/status availability */
@@ -250,24 +264,19 @@ inline static int flag_low(int flag, unsigned long timeout)
 
 /* Timed waiting for status or data */
 static int sleep_timeout;	/* max # of ticks to sleep */
-static struct wait_queue *waitq = NULL;
-static struct timer_list delay_timer = {NULL, NULL, 0, 0, NULL};
-
-#define SET_TIMER(func, jifs) \
-	delay_timer.expires = jiffies+(jifs); \
-	delay_timer.function = (void *) (func); \
-	add_timer(&delay_timer);
-#define CLEAR_TIMER	del_timer(&delay_timer)
+static DECLARE_WAIT_QUEUE_HEAD(waitq);
+static void sleep_timer(unsigned long data);
+static struct timer_list delay_timer = {function: sleep_timer};
 
 
 /* Timer routine: wake up when desired flag goes low,
    or when timeout expires. */
-static void sleep_timer(void)
+static void sleep_timer(unsigned long data)
 {
 	int flags = inb(STATUS_PORT) & FL_STDT;
 
 	if (flags == FL_STDT && --sleep_timeout > 0) {
-		SET_TIMER(sleep_timer, HZ/100); /* multi-statement macro */
+		mod_timer(&delay_timer, jiffies + HZ/100); /* multi-statement macro */
 	} else
 		wake_up(&waitq);
 }
@@ -283,7 +292,7 @@ static int sleep_flag_low(int flag, unsigned long timeout)
 	sleep_timeout = timeout;
 	flag_high = inb(STATUS_PORT) & flag;
 	if (flag_high && sleep_timeout > 0) {
-		SET_TIMER(sleep_timer, HZ/100);
+		mod_timer(&delay_timer, jiffies + HZ/100);
 		sleep_on(&waitq);
 		flag_high = inb(STATUS_PORT) & flag;
 	}
@@ -915,7 +924,7 @@ static int get_multi_disk_info(void)
 		return -EIO;
 	return 0;
 }
-#endif MULTISESSION
+#endif /* MULTISESSION */
 
 
 static int update_toc(void)
@@ -953,7 +962,7 @@ static int update_toc(void)
 #ifdef MULTISESSION
  	if (disk_info.xa)
 		get_multi_disk_info();	/* Here disk_info.multi is set */
-#endif MULTISESSION
+#endif /* MULTISESSION */
 	if (disk_info.multi)
 		printk(KERN_WARNING "optcd: Multisession support experimental, "
 			"see linux/Documentation/cdrom/optcd\n");
@@ -968,7 +977,7 @@ static int update_toc(void)
 
 
 #define CURRENT_VALID \
-	(CURRENT && MAJOR(CURRENT -> rq_dev) == MAJOR_NR \
+	(!QUEUE_EMPTY && MAJOR(CURRENT -> rq_dev) == MAJOR_NR \
 	 && CURRENT -> cmd == READ && CURRENT -> sector != -1)
 
 
@@ -1065,15 +1074,11 @@ static volatile int error = 0;	/* %% do something with this?? */
 static int tries;		/* ibid?? */
 static int timeout = 0;
 
-static struct timer_list req_timer = {NULL, NULL, 0, 0, NULL};
+static void poll(unsigned long data);
+static struct timer_list req_timer = {function: poll};
 
-#define SET_REQ_TIMER(func, jifs) \
-	req_timer.expires = jiffies+(jifs); \
-	req_timer.function = (void *) (func); \
-	add_timer(&req_timer);
-#define CLEAR_REQ_TIMER	del_timer(&req_timer)
 
-static void poll(void)
+static void poll(unsigned long data)
 {
 	static volatile int read_count = 1;
 	int flags;
@@ -1349,11 +1354,11 @@ static void poll(void)
 		}
 	}
 
-	SET_REQ_TIMER(poll, HZ/100);
+	mod_timer(&req_timer, jiffies + HZ/100);
 }
 
 
-static void do_optcd_request(void)
+static void do_optcd_request(request_queue_t * q)
 {
 	DEBUG((DEBUG_REQUEST, "do_optcd_request(%ld+%ld)",
 	       CURRENT -> sector, CURRENT -> nr_sectors));
@@ -1387,7 +1392,7 @@ static void do_optcd_request(void)
 				timeout = READ_TIMEOUT;
 				tries = 5;
 				/* %% why not start right away?? */
-				SET_REQ_TIMER(poll, HZ/100);
+				mod_timer(&req_timer, jiffies + HZ/100);
 			}
 			break;
 		}
@@ -1447,7 +1452,7 @@ static int cdromplaymsf(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof msf);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	status = exec_long_cmd(COMPLAY, &msf);
@@ -1471,7 +1476,7 @@ static int cdromplaytrkind(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof ti);
 	if (status)
 		return status;
-	memcpy_fromfs(&ti, (void *) arg, sizeof ti);
+	copy_from_user(&ti, (void *) arg, sizeof ti);
 
 	if (ti.cdti_trk0 < disk_info.first
 	    || ti.cdti_trk0 > disk_info.last
@@ -1520,7 +1525,7 @@ static int cdromreadtochdr(unsigned long arg)
 	tochdr.cdth_trk0 = disk_info.first;
 	tochdr.cdth_trk1 = disk_info.last;
 
-	memcpy_tofs((void *) arg, &tochdr, sizeof tochdr);
+	copy_to_user((void *) arg, &tochdr, sizeof tochdr);
 	return 0;
 }
 
@@ -1534,7 +1539,7 @@ static int cdromreadtocentry(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void *) arg, sizeof entry);
 	if (status)
 		return status;
-	memcpy_fromfs(&entry, (void *) arg, sizeof entry);
+	copy_from_user(&entry, (void *) arg, sizeof entry);
 
 	if (entry.cdte_track == CDROM_LEADOUT)
 		tocptr = &toc[disk_info.last + 1];
@@ -1556,7 +1561,7 @@ static int cdromreadtocentry(unsigned long arg)
 	else if (entry.cdte_format != CDROM_MSF)
 		return -EINVAL;
 
-	memcpy_tofs((void *) arg, &entry, sizeof entry);
+	copy_to_user((void *) arg, &entry, sizeof entry);
 	return 0;
 }
 
@@ -1570,7 +1575,7 @@ static int cdromvolctrl(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof volctrl);
 	if (status)
 		return status;
-	memcpy_fromfs(&volctrl, (char *) arg, sizeof volctrl);
+	copy_from_user(&volctrl, (char *) arg, sizeof volctrl);
 
 	msf.cdmsf_min0 = 0x10;
 	msf.cdmsf_sec0 = 0x32;
@@ -1596,7 +1601,7 @@ static int cdromsubchnl(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void *) arg, sizeof subchnl);
 	if (status)
 		return status;
-	memcpy_fromfs(&subchnl, (void *) arg, sizeof subchnl);
+	copy_from_user(&subchnl, (void *) arg, sizeof subchnl);
 
 	if (subchnl.cdsc_format != CDROM_LBA
 	    && subchnl.cdsc_format != CDROM_MSF)
@@ -1608,7 +1613,7 @@ static int cdromsubchnl(unsigned long arg)
 		return -EIO;
 	}
 
-	memcpy_tofs((void *) arg, &subchnl, sizeof subchnl);
+	copy_to_user((void *) arg, &subchnl, sizeof subchnl);
 	return 0;
 }
 
@@ -1622,7 +1627,7 @@ static int cdromread(unsigned long arg, int blocksize, int cmd)
 	status = verify_area(VERIFY_WRITE, (void *) arg, blocksize);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	msf.cdmsf_min1 = 0;
@@ -1636,7 +1641,7 @@ static int cdromread(unsigned long arg, int blocksize, int cmd)
 		return -EIO;
 	fetch_data(buf, blocksize);
 
-	memcpy_tofs((void *) arg, &buf, blocksize);
+	copy_to_user((void *) arg, &buf, blocksize);
 	return 0;
 }
 
@@ -1649,7 +1654,7 @@ static int cdromseek(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof msf);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	status = exec_seek_cmd(COMSEEK, &msf);
@@ -1671,7 +1676,7 @@ static int cdrommultisession(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void*) arg, sizeof ms);
 	if (status)
 		return status;
-	memcpy_fromfs(&ms, (void*) arg, sizeof ms);
+	copy_from_user(&ms, (void*) arg, sizeof ms);
 
 	ms.addr.msf.minute = disk_info.last_session.minute;
 	ms.addr.msf.second = disk_info.last_session.second;
@@ -1685,7 +1690,7 @@ static int cdrommultisession(unsigned long arg)
 
 	ms.xa_flag = disk_info.xa;
 
-  	memcpy_tofs((void*) arg, &ms,
+  	copy_to_user((void*) arg, &ms,
 		sizeof(struct cdrom_multisession));
 
 #if DEBUG_MULTIS
@@ -1704,11 +1709,11 @@ static int cdrommultisession(unsigned long arg)
 			disk_info.last_session.minute,
 			disk_info.last_session.second,
 			disk_info.last_session.frame);
-#endif DEBUG_MULTIS
+#endif /* DEBUG_MULTIS */
 
 	return 0;
 }
-#endif MULTISESSION
+#endif /* MULTISESSION */
 
 
 static int cdromreset(void)
@@ -1835,7 +1840,7 @@ static int opt_ioctl(struct inode *ip, struct file *fp,
 	case CDROMMULTISESSION:	retval = cdrommultisession(arg); break;
 #endif
 
-	case CDROM_GET_UPC:	retval = -EINVAL; break; /* not implemented */
+	case CDROM_GET_MCN:	retval = -EINVAL; break; /* not implemented */
 	case CDROMVOLREAD:	retval = -EINVAL; break; /* not implemented */
 
 	case CDROMREADRAW:
@@ -1880,12 +1885,12 @@ static int opt_open(struct inode *ip, struct file *fp)
 		status = drive_status();
 		if (status < 0) {
 			DEBUG((DEBUG_VFS, "drive_status: %02x", -status));
-			return -EIO;
+			goto err_out;
 		}
 		DEBUG((DEBUG_VFS, "status: %02x", status));
 		if ((status & ST_DOOR_OPEN) || (status & ST_DRVERR)) {
 			printk(KERN_INFO "optcd: no disk or door open\n");
-			return -EIO;
+			goto err_out;
 		}
 		status = exec_cmd(COMLOCK);		/* Lock door */
 		if (status < 0) {
@@ -1899,20 +1904,22 @@ static int opt_open(struct inode *ip, struct file *fp)
 				DEBUG((DEBUG_VFS,
 				       "exec_cmd COMUNLOCK: %02x", -status));
 			}
-			return -EIO;
+			goto err_out;
 		}
 		open_count++;
 	}
-	MOD_INC_USE_COUNT;
 
 	DEBUG((DEBUG_VFS, "exiting opt_open"));
 
 	return 0;
+
+err_out:
+	return -EIO;
 }
 
 
 /* Release device special file; flush all blocks from the buffer cache */
-static void opt_release(struct inode *ip, struct file *fp)
+static int opt_release(struct inode *ip, struct file *fp)
 {
 	int status;
 
@@ -1923,8 +1930,6 @@ static void opt_release(struct inode *ip, struct file *fp)
 	if (!--open_count) {
 		toc_uptodate = 0;
 		opt_invalidate_buffers();
-		sync_dev(ip -> i_rdev);
-		invalidate_buffers(ip -> i_rdev);
 	 	status = exec_cmd(COMUNLOCK);	/* Unlock door */
 		if (status < 0) {
 			DEBUG((DEBUG_VFS, "exec_cmd COMUNLOCK: %02x", -status));
@@ -1933,10 +1938,10 @@ static void opt_release(struct inode *ip, struct file *fp)
 			status = exec_cmd(COMOPEN);
 			DEBUG((DEBUG_VFS, "exec_cmd COMOPEN: %02x", -status));
 		}
-		CLEAR_TIMER;
-		CLEAR_REQ_TIMER;
+		del_timer(&delay_timer);
+		del_timer(&req_timer);
 	}
-	MOD_DEC_USE_COUNT;
+	return 0;
 }
 
 
@@ -1958,7 +1963,7 @@ static int opt_media_change(kdev_t dev)
 
 /* Returns 1 if a drive is detected with a version string
    starting with "DOLPHIN". Otherwise 0. */
-static int version_ok(void)
+static int __init version_ok(void)
 {
 	char devname[100];
 	int count, i, ch, status;
@@ -1995,33 +2000,34 @@ static int version_ok(void)
 }
 
 
-static struct file_operations opt_fops = {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,		/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select */
-	opt_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	opt_open,		/* open */
-	opt_release,		/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	opt_media_change,	/* media change */
-	NULL			/* revalidate */
+static struct block_device_operations opt_fops = {
+	owner:			THIS_MODULE,
+	open:			opt_open,
+	release:		opt_release,
+	ioctl:			opt_ioctl,
+	check_media_change:	opt_media_change,
 };
 
-
+#ifndef MODULE
 /* Get kernel parameter when used as a kernel driver */
-void optcd_setup(char *str, int *ints)
+static int optcd_setup(char *str)
 {
+	int ints[4];
+	(void)get_options(str, ARRAY_SIZE(ints), ints);
+	
 	if (ints[0] > 0)
 		optcd_port = ints[1];
+
+ 	return 1;
 }
+
+__setup("optcd=", optcd_setup);
+
+#endif /* MODULE */
 
 /* Test for presence of drive and initialize it. Called at boot time
    or during module initialisation. */
-int optcd_init(void)
+int __init optcd_init(void)
 {
 	int status;
 
@@ -2050,35 +2056,42 @@ int optcd_init(void)
 		DEBUG((DEBUG_VFS, "exec_cmd COMINITDOUBLE: %02x", -status));
 		return -EIO;
 	}
-	if (register_blkdev(MAJOR_NR, "optcd", &opt_fops) != 0)
+	if (devfs_register_blkdev(MAJOR_NR, "optcd", &opt_fops) != 0)
 	{
 		printk(KERN_ERR "optcd: unable to get major %d\n", MAJOR_NR);
 		return -EIO;
 	}
-
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	devfs_register (NULL, "optcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+			S_IFBLK | S_IRUGO | S_IWUGO, &opt_fops, NULL);
+	hardsect_size[MAJOR_NR] = &hsecsize;
+	blksize_size[MAJOR_NR] = &blksize;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 4;
 	request_region(optcd_port, 4, "optcd");
+	register_disk(NULL, MKDEV(MAJOR_NR,0), 1, &opt_fops, 0);
 
 	printk(KERN_INFO "optcd: DOLPHIN 8000 AT CDROM at 0x%x\n", optcd_port);
 	return 0;
 }
 
 
-#ifdef MODULE
-int init_module(void)
+void __exit optcd_exit(void)
 {
-	return optcd_init();
-}
-
-
-void cleanup_module(void)
-{
-	if (unregister_blkdev(MAJOR_NR, "optcd") == -EINVAL) {
+	devfs_unregister(devfs_find_handle(NULL, "optcd", 0, 0,
+					   DEVFS_SPECIAL_BLK, 0));
+	if (devfs_unregister_blkdev(MAJOR_NR, "optcd") == -EINVAL) {
 		printk(KERN_ERR "optcd: what's that: can't unregister\n");
 		return;
 	}
+	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	release_region(optcd_port, 4);
 	printk(KERN_INFO "optcd: module released.\n");
 }
-#endif MODULE
+
+#ifdef MODULE
+module_init(optcd_init);
+#endif
+module_exit(optcd_exit);
+
+
+MODULE_LICENSE("GPL");

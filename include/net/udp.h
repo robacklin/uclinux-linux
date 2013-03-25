@@ -23,6 +23,9 @@
 #define _UDP_H
 
 #include <linux/udp.h>
+#include <linux/poll.h>
+#include <net/sock.h>
+#include <net/snmp.h>
 
 #define UDP_HTABLE_SIZE		128
 
@@ -31,33 +34,48 @@
  *        the port space is shared.
  */
 extern struct sock *udp_hash[UDP_HTABLE_SIZE];
+extern rwlock_t udp_hash_lock;
 
-extern unsigned short udp_good_socknum(void);
+extern int udp_port_rover;
 
-#define UDP_NO_CHECK	0
+static inline int udp_lport_inuse(u16 num)
+{
+	struct sock *sk = udp_hash[num & (UDP_HTABLE_SIZE - 1)];
 
+	for(; sk != NULL; sk = sk->next) {
+		if(sk->num == num)
+			return 1;
+	}
+	return 0;
+}
+
+/* Note: this must match 'valbool' in sock_setsockopt */
+#define UDP_CSUM_NOXMIT		1
+
+/* Used by SunRPC/xprt layer. */
+#define UDP_CSUM_NORCV		2
+
+/* Default, as per the RFC, is to always do csums. */
+#define UDP_CSUM_DEFAULT	0
 
 extern struct proto udp_prot;
 
 
-extern void	udp_err(int type, int code, unsigned char *header, __u32 daddr,
-			__u32 saddr, struct inet_protocol *protocol, int len);
-extern void	udp_send_check(struct udphdr *uh, __u32 saddr, 
-			__u32 daddr, int len, struct sock *sk);
-extern int	udp_recvfrom(struct sock *sk, unsigned char *to,
-			     int len, int noblock, unsigned flags,
-			     struct sockaddr_in *sin, int *addr_len);
-extern int	udp_read(struct sock *sk, unsigned char *buff,
-			 int len, int noblock, unsigned flags);
+extern void	udp_err(struct sk_buff *, u32);
 extern int	udp_connect(struct sock *sk,
-			    struct sockaddr_in *usin, int addr_len);
-extern int	udp_rcv(struct sk_buff *skb, struct device *dev,
-			struct options *opt, __u32 daddr,
-			unsigned short len, __u32 saddr, int redo,
-			struct inet_protocol *protocol);
-extern int	udp_ioctl(struct sock *sk, int cmd, unsigned long arg);
+			    struct sockaddr *usin, int addr_len);
 
-/* CONFIG_IP_TRANSPARENT_PROXY */
-extern int	udp_chkaddr(struct sk_buff *skb);
+extern int	udp_sendmsg(struct sock *sk, struct msghdr *msg, int len);
+
+extern int	udp_rcv(struct sk_buff *skb);
+extern int	udp_ioctl(struct sock *sk, int cmd, unsigned long arg);
+extern int	udp_disconnect(struct sock *sk, int flags);
+extern unsigned int udp_poll(struct file *file, struct socket *sock,
+			     poll_table *wait);
+
+extern struct udp_mib udp_statistics[NR_CPUS*2];
+#define UDP_INC_STATS(field)		SNMP_INC_STATS(udp_statistics, field)
+#define UDP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(udp_statistics, field)
+#define UDP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(udp_statistics, field)
 
 #endif	/* _UDP_H */

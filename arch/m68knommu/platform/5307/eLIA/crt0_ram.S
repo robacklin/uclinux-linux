@@ -1,12 +1,9 @@
 /*****************************************************************************/
 
 /*
- *	crt0_ram.S -- startup code for MCF5307 ColdFire based eLIA board.
+ *	crt0_ram.S -- startup code for MCF5307 ColdFire based eLIA.
  *
- *	Copyright (C) 1999, Greg Ungerer (gerg@snapgear.com)
- *  	Copyright (C) 2000  Lineo Inc. (www.lineo.com) 
- *
- * 	1999/02/24 Modified for the 5307 processor David W. Miller
+ *	(C) Copyright 1999-2003, Greg Ungerer.
  */
 
 /*****************************************************************************/
@@ -14,16 +11,16 @@
 #include "linux/autoconf.h"
 #include "asm/coldfire.h"
 #include "asm/mcfsim.h"
+#include "asm/elia.h"
 
 /*****************************************************************************/
 
 /*
- *	Lineo eLIA board, chip select and memory setup.
+ *	Moreton Bay eLIA board memory setup.
  */
-
 #define	MEM_BASE	0x00000000	/* Memory base at address 0 */
-#define	MEM_SIZE	0x01000000	/* Memory size 16Mb */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
+#define	MEM_SIZE	0x01000000	/* Memory size 16Mb */
 
 /*****************************************************************************/
 
@@ -65,7 +62,7 @@ _ramend:
  */
 .global ppdata
 ppdata:
-.short	0x7000
+.short	0x0000
 
 /*****************************************************************************/
 
@@ -80,14 +77,6 @@ _start:
 	nop					/* Filler */
 	move.w	#0x2700, %sr			/* No interrupts */
 
-
-#if 0
-	/*
-	 *	Set LEDs to known startup state.
-	 */
-	/* FIXME: reset LED values... */
-
-
 	/*
 	 *	Disable watchdog timer.
 	 */
@@ -100,8 +89,6 @@ _start:
 	move.b	%d0, MCFSIM_SWSR(%a0)
 	move.l	#0xffffffff, %d0		/* Mask out all interrupts */
 	move.l	%d0, MCFSIM_IMR(%a0)
-#endif
-
 
 	/*
 	 * Setup VBR here, otherwise buserror remap will not work.
@@ -131,12 +118,12 @@ _start:
 	 *	Enable CPU internal cache.
 	 */
 	move.l	#0x01000000, %d0		/* invalidate whole cache */
-	movec	%d0, %CACR
+	movec	%d0,%CACR
 	nop
 #ifdef DEBUGGER_COMPATIBLE_CACHE
 	move.l	#0x0000c000, %d0		/* Set SDRAM cached only */
 #else
-	move.l	#0x0000c020, %d0		/* Set SDRAM cached only (copyback)*/
+	move.l	#0x0000c020, %d0		/* Set SDRAM cached only (copyback) */
 #endif
 	movec	%d0, %ACR0
 	move.l	#0x00000000, %d0		/* No other regions cached */
@@ -144,10 +131,11 @@ _start:
 
 	/* Enable cache */
 	move.l	#0xa0000200, %d0
-	movec	%d0, %CACR
+	movec	%d0,%CACR
 	nop
 
 
+#ifdef CONFIG_ROMFS_FS
 	/*
 	 *	Move ROM filesystem above bss :-)
 	 */
@@ -176,6 +164,13 @@ _copy_romfs:
 	cmp.l	%a0, %a2			/* Check if at end */
 	bne	_copy_romfs
 
+#else /* !CONFIG_ROMFS_FS */
+
+	lea.l	_ebss, %a1			/* Get end of bss segment */
+	move.l	%a1, _ramstart			/* Set start of ram */
+
+#endif /* !CONFIG_ROMFS_FS */
+
 	/*
 	 *	Zero out the bss region.
 	 */
@@ -188,6 +183,7 @@ _clear_bss:
 	bne	_clear_bss
 
 #if CONFIG_BLK_DEV_INITRD
+# if CONFIG_ROMFS_FS
 	/*
 	 *	Setup up RAMdisk info if using it.
 	 *	(Must do this after clearing the bss :-)
@@ -195,7 +191,27 @@ _clear_bss:
 	move.l	%d2, initrd_start		/* Set up start of initrd */
 	add.l	%d1, %d2			/* Calculate end of initrd */
 	move.l	%d2, initrd_end
-#endif
+
+# else /* !CONFIG_ROMFS_FS */
+
+	/*
+	 * initrd support for Coldfire currently requires romfs.
+	 * Generic initrd support requires a bootloader protocol to 
+	 * tell the kernel where the image is located.
+	 */
+	moveq.l	#0, %d2
+	move.l	%d2, initrd_start
+	move.l	%d2, initrd_end
+
+# endif /* !CONFIG_ROMFS_FS */
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 *	Load the current task pointer and stack.
+	 */
+	lea	init_task_union, %a0
+	movel	%a0, _current_task
+	lea	0x2000(%a0), %sp
 
 	/*
 	 *	Assember start up done, start code proper.

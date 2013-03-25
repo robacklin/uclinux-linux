@@ -1,12 +1,13 @@
 /*
  * linux/arch/h8300/boot/traps.c -- general exception handling code
- *
+ * H8/300 support Yoshinori Sato <ysato@users.sourceforge.jp>
+ * 
  * Cloned from Linux/m68k.
  *
  * No original Copyright holder listed,
  * Probabily original (C) Roman Zippel (assigned DJD, 1999)
  *
- * Copyright 1999-2000 D. Jeff Dionne, <jeff@rt-control.com>
+ * Copyright 1999-2000 D. Jeff Dionne, <jeff@uClinux.org>
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
@@ -17,149 +18,36 @@
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
-#include <asm/traps.h>
 #include <asm/page.h>
-
-/* table for system interrupt handlers */
-static irq_handler_t irq_list[SYS_IRQS];
-
-/* The number of spurious interrupts */
-volatile unsigned int num_spurious;
-
-#define NUM_IRQ_NODES 64
-static irq_node_t nodes[NUM_IRQ_NODES];
-
-extern int ptrace_cancel_bpt(struct task_struct *child);
-
-void trap_init (void)
-{
-}
-
-static inline void console_verbose(void)
-{
-	extern int console_loglevel;
-	console_loglevel = 15;
-}
+#include <asm/gpio.h>
 
 /*
- * void init_IRQ(void)
- *
- * Parameters:	None
- *
- * Returns:	Nothing
- *
- * This function should be called during kernel startup to initialize
- * the IRQ handling routines.
+ * this must be called very early as the kernel might
+ * use some instruction that are emulated on the 060
  */
 
-void init_IRQ(void)
-{
-	int i;
-
-	for (i = 0; i < SYS_IRQS; i++) {
-		irq_list[i].handler = NULL;
-		irq_list[i].flags   = IRQ_FLG_STD;
-		irq_list[i].devname = NULL;
-		irq_list[i].dev_id  = NULL;
-	}
-
-	for (i = 0; i < NUM_IRQ_NODES; i++)
-		nodes[i].handler = NULL;
-        
-}
-
-irq_node_t *new_irq_node(void)
-{
-	irq_node_t *node;
-	short i;
-
-	for (node = nodes, i = NUM_IRQ_NODES-1; i >= 0; node++, i--)
-		if (!node->handler)
-			return node;
-
-	printk ("new_irq_node: out of nodes\n");
-	return NULL;
-}
-
-int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
-                unsigned long flags, const char *devname, void *dev_id)
-{
-	irq_list[irq].handler = handler;
-	irq_list[irq].flags   = flags;
-	irq_list[irq].devname = devname;
-	irq_list[irq].dev_id  = dev_id;
-	return 0;
-}
-
-void free_irq(unsigned int irq, void *dev_id)
-{
-	if (irq_list[irq].dev_id != dev_id)
-		printk("%s: Removing probably wrong IRQ %d from %s\n",
-		       __FUNCTION__, irq, irq_list[irq].devname);
-
-	irq_list[irq].handler = NULL;
-	irq_list[irq].flags   = IRQ_FLG_STD;
-	irq_list[irq].dev_id  = NULL;
-	irq_list[irq].devname = NULL;
-}
-
-/*
- * Do we need these probe functions on the m68k?
- */
-unsigned long probe_irq_on (void)
-{
-	return 0;
-}
-
-int probe_irq_off (unsigned long irqs)
-{
-	return 0;
-}
-
-void enable_irq(unsigned int irq)
+void __init base_trap_init(void)
 {
 }
 
-void disable_irq(unsigned int irq)
+void __init trap_init (void)
 {
 }
 
-asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
+asmlinkage void set_esp0 (unsigned long ssp)
 {
-	kstat.interrupts[vec]++;
-	if (irq_list[vec].handler)
-		irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
-	else
-		panic("No interrupt handler for %ld\n", vec);
-}
-
-int get_irq_list(char *buf)
-{
-	int i, len = 0;
-
-	/* autovector interrupts */
-	for (i = 0; i < SYS_IRQS; i++) {
-		if (irq_list[i].handler) {
-			len += sprintf(buf+len, "auto %2d: %10u ", i,
-			               i ? kstat.interrupts[i] : num_spurious);
-			if (irq_list[i].flags & IRQ_FLG_LOCK)
-				len += sprintf(buf+len, "L ");
-			else
-				len += sprintf(buf+len, "  ");
-			len += sprintf(buf+len, "%s\n", irq_list[i].devname);
-		}
-	}
-	return 0;
+  current->thread.esp0 = ssp;
 }
 
 /*
  *	Generic dumping code. Used for panic and debug.
  */
 
-void dump(struct pt_regs *fp)
+static void dump(struct pt_regs *fp)
 {
 	unsigned long	*sp;
 	unsigned char	*tp;
@@ -185,15 +73,13 @@ void dump(struct pt_regs *fp)
 			(int) current->mm->brk);
 		printk("USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
 			(int) current->mm->start_stack,
-			(int) current->kernel_stack_page);
+			(int) (PAGE_SIZE+current));
 	}
 
 	printk("PC: %08lx\n", (long)fp->pc);
-	printk("CCR: %08lx   SP: %08lx\n", fp->ccr, (long) fp);
+	printk("CCR: %02x   SP: %08lx\n", fp->ccr, (unsigned long) fp);
 	printk("ER0: %08lx  ER1: %08lx   ER2: %08lx   ER3: %08lx\n",
 		fp->er0, fp->er1, fp->er2, fp->er3);
-	printk("ER4: %08lx  ER5: %08lx",
-		fp->er4, fp->er5);
 	printk("\nCODE:");
 	tp = ((unsigned char *) fp->pc) - 0x20;
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x40);  i += 4) {
@@ -211,34 +97,27 @@ void dump(struct pt_regs *fp)
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n");
-	if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
-                printk("(Possibly corrupted stack page??)\n");
+	if (STACK_MAGIC != *(unsigned long *)((unsigned long)current+PAGE_SIZE))
+                printk("(Possibly corrupted stack page\?\?)\n");
 
 	printk("\n\n");
 }
 
-asmlinkage void set_esp0 (unsigned long ssp)
+void show_trace_task(struct task_struct *tsk)
 {
-  current->tss.esp0 = ssp;
+	/* DAVIDM: we can do better, need a proper stack dump */
+	printk("STACK ksp=0x%lx, usp=0x%lx\n", tsk->thread.ksp, tsk->thread.usp);
 }
 
 void die_if_kernel (char *str, struct pt_regs *fp, int nr)
 {
+	extern int console_loglevel;
+
 	if (!(fp->ccr & PS_S))
 		return;
 
-	console_verbose();
+	console_loglevel = 15;
 	dump(fp);
 
 	do_exit(SIGSEGV);
-}
-
-asmlinkage void trace_trap(unsigned long bp)
-{
-	if (current->debugreg[0] == bp ||
-            current->debugreg[1] == bp) {
-	        ptrace_cancel_bpt(current);
-		force_sig(SIGTRAP,current);
-	} else
-	        force_sig(SIGILL,current);
 }

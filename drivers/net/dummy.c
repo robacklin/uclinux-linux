@@ -28,146 +28,96 @@
 			Alan Cox, 30th May 1994
 */
 
-/* To have statistics (just packets sent) define this */
-#undef DUMMY_STATS
-
+#include <linux/config.h>
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/ioport.h>
-#include <linux/in.h>
-#include <linux/malloc.h>
-#include <linux/string.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <linux/errno.h>
-
 #include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
+#include <linux/init.h>
 
-static int dummy_xmit(struct sk_buff *skb, struct device *dev);
-#ifdef DUMMY_STATS
-static struct enet_statistics *dummy_get_stats(struct device *dev);
+static int dummy_xmit(struct sk_buff *skb, struct net_device *dev);
+static struct net_device_stats *dummy_get_stats(struct net_device *dev);
+
+/* fake multicast ability */
+static void set_multicast_list(struct net_device *dev)
+{
+}
+
+#ifdef CONFIG_NET_FASTROUTE
+static int dummy_accept_fastpath(struct net_device *dev, struct dst_entry *dst)
+{
+	return -1;
+}
 #endif
 
-static int dummy_open(struct device *dev)
+static int __init dummy_init(struct net_device *dev)
 {
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int dummy_close(struct device *dev)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
-
-static int dummy_rebuild(void *eth, struct device *dev, unsigned long raddr, struct sk_buff *skb)
-{
-	return 0;
-}
-
-int dummy_init(struct device *dev)
-{
-/* I commented this out as bootup is noisy enough anyway and this driver
-   seems pretty reliable 8) 8) 8) */
-/*	printk ( KERN_INFO "Dummy net driver (94/05/27 v1.0)\n" ); */
-
 	/* Initialize the device structure. */
-	dev->hard_start_xmit	= dummy_xmit;
 
-#if DUMMY_STATS
-	dev->priv = kmalloc(sizeof(struct enet_statistics), GFP_KERNEL);
+	dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL);
 	if (dev->priv == NULL)
 		return -ENOMEM;
-	memset(dev->priv, 0, sizeof(struct enet_statistics));
-	dev->get_stats		= dummy_get_stats;
+	memset(dev->priv, 0, sizeof(struct net_device_stats));
+
+	dev->get_stats = dummy_get_stats;
+	dev->hard_start_xmit = dummy_xmit;
+	dev->set_multicast_list = set_multicast_list;
+#ifdef CONFIG_NET_FASTROUTE
+	dev->accept_fastpath = dummy_accept_fastpath;
 #endif
 
-	dev->open = dummy_open;
-	dev->stop = dummy_close;
-
-	/* Fill in the fields of the device structure with ethernet-generic values. */
+	/* Fill in device structure with ethernet-generic values. */
 	ether_setup(dev);
+	dev->tx_queue_len = 0;
 	dev->flags |= IFF_NOARP;
-	dev->rebuild_header = dummy_rebuild;
+	dev->flags &= ~IFF_MULTICAST;
 
 	return 0;
 }
 
-static int
-dummy_xmit(struct sk_buff *skb, struct device *dev)
+static int dummy_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-#if DUMMY_STATS
-	struct enet_statistics *stats;
-#endif
+	struct net_device_stats *stats = dev->priv;
 
-	if (skb == NULL || dev == NULL)
-		return 0;
-
-	dev_kfree_skb(skb, FREE_WRITE);
-
-#if DUMMY_STATS
-	stats = (struct enet_statistics *)dev->priv;
 	stats->tx_packets++;
-#endif
+	stats->tx_bytes+=skb->len;
 
+	dev_kfree_skb(skb);
 	return 0;
 }
 
-#if DUMMY_STATS
-static struct enet_statistics *
-dummy_get_stats(struct device *dev)
+static struct net_device_stats *dummy_get_stats(struct net_device *dev)
 {
-	struct enet_statistics *stats = (struct enet_statistics*) dev->priv;
-	return stats;
-}
-#endif
-
-#ifdef MODULE
-
-static int dummy_probe(struct device *dev)
-{
-	dummy_init(dev);
-	return 0;
+	return dev->priv;
 }
 
-static struct device dev_dummy = {
-	"dummy0\0   ", 
-		0, 0, 0, 0,
-	 	0x0, 0,
-	 	0, 0, 0, NULL, dummy_probe };
+static struct net_device dev_dummy;
 
-int init_module(void)
+static int __init dummy_init_module(void)
 {
+	int err;
+
+	dev_dummy.init = dummy_init;
+	SET_MODULE_OWNER(&dev_dummy);
+
 	/* Find a name for this unit */
-	int ct= 1;
-	
-	while(dev_get(dev_dummy.name)!=NULL && ct<100)
-	{
-		sprintf(dev_dummy.name,"dummy%d",ct);
-		ct++;
-	}
-	if(ct==100)
-		return -ENFILE;
-	
-	if (register_netdev(&dev_dummy) != 0)
-		return -EIO;
+	err=dev_alloc_name(&dev_dummy,"dummy%d");
+	if(err<0)
+		return err;
+	err = register_netdev(&dev_dummy);
+	if (err<0)
+		return err;
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit dummy_cleanup_module(void)
 {
 	unregister_netdev(&dev_dummy);
 	kfree(dev_dummy.priv);
-	dev_dummy.priv = NULL;
+
+	memset(&dev_dummy, 0, sizeof(dev_dummy));
+	dev_dummy.init = dummy_init;
 }
-#endif /* MODULE */
+
+module_init(dummy_init_module);
+module_exit(dummy_cleanup_module);
+MODULE_LICENSE("GPL");

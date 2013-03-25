@@ -1,21 +1,17 @@
-/* $Id: sigcontext.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $ */
-#ifndef _ASMsparc_SIGCONTEXT_H
-#define _ASMsparc_SIGCONTEXT_H
+/* $Id: sigcontext.h,v 1.14 1999/09/06 08:22:05 jj Exp $ */
+#ifndef __SPARC_SIGCONTEXT_H
+#define __SPARC_SIGCONTEXT_H
 
+#ifdef __KERNEL__
 #include <asm/ptrace.h>
-
-#define SUNOS_MAXWIN   31
+#endif
 
 #ifndef __ASSEMBLY__
 
-/* SunOS system call sigstack() uses this arg. */
-struct sunos_sigstack {
-	unsigned long sig_sp;
-	int onstack_flag;
-};
+#define __SUNOS_MAXWIN   31
 
 /* This is what SunOS does, so shall I. */
-struct sigcontext_struct {
+struct sigcontext {
 	int sigc_onstack;      /* state to restore */
 	int sigc_mask;         /* sigmask to restore */
 	int sigc_sp;           /* stack pointer */
@@ -31,12 +27,36 @@ struct sigcontext_struct {
 	int sigc_oswins;       /* outstanding windows */
 
 	/* stack ptrs for each regwin buf */
-	char *sigc_spbuf[SUNOS_MAXWIN];
+	char *sigc_spbuf[__SUNOS_MAXWIN];
 
 	/* Windows to restore after signal */
-	struct reg_window sigc_wbuf[SUNOS_MAXWIN];
+	struct {
+		unsigned long	locals[8];
+		unsigned long	ins[8];
+	} sigc_wbuf[__SUNOS_MAXWIN];
 };
+
+typedef struct {
+	struct {
+		unsigned long psr;
+		unsigned long pc;
+		unsigned long npc;
+		unsigned long y;
+		unsigned long u_regs[16]; /* globals and ins */
+	}		si_regs;
+	int		si_mask;
+} __siginfo_t;
+
+typedef struct {
+	unsigned   long si_float_regs [32];
+	unsigned   long si_fsr;
+	unsigned   long si_fpqdepth;
+	struct {
+		unsigned long *insn_addr;
+		unsigned long insn;
+	} si_fpqueue [16];
+} __siginfo_fpu_t;
+
 #endif /* !(__ASSEMBLY__) */
 
-#endif /* !(_ASMsparc_SIGCONTEXT_H) */
-
+#endif /* !(__SPARC_SIGCONTEXT_H) */

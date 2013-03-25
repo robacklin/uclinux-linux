@@ -11,7 +11,7 @@ README for the ISDN-subsystem
   necessary. Those programs and some contributed utilities are available
   at
 
-   ftp.franken.de
+   ftp.isdn4linux.de
 
    /pub/isdn4linux/isdn4k-utils-<VersionNumber>.tar.gz
 
@@ -22,19 +22,23 @@ README for the ISDN-subsystem
    reasons, the mailing-list's primary language is german. However mails
    written in english have been welcome all the time.
 
-   to subscribe: write a email to majordomo@hub-wue.franken.de,
+   to subscribe: write a email to majordomo@listserv.isdn4linux.de,
    Subject irrelevant, in the message body:
    subscribe isdn4linux <your_email_address>
 
-   To write to the mailing-list, write to isdn4linux@hub-wue.franken.de
+   To write to the mailing-list, write to isdn4linux@listserv.isdn4linux.de
 
    This mailinglist is bidirectionally gated to the newsgroup
 
      de.alt.comm.isdn4linux
-   
-  There is also a well maintained FAQ (both english and german) available
-  at ftp.franken.de in /pub/isdn4linux/FAQ/
-  This FAQ is also available at http://www.lrz-muenchen.de/~ui161ab/www/isdn/
+
+  There is also a well maintained FAQ in English available at
+     http://www.mhessler.de/i4lfaq/
+  It can be viewed online, or downloaded in sgml/text/html format.
+  The FAQ can also be viewed online at
+     http://www.isdn4inux.de/faq/
+  or downloaded from
+     ftp://ftp.isdn4linux.de/pub/isdn4linux/FAQ/
 
   1.1 Technical details
 
@@ -56,13 +60,13 @@ README for the ISDN-subsystem
   A low-level-driver can register itself through an interface (which is
   defined in isdnif.h) and gets assigned a slot.
   The following char-devices are made available for each channel:
-  
+
   A raw-control-device with the following functions:
      write: raw D-channel-messages (format: depends on driver).
      read:  raw D-channel-messages (format: depends on driver).
      ioctl: depends on driver, i.e. for the ICN-driver, the base-address of
             the ports and the shared memory on the card can be set and read
-            also the boot-code and the protocol software can be loaded into 
+            also the boot-code and the protocol software can be loaded into
             the card.
 
    O N L Y !!!  for debugging (no locking against other devices):
@@ -74,10 +78,9 @@ README for the ISDN-subsystem
 
    128 tty-devices (64 cuix and 64 ttyIx) with integrated modem-emulator:
    The functionality is almost the same as that of a serial device
-   (the line-discs are handled by the kernel), which lets you run 
-   SLIP, CSLIP and asynchronous PPP through the devices. We have tested 
-   Seyon, minicom, CSLIP (uri-dip) PPP and mgetty (compiled with NO_FAX),
-   XCept.
+   (the line-discs are handled by the kernel), which lets you run
+   SLIP, CSLIP and asynchronous PPP through the devices. We have tested
+   Seyon, minicom, CSLIP (uri-dip) PPP, mgetty, XCept and Hylafax. 
 
    The modem-emulation supports the following:
            1.3.1 Commands:
@@ -86,7 +89,7 @@ README for the ISDN-subsystem
                ATD<No.> Dial, the number may contain:
                         [0-9] and [,#.*WPT-S]
                         the latter are ignored until 'S'.
-                        The 'S' must precede the number, if 
+                        The 'S' must precede the number, if
                         the line is a SPV (German 1TR6).
                ATE0     Echo off.
                ATE1     Echo on (default).
@@ -115,17 +118,46 @@ README for the ISDN-subsystem
                         Assignment") however the size of outgoing packets
                         will be limited correctly.
                AT&D0    Ignore DTR
-               AT&D2    DTR-low-edge: Hang up and return to 
+               AT&D2    DTR-low-edge: Hang up and return to
                         command mode (default).
                AT&D3    Same as AT&D2 but also resets all registers.
                AT&Ex    Set the EAZ/MSN for this channel to x.
                AT&F     Reset all registers and profile to "factory-defaults"
+               AT&Lx    Set list of phone numbers to listen on.  x is a
+                        list of wildcard patterns separated by semicolon.
+                        If this is set, it has precedence over the MSN set
+                        by AT&E.
+               AT&Rx    Select V.110 bitrate adaption.
+                        This command enables V.110 protocol with 9600 baud
+                        (x=9600), 19200 baud (x=19200) or 38400 baud
+                        (x=38400). A value of x=0 disables V.110 switching
+                        back to default X.75. This command sets the following
+                        Registers:
+                          Reg 14 (Layer-2 protocol):
+                            x = 0:     0
+                            x = 9600:  7
+                            x = 19200: 8
+                            x = 38400: 9
+                          Reg 18.2 = 1
+                          Reg 19 (Additional Service Indicator):
+                            x = 0:       0
+                            x = 9600:  197
+                            x = 19200: 199
+                            x = 38400: 198
+                          Note on value in Reg 19:
+                            There is _NO_ common convention for 38400 baud.
+                            The value 198 is chosen arbitrarily. Users
+                            _MUST_ negotiate this value before establishing
+                            a connection.
                AT&Sx    Set window-size (x = 1..8) (not yet implemented)
                AT&V     Show all settings.
                AT&W0    Write registers and EAZ/MSN to profile. See also
                         iprofd (5.c in this README).
-               AT&X0    BTX-mode off (default)
-               AT&X1    BTX-mode on. (S13.1=1, S14=0, S16=7, S18=7, S19=0)
+               AT&X0    BTX-mode and T.70-mode off (default)
+               AT&X1    BTX-mode on. (S13.1=1, S13.5=0 S14=0, S16=7, S18=7, S19=0)
+               AT&X2    T.70-mode on. (S13.1=1, S13.5=1, S14=0, S16=7, S18=7, S19=0)
+               AT+Rx    Resume a suspended call with CallID x (x = 1,2,3...)
+               AT+Sx    Suspend a call with CallID x (x = 1,2,3...)
 
            For voice-mode commands refer to README.audio
 
@@ -134,9 +166,9 @@ README for the ISDN-subsystem
                a normal modem to the escape sequence <DELAY>+++<DELAY>.
                (The escape character - default '+' - can be set in the
                register 2).
-               The DELAY must at least be 1.5 seconds long and delay 
+               The DELAY must at least be 1.5 seconds long and delay
                between the escape characters must not exceed 0.5 seconds.
-     
+
            1.3.3 Registers:
 
               Nr.  Default  Description
@@ -149,7 +181,7 @@ README for the ISDN-subsystem
               4    10       Line feed character (ASCII).
               5    8        Backspace character (ASCII).
               6    3        Delay in seconds before dialing.
-              7    60       Wait for carrier (ignored).
+              7    60       Wait for carrier.
               8    2        Pause time for comma (ignored)
               9    6        Carrier detect time (ignored)
              10    7        Carrier loss to disconnect time (ignored).
@@ -184,14 +216,33 @@ README for the ISDN-subsystem
                                       1 = Extended response messages
                             Bit 4:    0 = CALLER NUMBER before every RING.
                                       1 = CALLER NUMBER after first RING.
+                            Bit 5:    0 = T.70 extended protocol off
+                                      1 = T.70 extended protocol on
+                            Bit 6:    0 = Special RUNG Message off
+                                      1 = Special RUNG Message on
+                                          "RUNG" is delivered on a ttyI, if
+                                          an incoming call happened (RING) and
+                                          the remote party hung up before any
+                                          local ATA was given.
+			    Bit 7:    0 = Don't show display messages from net
+                                      1 = Show display messages from net
+				          (S12 Bit 1 must be 0 too)      
              14   0         Layer-2 protocol:
                                       0 = X75/LAPB with I-frames
                                       1 = X75/LAPB with UI-frames
                                       2 = X75/LAPB with BUI-frames
                                       3 = HDLC
                                       4 = Transparent (audio)
-             15   0         Layer-3 protocol: (at the moment always 0)
+                                      7 = V.110, 9600 baud
+                                      8 = V.110, 19200 baud
+                                      9 = V.110, 38400 baud
+                                     10 = Analog Modem (only if hardware supports this)
+                                     11 = Fax G3 (only if hardware supports this)
+             15   0         Layer-3 protocol:
                                       0 = transparent
+                                      1 = transparent with audio features (e.g. DSP)
+                                      2 = Fax G3 Class 2 commands (S14 has to be set to 11)
+                                      3 = Fax G3 Class 1 commands (S14 has to be set to 11)
              16   250       Send-Packet-size/16
              17   8         Window-size (not yet implemented)
              18   4         Bit coded register, Service-Octet-1 to accept,
@@ -220,6 +271,13 @@ README for the ISDN-subsystem
                             Set on incoming call (during RING) to
                             octet 3a of calling party number IE (Screening info)
                             See section 4.5.10 of ITU Q.931
+             23   0         Bit coded register:
+                            Bit 0:    0 = Add CPN to RING message off
+                                      1 = Add CPN to RING message on
+                            Bit 1:    0 = Add CPN to FCON message off
+                                      1 = Add CPN to FCON message on
+                            Bit 2:    0 = Add CDN to RING/FCON message off
+                                      1 = Add CDN to RING/FCON message on
 
   Last but not least a (at the moment fairly primitive) device to request
   the line-status (/dev/isdninfo) is made available.
@@ -228,7 +286,7 @@ README for the ISDN-subsystem
 
   All inactive physical lines are listening to all EAZs for incoming
   calls and are NOT assigned to a specific tty or network interface.
-  When an incoming call is detected, the driver looks first for a network 
+  When an incoming call is detected, the driver looks first for a network
   interface and then for an opened tty which:
 
   1. is configured for the same EAZ.
@@ -257,8 +315,6 @@ README for the ISDN-subsystem
   If an incoming call matches one network interface, it gets connected to it.
   If another incoming call for the same EAZ arrives, which does not match
   a network interface, the first tty gets a "RING" and so on.
-  As soon as voice gets supported (with the availability of the Diehl-driver),
-  the service-identifier will be evaluated in addition.
 
 2 System prerequisites:
 
@@ -267,7 +323,7 @@ README for the ISDN-subsystem
   Always use the latest module utilities. The current version is
   named in Documentation/Changes. Some old versions of insmod
   are not capable of setting the driver-Ids correctly.
- 
+
 3. Lowlevel-driver configuration.
 
    Configuration depends on how the drivers are built. See the
@@ -316,7 +372,7 @@ README for the ISDN-subsystem
    g) Set the timeout for hang-up:
        isdnctrl huptimeout isdn0 <timeout_in_seconds>
 
-   h) additionally you may activate charge-hang-up (= Hang up before 
+   h) additionally you may activate charge-hang-up (= Hang up before
       next charge-info, this only works, if your isdn-provider transmits
       the charge-info during and after the connection):
        isdnctrl chargehup isdn0 on
@@ -335,9 +391,9 @@ README for the ISDN-subsystem
       "manual" is a dial mode created to prevent the unexpected dialouts.
         In this mode, the interface will never make any connections on its
         own. You must explicitly initiate a connection with "isdnctrl dial
-        isdn0". However, after an idle time of no traffic as configured for 
-        the huptimeout value with isdnctrl, the connection _will_ be ended.
-        If you don't want any automatic hangup, set the huptimeout value to 0.
+        isdn0". However, after an idle time of no traffic as configured for
+	the huptimeout value with isdnctrl, the connection _will_ be ended.
+	If you don't want any automatic hangup, set the huptimeout value to 0.
         "manual" is the default.
 
    j) Setup the interface with ifconfig as usual, and set a route to it.
@@ -358,22 +414,22 @@ README for the ISDN-subsystem
   automatic dial-out (look at syslog kernel-messages).
   The phone numbers and EAZs can be assigned at any time with isdnctrl.
   You can add as many interfaces as you like with addif following the
-  directions above. Of course, there may be some limitations. But we have 
-  tested as many as 20 interfaces without any problem. However, if you 
-  don't give an interface name to addif, the  kernel will assign a name 
+  directions above. Of course, there may be some limitations. But we have
+  tested as many as 20 interfaces without any problem. However, if you
+  don't give an interface name to addif, the  kernel will assign a name
   which starts with "eth". The number of "eth"-interfaces is limited by
   the kernel.
 
 5. Additional options for isdnctrl:
 
-   "isdnctrl secure <InterfaceName> on" 
+   "isdnctrl secure <InterfaceName> on"
    Only incoming calls, for which the caller-id is listed in the access
    list of the interface are accepted. You can add caller-id's With the
    command "isdnctrl addphone <InterfaceName> in <caller-id>"
    Euro-ISDN does not transmit the leading '0' of the caller-id for an
    incoming call, therefore you should configure it accordingly.
    If the real number for the dialout e.g. is "09311234567" the number
-   to configure here is "9311234567". The pattern-match function 
+   to configure here is "9311234567". The pattern-match function
    works similar to the shell mechanism.
 
      ?     one arbitrary digit
@@ -383,23 +439,23 @@ README for the ISDN-subsystem
            a '^' as the first character in a list inverts the list
 
 
-   "isdnctrl secure <InterfaceName> off" 
+   "isdnctrl secure <InterfaceName> off"
    Switch off secure operation (default).
 
-   "isdnctrl ihup <InterfaceName> [on|off]" 
+   "isdnctrl ihup <InterfaceName> [on|off]"
    Switch the hang-up-timer for incoming calls on or off.
 
-   "isdnctrl eaz <InterfaceName>" 
+   "isdnctrl eaz <InterfaceName>"
    Returns the EAZ of an interface.
 
-   "isdnctrl delphone <InterfaceName> in|out <number>" 
+   "isdnctrl delphone <InterfaceName> in|out <number>"
    Deletes a number from one of the access-lists of the interface.
 
-   "isdnctrl delif <InterfaceName>" 
+   "isdnctrl delif <InterfaceName>"
    Removes the interface (and possible slaves) from the kernel.
    (You have to unregister it with "ifconfig <InterfaceName> down" before).
 
-   "isdnctrl callback <InterfaceName> [on|off]" 
+   "isdnctrl callback <InterfaceName> [on|off]"
    Switches an interface to callback-mode. In this mode, an incoming call
    will be rejected and after this the remote-station will be called. If
    you test this feature by using ping, some routers will re-dial very
@@ -420,11 +476,14 @@ README for the ISDN-subsystem
    only while an interface is down.
 
    At the moment the following values are supported:
- 
+
    rawip    (Default) Selects raw-IP-encapsulation. This means, MAC-headers
-            are stripped off.  
+            are stripped off.
    ip       IP with type-field. Same as IP but the type-field of the MAC-header
             is preserved.
+   x25iface X.25 interface encapsulation (first byte semantics as defined in
+            ../networking/x25-iface.txt). Use this for running the linux
+            X.25 network protocol stack (AF_X25 sockets) on top of isdn.
    cisco-h  A special-mode for communicating with a Cisco, which is configured
             to do "hdlc"
    ethernet No stripping. Packets are sent with full MAC-header.
@@ -434,20 +493,26 @@ README for the ISDN-subsystem
 
    uihdlc   HDLC with UI-frame-header (for use with DOS ISPA, option -h1)
 
+
+   NOTE:    x25iface encapsulation is currently experimental. Please
+            read README.x25 for further details
+
+
    Watching packets, using standard-tcpdump will fail for all encapsulations
    except ethernet because tcpdump does not know how to handle packets
    without MAC-header. A patch for tcpdump is included in the utility-package
    mentioned above.
 
-   "isdnctrl l2_prot <InterfaceName> <L2-ProtocolName>" 
-   Selects a layer-2-protocol. 
+   "isdnctrl l2_prot <InterfaceName> <L2-ProtocolName>"
+   Selects a layer-2-protocol.
    (With the ICN-driver and the HiSax-driver, "x75i" and "hdlc" is available.
-   With other drivers, "x75ui", "x75bui" may be possible too.)
+   With other drivers, "x75ui", "x75bui", "x25dte", "x25dce" may be
+   possible too. See README.x25 for x25 related l2 protocols.)
 
-   isdnctrl l3_prot <InterfaceName> <L3-ProtocolName> 
+   isdnctrl l3_prot <InterfaceName> <L3-ProtocolName>
    The same for layer-3. (At the moment only "trans" is allowed)
 
-   "isdnctrl list <InterfaceName>" 
+   "isdnctrl list <InterfaceName>"
    Shows all parameters of an interface and the charge-info.
    Try "all" as the interface name.
 
@@ -473,7 +538,7 @@ README for the ISDN-subsystem
    You normally should NOT enable this feature, if the ISDN adapter is not
    the only device connected to the S0-bus. Otherwise it could happen that
    isdn4linux rejects an incoming call, which belongs to another device on
-   the bus. 
+   the bus.
 
    "isdnctrl addslave <InterfaceName> <SlaveName>
    Creates a slave interface for channel-bundling. Slave interfaces are
@@ -515,9 +580,9 @@ README for the ISDN-subsystem
    isdnctrl eaz isdn1 4      # listen on 12345674(1tr6) only.
    ...
    isdnctrl eaz isdn2 987654 # listen on 987654(euro) only.
-   
+
    Same scheme is used with AT&E...  at the tty's.
-  
+
 6. If you want to write a new low-level-driver, you are welcome.
    The interface to the link-level-module is described in the file INTERFACE.
    If the interface should be expanded for any reason, don't do it

@@ -37,11 +37,9 @@ struct	rusage {
 	long	ru_nivcsw;		/* involuntary " */
 };
 
-#define RLIM_INFINITY	((long)(~0UL>>1))
-
 struct rlimit {
-	long	rlim_cur;
-	long	rlim_max;
+	unsigned long	rlim_cur;
+	unsigned long	rlim_max;
 };
 
 #define	PRIO_MIN	(-20)

@@ -1,7 +1,7 @@
 #ifndef _H8300_PTRACE_H
 #define _H8300_PTRACE_H
 
-#include <linux/config.h> /* get configuration macros */
+#ifndef __ASSEMBLY__
 
 #define PT_ER1	   0
 #define PT_ER2	   1
@@ -14,26 +14,26 @@
 #define PT_CCR	   8
 #define PT_PC	   9
 #define PT_USP	   10
-
-#ifndef __ASSEMBLY__
+#define PT_EXR     11
 
 /* this struct defines the way the registers are stored on the
    stack during a system call. */
 
 struct pt_regs {
-  long     er1;
-  long     er2;
-  long     er3;
-  long     er4;
-  long     er5;
-  long     er0;
-  long     orig_er0;
-  long     pc;
-  short    ccr;
-  unsigned long kmod_pc;
-};
-/* 2.95.3でオフセットの計算を間違えることがある。
-   ここは触らないほうがいいかも。 */
+	long     er4;
+	long     er5;
+	long     er3;
+	long     er2;
+	long     er1;
+	long     orig_er0;
+	unsigned short ccr;
+	long     er0;
+	long     vector;
+#if defined(__H8300S__)
+	unsigned short exr;
+#endif
+	unsigned long  pc;
+} __attribute__((aligned(2),packed));
 
 /*
  * This is the extended stack used by signal handlers and the context
@@ -44,16 +44,31 @@ struct switch_stack {
 	unsigned long  retpc;
 };
 
-#ifdef __KERNEL__
+#define PTRACE_GETREGS            12
+#define PTRACE_SETREGS            13
 
+#ifdef __KERNEL__
 #ifndef PS_S
-#define PS_S  (0x2000)
-#define PS_M  (0x1000)
+#define PS_S  (0x10)
 #endif
 
-#define user_mode(regs) (!((regs)->ccr & 0x10))
-#define instruction_pointer(regs) (*((unsigned long *)(regs)+7))
+#if defined(__H8300H__)
+#define H8300_REGS_NO 11
+#endif
+#if defined(__H8300S__)
+#define H8300_REGS_NO 12
+#endif
+
+/* Find the stack offset for a register, relative to thread.esp0. */
+#define PT_REG(reg)	((long)&((struct pt_regs *)0)->reg)
+#define SW_REG(reg)	((long)&((struct switch_stack *)0)->reg \
+			 - sizeof(struct switch_stack))
+
+#define user_mode(regs) (!((regs)->ccr & PS_S))
+#define instruction_pointer(regs) ((regs)->pc)
+
 extern void show_regs(struct pt_regs *);
+
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */
-#endif /* _H8300H_PTRACE_H */
+#endif /* _H8300_PTRACE_H */

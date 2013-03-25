@@ -41,7 +41,13 @@
 #define LEDMAN_VPN_TX		26
 #define LEDMAN_RESET		27
 #define LEDMAN_STATIC		28
-#define	LEDMAN_MAX			29	/* one more than the highest LED above */
+#define LEDMAN_LAN3_RX		29
+#define LEDMAN_LAN3_TX		30
+#define LEDMAN_LAN3_LINK	31
+#define LEDMAN_LAN3_DHCP	32
+#define LEDMAN_FAILOVER		33
+#define LEDMAN_HIGHAVAIL	34
+#define	LEDMAN_MAX			35	/* one more than the highest LED above */
 
 #define LEDMAN_MAX_NAME		16
 

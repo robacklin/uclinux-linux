@@ -1,18 +1,22 @@
-/* $Id: dma.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $
+/*
  * linux/include/asm/dma.h: Defines for using and allocating dma channels.
  * Written by Hennus Bergman, 1992.
  * High DMA channel support & info by Hannu Savolainen
  * and John Boyd, Nov. 1992.
  *
  * NOTE: all this is true *only* for ISA/EISA expansions on Mips boards
- * and can only be used for expansion cards. Onboard DMA controller, such
+ * and can only be used for expansion cards. Onboard DMA controllers, such
  * as the R4030 on Jazz boards behave totally different!
  */
 
 #ifndef __ASM_MIPS_DMA_H
 #define __ASM_MIPS_DMA_H
 
-#include <asm/io.h>		/* need byte IO */
+#include <linux/config.h>
+#include <asm/io.h>			/* need byte IO */
+#include <linux/spinlock.h>		/* And spinlocks */
+#include <linux/delay.h>
+#include <asm/system.h>
 
 
 #ifdef HAVE_REALLY_SLOW_DMA_CONTROLLER
@@ -39,7 +43,7 @@
  *  - page registers for 5-7 don't use data bit 0, represent 128K pages
  *  - page registers for 0-3 use bit 0, represent 64K pages
  *
- * DMA transfers are limited to the lower 16MB of _physical_ memory.  
+ * DMA transfers are limited to the lower 16MB of _physical_ memory.
  * Note that addresses loaded into registers must be _physical_ addresses,
  * not logical addresses (which may differ if paging is active).
  *
@@ -49,7 +53,7 @@
  *    |  ...  |   |  ... |   |  ... |
  *    |  ...  |   |  ... |   |  ... |
  *    |  ...  |   |  ... |   |  ... |
- *   P7  ...  P0  A7 ... A0  A7 ... A0   
+ *   P7  ...  P0  A7 ... A0  A7 ... A0
  * |    Page    | Addr MSB | Addr LSB |   (DMA registers)
  *
  *  Address mapping for channels 5-7:
@@ -58,7 +62,7 @@
  *    |  ...  |   \   \   ... \  \  \  ... \  \
  *    |  ...  |    \   \   ... \  \  \  ... \  (not used)
  *    |  ...  |     \   \   ... \  \  \  ... \
- *   P7  ...  P1 (0) A7 A6  ... A0 A7 A6 ... A0   
+ *   P7  ...  P1 (0) A7 A6  ... A0 A7 A6 ... A0
  * |      Page      |  Addr MSB   |  Addr LSB  |   (DMA registers)
  *
  * Again, channels 5-7 transfer _physical_ words (16 bits), so addresses
@@ -67,19 +71,25 @@
  *
  * Transfer count (_not # bytes_) is limited to 64K, represented as actual
  * count - 1 : 64K => 0xFFFF, 1 => 0x0000.  Thus, count is always 1 or more,
- * and up to 128K bytes may be transferred on channels 5-7 in one operation. 
+ * and up to 128K bytes may be transferred on channels 5-7 in one operation.
  *
  */
 
 #define MAX_DMA_CHANNELS	8
 
 /*
- * The maximum address that we can perform a DMA transfer to on this platform
- * This describes only the PC style part of the DMA logic like on Deskstations
- * or Acer PICA but not the much more versatile DMA logic used for the
- * local devices on Acer PICA or Magnums.
+ * The maximum address in KSEG0 that we can perform a DMA transfer to on this
+ * platform.  This describes only the PC style part of the DMA logic like on
+ * Deskstations or Acer PICA but not the much more versatile DMA logic used
+ * for the local devices on Acer PICA or Magnums.
  */
-#define MAX_DMA_ADDRESS		0x1000000
+#ifdef CONFIG_SGI_IP22
+/* Horrible hack to have a correct DMA window on IP22 */
+#include <asm/sgi/mc.h>
+#define MAX_DMA_ADDRESS		(PAGE_OFFSET + SGIMC_SEG0_BADDR + 0x01000000)
+#else
+#define MAX_DMA_ADDRESS		(PAGE_OFFSET + 0x01000000)
+#endif
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -138,6 +148,22 @@
 #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
 
+#define DMA_AUTOINIT	0x10
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
+
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
 {
@@ -160,7 +186,7 @@ static __inline__ void disable_dma(unsigned int dmanr)
  * Use this once to initialize the FF to a known state.
  * After that, keep track of it. :-)
  * --- In order to do that, the DMA routines below should ---
- * --- only be used while interrupts are disabled! ---
+ * --- only be used while holding the DMA lock ! ---
  */
 static __inline__ void clear_dma_ff(unsigned int dmanr)
 {
@@ -228,7 +254,7 @@ static __inline__ void set_dma_addr(unsigned int dmanr, unsigned int a)
 }
 
 
-/* Set transfer size (max 64k for DMA1..3, 128k for DMA5..7) for
+/* Set transfer size (max 64k for DMA0..3, 128k for DMA5..7) for
  * a specific DMA channel.
  * You must ensure the parameters are valid.
  * NOTE: from a manual: "the number of transfers is one more
@@ -267,7 +293,7 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 
 	count = 1 + dma_inb(io_port);
 	count += dma_inb(io_port) << 8;
-	
+
 	return (dmanr<=3)? count : (count<<1);
 }
 
@@ -276,9 +302,10 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
 
-/*
- * DMA memory allocation - formerly in include/linux/mm.h
- */
-#define __get_dma_pages(priority, order) __get_free_pages((priority),(order), 1)
+#ifdef CONFIG_PCI
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy 	(0)
+#endif
 
 #endif /* __ASM_MIPS_DMA_H */

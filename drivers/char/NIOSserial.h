@@ -2,7 +2,7 @@
  *
  * Copyright (C) 1995       David S. Miller    <davem@caip.rutgers.edu>
  * Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
- * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@rt-control.com>
+ * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@uClinux.org>
  * Copyright (C) 1999       Vladimir Gurevich  <vgurevic@cisco.com>
  * Copyright (C) 2001       Vic Phillips       <vic@microtronix.com>
  *
@@ -127,8 +127,8 @@ struct NIOS_serial {
 	struct tq_struct	tqueue_hangup;
 	struct termios		normal_termios;
 	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
 };
 
 #define SERIAL_MAGIC 0x5301

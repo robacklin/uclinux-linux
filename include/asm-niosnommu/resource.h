@@ -1,5 +1,6 @@
-#ifndef _NIOS_RESOURCE_H
-#define _NIOS_RESOURCE_H
+//vic - update by copying from:
+#ifndef _M68K_RESOURCE_H
+#define _M68K_RESOURCE_H
 
 /*
  * Resource limits
@@ -13,27 +14,35 @@
 #define RLIMIT_RSS	5		/* max resident set size */
 #define RLIMIT_NPROC	6		/* max number of processes */
 #define RLIMIT_NOFILE	7		/* max number of open files */
-#define RLIMIT_MEMLOCK	8		/* max locked-in-memory address space */
+#define RLIMIT_MEMLOCK	8		/* max locked-in-memory address space*/
 #define RLIMIT_AS	9		/* address space limit */
+#define RLIMIT_LOCKS	10		/* maximum file locks held */
 
-#define RLIM_NLIMITS	10
+#define RLIM_NLIMITS	11
+
+/*
+ * SuS says limits have to be unsigned.
+ * Which makes a ton more sense anyway.
+ */
+#define RLIM_INFINITY	(~0UL)
 
 #ifdef __KERNEL__
 
-#define INIT_RLIMITS					\
-{							\
-	{ LONG_MAX, LONG_MAX },				\
-	{ LONG_MAX, LONG_MAX },				\
-	{ LONG_MAX, LONG_MAX },				\
-	{ _STK_LIM, _STK_LIM },				\
-	{        0, LONG_MAX },				\
-	{ LONG_MAX, LONG_MAX },				\
-	{ MAX_TASKS_PER_USER, MAX_TASKS_PER_USER },	\
-	{ NR_OPEN, NR_OPEN },				\
-	{ LONG_MAX, LONG_MAX },				\
-	{ LONG_MAX, LONG_MAX },				\
+#define INIT_RLIMITS	\
+{                       \
+  {LONG_MAX, LONG_MAX}, \
+  {LONG_MAX, LONG_MAX}, \
+  {LONG_MAX, LONG_MAX}, \
+  {_STK_LIM, LONG_MAX}, \
+  {       0, LONG_MAX}, \
+  {LONG_MAX, LONG_MAX}, \
+  {0, 0},		\
+  {INR_OPEN, INR_OPEN}, \
+  {LONG_MAX, LONG_MAX}, \
+  {LONG_MAX, LONG_MAX}, \
+  {LONG_MAX, LONG_MAX}  \
 }
 
 #endif /* __KERNEL__ */
 
-#endif /* !(_NIOS_RESOURCE_H) */
+#endif /* _M68K_RESOURCE_H */

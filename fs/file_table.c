@@ -2,177 +2,204 @@
  *  linux/fs/file_table.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *  Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <linux/config.h>
-#include <linux/stddef.h>
-#include <linux/fs.h>
 #include <linux/string.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/file.h>
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/smp_lock.h>
+#include <linux/iobuf.h>
 
-/*
- * first_file points to a doubly linked list of all file structures in
- *            the system.
- * nr_files   holds the length of this list.
- */
-struct file * first_file = NULL;
-int nr_files = 0;
-int max_files = NR_FILE;
+/* sysctl tunables... */
+struct files_stat_struct files_stat = {0, 0, NR_FILE};
 
-/*
- * Insert a new file structure at the head of the list of available ones.
- */
-static inline void insert_file_free(struct file *file)
-{
-	struct file *next, *prev;
+/* Here the new files go */
+static LIST_HEAD(anon_list);
+/* And here the free ones sit */
+static LIST_HEAD(free_list);
+/* public *and* exported. Not pretty! */
+spinlock_t files_lock = SPIN_LOCK_UNLOCKED;
 
-	next = first_file;
-	first_file = file;
-	file->f_count = 0;
-	prev = next->f_prev;
-	file->f_next = next;
-	next->f_prev = file;
-	file->f_prev = prev;
-	prev->f_next = file;
-}
-
-/*
- * Remove a file structure from the list of available ones.
- */
-static inline void remove_file_free(struct file *file)
-{
-	struct file *next, *prev;
-
-	next = file->f_next;
-	prev = file->f_prev;
-	file->f_next = file->f_prev = NULL;
-	if (first_file == file)
-		first_file = next;
-	next->f_prev = prev;
-	prev->f_next = next;
-}
-
-/*
- * Insert a file structure at the end of the list of available ones.
- */
-static inline void put_last_free(struct file *file)
-{
-	struct file *next, *prev;
-
-	next = first_file;
-	file->f_next = next;
-	prev = next->f_prev;
-	next->f_prev = file;
-	file->f_prev = prev;
-	prev->f_next = file;
-}
-
-/*
- * Allocate a new memory page for file structures and
- * insert the new structures into the global list.
- * Returns 0, if there is no more memory, 1 otherwise.
- */
-static int grow_files(void)
-{
-	struct file * file;
-	int i;
-
-	/*
-	 * We don't have to clear the page because we only look into
-	 * f_count, f_prev and f_next and they get initialized in
-	 * insert_file_free.  The rest of the file structure is cleared
-	 * by get_empty_filp before it is returned.
-	 */
-	file = (struct file *) __get_free_page(GFP_KERNEL);
-
-	if (!file)
-		return 0;
-
-	nr_files += i = PAGE_SIZE/sizeof(struct file);
-
-	if (!first_file)
-		file->f_count = 0,
-		file->f_next = file->f_prev = first_file = file++,
-		i--;
-
-	for (; i ; i--)
-		insert_file_free(file++);
-
-	return 1;
-}
-
-unsigned long file_table_init(unsigned long start, unsigned long end)
-{
-	return start;
-}
-
-/*
- * Find an unused file structure and return a pointer to it.
+/* Find an unused file structure and return a pointer to it.
  * Returns NULL, if there are no more free file structures or
  * we run out of memory.
+ *
+ * SMP-safe.
  */
 struct file * get_empty_filp(void)
 {
-	int i;
-	int max = max_files;
+	static int old_max = 0;
 	struct file * f;
 
+	file_list_lock();
+	if (files_stat.nr_free_files > NR_RESERVED_FILES) {
+	used_one:
+		f = list_entry(free_list.next, struct file, f_list);
+		list_del(&f->f_list);
+		files_stat.nr_free_files--;
+	new_one:
+		memset(f, 0, sizeof(*f));
+		atomic_set(&f->f_count,1);
+		f->f_version = ++event;
+		f->f_uid = current->fsuid;
+		f->f_gid = current->fsgid;
+		f->f_maxcount = INT_MAX;
+		list_add(&f->f_list, &anon_list);
+		file_list_unlock();
+		return f;
+	}
 	/*
-	 * Reserve a few files for the super-user..
+	 * Use a reserved one if we're the superuser
 	 */
-	if (current->euid)
-		max -= 10;
+	if (files_stat.nr_free_files && !current->euid)
+		goto used_one;
+	/*
+	 * Allocate a new one if we're below the limit.
+	 */
+	if (files_stat.nr_files < files_stat.max_files) {
+		file_list_unlock();
+		f = kmem_cache_alloc(filp_cachep, SLAB_KERNEL);
+		file_list_lock();
+		if (f) {
+			files_stat.nr_files++;
+			goto new_one;
+		}
+		/* Big problems... */
+		printk(KERN_WARNING "VFS: filp allocation failed\n");
 
-	/* if the return is taken, we are in deep trouble */
-	if (!first_file && !grow_files())
-		return NULL;
-
-	do {
-		for (f = first_file, i=0; i < nr_files; i++, f = f->f_next)
-			if (!f->f_count) {
-				/* The f_next pointer is followed by the f_prev pointer */
-				memset(f, 0, offsetof(struct file, f_next));
-				memset(&f->f_prev + 1, 0, sizeof(*f) - sizeof(f->f_prev) - offsetof(struct file, f_prev));
-				f->f_count = 1;
-				f->f_version = ++event;
-				first_file = f->f_next;
-				return f;
-			}
-	} while (nr_files < max && grow_files());
-
+	} else if (files_stat.max_files > old_max) {
+		printk(KERN_INFO "VFS: file-max limit %d reached\n", files_stat.max_files);
+		old_max = files_stat.max_files;
+	}
+	file_list_unlock();
 	return NULL;
 }
 
-#ifdef CONFIG_QUOTA
-
-void add_dquot_ref(kdev_t dev, short type)
+/*
+ * Clear and initialize a (private) struct file for the given dentry,
+ * and call the open function (if any).  The caller must verify that
+ * inode->i_fop is not NULL.
+ */
+int init_private_file(struct file *filp, struct dentry *dentry, int mode)
 {
-	struct file *filp;
-	int cnt;
+	memset(filp, 0, sizeof(*filp));
+	filp->f_mode   = mode;
+	atomic_set(&filp->f_count, 1);
+	filp->f_dentry = dentry;
+	filp->f_uid    = current->fsuid;
+	filp->f_gid    = current->fsgid;
+	filp->f_op     = dentry->d_inode->i_fop;
+	filp->f_maxcount = INT_MAX;
 
-	for (filp = first_file, cnt = 0; cnt < nr_files; cnt++, filp = filp->f_next) {
-		if (!filp->f_count || !filp->f_inode || filp->f_inode->i_dev != dev)
-			continue;
-		if (filp->f_mode & FMODE_WRITE && filp->f_inode->i_sb->dq_op) {
-			filp->f_inode->i_sb->dq_op->initialize(filp->f_inode, type);
-			filp->f_inode->i_flags |= S_WRITE;
-		}
+	if (filp->f_op->open)
+		return filp->f_op->open(dentry->d_inode, filp);
+	else
+		return 0;
+}
+
+void fastcall fput(struct file * file)
+{
+	struct dentry * dentry = file->f_dentry;
+	struct vfsmount * mnt = file->f_vfsmnt;
+	struct inode * inode = dentry->d_inode;
+
+	if (atomic_dec_and_test(&file->f_count)) {
+		locks_remove_flock(file);
+
+		if (file->f_iobuf)
+			free_kiovec(1, &file->f_iobuf);
+
+		if (file->f_op && file->f_op->release)
+			file->f_op->release(inode, file);
+		fops_put(file->f_op);
+		if (file->f_mode & FMODE_WRITE)
+			put_write_access(inode);
+		file_list_lock();
+		file->f_dentry = NULL;
+		file->f_vfsmnt = NULL;
+		list_del(&file->f_list);
+		list_add(&file->f_list, &free_list);
+		files_stat.nr_free_files++;
+		file_list_unlock();
+		dput(dentry);
+		mntput(mnt);
 	}
 }
 
-void reset_dquot_ptrs(kdev_t dev, short type)
+struct file fastcall *fget(unsigned int fd)
 {
-	struct file *filp;
-	int cnt;
+	struct file * file;
+	struct files_struct *files = current->files;
 
-	for (filp = first_file, cnt = 0; cnt < nr_files; cnt++, filp = filp->f_next) {
-		if (!filp->f_count || !filp->f_inode || filp->f_inode->i_dev != dev)
-			continue;
-		if (IS_WRITABLE(filp->f_inode)) {
-			filp->f_inode->i_dquot[type] = NODQUOT;
-			filp->f_inode->i_flags &= ~S_WRITE;
-		}
+	read_lock(&files->file_lock);
+	file = fcheck(fd);
+	if (file)
+		get_file(file);
+	read_unlock(&files->file_lock);
+	return file;
+}
+
+/* Here. put_filp() is SMP-safe now. */
+
+void put_filp(struct file *file)
+{
+	if(atomic_dec_and_test(&file->f_count)) {
+		file_list_lock();
+		list_del(&file->f_list);
+		list_add(&file->f_list, &free_list);
+		files_stat.nr_free_files++;
+		file_list_unlock();
 	}
 }
 
-#endif
+void file_move(struct file *file, struct list_head *list)
+{
+	if (!list)
+		return;
+	file_list_lock();
+	list_del(&file->f_list);
+	list_add(&file->f_list, list);
+	file_list_unlock();
+}
+
+int fs_may_remount_ro(struct super_block *sb)
+{
+	struct list_head *p;
+
+	/* Check that no files are currently opened for writing. */
+	file_list_lock();
+	for (p = sb->s_files.next; p != &sb->s_files; p = p->next) {
+		struct file *file = list_entry(p, struct file, f_list);
+		struct inode *inode = file->f_dentry->d_inode;
+
+		/* File with pending delete? */
+		if (inode->i_nlink == 0)
+			goto too_bad;
+
+		/* Writable file? */
+		if (S_ISREG(inode->i_mode) && (file->f_mode & FMODE_WRITE))
+			goto too_bad;
+	}
+	file_list_unlock();
+	return 1; /* Tis' cool bro. */
+too_bad:
+	file_list_unlock();
+	return 0;
+}
+
+void __init files_init(unsigned long mempages)
+{ 
+	int n; 
+	/* One file with associated inode and dcache is very roughly 1K. 
+	 * Per default don't use more than 10% of our memory for files. 
+	 */ 
+
+	n = (mempages * (PAGE_SIZE / 1024)) / 10;
+	files_stat.max_files = n; 
+	if (files_stat.max_files < NR_FILE)
+		files_stat.max_files = NR_FILE;
+} 
+

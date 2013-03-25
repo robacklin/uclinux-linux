@@ -2,859 +2,665 @@
  *  dir.c
  *
  *  Copyright (C) 1995, 1996 by Paal-Kr. Engstad and Volker Lendecke
+ *  Copyright (C) 1997 by Volker Lendecke
  *
+ *  Please add a note about your changes to smbfs in the ChangeLog file.
  */
 
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <linux/stat.h>
 #include <linux/kernel.h>
-#include <linux/malloc.h>
-#include <linux/mm.h>
+#include <linux/smp_lock.h>
+#include <linux/ctype.h>
+
 #include <linux/smb_fs.h>
+#include <linux/smb_mount.h>
 #include <linux/smbno.h>
-#include <asm/segment.h>
-#include <asm/semaphore.h>
-#include <linux/errno.h>
 
-static int
- smb_dir_read(struct inode *inode, struct file *filp, char *buf, int count);
+#include "smb_debug.h"
+#include "proto.h"
 
-static int
- smb_readdir(struct inode *inode, struct file *filp,
-	     void *dirent, filldir_t filldir);
+static int smb_readdir(struct file *, void *, filldir_t);
+static int smb_dir_open(struct inode *, struct file *);
 
-static struct smb_inode_info *
- smb_find_dir_inode(struct inode *parent, const char *name, int len);
+static struct dentry *smb_lookup(struct inode *, struct dentry *);
+static int smb_create(struct inode *, struct dentry *, int);
+static int smb_mkdir(struct inode *, struct dentry *, int);
+static int smb_rmdir(struct inode *, struct dentry *);
+static int smb_unlink(struct inode *, struct dentry *);
+static int smb_rename(struct inode *, struct dentry *,
+		      struct inode *, struct dentry *);
+static int smb_make_node(struct inode *,struct dentry *, int, int);
+static int smb_link(struct dentry *, struct inode *, struct dentry *);
 
-static int
- smb_lookup(struct inode *dir, const char *__name,
-	    int len, struct inode **result);
-
-static int
- smb_create(struct inode *dir, const char *name, int len, int mode,
-	    struct inode **result);
-
-static int
- smb_mkdir(struct inode *dir, const char *name, int len, int mode);
-
-static int
- smb_rmdir(struct inode *dir, const char *name, int len);
-
-static int
- smb_unlink(struct inode *dir, const char *name, int len);
-
-static int
- smb_rename(struct inode *old_dir, const char *old_name, int old_len,
-	    struct inode *new_dir, const char *new_name, int new_len,
-	    int must_be_dir);
-
-static struct file_operations smb_dir_operations =
+struct file_operations smb_dir_operations =
 {
-	NULL,			/* lseek - default */
-	smb_dir_read,		/* read - bad */
-	NULL,			/* write - bad */
-	smb_readdir,		/* readdir */
-	NULL,			/* select - default */
-	smb_ioctl,		/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* no special release code */
-	NULL			/* fsync */
+	read:		generic_read_dir,
+	readdir:	smb_readdir,
+	ioctl:		smb_ioctl,
+	open:		smb_dir_open,
 };
 
 struct inode_operations smb_dir_inode_operations =
 {
-	&smb_dir_operations,	/* default directory file ops */
-	smb_create,		/* create */
-	smb_lookup,		/* lookup */
-	NULL,			/* link */
-	smb_unlink,		/* unlink */
-	NULL,			/* symlink */
-	smb_mkdir,		/* mkdir */
-	smb_rmdir,		/* rmdir */
-	NULL,			/* mknod */
-	smb_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* bmap */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL			/* smap */
+	create:		smb_create,
+	lookup:		smb_lookup,
+	unlink:		smb_unlink,
+	mkdir:		smb_mkdir,
+	rmdir:		smb_rmdir,
+	rename:		smb_rename,
+	revalidate:	smb_revalidate_inode,
+	setattr:	smb_notify_change,
 };
 
-static int
-strncasecmp(const char *s1, const char *s2, int len)
+struct inode_operations smb_dir_inode_operations_unix =
 {
-	int result = 0;
+	create:		smb_create,
+	lookup:		smb_lookup,
+	unlink:		smb_unlink,
+	mkdir:		smb_mkdir,
+	rmdir:		smb_rmdir,
+	rename:		smb_rename,
+	revalidate:	smb_revalidate_inode,
+	setattr:	smb_notify_change,
+	symlink:	smb_symlink,
+	mknod:		smb_make_node,
+	link:		smb_link,
+};
 
-	for (; len > 0; len -= 1)
-	{
-		char c1, c2;
-
-		c1 = (*s1 >= 'a' && *s1 <= 'z') ? *s1 - ('a' - 'A') : *s1;
-		c2 = (*s2 >= 'a' && *s2 <= 'z') ? *s2 - ('a' - 'A') : *s2;
-		s1 += 1;
-		s2 += 1;
-
-		if ((result = c1 - c2) != 0 || c1 == 0)
-		{
-			return result;
-		}
-	}
-	return result;
-}
-
-struct smb_inode_info *
-smb_find_inode(struct smb_server *server, ino_t ino)
+/*
+ * Read a directory, using filldir to fill the dirent memory.
+ * smb_proc_readdir does the actual reading from the smb server.
+ *
+ * The cache code is almost directly taken from ncpfs
+ */
+static int 
+smb_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
-	struct smb_inode_info *root = &(server->root);
-	struct smb_inode_info *this = root;
-
-	do
-	{
-		if (ino == smb_info_ino(this))
-		{
-			return this;
-		}
-		this = this->next;
-	}
-	while (this != root);
-
-	return NULL;
-}
-
-static ino_t
-smb_fresh_inodes(struct smb_server *server, int no)
-{
-	static ino_t seed = 1;
-	struct smb_inode_info *root = &(server->root);
-	struct smb_inode_info *this;
-
-      retry:
-	if (seed + no <= no)
-	{
-		/* avoid inode number of 0 at wrap-around */
-		seed += no;
-	}
-	this = root;
-	do
-	{
-		/* We assume that ino_t is unsigned! */
-		if (this->finfo.f_ino - seed < no)
-		{
-			seed += no;
-			goto retry;
-		}
-		this = this->next;
-	}
-	while (this != root);
-
-	seed += no;
-
-	return seed - no;
-}
-
-static int
-smb_dir_read(struct inode *inode, struct file *filp, char *buf, int count)
-{
-	return -EISDIR;
-}
-
-
-static unsigned long c_ino = 0;
-static kdev_t c_dev;
-static int c_size;
-static int c_seen_eof;
-static int c_last_returned_index;
-static struct smb_dirent *c_entry = NULL;
-
-static struct smb_dirent *
-smb_search_in_cache(struct inode *dir, unsigned long f_pos)
-{
-	int i;
-
-	if ((dir->i_dev != c_dev) || (dir->i_ino != c_ino))
-	{
-		return NULL;
-	}
-	for (i = 0; i < c_size; i++)
-	{
-		if (f_pos == c_entry[i].f_pos)
-		{
-			c_last_returned_index = i;
-			return &(c_entry[i]);
-		}
-	}
-	return NULL;
-}
-
-static int
-smb_refill_dir_cache(struct smb_server *server, struct inode *dir,
-		     unsigned long f_pos)
-{
+	struct dentry *dentry = filp->f_dentry;
+	struct inode *dir = dentry->d_inode;
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	union  smb_dir_cache *cache = NULL;
+	struct smb_cache_control ctl;
+	struct page *page = NULL;
 	int result;
-	static struct semaphore sem = MUTEX;
-	int i;
-	ino_t ino;
 
-	do
-	{
-		down(&sem);
-		result = smb_proc_readdir(server, dir, f_pos,
-					  SMB_READDIR_CACHE_SIZE, c_entry);
+	ctl.page  = NULL;
+	ctl.cache = NULL;
 
-		if (result <= 0)
-		{
-			smb_invalid_dir_cache(dir->i_ino);
-			up(&sem);
-			return result;
-		}
-		c_seen_eof = (result < SMB_READDIR_CACHE_SIZE);
-		c_dev = dir->i_dev;
-		c_ino = dir->i_ino;
-		c_size = result;
-		c_last_returned_index = 0;
+	VERBOSE("reading %s/%s, f_pos=%d\n",
+		DENTRY_PATH(dentry),  (int) filp->f_pos);
 
-		ino = smb_fresh_inodes(server, c_size);
-		for (i = 0; i < c_size; i++)
-		{
-			c_entry[i].f_ino = ino;
-			ino += 1;
-		}
-
-		up(&sem);
-
+	result = 0;
+	switch ((unsigned int) filp->f_pos) {
+	case 0:
+		if (filldir(dirent, ".", 1, 0, dir->i_ino, DT_DIR) < 0)
+			goto out;
+		filp->f_pos = 1;
+		/* fallthrough */
+	case 1:
+		if (filldir(dirent, "..", 2, 1,
+			    dentry->d_parent->d_inode->i_ino, DT_DIR) < 0)
+			goto out;
+		filp->f_pos = 2;
 	}
-	while ((c_dev != dir->i_dev) || (c_ino != dir->i_ino));
-
-	return result;
-}
-
-static int
-smb_readdir(struct inode *dir, struct file *filp,
-	    void *dirent, filldir_t filldir)
-{
-	int result, i = 0;
-	struct smb_dirent *entry = NULL;
-	struct smb_server *server = SMB_SERVER(dir);
-
-	DPRINTK("smb_readdir: filp->f_pos = %d\n", (int) filp->f_pos);
-	DDPRINTK("smb_readdir: dir->i_ino = %ld, c_ino = %ld\n",
-		 dir->i_ino, c_ino);
-
-	if ((dir == NULL) || !S_ISDIR(dir->i_mode))
-	{
-		printk("smb_readdir: dir is NULL or not a directory\n");
-		return -EBADF;
-	}
-	if (c_entry == NULL)
-	{
-		i = sizeof(struct smb_dirent) * SMB_READDIR_CACHE_SIZE;
-		c_entry = (struct smb_dirent *) smb_vmalloc(i);
-		if (c_entry == NULL)
-		{
-			printk("smb_readdir: no MEMORY for cache\n");
-			return -ENOMEM;
-		}
-	}
-	if (filp->f_pos == 0)
-	{
-		c_ino = 0;
-		c_dev = 0;
-		c_seen_eof = 0;
-
-		if (filldir(dirent, ".", 1, filp->f_pos,
-			    smb_info_ino(SMB_INOP(dir))) < 0)
-		{
-			return 0;
-		}
-		filp->f_pos += 1;
-	}
-	if (filp->f_pos == 1)
-	{
-		if (filldir(dirent, "..", 2, filp->f_pos,
-			    smb_info_ino(SMB_INOP(dir)->dir)) < 0)
-		{
-			return 0;
-		}
-		filp->f_pos += 1;
-	}
-	entry = smb_search_in_cache(dir, filp->f_pos);
-
-	if (entry == NULL)
-	{
-		if (c_seen_eof)
-		{
-			/* End of directory */
-			return 0;
-		}
-		result = smb_refill_dir_cache(server, dir, filp->f_pos);
-		if (result <= 0)
-		{
-			return result;
-		}
-		entry = c_entry;
-	}
-	while (entry < &(c_entry[c_size]))
-	{
-		/* We found it.  For getwd(), we have to return the
-		   correct inode in d_ino if the inode is currently in
-		   use. Otherwise the inode number does not
-		   matter. (You can argue a lot about this..) */
-
-		struct smb_inode_info *ino_info
-		= smb_find_dir_inode(dir, entry->name, entry->len);
-
-		ino_t ino = entry->f_ino;
-
-		if (ino_info != NULL)
-		{
-			ino = smb_info_ino(ino_info);
-		}
-		DDPRINTK("smb_readdir: entry->name = %s\n", entry->name);
-		DDPRINTK("smb_readdir: entry->f_pos = %ld\n", entry->f_pos);
-
-		if (filldir(dirent, entry->name, strlen(entry->name),
-			    entry->f_pos, ino) < 0)
-		{
-			break;
-		}
-		if ((dir->i_dev != c_dev) || (dir->i_ino != c_ino)
-		    || (entry->f_pos != filp->f_pos))
-		{
-			/* Someone has destroyed the cache while we slept
-			   in filldir */
-			break;
-		}
-		filp->f_pos += 1;
-		entry += 1;
-	}
-	return 0;
-}
-
-void
-smb_init_dir_cache(void)
-{
-	c_ino = 0;
-	c_dev = 0;
-	c_entry = NULL;
-}
-
-void
-smb_invalid_dir_cache(unsigned long ino)
-{
-	/* TODO: check for dev as well */
-	if (ino == c_ino)
-	{
-		c_ino = 0;
-		c_seen_eof = 0;
-	}
-}
-
-void
-smb_free_dir_cache(void)
-{
-	if (c_entry != NULL)
-	{
-		smb_vfree(c_entry);
-	}
-	c_entry = NULL;
-}
-
-/* Insert a NEW smb_inode_info into the inode tree of our filesystem,
-   under dir. The caller must assure that it's not already there. We
-   assume that path is allocated for us. */
-
-static struct inode *
-smb_iget(struct inode *dir, struct smb_inode_info *new_inode_info)
-{
-	struct inode *inode;
-	struct smb_inode_info *root;
-
-	if ((dir == NULL) || (new_inode_info == NULL))
-	{
-		printk("smb_iget: parameter is NULL\n");
-		return NULL;
-	}
-	new_inode_info->state = SMB_INODE_LOOKED_UP;
-	new_inode_info->nused = 0;
-	new_inode_info->dir = SMB_INOP(dir);
-
-	SMB_INOP(dir)->nused += 1;
 
 	/*
-	 * We have to link the new inode_info into the doubly linked
-	 * list of inode_infos to make a complete linear search possible.
+	 * Make sure our inode is up-to-date.
 	 */
-	root = &(SMB_SERVER(dir)->root);
+	result = smb_revalidate_inode(dentry);
+	if (result)
+		goto out;
 
-	new_inode_info->prev = root;
-	new_inode_info->next = root->next;
-	root->next->prev = new_inode_info;
-	root->next = new_inode_info;
 
-	if (!(inode = iget(dir->i_sb, smb_info_ino(new_inode_info))))
-	{
-		printk("smb_iget: iget failed!");
+	page = grab_cache_page(&dir->i_data, 0);
+	if (!page)
+		goto read_really;
+
+	ctl.cache = cache = kmap(page);
+	ctl.head  = cache->head;
+
+	if (!Page_Uptodate(page) || !ctl.head.eof) {
+		VERBOSE("%s/%s, page uptodate=%d, eof=%d\n",
+			 DENTRY_PATH(dentry), Page_Uptodate(page),ctl.head.eof);
+		goto init_cache;
+	}
+
+	if (filp->f_pos == 2) {
+		if (jiffies - ctl.head.time >= SMB_MAX_AGE(server))
+			goto init_cache;
+
 		/*
-		 * If we blocked in iget(), another task may have referenced
-		 * the info structure ... clean up with smb_free_inode_info.
+		 * N.B. ncpfs checks mtime of dentry too here, we don't.
+		 *   1. common smb servers do not update mtime on dir changes
+		 *   2. it requires an extra smb request
+		 *      (revalidate has the same timeout as ctl.head.time)
+		 *
+		 * Instead smbfs invalidates its own cache on local changes
+		 * and remote changes are not seen until timeout.
 		 */
-		smb_free_inode_info(new_inode_info);
-		return NULL;
 	}
 
-	return inode;
-}
+	if (filp->f_pos > ctl.head.end)
+		goto finished;
 
-void
-smb_free_inode_info(struct smb_inode_info *i)
-{
-	if (i == NULL)
-	{
-		printk("smb_free_inode: i == NULL\n");
-		return;
-	}
-	i->state = SMB_INODE_CACHED;
-	while ((i->nused == 0) && (i->state == SMB_INODE_CACHED))
-	{
-		struct smb_inode_info *dir = i->dir;
+	ctl.fpos = filp->f_pos + (SMB_DIRCACHE_START - 2);
+	ctl.ofs  = ctl.fpos / SMB_DIRCACHE_SIZE;
+	ctl.idx  = ctl.fpos % SMB_DIRCACHE_SIZE;
 
-		i->next->prev = i->prev;
-		i->prev->next = i->next;
-
-		smb_kfree_s(i, sizeof(struct smb_inode_info));
-
-		if (dir == NULL)
-		{
-			return;
+	for (;;) {
+		if (ctl.ofs != 0) {
+			ctl.page = find_lock_page(&dir->i_data, ctl.ofs);
+			if (!ctl.page)
+				goto invalid_cache;
+			ctl.cache = kmap(ctl.page);
+			if (!Page_Uptodate(ctl.page))
+				goto invalid_cache;
 		}
-		dir->nused -= 1;
-		i = dir;
+		while (ctl.idx < SMB_DIRCACHE_SIZE) {
+			struct dentry *dent;
+			int res;
+
+			dent = smb_dget_fpos(ctl.cache->dentry[ctl.idx],
+					     dentry, filp->f_pos);
+			if (!dent)
+				goto invalid_cache;
+
+			res = filldir(dirent, dent->d_name.name,
+				      dent->d_name.len, filp->f_pos,
+				      dent->d_inode->i_ino, DT_UNKNOWN);
+			dput(dent);
+			if (res)
+				goto finished;
+			filp->f_pos += 1;
+			ctl.idx += 1;
+			if (filp->f_pos > ctl.head.end)
+				goto finished;
+		}
+		if (ctl.page) {
+			kunmap(ctl.page);
+			SetPageUptodate(ctl.page);
+			UnlockPage(ctl.page);
+			page_cache_release(ctl.page);
+			ctl.page = NULL;
+		}
+		ctl.idx  = 0;
+		ctl.ofs += 1;
 	}
-}
-
-void
-smb_init_root(struct smb_server *server)
-{
-	struct smb_inode_info *root = &(server->root);
-
-	root->state = SMB_INODE_LOOKED_UP;
-	root->nused = 1;
-	root->dir = NULL;
-	root->next = root->prev = root;
-
-	return;
-}
-
-void
-smb_free_all_inodes(struct smb_server *server)
-{
-	/* Here nothing should be to do. I do not know whether it's
-	   better to leave some memory allocated or be stuck in an
-	   endless loop */
-#if 1
-	struct smb_inode_info *root = &(server->root);
-
-	if (root->next != root)
-	{
-		printk("smb_free_all_inodes: INODES LEFT!!!\n");
+invalid_cache:
+	if (ctl.page) {
+		kunmap(ctl.page);
+		UnlockPage(ctl.page);
+		page_cache_release(ctl.page);
+		ctl.page = NULL;
 	}
-	while (root->next != root)
-	{
-		printk("smb_free_all_inodes: freeing inode\n");
-		smb_free_inode_info(root->next);
-		/* In case we have an endless loop.. */
-		schedule();
+	ctl.cache = cache;
+init_cache:
+	smb_invalidate_dircache_entries(dentry);
+	ctl.head.time = jiffies;
+	ctl.head.eof = 0;
+	ctl.fpos = 2;
+	ctl.ofs = 0;
+	ctl.idx = SMB_DIRCACHE_START;
+	ctl.filled = 0;
+	ctl.valid  = 1;
+read_really:
+	result = server->ops->readdir(filp, dirent, filldir, &ctl);
+	if (ctl.idx == -1)
+		goto invalid_cache;	/* retry */
+	ctl.head.end = ctl.fpos - 1;
+	ctl.head.eof = ctl.valid;
+finished:
+	if (page) {
+		cache->head = ctl.head;
+		kunmap(page);
+		SetPageUptodate(page);
+		UnlockPage(page);
+		page_cache_release(page);
 	}
-#endif
-
-	return;
-}
-
-/* This has to be called when a connection has gone down, so that all
-   file-handles we got from the server are invalid */
-void
-smb_invalidate_all_inodes(struct smb_server *server)
-{
-	struct smb_inode_info *ino = &(server->root);
-
-	do
-	{
-		ino->finfo.opened = 0;
-		ino = ino->next;
+	if (ctl.page) {
+		kunmap(ctl.page);
+		SetPageUptodate(ctl.page);
+		UnlockPage(ctl.page);
+		page_cache_release(ctl.page);
 	}
-	while (ino != &(server->root));
-
-	return;
+out:
+	return result;
 }
 
 static int
-compare_filename(const struct smb_server *server,
-		 const char *s1, int len, struct smb_dirent *entry)
+smb_dir_open(struct inode *dir, struct file *file)
 {
-	if (len != entry->len)
-	{
-#if 0
-		/* Check whether the entry is about to be removed */
-		if (!entry->len)
-			printk("SMBFS: dead entry %s\n", entry->name);
-#endif
-		return 1;
+	struct dentry *dentry = file->f_dentry;
+	struct smb_sb_info *server;
+	int error = 0;
+
+	VERBOSE("(%s/%s)\n", dentry->d_parent->d_name.name,
+		file->f_dentry->d_name.name);
+
+	/*
+	 * Directory timestamps in the core protocol aren't updated
+	 * when a file is added, so we give them a very short TTL.
+	 */
+	lock_kernel();
+	server = server_from_dentry(dentry);
+	if (server->opt.protocol < SMB_PROTOCOL_LANMAN2) {
+		unsigned long age = jiffies - dir->u.smbfs_i.oldmtime;
+		if (age > 2*HZ)
+			smb_invalid_dir_cache(dir);
 	}
-	if (server->case_handling == CASE_DEFAULT)
-	{
-		return strncasecmp(s1, entry->name, len);
-	}
-	return strncmp(s1, entry->name, len);
+
+	/*
+	 * Note: in order to allow the smbmount process to open the
+	 * mount point, we only revalidate if the connection is valid or
+	 * if the process is trying to access something other than the root.
+	 */
+	if (server->state == CONN_VALID || !IS_ROOT(dentry))
+		error = smb_revalidate_inode(dentry);
+	unlock_kernel();
+	return error;
 }
 
 /*
- * Search for the smb_inode_info that belongs to this name,
- * currently by a complete linear search through the inodes
- * belonging to this filesystem.
- *
- * Note that this returns files as well as directories.
+ * Dentry operations routines
  */
-static struct smb_inode_info *
-smb_find_dir_inode(struct inode *parent, const char *name, int len)
+static int smb_lookup_validate(struct dentry *, int);
+static int smb_hash_dentry(struct dentry *, struct qstr *);
+static int smb_compare_dentry(struct dentry *, struct qstr *, struct qstr *);
+static int smb_delete_dentry(struct dentry *);
+
+static struct dentry_operations smbfs_dentry_operations =
 {
-	struct smb_server *server = SMB_SERVER(parent);
-	struct smb_inode_info *dir = SMB_INOP(parent);
-	struct smb_inode_info *result = &(server->root);
+	d_revalidate:	smb_lookup_validate,
+	d_hash:		smb_hash_dentry,
+	d_compare:	smb_compare_dentry,
+	d_delete:	smb_delete_dentry,
+};
 
-	if (name == NULL)
-	{
-		return NULL;
-	}
-	if ((len == 1) && (name[0] == '.'))
-	{
-		return dir;
-	}
-	if ((len == 2) && (name[0] == '.') && (name[1] == '.'))
-	{
-		return dir->dir;
-	}
-	do
-	{
-		if (result->dir == dir)
-		{
-			if (compare_filename(server, name, len,
-					     &(result->finfo)) == 0)
-			{
-				return result;
-			}
-		}
-		result = result->next;
-	}
-	while (result != &(server->root));
+static struct dentry_operations smbfs_dentry_operations_case =
+{
+	d_revalidate:	smb_lookup_validate,
+	d_delete:	smb_delete_dentry,
+};
 
-	return NULL;
+
+/*
+ * This is the callback when the dcache has a lookup hit.
+ */
+static int
+smb_lookup_validate(struct dentry * dentry, int flags)
+{
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	struct inode * inode = dentry->d_inode;
+	unsigned long age = jiffies - dentry->d_time;
+	int valid;
+
+	/*
+	 * The default validation is based on dentry age:
+	 * we believe in dentries for a few seconds.  (But each
+	 * successful server lookup renews the timestamp.)
+	 */
+	valid = (age <= SMB_MAX_AGE(server));
+#ifdef SMBFS_DEBUG_VERBOSE
+	if (!valid)
+		VERBOSE("%s/%s not valid, age=%lu\n", 
+			DENTRY_PATH(dentry), age);
+#endif
+
+	if (inode) {
+		lock_kernel();
+		if (is_bad_inode(inode)) {
+			PARANOIA("%s/%s has dud inode\n", DENTRY_PATH(dentry));
+			valid = 0;
+		} else if (!valid)
+			valid = (smb_revalidate_inode(dentry) == 0);
+		unlock_kernel();
+	} else {
+		/*
+		 * What should we do for negative dentries?
+		 */
+	}
+	return valid;
 }
 
-static int
-smb_lookup(struct inode *dir, const char *name, int len,
-	   struct inode **result)
+static int 
+smb_hash_dentry(struct dentry *dir, struct qstr *this)
 {
-	struct smb_dirent finfo;
-	struct smb_inode_info *result_info;
-	int error;
-	int found_in_cache;
+	unsigned long hash;
+	int i;
 
-	struct smb_inode_info *new_inode_info = NULL;
-
-	*result = NULL;
-
-	if (!dir || !S_ISDIR(dir->i_mode))
-	{
-		printk("smb_lookup: inode is NULL or not a directory.\n");
-		iput(dir);
-		return -ENOENT;
-	}
-	DDPRINTK("smb_lookup: %s\n", name);
-
-	/* Fast cheat for . */
-	if (len == 0 || (len == 1 && name[0] == '.'))
-	{
-		*result = dir;
-		return 0;
-	}
-	/* ..and for .. */
-	if (len == 2 && name[0] == '.' && name[1] == '.')
-	{
-		struct smb_inode_info *parent = SMB_INOP(dir)->dir;
-
-		if (parent->state == SMB_INODE_CACHED)
-		{
-			parent->state = SMB_INODE_LOOKED_UP;
-		}
-		*result = iget(dir->i_sb, smb_info_ino(parent));
-		iput(dir);
-		if (*result == 0)
-		{
-			return -EACCES;
-		}
-		return 0;
-	}
-	result_info = smb_find_dir_inode(dir, name, len);
-
-      in_tree:
-	if (result_info != NULL)
-	{
-		if (result_info->state == SMB_INODE_CACHED)
-		{
-			result_info->state = SMB_INODE_LOOKED_UP;
-		}
-		*result = iget(dir->i_sb, smb_info_ino(result_info));
-		iput(dir);
-
-		if (new_inode_info != NULL)
-		{
-			smb_kfree_s(new_inode_info,
-				    sizeof(struct smb_inode_info));
-		}
-		if (*result == NULL)
-		{
-			return -EACCES;
-		}
-		return 0;
-	}
-	/* If the file is in the dir cache, we do not have to ask the
-	   server. */
-	found_in_cache = 0;
-
-	if ((dir->i_dev == c_dev) && (dir->i_ino == c_ino) && (c_size != 0))
-	{
-		int first = c_last_returned_index;
-		int i;
-
-		i = first;
-		do
-		{
-			if (compare_filename(SMB_SERVER(dir), name, len,
-					     &(c_entry[i])) == 0)
-			{
-				finfo = c_entry[i];
-				found_in_cache = 1;
-				break;
-			}
-			i = (i + 1) % c_size;
-		}
-		while (i != first);
-	}
-	if (found_in_cache == 0)
-	{
-		DPRINTK("smb_lookup: not found in cache: %s\n", name);
-		if (len > SMB_MAXNAMELEN)
-		{
-			iput(dir);
-			return -ENAMETOOLONG;
-		}
-		error = smb_proc_getattr(dir, name, len, &finfo);
-		if (error < 0)
-		{
-			iput(dir);
-			return error;
-		}
-		finfo.f_ino = smb_fresh_inodes(SMB_SERVER(dir), 1);
-	}
-	new_inode_info = smb_kmalloc(sizeof(struct smb_inode_info),
-				     GFP_KERNEL);
-
-	/* Here somebody else might have inserted the inode */
-
-	result_info = smb_find_dir_inode(dir, name, len);
-	if (result_info != NULL)
-	{
-		goto in_tree;
-	}
-
-	if (new_inode_info == NULL)
-	{
-		iput(dir);
-		return -ENOMEM;
-	}
-	new_inode_info->finfo = finfo;
-
-	DPRINTK("attr: %x\n", finfo.attr);
-
-	if ((*result = smb_iget(dir, new_inode_info)) == NULL)
-	{
-		iput(dir);
-		return -EACCES;
-	}
-	DDPRINTK("smb_lookup: %s => %lu\n", name, (unsigned long) result_info);
-	iput(dir);
+	hash = init_name_hash();
+	for (i=0; i < this->len ; i++)
+		hash = partial_name_hash(tolower(this->name[i]), hash);
+	this->hash = end_name_hash(hash);
+  
 	return 0;
 }
 
 static int
-smb_create(struct inode *dir, const char *name, int len, int mode,
-	   struct inode **result)
+smb_compare_dentry(struct dentry *dir, struct qstr *a, struct qstr *b)
 {
-	int error;
-	struct smb_dirent entry;
-	struct smb_inode_info *new_inode_info;
+	int i, result = 1;
 
-	*result = NULL;
+	if (a->len != b->len)
+		goto out;
+	for (i=0; i < a->len; i++) {
+		if (tolower(a->name[i]) != tolower(b->name[i]))
+			goto out;
+	}
+	result = 0;
+out:
+	return result;
+}
 
-	if (!dir || !S_ISDIR(dir->i_mode))
-	{
-		printk("smb_create: inode is NULL or not a directory\n");
-		iput(dir);
-		return -ENOENT;
+/*
+ * This is the callback from dput() when d_count is going to 0.
+ * We use this to unhash dentries with bad inodes.
+ */
+static int
+smb_delete_dentry(struct dentry * dentry)
+{
+	if (dentry->d_inode) {
+		if (is_bad_inode(dentry->d_inode)) {
+			PARANOIA("bad inode, unhashing %s/%s\n",
+				 DENTRY_PATH(dentry));
+			return 1;
+		}
+	} else {
+		/* N.B. Unhash negative dentries? */
 	}
-	new_inode_info = smb_kmalloc(sizeof(struct smb_inode_info),
-				     GFP_KERNEL);
-	if (new_inode_info == NULL)
-	{
-		iput(dir);
-		return -ENOMEM;
-	}
-	error = smb_proc_create(dir, name, len, 0, CURRENT_TIME);
-	if (error < 0)
-	{
-		smb_kfree_s(new_inode_info, sizeof(struct smb_inode_info));
-		iput(dir);
-		return error;
-	}
-	smb_invalid_dir_cache(dir->i_ino);
-
-	if ((error = smb_proc_getattr(dir, name, len, &entry)) < 0)
-	{
-		smb_kfree_s(new_inode_info, sizeof(struct smb_inode_info));
-		iput(dir);
-		return error;
-	}
-	entry.f_ino = smb_fresh_inodes(SMB_SERVER(dir), 1);
-
-	new_inode_info->finfo = entry;
-
-	if ((*result = smb_iget(dir, new_inode_info)) == NULL)
-	{
-		iput(dir);
-		return error;
-	}
-	iput(dir);
 	return 0;
 }
 
-static int
-smb_mkdir(struct inode *dir, const char *name, int len, int mode)
+/*
+ * Initialize a new dentry
+ */
+void
+smb_new_dentry(struct dentry *dentry)
 {
-	int error;
+	struct smb_sb_info *server = server_from_dentry(dentry);
 
-	if (!dir || !S_ISDIR(dir->i_mode))
-	{
-		iput(dir);
-		return -EINVAL;
+	if (server->mnt->flags & SMB_MOUNT_CASE)
+		dentry->d_op = &smbfs_dentry_operations_case;
+	else
+		dentry->d_op = &smbfs_dentry_operations;
+	dentry->d_time = jiffies;
+}
+
+
+/*
+ * Whenever a lookup succeeds, we know the parent directories
+ * are all valid, so we want to update the dentry timestamps.
+ * N.B. Move this to dcache?
+ */
+void
+smb_renew_times(struct dentry * dentry)
+{
+	for (;;) {
+		dentry->d_time = jiffies;
+		if (IS_ROOT(dentry))
+			break;
+		dentry = dentry->d_parent;
 	}
-	if ((error = smb_proc_mkdir(dir, name, len)) == 0)
-	{
-		smb_invalid_dir_cache(dir->i_ino);
+}
+
+static struct dentry *
+smb_lookup(struct inode *dir, struct dentry *dentry)
+{
+	struct smb_fattr finfo;
+	struct inode *inode;
+	int error;
+	struct smb_sb_info *server;
+
+	error = -ENAMETOOLONG;
+	if (dentry->d_name.len > SMB_MAXNAMELEN)
+		goto out;
+
+	/* Do not allow lookup of names with backslashes in */
+	error = -EINVAL;
+	if (memchr(dentry->d_name.name, '\\', dentry->d_name.len))
+		goto out;
+
+	error = smb_proc_getattr(dentry, &finfo);
+#ifdef SMBFS_PARANOIA
+	if (error && error != -ENOENT)
+		PARANOIA("find %s/%s failed, error=%d\n",
+			 DENTRY_PATH(dentry), error);
+#endif
+
+	inode = NULL;
+	if (error == -ENOENT)
+		goto add_entry;
+	if (!error) {
+		error = -EACCES;
+		finfo.f_ino = iunique(dentry->d_sb, 2);
+		inode = smb_iget(dir->i_sb, &finfo);
+		if (inode) {
+	add_entry:
+			server = server_from_dentry(dentry);
+			if (server->mnt->flags & SMB_MOUNT_CASE)
+				dentry->d_op = &smbfs_dentry_operations_case;
+			else
+				dentry->d_op = &smbfs_dentry_operations;
+
+			d_add(dentry, inode);
+			smb_renew_times(dentry);
+			error = 0;
+		}
 	}
-	iput(dir);
+out:
+	return ERR_PTR(error);
+}
+
+/*
+ * This code is common to all routines creating a new inode.
+ */
+static int
+smb_instantiate(struct dentry *dentry, __u16 fileid, int have_id)
+{
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	struct inode *inode;
+	int error;
+	struct smb_fattr fattr;
+
+	VERBOSE("file %s/%s, fileid=%u\n", DENTRY_PATH(dentry), fileid);
+
+	error = smb_proc_getattr(dentry, &fattr);
+	if (error)
+		goto out_close;
+
+	smb_renew_times(dentry);
+	fattr.f_ino = iunique(dentry->d_sb, 2);
+	inode = smb_iget(dentry->d_sb, &fattr);
+	if (!inode)
+		goto out_no_inode;
+
+	if (have_id) {
+		inode->u.smbfs_i.fileid = fileid;
+		inode->u.smbfs_i.access = SMB_O_RDWR;
+		inode->u.smbfs_i.open = server->generation;
+	}
+	d_instantiate(dentry, inode);
+out:
+	return error;
+
+out_no_inode:
+	error = -EACCES;
+out_close:
+	if (have_id) {
+		PARANOIA("%s/%s failed, error=%d, closing %u\n",
+			 DENTRY_PATH(dentry), error, fileid);
+		smb_close_fileid(dentry, fileid);
+	}
+	goto out;
+}
+
+/* N.B. How should the mode argument be used? */
+static int
+smb_create(struct inode *dir, struct dentry *dentry, int mode)
+{
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	__u16 fileid;
+	int error;
+	struct iattr attr;
+
+	VERBOSE("creating %s/%s, mode=%d\n", DENTRY_PATH(dentry), mode);
+
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_create(dentry, 0, CURRENT_TIME, &fileid);
+	if (!error) {
+		if (server->opt.capabilities & SMB_CAP_UNIX) {
+			/* Set attributes for new file */
+			attr.ia_valid = ATTR_MODE;
+			attr.ia_mode = mode;
+			error = smb_proc_setattr_unix(dentry, &attr, 0, 0);
+		}
+		error = smb_instantiate(dentry, fileid, 1);
+	} else {
+		PARANOIA("%s/%s failed, error=%d\n",
+			 DENTRY_PATH(dentry), error);
+	}
+	return error;
+}
+
+/* N.B. How should the mode argument be used? */
+static int
+smb_mkdir(struct inode *dir, struct dentry *dentry, int mode)
+{
+	struct smb_sb_info *server = server_from_dentry(dentry);
+	int error;
+	struct iattr attr;
+
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_mkdir(dentry);
+	if (!error) {
+		if (server->opt.capabilities & SMB_CAP_UNIX) {
+			/* Set attributes for new directory */
+			attr.ia_valid = ATTR_MODE;
+			attr.ia_mode = mode;
+			error = smb_proc_setattr_unix(dentry, &attr, 0, 0);
+		}
+		error = smb_instantiate(dentry, 0, 0);
+	}
 	return error;
 }
 
 static int
-smb_rmdir(struct inode *dir, const char *name, int len)
+smb_rmdir(struct inode *dir, struct dentry *dentry)
 {
+	struct inode *inode = dentry->d_inode;
 	int error;
 
-	if (!dir || !S_ISDIR(dir->i_mode))
-	{
-		printk("smb_rmdir: inode is NULL or not a directory\n");
-		iput(dir);
-		return -ENOENT;
-	}
-	if (smb_find_dir_inode(dir, name, len) != NULL)
-	{
-		error = -EBUSY;
-	} else
-	{
-		if ((error = smb_proc_rmdir(dir, name, len)) == 0)
-		{
-			smb_invalid_dir_cache(dir->i_ino);
-		}
-	}
-	iput(dir);
+	/*
+	 * Close the directory if it's open.
+	 */
+	smb_close(inode);
+
+	/*
+	 * Check that nobody else is using the directory..
+	 */
+	error = -EBUSY;
+	if (!d_unhashed(dentry))
+		goto out;
+
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_rmdir(dentry);
+
+out:
 	return error;
 }
 
 static int
-smb_unlink(struct inode *dir, const char *name, int len)
+smb_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int error;
 
-	if (!dir || !S_ISDIR(dir->i_mode))
-	{
-		printk("smb_unlink: inode is NULL or not a directory\n");
-		iput(dir);
-		return -ENOENT;
-	}
-	if (smb_find_dir_inode(dir, name, len) != NULL)
-	{
-		error = -EBUSY;
-	} else
-	{
-		if ((error = smb_proc_unlink(dir, name, len)) == 0)
-		{
-			smb_invalid_dir_cache(dir->i_ino);
-		}
-	}
-	iput(dir);
+	/*
+	 * Close the file if it's open.
+	 */
+	smb_close(dentry->d_inode);
+
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_unlink(dentry);
+	if (!error)
+		smb_renew_times(dentry);
 	return error;
 }
 
 static int
-smb_rename(struct inode *old_dir, const char *old_name, int old_len,
-	   struct inode *new_dir, const char *new_name, int new_len,
-	   int must_be_dir)
+smb_rename(struct inode *old_dir, struct dentry *old_dentry,
+	   struct inode *new_dir, struct dentry *new_dentry)
 {
-	int res;
+	int error;
 
-	if (!old_dir || !S_ISDIR(old_dir->i_mode))
-	{
-		printk("smb_rename: old inode is NULL or not a directory\n");
-		res = -ENOENT;
-		goto finished;
-	}
-	if (!new_dir || !S_ISDIR(new_dir->i_mode))
-	{
-		printk("smb_rename: new inode is NULL or not a directory\n");
-		res = -ENOENT;
-		goto finished;
-	}
-	if ((smb_find_dir_inode(old_dir, old_name, old_len) != NULL)
-	    || (smb_find_dir_inode(new_dir, new_name, new_len) != NULL))
-	{
-		res = -EBUSY;
-		goto finished;
-	}
-	res = smb_proc_mv(old_dir, old_name, old_len,
-			  new_dir, new_name, new_len);
-
-	if (res == -EEXIST)
-	{
-		int res1 = smb_proc_unlink(old_dir, new_name, new_len);
-
-		if (res1 == 0)
-		{
-			res = smb_proc_mv(old_dir, old_name, old_len,
-					  new_dir, new_name, new_len);
+	/*
+	 * Close any open files, and check whether to delete the
+	 * target before attempting the rename.
+	 */
+	if (old_dentry->d_inode)
+		smb_close(old_dentry->d_inode);
+	if (new_dentry->d_inode) {
+		smb_close(new_dentry->d_inode);
+		error = smb_proc_unlink(new_dentry);
+		if (error) {
+			VERBOSE("unlink %s/%s, error=%d\n",
+				DENTRY_PATH(new_dentry), error);
+			goto out;
 		}
+		/* FIXME */
+		d_delete(new_dentry);
 	}
-	if (res == 0)
-	{
-		smb_invalid_dir_cache(old_dir->i_ino);
-		smb_invalid_dir_cache(new_dir->i_ino);
+
+	smb_invalid_dir_cache(old_dir);
+	smb_invalid_dir_cache(new_dir);
+	error = smb_proc_mv(old_dentry, new_dentry);
+	if (!error) {
+		smb_renew_times(old_dentry);
+		smb_renew_times(new_dentry);
 	}
-      finished:
-	iput(old_dir);
-	iput(new_dir);
-	return res;
+out:
+	return error;
+}
+
+/*
+ * FIXME: samba servers won't let you create device nodes unless uid/gid
+ * matches the connection credentials (and we don't know which those are ...)
+ */
+static int
+smb_make_node(struct inode *dir, struct dentry *dentry, int mode, int dev)
+{
+	int error;
+	struct iattr attr;
+
+	attr.ia_valid = ATTR_MODE | ATTR_UID | ATTR_GID;
+	attr.ia_mode = mode;
+	attr.ia_uid = current->euid;
+	attr.ia_gid = current->egid;
+
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_setattr_unix(dentry, &attr, MAJOR(dev), MINOR(dev));
+	if (!error) {
+		error = smb_instantiate(dentry, 0, 0);
+	}
+	return error;
+}
+
+/*
+ * dentry = existing file
+ * new_dentry = new file
+ */
+static int
+smb_link(struct dentry *dentry, struct inode *dir, struct dentry *new_dentry)
+{
+	int error;
+
+	DEBUG1("smb_link old=%s/%s new=%s/%s\n",
+	       DENTRY_PATH(dentry), DENTRY_PATH(new_dentry));
+	smb_invalid_dir_cache(dir);
+	error = smb_proc_link(server_from_dentry(dentry), dentry, new_dentry);
+	if (!error) {
+		smb_renew_times(dentry);
+		error = smb_instantiate(new_dentry, 0, 0);
+	}
+	return error;
 }

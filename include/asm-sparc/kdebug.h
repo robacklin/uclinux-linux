@@ -1,4 +1,4 @@
-/* $Id: kdebug.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $
+/* $Id: kdebug.h,v 1.11 2000/06/04 06:23:53 anton Exp $
  * kdebug.h:  Defines and definitions for debugging the Linux kernel
  *            under various kernel debuggers.
  *
@@ -8,13 +8,7 @@
 #define _SPARC_KDEBUG_H
 
 #include <asm/openprom.h>
-
-/* The debugger lives in 1MB of virtual address space right underneath
- * the boot prom.
- */
-
-#define DEBUG_FIRSTVADDR       0xffc00000
-#define DEBUG_LASTVADDR        LINUX_OPPROM_BEGVM
+#include <asm/vaddrs.h>
 
 /* Breakpoints are enter through trap table entry 126.  So in sparc assembly
  * if you want to drop into the debugger you do:
@@ -71,9 +65,5 @@ extern __inline__ void sp_enter_debugger(void)
 #define KDEBUG_DUNNO_OFF    0x4
 #define KDEBUG_DUNNO2_OFF   0x8
 #define KDEBUG_TEACH_OFF    0xc
-
-/* ugh... */
-#define TRAP_TRACE(reg1, reg2) \
-     
 
 #endif /* !(_SPARC_KDEBUG_H) */

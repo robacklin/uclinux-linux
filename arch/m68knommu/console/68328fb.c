@@ -359,8 +359,6 @@ static int mc68328_encode_fix(struct fb_fix_screeninfo *fix,
    fix->ypanstep = 0;
    fix->ywrapstep = 0;
 
-   fix->line_length = par->xres / 8;
-
    for (i = 0; i < arraysize(fix->reserved); i++)
       fix->reserved[i] = 0;
 
@@ -874,7 +872,6 @@ static int mc68328_fb_get_fix(struct fb_fix_screeninfo *fix, int con)
    struct mc68328_fb_par par;
    int error = 0;
 
-   memset(&par, 0, sizeof(par));
    if (con == -1)
       mc68328_fb_get_par(&par);
    else

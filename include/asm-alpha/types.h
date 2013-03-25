@@ -25,22 +25,8 @@ typedef unsigned short __u16;
 typedef __signed__ int __s32;
 typedef unsigned int __u32;
 
-/*
- * There are 32-bit compilers for the alpha out there..
- */
-#if ((~0UL) == 0xffffffff)
-
-#if defined(__GNUC__) && !defined(__STRICT_ANSI__)
-typedef __signed__ long long __s64;
-typedef unsigned long long __u64;
-#endif
-
-#else
-
 typedef __signed__ long __s64;
 typedef unsigned long __u64;
-
-#endif
 
 /*
  * These aren't exported outside the kernel to avoid name space clashes
@@ -56,20 +42,13 @@ typedef unsigned short u16;
 typedef signed int s32;
 typedef unsigned int u32;
 
-/*
- * There are 32-bit compilers for the alpha out there..
- */
-#if ((~0UL) == 0xffffffff)
-
-typedef signed long long s64;
-typedef unsigned long long u64;
-
-#else
-
 typedef signed long s64;
 typedef unsigned long u64;
 
-#endif
+#define BITS_PER_LONG 64
+
+typedef u64 dma_addr_t;
+typedef u64 dma64_addr_t;
 
 #endif /* __KERNEL__ */
 #endif /* _ALPHA_TYPES_H */

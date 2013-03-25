@@ -1,24 +1,12 @@
-/*
- * $Id: capi.h,v 1.1.1.1 1999-11-22 03:47:00 christ Exp $
+/* $Id: capi.h,v 1.1.4.1 2001/11/20 14:19:38 kai Exp $
  * 
  * CAPI 2.0 Interface for Linux
  * 
  * Copyright 1997 by Carsten Paeth (calle@calle.in-berlin.de)
  * 
- * $Log: capi.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:00  christ
- * Importing new-wave v1.0.4
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * Revision 1.1  1997/03/04 21:27:33  calle
- * First version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
- *
- * 
  */
 
 #ifndef __LINUX_CAPI_H__
@@ -111,6 +99,7 @@ typedef struct capi_manufacturer_cmd {
  */
 #define CAPI_INSTALLED		_IOR('C',0x22, __u16)
 
+
 /*
  * member contr is input for
  * CAPI_GET_MANUFACTURER, CAPI_VERSION, CAPI_GET_SERIAL
@@ -126,5 +115,19 @@ typedef union capi_ioctl_struct {
 	capi_manufacturer_cmd cmd;
 	__u16 errcode;
 } capi_ioctl_struct;
+
+/*
+ * Middleware extension
+ */
+
+#define CAPIFLAG_HIGHJACKING	0x0001
+
+#define CAPI_GET_FLAGS		_IOR('C',0x23, unsigned)
+#define CAPI_SET_FLAGS		_IOR('C',0x24, unsigned)
+#define CAPI_CLR_FLAGS		_IOR('C',0x25, unsigned)
+
+#define CAPI_NCCI_OPENCOUNT	_IOR('C',0x26, unsigned)
+
+#define CAPI_NCCI_GETUNIT	_IOR('C',0x27, unsigned)
 
 #endif				/* __LINUX_CAPI_H__ */

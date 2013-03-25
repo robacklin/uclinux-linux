@@ -1,4 +1,4 @@
-/* $Id: errno.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $ */
+/* $Id: errno.h,v 1.6 1997/04/15 09:03:38 davem Exp $ */
 #ifndef _SPARC_ERRNO_H
 #define _SPARC_ERRNO_H
 
@@ -37,7 +37,7 @@
 #define	EPIPE		32	/* Broken pipe */
 #define	EDOM		33	/* Math argument out of domain of func */
 #define	ERANGE		34	/* Math result not representable */
-#define	EWOULDBLOCK	35	/* Operation would block */
+#define	EWOULDBLOCK	EAGAIN	/* Operation would block */
 #define	EINPROGRESS	36	/* Operation now in progress */
 #define	EALREADY	37	/* Operation already in progress */
 #define	ENOTSOCK	38	/* Socket operation on non-socket */

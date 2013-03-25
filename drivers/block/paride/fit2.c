@@ -1,6 +1,6 @@
 /* 
         fit2.c        (c) 1998  Grant R. Guenther <grant@torque.net>
-                          Under the terms of the GNU public license.
+                          Under the terms of the GNU General Public License.
 
 	fit2.c is a low-level protocol driver for the older version
         of the Fidelity International Technology parallel port adapter.  
@@ -19,6 +19,7 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/wait.h>
 #include <asm/io.h>
 
 #include "paride.h"
@@ -159,3 +160,4 @@ void    cleanup_module(void)
 #endif
 
 /* end of fit2.c */
+MODULE_LICENSE("GPL");

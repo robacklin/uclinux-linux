@@ -5,6 +5,8 @@
  *
  *	(C) Copyright 1999, Greg Ungerer (gerg@snapgear.com)
  * 	(C) Copyright 2000, Lineo Inc. (www.lineo.com) 
+ *      (c) copyright 2003, Arcturus Networks Inc.
+ *                          by Michael Leslie <mleslie@ArcturusNetworks.com>
  */
 
 /****************************************************************************/
@@ -73,6 +75,67 @@
 #define	MCFSIM_PCDDR		0x94		/* Port C Direction (r/w) */
 #define	MCFSIM_PCDAT		0x96		/* Port C Data (r/w) */
 #define	MCFSIM_PDCNT		0x98		/* Port D Control (r/w) */
+
+
+/*
+ *	Bit definitions for 5272 ICRs
+ */
+
+/* Hereunder, PI = interrupt enable, IPL = int priority level */
+/* IPL may only be written at the same time as PI is enabled */
+#define MCFSIM_INT1PI           0x80000000
+#define MCFSIM_INT1IPL(x)       ((x & 0x7) << 28)
+#define MCFSIM_INT2PI           0x08000000
+#define MCFSIM_INT2IPL(x)       ((x & 0x7) << 24)
+#define MCFSIM_INT3PI           0x00800000
+#define MCFSIM_INT3IPL(x)       ((x & 0x7) << 20)
+#define MCFSIM_INT4PI           0x00080000
+#define MCFSIM_INT4IPL(x)       ((x & 0x7) << 16)
+
+#define MCFSIM_TMR0PI           0x00008000
+#define MCFSIM_TMR0IPL(x)       ((x & 0x7) << 12)
+#define MCFSIM_TMR1PI           0x00000800
+#define MCFSIM_TMR1IPL(x)       ((x & 0x7) << 8)
+#define MCFSIM_TMR2PI           0x00000080
+#define MCFSIM_TMR2IPL(x)       ((x & 0x7) << 4)
+#define MCFSIM_TMR3PI           0x00000008
+#define MCFSIM_TMR3IPL(x)       ((x & 0x7) << 0)
+
+
+/* Interrupt vectors for 5272: */
+
+#define MCF_INT_SUPRIOUS 64 /* User Spurious Interrupt */
+#define MCF_INT_INT1     65 /* External Interrupt Input 1 */
+#define MCF_INT_INT2     66 /* External Interrupt Input 2 */
+#define MCF_INT_INT3     67 /* External Interrupt Input 3 */
+#define MCF_INT_INT4     68 /* External Interrupt Input 4 */
+#define MCF_INT_TMR0     69 /* Timer 0 */
+#define MCF_INT_TMR1     70 /* Timer 1 */
+#define MCF_INT_TMR2     71 /* Timer 2 */
+#define MCF_INT_TMR3     72 /* Timer 3 */
+#define MCF_INT_UART1    73 /* UART 1 */
+#define MCF_INT_UART2    74 /* UART 2 */
+#define MCF_INT_PLIP     75 /* PLIC 2KHz Periodic */
+#define MCF_INT_PLIA     76 /* PLIC Asynchronous */
+#define MCF_INT_USB0     77 /* USB Endpoint 0 */
+#define MCF_INT_USB1     78 /* USB Endpoint 1 */
+#define MCF_INT_USB2     79 /* USB Endpoint 2 */
+#define MCF_INT_USB3     80 /* USB Endpoint 3 */
+#define MCF_INT_USB4     81 /* USB Endpoint 4 */
+#define MCF_INT_USB5     82 /* USB Endpoint 5 */
+#define MCF_INT_USB6     83 /* USB Endpoint 6 */
+#define MCF_INT_USB7     84 /* USB Endpoint 7 */
+#define MCF_INT_DMA      85 /* DMA Controller */
+#define MCF_INT_ERx      86 /* Ethernet Receiver */
+#define MCF_INT_ETx      87 /* Ethernet Transmitter */
+#define MCF_INT_ENTC     88 /* Ethernet Module Non-time-critical */
+#define MCF_INT_QSPI     89 /* Queued Serial Peripheral Interface */
+#define MCF_INT_INT5     90 /* External Interrupt Input 5 */
+#define MCF_INT_INT6     91 /* External Interrupt Input 6 */
+#define MCF_INT_SWTO     92 /* Software Watchdog Timer Timeout */
+#define MCF_INT_93       93 /* Reserved */
+#define MCF_INT_94       94 /* Reserved */
+#define MCF_INT_95       95 /* Reserved */
 
 
 /****************************************************************************/

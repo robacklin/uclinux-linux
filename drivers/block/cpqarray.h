@@ -28,9 +28,8 @@
 #ifdef __KERNEL__
 #include <linux/blkdev.h>
 #include <linux/locks.h>
-#include <linux/malloc.h>
-#include <linux/config.h>
-#include <linux/md.h>
+#include <linux/slab.h>
+#include <linux/proc_fs.h>
 #include <linux/timer.h>
 #endif
 
@@ -40,6 +39,7 @@
 #define IO_ERROR	1
 #define NWD		16
 #define NWD_SHIFT	4
+#define IDA_MAX_PART	16
 
 #define IDA_TIMER	(5*HZ)
 #define IDA_TIMEOUT	(10*HZ)
@@ -56,7 +56,25 @@ typedef struct {
 } drv_info_t;
 
 #ifdef __KERNEL__
-typedef struct {
+
+struct ctlr_info;
+typedef struct ctlr_info ctlr_info_t;
+
+struct access_method {
+	void (*submit_command)(ctlr_info_t *h, cmdlist_t *c);
+	void (*set_intr_mask)(ctlr_info_t *h, unsigned long val);
+	unsigned long (*fifo_full)(ctlr_info_t *h);
+	unsigned long (*intr_pending)(ctlr_info_t *h);
+	unsigned long (*command_completed)(ctlr_info_t *h);
+};
+
+struct board_type {
+	__u32	board_id;
+	char	*product_name;
+	struct access_method *access;
+};
+
+struct ctlr_info {
 	int	ctlr;
 	char	devname[8];
 	__u32	log_drv_map;
@@ -65,25 +83,34 @@ typedef struct {
 	__u32	mp_failed_drv_map;
 
 	char	firm_rev[4];
-	int	product;
+	struct pci_dev *pdev;
 	int	ctlr_sig;
 
 	int	log_drives;
+	int	highest_lun;
 	int	phys_drives;
 
+	struct pci_dev *pci_dev;    /* NULL if EISA */
 	__u32	board_id;
-	__u32	vaddr;
-	__u32	paddr;
-	__u32	ioaddr;
+	char	*product_name;	
+
+	void *vaddr;
+	unsigned long paddr;
+	unsigned long io_mem_addr;
+	unsigned long io_mem_length;	
 	int	intr;
 	int	usage_count;
 	drv_info_t	drv[NWD];
-	int	proc;
+	struct proc_dir_entry *proc;
+
+	struct access_method access;
 
 	cmdlist_t *reqQ;
 	cmdlist_t *cmpQ;
 	cmdlist_t *cmd_pool;
+	dma_addr_t cmd_pool_dhandle;
 	__u32	*cmd_pool_bits;
+
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
 
@@ -92,7 +119,14 @@ typedef struct {
 	unsigned int nr_frees;
 	struct timer_list timer;
 	unsigned int misc_tflags;
-} ctlr_info_t;
+	// Disk structures we need to pass back
+	struct gendisk gendisk;
+	// Index by Minor Numbers
+	struct hd_struct	hd[256];
+	int			sizes[256];
+	int			blocksizes[256];
+	int			hardsizes[256];
+};
 #endif
 
 #endif /* CPQARRAY_H */

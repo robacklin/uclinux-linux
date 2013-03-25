@@ -1,6 +1,8 @@
-Yes.. it's being worked on.
+                       Linux DECnet Project
+                      ======================
 
-If you want to get involved email me <Alan.Cox@linux.org> and I'll put you
-in touch with the people doing the work.
+The documentation for this kernel subsystem is available in the
+Documentation/networking subdirctory of this distribution and also
+on line at http://www.chygwyn.com/DECnet/
 
-Alan
+Steve Whitehouse <SteveW@ACM.org>

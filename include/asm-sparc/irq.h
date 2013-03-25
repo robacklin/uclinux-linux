@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $
+/* $Id: irq.h,v 1.32 2000/08/26 02:42:28 anton Exp $
  * irq.h: IRQ registers on the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -7,34 +7,60 @@
 #ifndef _SPARC_IRQ_H
 #define _SPARC_IRQ_H
 
+#include <linux/config.h>
 #include <linux/linkage.h>
+#include <linux/threads.h>     /* For NR_CPUS */
 
-#include <asm/system.h>     /* For NCPUS */
+#include <asm/system.h>     /* For SUN4M_NCPUS */
+#include <asm/btfixup.h>
 
-#define NR_IRQS    15
+#define __irq_ino(irq) irq
+#define __irq_pil(irq) irq
+BTFIXUPDEF_CALL(char *, __irq_itoa, unsigned int)
+#define __irq_itoa(irq) BTFIXUP_CALL(__irq_itoa)(irq)
+
+#define NR_IRQS    16
 
 /* Dave Redman (djhr@tadpole.co.uk)
  * changed these to function pointers.. it saves cycles and will allow
  * the irq dependencies to be split into different files at a later date
  * sun4c_irq.c, sun4m_irq.c etc so we could reduce the kernel size.
+ * Jakub Jelinek (jj@sunsite.mff.cuni.cz)
+ * Changed these to btfixup entities... It saves cycles :)
  */
-extern void (*disable_irq)(unsigned int);
-extern void (*enable_irq)(unsigned int);
-extern void (*clear_clock_irq)( void );
-extern void (*clear_profile_irq)( void );
-extern void (*load_profile_irq)( unsigned int timeout );
-extern void (*init_timers)(void (*lvl10_irq)(int, void *, struct pt_regs *));
+BTFIXUPDEF_CALL(void, disable_irq, unsigned int)
+BTFIXUPDEF_CALL(void, enable_irq, unsigned int)
+BTFIXUPDEF_CALL(void, disable_pil_irq, unsigned int)
+BTFIXUPDEF_CALL(void, enable_pil_irq, unsigned int)
+BTFIXUPDEF_CALL(void, clear_clock_irq, void)
+BTFIXUPDEF_CALL(void, clear_profile_irq, int)
+BTFIXUPDEF_CALL(void, load_profile_irq, int, unsigned int)
+
+#define disable_irq_nosync disable_irq
+#define disable_irq(irq) BTFIXUP_CALL(disable_irq)(irq)
+#define enable_irq(irq) BTFIXUP_CALL(enable_irq)(irq)
+#define disable_pil_irq(irq) BTFIXUP_CALL(disable_pil_irq)(irq)
+#define enable_pil_irq(irq) BTFIXUP_CALL(enable_pil_irq)(irq)
+#define clear_clock_irq() BTFIXUP_CALL(clear_clock_irq)()
+#define clear_profile_irq(cpu) BTFIXUP_CALL(clear_profile_irq)(cpu)
+#define load_profile_irq(cpu,limit) BTFIXUP_CALL(load_profile_irq)(cpu,limit)
+
+extern void (*sparc_init_timers)(void (*lvl10_irq)(int, void *, struct pt_regs *));
 extern void claim_ticker14(void (*irq_handler)(int, void *, struct pt_regs *),
 			   int irq,
 			   unsigned int timeout);
 
-#ifdef __SMP__
-extern void (*set_cpu_int)(int, int);
-extern void (*clear_cpu_int)(int, int);
-extern void (*set_irq_udt)(int);
+#ifdef CONFIG_SMP
+BTFIXUPDEF_CALL(void, set_cpu_int, int, int)
+BTFIXUPDEF_CALL(void, clear_cpu_int, int, int)
+BTFIXUPDEF_CALL(void, set_irq_udt, int)
+
+#define set_cpu_int(cpu,level) BTFIXUP_CALL(set_cpu_int)(cpu,level)
+#define clear_cpu_int(cpu,level) BTFIXUP_CALL(clear_cpu_int)(cpu,level)
+#define set_irq_udt(cpu) BTFIXUP_CALL(set_irq_udt)(cpu)
 #endif
 
-extern int request_fast_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname);
+extern int request_fast_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, __const__ char *devname);
 
 /* On the sun4m, just like the timers, we have both per-cpu and master
  * interrupt registers.
@@ -68,7 +94,7 @@ struct sun4m_intreg_percpu {
  *             sun4m machines, for MP the layout makes more sense.
  */
 struct sun4m_intregs {
-	struct sun4m_intreg_percpu cpu_intregs[NCPUS];
+	struct sun4m_intreg_percpu cpu_intregs[SUN4M_NCPUS];
 	unsigned int tbt;                /* IRQ's that are still pending. */
 	unsigned int irqs;               /* Master IRQ bits. */
 
@@ -122,5 +148,6 @@ extern struct sun4m_intregs *sun4m_interrupts;
 #define	SUN4M_INT_SBUSBITS	0x00003F80	  /* sbus int bits */
 
 #define SUN4M_INT_SBUS(x)	(1 << (x+7))
+#define SUN4M_INT_VME(x)	(1 << (x))
 
 #endif

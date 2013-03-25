@@ -1,14 +1,12 @@
 /*
+ * DSS.1 module definitions
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        DSS.1 module definitions
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 #ifndef EDSS1_H

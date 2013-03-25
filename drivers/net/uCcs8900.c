@@ -1,6 +1,8 @@
 /* uCcs89x0.c: A Crystal Semiconductor CS89[02]0 driver for linux. */
-/*
-	Port for uCsimm 1999 D. Jeff Dionne, Rt-Control Inc.
+/* 
+
+	Port for uCsimm 1999 D. Jeff Dionne, Rt-Control Inc.(Arcturus Networks Inc.)
+	Port for arm7 platforms 2001 Oleksandr Zhadan, Arcturus Networks Inc.
 
 	Written 1996 by Russell Nelson, with reference to skeleton.c
 	written 1993-1994 by Donald Becker.
@@ -16,7 +18,6 @@
   Mike Cruse        : mcruse@cti-ltd.com
                     : Changes for Linux 2.0 compatibility. 
                     : Added dev_id parameter in net_interrupt(),
-
                     : request_irq() and free_irq(). Just NULL for now.
 
   Mike Cruse        : Added MOD_INC_USE_COUNT and MOD_DEC_USE_COUNT macros
@@ -28,18 +29,19 @@
                     : as an example. Disabled autoprobing in init_module(),
                     : not a good thing to do to other devices while Linux
                     : is running from all accounts.
-*/
 
-static const char *version =
-"cs89x0.c:v1.02 11/26/96 Russell Nelson <nelson@crynwr.com>\ncs89x0.c:68EZ328 support D. Jeff Dionne <jeff@rt-control.com> 1999\n";
+  Chee Tim Loh      : cheetim_loh@innomedia.com.sg
+                    : Added support for TI TMS320DM270.
+
+*/
 
 
 /* ======================= configure the driver here ======================= */
 
-
 /* use 0 for production, 1 for verification, >2 for debug */
 #ifndef NET_DEBUG
-#define NET_DEBUG 0
+#define NET_DEBUG 1
+//#define NET_DEBUG 77
 #endif
 
 /* ======================= end of configuration ======================= */
@@ -68,12 +70,13 @@ static const char *version =
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 
-#ifndef CONFIG_UCCS8900_HW_SWAP
+#ifndef CONFIG_UCCS89x0_HW_SWAP
 #include <asm/io.h>
 #else
 #include <asm/io_hw_swap.h>
@@ -95,20 +98,50 @@ static const char *version =
 #include <asm/MC68EZ328.h>
 #endif
 
-#ifdef CONFIG_M68332
-#include <asm/MC68332.h>
+#ifdef CONFIG_M68VZ328
+#include <asm/MC68VZ328.h>
 #endif
 
+#ifdef CONFIG_M5272
+#include <asm/coldfire.h>
+#include <asm/mcfsim.h>
+#endif
+
+#if defined(CONFIG_UCBOOTSTRAP)
+extern unsigned char cs8900a_hwaddr[6];
+#endif
+
+static char version[] __initdata=
+"cs89x0.c:v1.02 11/26/96 Russell Nelson <nelson@crynwr.com> \n\
+cs89x0.c:68EZ328 support D. Jeff Dionne <jeff@arcturusnetworks.com> 1999 \n\
+cs89x0.c:S3C4530 support O. Zhadan <oleks@arcturusnetworks.com> 2001 \n\
+";
+
 static unsigned int net_debug = NET_DEBUG;
+
+#if defined(CONFIG_UCSIMM) || defined(CONFIG_UCDIMM)
+static unsigned int netcard_portlist[] __initdata = { 0x10000300,0,0,0,0,0,0,0};
+#elif defined (CONFIG_ARCH_DM270)
+static unsigned int netcard_portlist[] __initdata = { 0x07c00300,0,0,0,0,0,0,0};
+#elif defined (CONFIG_BOARD_EVS3C4530HEI)
+static unsigned int netcard_portlist[] __initdata = { 0x05400000,0,0,0,0,0,0,0};
+#elif defined(CONFIG_BOARD_UC5272)
+static unsigned int netcard_portlist[] __initdata = { 0x30000000, 0 };
+#else
+static unsigned int netcard_portlist[] __initdata =
+   { 0x300, 0x320, 0x340, 0x360, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x2e0, 0};
+static unsigned int cs8900_irq_map[] = {10,11,12,5};
+#endif
+
 
 /* The number of low I/O ports used by the ethercard. */
 #define NETCARD_IO_EXTENT	16
 
-void *irq2dev_map[1]; /* FIXME:  This does NOT go here */
+/* void *irq2dev_map[1];  FIXME:  This does NOT go here */
 
 /* Information that need to be kept for each board. */
 struct net_local {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	int chip_type;		/* one of: CS8900, CS8920, CS8920M */
 	char chip_revision;	/* revision letter of the chip ('A'...) */
 	int send_cmd;		/* the propercommand used to send a packet. */
@@ -119,29 +152,34 @@ struct net_local {
 	int rx_mode;
 	int curr_rx_cfg;
         int linectl;
+	int force;		/* force various values; see FORCE* above. */
+	spinlock_t lock;
         int send_underrun;      /* keep track of how many underruns in a row we get */
-	struct sk_buff *skb;
 };
+
 
 /* Index to functions, as function prototypes. */
 
-extern int cs89x0_probe(struct device *dev);
+unsigned char *get_MAC_address(char *devname);
+extern int cs89x0_probe(struct net_device *dev);
 
-static int cs89x0_probe1(struct device *dev, int ioaddr);
-static int net_open(struct device *dev);
-static int net_send_packet(struct sk_buff *skb, struct device *dev);
+static int cs89x0_probe1(struct net_device *dev, int ioaddr);
+static int net_open(struct net_device *dev);
+static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void cs8900_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void set_multicast_list(struct device *dev);
-static void net_rx(struct device *dev);
-static int net_close(struct device *dev);
-static struct enet_statistics *net_get_stats(struct device *dev);
-static void reset_chip(struct device *dev);
-static int set_mac_address(struct device *dev, void *addr);
+static void set_multicast_list(struct net_device *dev);
+static void net_rx(struct net_device *dev);
+static int net_close(struct net_device *dev);
+static struct net_device_stats *net_get_stats(struct net_device *dev);
+static void reset_chip(struct net_device *dev);
+
+static int set_mac_address(struct net_device *dev, void *addr);
 
 
 /* Example routines you must write ;->. */
 #define tx_done(dev) 1
 
+
 /* Check for a network adaptor of this type, and return '0' iff one exists.
    If dev->base_addr == 0, probe all likely locations.
    If dev->base_addr == 1, always return failure.
@@ -149,72 +187,103 @@ static int set_mac_address(struct device *dev, void *addr);
    (detachable devices only).
    */
 
-int
-cs89x0_probe(struct device *dev)
+int __init cs89x0_probe(struct net_device *dev)
 {
-	int base_addr = CS8900_BASE;
+    static int i = 0; /* don't probe twice */
+    if	 ( netcard_portlist[i] )
+	 return(cs89x0_probe1(dev, netcard_portlist[i++]));
 
-	return cs89x0_probe1(dev, base_addr);
+    else return -ENXIO;
 }
 
 int inline
-readreg(struct device *dev, int portno)
+readreg(struct net_device *dev, int portno)
 {
 	outw(portno, dev->base_addr + ADD_PORT);
 	return inw(dev->base_addr + DATA_PORT);
 }
 
 void inline
-writereg(struct device *dev, int portno, int value)
+writereg(struct net_device *dev, int portno, int value)
 {
 	outw(portno, dev->base_addr + ADD_PORT);
 	outw(value,  dev->base_addr + DATA_PORT);
 }
 
 int inline
-readword(struct device *dev, int portno)
+readword(struct net_device *dev, int portno)
 {
 	return inw(dev->base_addr + portno);
 }
 
 void inline
-writeword(struct device *dev, int portno, int value)
+writeword(struct net_device *dev, int portno, int value)
 {
 	outw(value, dev->base_addr + portno);
 }
 
 /* This is the real probe routine.  */
-static int cs89x0_probe1(struct device *dev, int ioaddr)
+
+static int __init 
+cs89x0_probe1(struct net_device *dev, int ioaddr)
 {
 	struct net_local *lp;
 	static unsigned version_printed = 0;
 	int i;
 	unsigned rev_type = 0;
 
-	irq2dev_map[0] = dev;
+/*	irq2dev_map[0] = dev;  */
 
-#ifdef CONFIG_MWI
-
-	/* chip select at 0x800000, 8kb */
-	*(volatile unsigned short *)0xfffa5c = 0x8001;
-	*(volatile unsigned short *)0xfffa5e = 0x7970;
-
+#if defined(CONFIG_UCSIMM)
+	/* set up PF1 as sleep control */
+	PFSEL  |= 0x01;  /* IO, not LCONTRAST */
+	PFDIR  |= 0x01;  /* output */
+	PFDATA |= 0x01;  /* not sleeping */
+#elif defined(CONFIG_UCDIMM)
+	/* set up PG3 (~HiZ/P/~D) as sleep control */
+	PGSEL  |= 0x08;  /* IO */
+	PGDIR  |= 0x08;  /* output */
+	PGDATA |= 0x08;  /* not sleeping */
 #endif
 
-#ifdef CONFIG_UCSIMM
-	/* set up the chip select */
-	*(volatile unsigned  char *)0xfffff42b |= 0x01; /* output /sleep */
-	*(volatile unsigned short *)0xfffff428 |= 0x0101; /* not sleeping */
-
-	*(volatile unsigned  char *)0xfffff42b &= ~0x02; /* input irq5 */
-	*(volatile unsigned short *)0xfffff428 &= ~0x0202; /* irq5 fcn on */
+#if defined(CONFIG_UCSIMM) || defined(CONFIG_UCDIMM)
+	*(volatile unsigned  char *)PFSEL_ADDR &=   ~0x02; /* input irq5 */
+	*(volatile unsigned short *)PFDIR_ADDR &= ~0x0202; /* irq5 fcn on */
 	
-	*(volatile unsigned short *)0xfffff102 = 0x8000; /* 0x04000000 */
-	*(volatile unsigned short *)0xfffff112 = 0x01e1; /* 128k, 2ws, FLASH, en */
+	*(volatile unsigned short *)CSGBB_ADDR  = 0x8000;  /* 0x10000000 */
+	*(volatile unsigned short *)CSB_ADDR    = 0x01e1;  /* 128k, 2ws, FLASH, en */
 #endif
 
 #ifdef CONFIG_ARCH_ATMEL
-	/* Fixme -- set up the chip, irq, etc... */
+	*(volatile unsigned int *) AIC_IDCR = AIC_IRQ1; /* disable interrupt IRQ1 */
+#ifdef	CONFIG_EB40LS	 
+	*(volatile unsigned int *) PIO_DISABLE_REGISTER = (1 << 10); /* disable PIO for IRQ1 */
+#endif	
+	*(volatile unsigned int *) AIC_ICCR = AIC_IRQ1; /* clear interrupt IRQ1 */
+	*(volatile unsigned int *) AIC_IECR = AIC_IRQ1; /* enable interrupt IRQ1 */
+#endif
+
+#ifdef CONFIG_ARCH_DM270
+	printk("uCcs89x0: Setting up TI TMS320DM270 CS8900A IRQ ioaddr = 0x%X\n",ioaddr);
+	/* Set GIO port to input */
+	outw(inw(DM270_GIO_DIR(DM270_INTERRUPT_EXT4)) | (1<<DM270_GIO_DIR_SHIFT(DM270_INTERRUPT_EXT4)),
+			DM270_GIO_DIR(DM270_INTERRUPT_EXT4));
+
+	/* Set GIO as interrupt port */
+	outw(inw(DM270_GIO_IRQPORT) | (1<<DM270_GIO_IRQPORT_SHIFT(DM270_INTERRUPT_EXT4)),
+			DM270_GIO_IRQPORT);
+
+	/*
+	 * CS8900A INTRQ goes high when an enabled interrupt is triggered
+	 * and goes low after ISQ is read as all 0's
+	 */
+
+	/* Trigger on rising edge */
+	outw(inw(DM270_GIO_INV(DM270_INTERRUPT_EXT4)) | (1<<DM270_GIO_INV_SHIFT(DM270_INTERRUPT_EXT4)),
+			DM270_GIO_INV(DM270_INTERRUPT_EXT4));
+
+	/* Use single-sided edge interrupts */
+	outw(inw(DM270_GIO_IRQEDGE) & ~(1<<DM270_GIO_IRQEDGE_SHIFT(DM270_INTERRUPT_EXT4)), DM270_GIO_IRQEDGE);
 #endif
 
 #ifdef CONFIG_ALMA_ANS
@@ -246,6 +315,8 @@ static int cs89x0_probe1(struct device *dev, int ioaddr)
 	}
 
 	/* get the chip type */
+	printk ("CrystalLAN EISA ID: 0x%04x\n", readreg(dev, 0));
+
 	rev_type = readreg(dev, PRODUCT_ID_ADD);
 	lp->chip_type = rev_type &~ REVISON_BITS;
 	lp->chip_revision = ((rev_type & REVISON_BITS) >> 8) + 'A';
@@ -262,62 +333,52 @@ static int cs89x0_probe1(struct device *dev, int ioaddr)
 	if (net_debug  &&  version_printed++ == 0)
 		printk(version);
 
-	printk("%s: cs89%c0%s rev %c found at 0x%.8x %s",
+	printk("%s: cs89%c0%s rev %c found at 0x%.8lx %s",
 	       dev->name,
 	       lp->chip_type==CS8900?'0':'2',
 	       lp->chip_type==CS8920M?"M":"",
 	       lp->chip_revision,
 	       dev->base_addr,
-	       readreg(dev, PP_SelfST) & ACTIVE_33V ? "3.3Volts " : "5Volts ");
+	       readreg(dev, PP_SelfST) & ACTIVE_33V ? "3.3Volts" : "5Volts");
 
 	reset_chip(dev);
 
 	/* Fill this in, we don't have an EEPROM */
 	lp->adapter_cnf = A_CNF_10B_T | A_CNF_MEDIA_10B_T;
-	lp->auto_neg_cnf = EE_AUTO_NEG_ENABLE;
+	lp->auto_neg_cnf = EE_AUTO_NEG_ENABLE | IMM_BIT;
 
 	printk(" media %s%s%s",
 	       (lp->adapter_cnf & A_CNF_10B_T)?"RJ-45,":"",
 	       (lp->adapter_cnf & A_CNF_AUI)?"AUI,":"",
 	       (lp->adapter_cnf & A_CNF_10B_2)?"BNC,":"");
+
 	lp->irq_map = 0xffff;
 
-#ifdef CONFIG_MWI
-	dev->dev_addr[0] = 0x00;
-	dev->dev_addr[1] = 0x30;
-	dev->dev_addr[2] = 0x0f;
-	dev->dev_addr[3] = 0x00;
-	dev->dev_addr[4] = 0x01;
-	dev->dev_addr[5] = 0x0b;
-#endif
+	/* dev->dev_addr[0] through dev->dev_addr[6] holds the mac address
+	 * of this ethernet device.  This can be set to anything we want it
+	 * to be.  But care should be taken to make this number unique... */
 
-#ifdef CONFIG_ALMA_ANS
-	/* Bad hack, has to be fixed, since we have the SEEPROM on board */
-	dev->dev_addr[0] = 0x00;
-	dev->dev_addr[1] = 0x00;
-	dev->dev_addr[2] = 0xc0;
-	dev->dev_addr[3] = 0xff;
-	dev->dev_addr[4] = 0xee;
-	dev->dev_addr[5] = 0x01;
-#endif
-
-#ifdef CONFIG_UCSIMM
-	{
- 		extern unsigned char *cs8900a_hwaddr;
+#if defined (CONFIG_UCBOOTSTRAP)
  		memcpy(dev->dev_addr, cs8900a_hwaddr, 6);
-	}
-#endif
+	
+#elif defined (CONFIG_ARCH_DM270)
+      memcpy(dev->dev_addr, get_MAC_address("dev1"), 6);
+#else
+#warning	    MAC address is not defined - uxing 00:de:ad:be:ef:53
+	{                         
+	  dev->dev_addr[0] = 0x00;
+	  dev->dev_addr[1] = 0xde;
+	  dev->dev_addr[2] = 0xad;
+	  dev->dev_addr[3] = 0xbe;
+	  dev->dev_addr[4] = 0xef;
+	  dev->dev_addr[5] = 0x53;
+	}                         
 
-#ifdef CONFIG_ARCH_ATMEL
-	{
- 		memcpy(dev->dev_addr, (unsigned long)CS8900_BASE, 6);
-	}
 #endif
 
 	/* print the ethernet address. */
-	printk("mac = %.2x", dev->dev_addr[0]);
-	for (i = 1; i < ETH_ALEN; i++)
-		printk(":%.2x", dev->dev_addr[i]);
+	for (i = 0; i < ETH_ALEN; i++)
+		printk(" %2.2x", dev->dev_addr[i]);
 
 #ifdef FIXME
 	/* Grab the region so we can find another board if autoIRQ fails. */
@@ -328,7 +389,7 @@ static int cs89x0_probe1(struct device *dev, int ioaddr)
 	dev->stop		= net_close;
 	dev->hard_start_xmit 	= net_send_packet;
 	dev->get_stats		= net_get_stats;
-	dev->set_multicast_list	= &set_multicast_list;
+	dev->set_multicast_list = &set_multicast_list;
 	dev->set_mac_address 	= &set_mac_address;
 
 	/* Fill in the fields of the device structure with ethernet values. */
@@ -339,18 +400,18 @@ static int cs89x0_probe1(struct device *dev, int ioaddr)
 }
 
 
-void
-reset_chip(struct device *dev)
+
+void __init
+reset_chip(struct net_device *dev)
 {
 	int reset_start_time;
 
 	writereg(dev, PP_SelfCTL, readreg(dev, PP_SelfCTL) | POWER_ON_RESET);
 
-	/* wait 30 ms */
 	current->state = TASK_INTERRUPTIBLE;
-	current->timeout = jiffies + 3;
-	schedule();
-
+	/* wait 30 ms */
+	schedule_timeout(30*HZ/1000);
+	
 	/* Wait until the chip is reset */
 	reset_start_time = jiffies;
 	while( (readreg(dev, PP_SelfST) & INIT_DONE) == 0 && jiffies - reset_start_time < 2)
@@ -358,7 +419,7 @@ reset_chip(struct device *dev)
 }
 
 static int
-detect_tp(struct device *dev)
+detect_tp(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int timenow = jiffies;
@@ -383,7 +444,7 @@ detect_tp(struct device *dev)
 
 /* send a test packet - return true if carrier bits are ok */
 int
-send_test_pkt(struct device *dev)
+send_test_pkt(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 	char test_packet[] = { 0,0,0,0,0,0, 0,0,0,0,0,0,
@@ -424,7 +485,7 @@ send_test_pkt(struct device *dev)
 
 
 void
-write_irq(struct device *dev, int chip_type, int irq)
+write_irq(struct net_device *dev, int chip_type, int irq)
 {
   /* we only hooked up 0 :-) */
 	writereg(dev, PP_CS8900_ISAINT, 0);
@@ -438,64 +499,84 @@ write_irq(struct device *dev, int chip_type, int irq)
    there is non-reboot way to recover if something goes wrong.
    */
 static int
-net_open(struct device *dev)
+net_open(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int result = 0;
-//	int i;
+	volatile unsigned long  *icrp;
 
 	write_irq(dev, lp->chip_type, 0);
 
-	irq2dev_map[/* FIXME */ 0] = dev;
+/*	irq2dev_map[0] = dev;   */
 	writereg(dev, PP_BusCTL, 0); /* ints off! */
 
-#ifdef CONFIG_UCSIMM
+#if defined(CONFIG_UCSIMM) || defined(CONFIG_UCDIMM)
 	*(volatile unsigned short *)0xfffff302 |= 0x0080; /* +ve pol irq */
-
-        if (request_irq(IRQ_MACHSPEC | IRQ5_IRQ_NUM,
-                        cs8900_interrupt,
-                        IRQ_FLG_STD,
-                        "CrystalLAN_cs8900a", NULL))
+	dev->irq = IRQ5_IRQ_NUM;
+        if (request_irq(dev->irq, cs8900_interrupt, IRQ_FLG_STD,
+                        "CrystalLAN_cs8900a", dev))
                 panic("Unable to attach cs8900 intr\n");
 #endif
 
 #ifdef CONFIG_ARCH_ATMEL
+	/* Set IRQ1 with high level sensitive & priority level 6. */
+	*(volatile unsigned int *) AIC_SMR(IRQ_IRQ1) = 0x46;
+
 	/* We use IRQ_IRQ1 for the network interrupt */
-        if (request_irq(IRQ_MACHSPEC | IRQ_IRQ1,
+	dev->irq = IRQ_IRQ1;
+        if (request_irq(dev->irq,
                         cs8900_interrupt,
                         IRQ_FLG_STD,
                         "CrystalLAN_cs8900a", NULL))
                 panic("Unable to attach cs8900 intr\n");                        
+#endif
+
+#ifdef CONFIG_ARCH_DM270
+	/* We use IRQ4 for the network interrupt */
+	dev->irq = DM270_INTERRUPT_EXT4;
+	if (request_irq(dev->irq,
+			cs8900_interrupt,
+			IRQ_FLG_STD,
+			"CrystalLAN_cs8900a", NULL))
+		panic("Unable to attach cs8900a intr\n");                        
+#endif
+
+#if defined (CONFIG_BOARD_UCLINKII)     || \
+    defined (CONFIG_BOARD_EVS3C4530LII) || \
+    defined (CONFIG_BOARD_EVS3C4530HEI)
+	
+	*(volatile unsigned int *)IOPCON0 |= (xINTREQ0_ENABLE | xINTREQ0_ACT_HI);
+	dev->irq = _IRQ0;
+	if (request_irq (dev->irq, cs8900_interrupt, 0,
+			 "Crystal_CS8900", dev))
+ 	  panic("Unable to attach cs8900 intr\n");
 #endif
 
 #ifdef CONFIG_ALMA_ANS
 	/* We use positive polarity IRQ3 as a network interrupt */
 	ICR |= ICR_POL3;
-
-        if (request_irq(IRQ_MACHSPEC | IRQ3_IRQ_NUM,
-                        cs8900_interrupt,
+	dev->irq = IRQ3_IRQ_NUM;
+	if (request_irq(dev->irq, cs8900_interrupt,
                         IRQ_FLG_STD,
                         "CrystalLAN_cs8900a", NULL))
                 panic("Unable to attach cs8900 intr\n");                        
 #endif
 
-#ifdef CONFIG_MWI
+#if defined (CONFIG_BOARD_UC5272)
+	dev->irq = MCF_INT_INT1;
+	/* do some nonsense that should be taken care of by
+	 * request_irq:
+	 * enable INT1 and give it priority 4 */
 
-	/* We use vector position 28 as network interrupt */
-	if (request_irq(IRQ_MACHSPEC| 28,
-			cs8900_interrupt,
-			IRQ_FLG_STD,
-			"cs8900a", NULL))
-		panic("Unable to attach cs8900 intr\n");
+	icrp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_ICR1);
+	*icrp = (*icrp & 0x07777777) | 0xC0000000;
 
-	/* setup porte */
-	*(volatile unsigned char *)0xfffa15 &= 0xfb;
-	*(volatile unsigned char *)0xfffa17 |= 0x04;
-	
-	/* setup portf */
-	*(volatile unsigned char *)0xfffa1d &= 0x7f;
-	*(volatile unsigned char *)0xfffa1f |= 0x10;
+	*(volatile unsigned long *) (MCF_MBAR + MCFSIM_PITR) |= 0x80000000;
+
+        if (request_irq(dev->irq, cs8900_interrupt, 0, "cs8900a", dev))
+	  panic("Unable to attach cs8900 intr\n");
 #endif
+
 	/* set the Ethernet address */
 	set_mac_address(dev, dev->dev_addr);
 
@@ -521,7 +602,9 @@ net_open(struct device *dev)
                 printk("%s: EEPROM is configured for unavailable media\n", dev->name);
         release_irq:
                 writereg(dev, PP_LineCTL, readreg(dev, PP_LineCTL) & ~(SERIAL_TX_ON | SERIAL_RX_ON));
-                irq2dev_map[dev->irq] = 0;
+		/* so subsequent opens don't fail we release the IRQ ...MaTed--- */
+		free_irq( dev->irq, dev);
+/*                irq2dev_map[dev->irq] = 0;    */
 		return -EAGAIN;
 	}
 
@@ -529,15 +612,19 @@ net_open(struct device *dev)
 	switch(lp->adapter_cnf & A_CNF_MEDIA_TYPE) {
 	case A_CNF_MEDIA_10B_T:
                 result = detect_tp(dev);
-                if (!result) printk("%s: 10Base-T (RJ-45) has no cable\n", dev->name);
-                if (lp->auto_neg_cnf & IMM_BIT) /* check "ignore missing media" bit */
-                        result = A_CNF_MEDIA_10B_T; /* Yes! I don't care if I see a link pulse */
+                if (!result) { 
+		  printk("%s: 10Base-T (RJ-45) has no cable\n", dev->name);
+		  if (lp->auto_neg_cnf & IMM_BIT) { /* check "ignore missing media" bit */
+		    printk("%s: but ignore the fact.\n", dev->name);
+		    result = A_CNF_MEDIA_10B_T; /* Yes! I don't care if I see a link pulse */
+		  }
+                }
 		break;
 	case A_CNF_MEDIA_AUI:
-	  printk("AUI?  What stinking AUI?\n");
+	  printk("AUI is not supported by uCcs8900\n");
 		break;
 	case A_CNF_MEDIA_10B_2:
-	  printk("10Base2?  What stinking 10Base2?\n");
+	  printk("10Base2 is not supported by uCcs8900\n");
 		break;
 	case A_CNF_MEDIA_AUTO:
 		writereg(dev, PP_LineCTL, lp->linectl | AUTO_AUI_10BASET);
@@ -577,97 +664,83 @@ net_open(struct device *dev)
 		 TX_COL_COUNT_OVRFLOW_ENBL | TX_UNDERRUN_ENBL);
 
 	/* now that we've got our act together, enable everything */
-	writereg(dev, PP_BusCTL, ENABLE_IRQ
-                 );
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	writereg(dev, PP_BusCTL, ENABLE_IRQ );
+	
+	netif_start_queue(dev);
+	
 	return 0;
 }
 
-static int
-net_send_packet(struct sk_buff *skb, struct device *dev)
+
+static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
-	if (dev->tbusy) {
-		/* If we get here, some higher level has decided we are broken.
-		   There should really be a "kick me" function call instead. */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		if (net_debug > 0) printk("%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
-		/* Try to restart the adaptor. */
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
+	struct net_local *lp = (struct net_local *)dev->priv;
+
+#if 1
+	if (net_debug > 3) {  /*OZH*/
+		printk("%s: sent %d byte packet of type %x\n",
+			dev->name, skb->len,
+			(skb->data[ETH_ALEN+ETH_ALEN] << 8) | skb->data[ETH_ALEN+ETH_ALEN+1]);
 	}
+#endif
+	/* keep the upload from being interrupted, since we
+                  ask the chip to start transmitting before the
+                  whole packet has been completely uploaded. */
 
-	/* If some higher layer thinks we've missed an tx-done interrupt
-	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	   itself. */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
+	spin_lock_irq(&lp->lock);
+	netif_stop_queue(dev);
+
+	/* initiate a transmit sequence */
+	writeword(dev, TX_CMD_PORT, lp->send_cmd);
+	writeword(dev, TX_LEN_PORT, skb->len);
+
+	/* Test to see if the chip has allocated memory for the packet */
+	if ((readreg(dev, PP_BusST) & READY_FOR_TX_NOW) == 0) {
+		/*
+		 * Gasp!  It hasn't.  But that shouldn't happen since
+		 * we're waiting for TxOk, so return 1 and requeue this packet.
+		 */
+		
+		spin_unlock_irq(&lp->lock);
+		if (net_debug) printk("cs89x0: Tx buffer not free!\n");
+		return 1;
 	}
+	/* Write the contents of the packet */
+	outsw(dev->base_addr + TX_FRAME_PORT,skb->data,(skb->len+1) >>1);
+	spin_unlock_irq(&lp->lock);
+	dev->trans_start = jiffies;
+	dev_kfree_skb (skb);
 
-	/* Block a timer-based transmit from overlapping.  This could better be
-	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
-		printk("%s: Transmitter access conflict.\n", dev->name);
-	else {
-		struct net_local *lp = (struct net_local *)dev->priv;
-		unsigned long ioaddr = dev->base_addr;
-		unsigned long flags;
-
-		if (net_debug > 3)printk("%s: sent %ld byte packet of type %x\n", dev->name, skb->len, (skb->data[ETH_ALEN+ETH_ALEN] << 8) | skb->data[ETH_ALEN+ETH_ALEN+1]);
-
-		/* keep the upload from being interrupted, since we
-                   ask the chip to start transmitting before the
-                   whole packet has been completely uploaded. */
-		save_flags(flags);
-		cli();
-
-		/* initiate a transmit sequence */
-		outw(lp->send_cmd, ioaddr + TX_CMD_PORT);
-		outw(skb->len, ioaddr + TX_LEN_PORT);
-
-		/* Test to see if the chip has allocated memory for the packet */
-		if ((readreg(dev, PP_BusST) & READY_FOR_TX_NOW) == 0) {
-			/* Gasp!  It hasn't.  But that shouldn't happen since
-			   we're waiting for TxOk, so return 1 and requeue this packet. */
-			restore_flags(flags);
-			printk("cs8900 did not allocate memory for tx!\n");
-			return 1;
-		}
-
-		/* Write the contents of the packet */
-                outsw(ioaddr + TX_FRAME_PORT,skb->data,(skb->len+1) >>1);
-
-		restore_flags(flags);
-		dev->trans_start = jiffies;
-	}
-	dev_kfree_skb (skb, FREE_WRITE);
+	/*
+	 * We DO NOT call netif_wake_queue() here.
+	 * We also DO NOT call netif_start_queue().
+	 *
+	 * Either of these would cause another bottom half run through
+	 * net_send_packet() before this packet has fully gone out.  That causes
+	 * us to hit the "Gasp!" above and the send is rescheduled.  it runs like
+	 * a dog.  We just return and wait for the Tx completion interrupt handler
+	 * to restart the netdevice layer
+	 */
 
 	return 0;
 }
-
+
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
 void
 cs8900_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-        struct device *dev = (struct device *)(irq2dev_map[/* FIXME */0]);
+        struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status;
+	volatile unsigned long  *icrp;
 
-	dev = irq2dev_map[0];
-	if (dev == NULL) {
-		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
-	}
-	if (dev->interrupt)
-		printk("%s: Re-entering the interrupt handler.\n", dev->name);
-	dev->interrupt = 1;
+#if defined (CONFIG_BOARD_UC5272)
+	/* clear INT1  */
+	icrp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_ICR1);
+	*icrp = (*icrp & 0x77777777) | 0x80000000;
+#endif
 
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
@@ -680,7 +753,10 @@ cs8900_interrupt(int irq, void *dev_id, struct pt_regs * regs)
            faster than you can read them off, you're screwed.  Hasta la
            vista, baby!  */
 	while ((status = readword(dev, ISQ_PORT))) {
+#if 1
+		/* OZH */	
 		if (net_debug > 4)printk("%s: event=%04x\n", dev->name, status);
+#endif
 		switch(status & ISQ_EVENT_MASK) {
 		case ISQ_RECEIVER_EVENT:
 			/* Got a packet(s). */
@@ -688,13 +764,14 @@ cs8900_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			break;
 		case ISQ_TRANSMITTER_EVENT:
 			lp->stats.tx_packets++;
-			dev->tbusy = 0;
-			mark_bh(NET_BH);	/* Inform upper layers. */
-			if ((status & TX_OK) == 0) lp->stats.tx_errors++;
-			if (status & TX_LOST_CRS) lp->stats.tx_carrier_errors++;
-			if (status & TX_SQE_ERROR) lp->stats.tx_heartbeat_errors++;
-			if (status & TX_LATE_COL) lp->stats.tx_window_errors++;
-			if (status & TX_16_COL) lp->stats.tx_aborted_errors++;
+
+			netif_wake_queue(dev);
+			
+			if ((status & TX_OK) == 0)	lp->stats.tx_errors++;
+			if (status & TX_LOST_CRS) 	lp->stats.tx_carrier_errors++;
+			if (status & TX_SQE_ERROR) 	lp->stats.tx_heartbeat_errors++;
+			if (status & TX_LATE_COL) 	lp->stats.tx_window_errors++;
+			if (status & TX_16_COL) 	lp->stats.tx_aborted_errors++;
 			break;
 		case ISQ_BUFFER_EVENT:
 			if (status & READY_FOR_TX) {
@@ -703,8 +780,7 @@ cs8900_interrupt(int irq, void *dev_id, struct pt_regs * regs)
                                    That shouldn't happen since we only ever
                                    load one packet.  Shrug.  Do the right
                                    thing anyway. */
-				dev->tbusy = 0;
-				mark_bh(NET_BH);	/* Inform upper layers. */
+				netif_wake_queue(dev);   
 			}
 			if (status & TX_UNDERRUN) {
 				if (net_debug > 0) printk("%s: transmit underrun\n", dev->name);
@@ -720,83 +796,87 @@ cs8900_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			break;
 		}
 	}
-	dev->interrupt = 0;
-	return;
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
 static void
-net_rx(struct device *dev)
+net_rx(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	int ioaddr = dev->base_addr;
 	struct sk_buff *skb;
 	int status, length;
 
+	int ioaddr = dev->base_addr;
 	status = inw(ioaddr + RX_FRAME_PORT);
 	length = inw(ioaddr + RX_FRAME_PORT);
+
 	if ((status & RX_OK) == 0) {
 		lp->stats.rx_errors++;
-		if (status & RX_RUNT) lp->stats.rx_length_errors++;
-		if (status & RX_EXTRA_DATA) lp->stats.rx_length_errors++;
+		if (status & RX_RUNT) 		lp->stats.rx_length_errors++;
+		if (status & RX_EXTRA_DATA) 	lp->stats.rx_length_errors++;
 		if (status & RX_CRC_ERROR) if (!(status & (RX_EXTRA_DATA|RX_RUNT)))
 			/* per str 172 */
 			lp->stats.rx_crc_errors++;
-		if (status & RX_DRIBBLE) lp->stats.rx_frame_errors++;
+		if (status & RX_DRIBBLE) 	lp->stats.rx_frame_errors++;
 		return;
 	}
 
 	/* Malloc up new buffer. */
-	skb = alloc_skb(length, GFP_ATOMIC);
+	skb = alloc_skb(length+2, GFP_ATOMIC);	/* Fixed 32bit alignment problem. OZH */
 	if (skb == NULL) {
-		printk("%s: Memory squeeze, dropping packet.\n", dev->name);
+		if (net_debug > 1) printk("%s: Memory squeeze, dropping packet.\n", dev->name);
 		lp->stats.rx_dropped++;
 		return;
 	}
-	skb->len = length;
-	skb->dev = dev;
+	skb_reserve(skb, 2);	/* longword align L3 header */
 
-        insw(ioaddr + RX_FRAME_PORT, skb->data, length >> 1);
+	skb->dev = dev;
+	insw(ioaddr + RX_FRAME_PORT, skb_put(skb, length), length >> 1);
 	if (length & 1)
 		skb->data[length-1] = inw(ioaddr + RX_FRAME_PORT);
-
-	if (net_debug > 3)printk("%s: received %d byte packet of type %x\n",
-                                 dev->name, length,
-                                 (skb->data[ETH_ALEN+ETH_ALEN] << 8) | skb->data[ETH_ALEN+ETH_ALEN+1]);
+#if 1
+	if (net_debug > 3) {	/* OZH */
+		printk(	"%s: received %d byte packet of type %x\n",
+			dev->name, length,
+			(skb->data[ETH_ALEN+ETH_ALEN] << 8) | skb->data[ETH_ALEN+ETH_ALEN+1]);
+	}
+	if (net_debug == 77) {
+	    int i;
+	    for (i=0; i< length; i++)
+	        printk ("%2.2x:", skb->data[i]);
+    	    printk("\n");
+	    }
+#endif
         skb->protocol=eth_type_trans(skb,dev);
-
 	netif_rx(skb);
+	dev->last_rx = jiffies;
 	lp->stats.rx_packets++;
+	lp->stats.rx_bytes += length;
 	return;
 }
 
 /* The inverse routine to net_open(). */
 static int
-net_close(struct device *dev)
+net_close(struct net_device *dev)
 {
-	/* FIXME:  This needs to put the chip to sleep and turn off the irq */
+	netif_stop_queue (dev);
+	
 	writereg(dev, PP_RxCFG, 0);
 	writereg(dev, PP_TxCFG, 0);
 	writereg(dev, PP_BufCFG, 0);
 	writereg(dev, PP_BusCTL, 0);
 
-	dev->start = 0;
-
-#if 0
-	free_irq(dev->irq, NULL);
-#endif
-
-	irq2dev_map[/* FIXME */ 0] = 0;
-
-	/* Update the statistics here. */
+	free_irq(dev->irq, dev);
 
 	return 0;
 }
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct enet_statistics *
-net_get_stats(struct device *dev)
+   
+   
+static  struct net_device_stats *
+net_get_stats(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
@@ -809,7 +889,7 @@ net_get_stats(struct device *dev)
 	return &lp->stats;
 }
 
-static void set_multicast_list(struct device *dev)
+static void set_multicast_list(struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
@@ -834,14 +914,14 @@ static void set_multicast_list(struct device *dev)
 }
 
 static int
-set_mac_address(struct device *dev, void *addr)
+set_mac_address(struct net_device *dev, void *addr)
 {
 	int i;
-	if (dev->start)
-		return -EBUSY;
-	printk("%s: Setting MAC address to %2.2x", dev->name, ((unsigned char *)addr)[0]);
-	for (i = 1; i < 6; i++)
-		printk(":%2.2x", dev->dev_addr[i] = ((unsigned char *)addr)[i]);
+/* 	if (netif_running(dev)) */
+/* 		return -EBUSY; */
+	printk("%s: Setting MAC address to ", dev->name);
+	for (i = 0; i < 6; i++)
+		printk(" %2.2x", dev->dev_addr[i] = ((unsigned char *)addr)[i]);
 	printk(".\n");
 	/* set the Ethernet address */
 	for (i=0; i < ETH_ALEN/2; i++)
@@ -849,12 +929,12 @@ set_mac_address(struct device *dev, void *addr)
 
 	return 0;
 }
+
 /*
  * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/include -I/usr/src/linux/net/inet -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -DMODULE -DCONFIG_MODVERSIONS -c cs89x0.c"
  *  version-control: t
  *  kept-new-versions: 5
- *  c-indent-level: 8
- *  tab-width: 8
+ *  c-indent-level: 4
+ *  tab-width: 4
  * End:
  */

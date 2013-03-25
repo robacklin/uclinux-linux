@@ -8,7 +8,7 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@rt-control.com>
+# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uClinux.org>
 # Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
 # Copyright (C) 1994 by Hamish Macdonald
 #

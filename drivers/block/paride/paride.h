@@ -1,3 +1,6 @@
+#ifndef __DRIVERS_PARIDE_H__
+#define __DRIVERS_PARIDE_H__
+
 /* 
 	paride.h	(c) 1997-8  Grant R. Guenther <grant@torque.net>
    		                    Under the terms of the GPL.
@@ -10,9 +13,10 @@
 /* Changes:
 
 	1.01	GRG 1998.05.05	init_proto, release_proto
+	1.01ac	AGC 2002.04.03  added privptr
 */
 
-#define PARIDE_H_VERSION 	"1.01"
+#define PARIDE_H_VERSION 	"1.01ac"
 
 /* Some adapters need to know what kind of device they are in
 
@@ -43,8 +47,10 @@ struct pi_adapter  {
 	int	saved_r2;	     /* saved port state */
 	int	reserved;	     /* number of ports reserved */
 	int	private;	     /* for protocol module */
-
-	struct wait_queue *parq;     /* semaphore for parport sharing */
+	void	*privptr;	     /* private pointer for protocol module */
+				     /* For 2.5 just make private a ulong but
+		     			for 2.4 fixups thats a bit risky.. */				
+	wait_queue_head_t parq;     /* semaphore for parport sharing */
 	void	*pardev;	     /* pointer to pardevice */
 	char	*parname;	     /* parport name */
 	int	claimed;	     /* parport has already been claimed */
@@ -161,4 +167,5 @@ typedef struct pi_protocol PIP;
 extern int pi_register( PIP * );
 extern void pi_unregister ( PIP * );
 
+#endif /* __DRIVERS_PARIDE_H__ */
 /* end of paride.h */

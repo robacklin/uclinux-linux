@@ -1,32 +1,14 @@
-/* $Id: isac.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * isac.h   ISAC specific defines
+/* $Id: isac.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * ISAC specific defines
  *
- *
- * $Log: isac.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.3.2.3  1998/05/27 18:05:41  keil
- * HiSax 3.0
- *
- * Revision 1.3.2.2  1997/11/15 19:01:14  keil
- * ipac changes
- *
- * Revision 1.3.2.1  1997/10/17 22:10:50  keil
- * new files on 2.0
- *
- * Revision 1.3  1997/07/27 21:37:41  keil
- * T3 implemented; supervisor l1timer; B-channel TEST_LOOP
- *
- * Revision 1.2  1997/06/26 11:16:16  keil
- * first version
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 
 /* All Registers original Siemens Spec  */
 

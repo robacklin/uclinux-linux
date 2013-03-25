@@ -3,21 +3,24 @@
 /*
  *	lcdtxt.c -- driver for a text based LCD displays
  *
- *	(C) Copyright 2000-2001, Greg Ungerer (gerg@snapgear.com)
+ *	(C) Copyright 2000-2002, Greg Ungerer (gerg@snapgear.com)
  *	(C) Copyright 2000-2001, Lineo Inc. (www.lineo.com) 
  */
 
 /*****************************************************************************/
 
 #include <linux/config.h>
+#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <asm/param.h>
+#include <asm/uaccess.h>
 
 /*****************************************************************************/
 
@@ -28,6 +31,13 @@
 
 int		lcdtxt_line;
 int		lcdtxt_pos;
+
+#if LINUX_VERSION_CODE < 0x020100
+#define GET_USER(a,b)   a = get_user(b)
+#else
+#include <asm/uaccess.h>
+#define GET_USER(a,b)   get_user(a,b)
+#endif
 
 /*****************************************************************************/
 
@@ -69,7 +79,7 @@ int		lcdtxt_pos;
 /*****************************************************************************/
 
 /*
- *	Hardware specifics for LCD on the SECUREEDGEMP3 board.
+ *	Hardware specifics for LCD on the LINEOMP3 board.
  *	This is a 16 character by 2 line device.
  */
 #include <asm/coldfire.h>
@@ -99,38 +109,16 @@ static void lcdtxt_writectrl(unsigned char ctrl)
 	*pp &= ~0x0100;
 	lcdp[0] = ctrl;
 	lcdp[1] = 0;	/* Latch data */
-#if 0
-printk("lcdtxt_writectrl(ctrl=%02x)\n", ctrl);
-#endif
 	udelay(40);
 }
-
-#if 0
-static unsigned char lcdtxt_readctrl(void)
-{
-	/* Hardware does not implement read function */
-	return(0);
-}
-#endif
 
 static void lcdtxt_writedata(unsigned char val)
 {
 	*pp |= 0x0100;
 	lcdp[0] = val;
 	lcdp[1] = 0;	/* Latch data */
-#if 0
-printk("lcdtxt_writedata(val=%02x)\n", val);
-#endif
 	udelay(40);
 }
-
-#if 0
-static unsigned char lcdtxt_readdata(void)
-{
-	/* Hardware does not implement read function */
-	return(0);
-}
-#endif
 
 /*****************************************************************************/
 #elif defined(CONFIG_eLIA)
@@ -183,13 +171,6 @@ static void lcdtxt_writedata(unsigend char val)
 	udelay(2000);
 }
 
-#if 0
-static unsigned char lcdtxt_readdata(void)
-{
-	return(lcdp[1]);
-}
-#endif
-
 /*****************************************************************************/
 #else /* UNKNOWN HARDWARE */
 /*****************************************************************************/
@@ -209,11 +190,12 @@ int lcdtxt_open(struct inode *inode, struct file *filp)
 
 /*****************************************************************************/
 
-void lcdtxt_release(struct inode *inode, struct file *filp)
+int lcdtxt_release(struct inode *inode, struct file *filp)
 {
 #if LCDTXT_DEBUG
 	printk("lcdtxt_close()\n");
 #endif
+	return 0;
 }
 
 /*****************************************************************************/
@@ -245,66 +227,68 @@ int scroll_buff_line = 1;
 int scrolling = 0;
 
 /*****************************************************************************/
+
 /*
- *  magic super scroll function
+ *	Magic super scroll function.
  */
-static void scroll_text(void) {
 
-		int i, j;
-		int larger, smaller;
+static void scroll_text(void)
+{
+	int i, j;
+	int larger, smaller;
 
-		del_timer(&scroll_timer);
+	del_timer(&scroll_timer);
 		
-		i = strlen(scroll_buff[0]);
-		larger = strlen(scroll_buff[1]);
-		if (i > larger) {
-			smaller = larger;
-			larger = i;
-		} else {
-			smaller = i;
+	i = strlen(scroll_buff[0]);
+	larger = strlen(scroll_buff[1]);
+	if (i > larger) {
+		smaller = larger;
+		larger = i;
+	} else {
+		smaller = i;
+	}
+
+	if (scroll_dir == 1) {
+		if ((scroll_pos + LCDTXT_LINELENGTH) >= larger) {
+			scroll_dir = -1;
 		}
-
-		if (scroll_dir == 1) {
-			if ((scroll_pos + LCDTXT_LINELENGTH) >= larger) {
-				scroll_dir = -1;
-			}
-		} else {
-			if (scroll_pos <= 0) {
-				scroll_dir = 1;
-			}
+	} else {
+		if (scroll_pos <= 0) {
+			scroll_dir = 1;
 		}
+	}
 
-		scroll_pos += scroll_dir;
-		if (scroll_pos < 0)
-			scroll_pos = 0;
+	scroll_pos += scroll_dir;
+	if (scroll_pos < 0)
+		scroll_pos = 0;
 
-		for (j = 0; j < LCDTXT_LINENUM ; j++) {
-			if (strlen(scroll_buff[j]+scroll_pos) < LCDTXT_LINELENGTH) {
-					lcdtxt_pos = strlen(scroll_buff[j]);
-					lcdtxt_line = j;
-					lcdtxt_resetposn();
-					continue;
-			} else {
+	for (j = 0; j < LCDTXT_LINENUM ; j++) {
+		if (strlen(scroll_buff[j]+scroll_pos) < LCDTXT_LINELENGTH) {
+				lcdtxt_pos = strlen(scroll_buff[j]);
 				lcdtxt_line = j;
-				lcdtxt_pos = 0;
 				lcdtxt_resetposn();
-			}
-			for (i = scroll_pos; i < (scroll_pos + LCDTXT_LINELENGTH); i++) { 
-				if (scroll_buff[j][i] != 0) {
-					lcdtxt_writedata(scroll_buff[j][i]);
-					lcdtxt_pos++;
-				}
-			}
-		}
-		if (larger <= LCDTXT_LINELENGTH) {
-#if LCDTXT_DEBUG
-			printk("lcdtxt: disabling autoscroll\n");
-#endif
-			del_timer(&scroll_timer);
+				continue;
 		} else {
-			scroll_timer.expires = jiffies + HZ;
-			add_timer(&scroll_timer);
+			lcdtxt_line = j;
+			lcdtxt_pos = 0;
+			lcdtxt_resetposn();
 		}
+		for (i = scroll_pos; i < (scroll_pos + LCDTXT_LINELENGTH); i++) { 
+			if (scroll_buff[j][i] != 0) {
+				lcdtxt_writedata(scroll_buff[j][i]);
+				lcdtxt_pos++;
+			}
+		}
+	}
+	if (larger <= LCDTXT_LINELENGTH) {
+#if LCDTXT_DEBUG
+		printk("lcdtxt: disabling autoscroll\n");
+#endif
+		del_timer(&scroll_timer);
+	} else {
+		scroll_timer.expires = jiffies + HZ;
+		add_timer(&scroll_timer);
+	}
 }
 
 /*****************************************************************************/
@@ -323,12 +307,13 @@ void lcdtxt_ceol(void)
 
 /*****************************************************************************/
 
-int lcdtxt_write(struct inode *inode, struct file *filp, const char *buf, int count)
+ssize_t lcdtxt_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 {
-	char		*dp, c;
-	int		 num;
-static	unsigned char	 prog_need;
-static	unsigned char	 setpos;
+	char	*dp, c;
+	int	num;
+
+	static unsigned char	 prog_need;
+	static unsigned char	 setpos;
 
 #if LCDTXT_DEBUG
 	printk("lcdtxt_write(buf=%x,count=%d)\n", (int) buf, count);
@@ -338,7 +323,7 @@ static	unsigned char	 setpos;
 	dp = (char *) buf;
 
 	for (num = 0; (num < count); num++) {
-		c = get_user(dp++);
+		GET_USER(c, dp++);
 
 		/* If we're programming a character skip normal processing */
 		if (prog_need != 0) {
@@ -348,7 +333,8 @@ static	unsigned char	 setpos;
 			continue;
 		}
 
-		/* Now are we setting the cursor position directly.
+		/*
+		 * Now are we setting the cursor position directly.
 		 * This code is a subset of the ioctl(fd, 3, ...) code
 		 * below.  It can be included inline in a character stream
 		 * but addresses a smaller range of rows and columns.
@@ -446,13 +432,14 @@ static	unsigned char	 setpos;
 		}
 	}
 	if ((scroll_buff[0][LCDTXT_LINELENGTH] || scroll_buff[1][LCDTXT_LINELENGTH])
-				   	&& scrolling == 1) {
+	    && scrolling == 1) {
 #if LCDTXT_DEBUG
 		printk("lcdtxt: engaging autoscroll\n");
 #endif
 		scroll_timer.expires = jiffies + HZ/2;
 		add_timer(&scroll_timer);
 	}
+
 	return(num);
 }
 
@@ -463,67 +450,62 @@ int lcdtxt_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, unsig
 	int	rc = 0;
 
 	switch (cmd) {
-		case 1: // turn scrolling on
-#if LCDTXT_DEBUG
-				printk(KERN_INFO "lcdtxt:  scrolling enabled\n");
-#endif
-				scrolling = 1;
-				scroll_timer.expires = jiffies + HZ/2;
-				scroll_timer.function = (void *)scroll_text;
-				add_timer(&scroll_timer);
-				break;
-		case 2: // turn scrolling off
-#if LCDTXT_DEBUG
-				printk(KERN_INFO "lcdtxt:  scrolling disabled\n");
-#endif
-				scrolling = 0;
-				scroll_timer.function = NULL;
-				del_timer(&scroll_timer);
-				break;
 
-		case 3: // Directly address X/Y cursor position
-				/* This ioctl is essentailly a duplication of the
-				 * 0x1f escape code code in the write routine.
-				 * This version allows a wider range of values to be set
-				 */
-				lcdtxt_pos = arg & 0xff;
-				lcdtxt_line = (arg >> 8) & 0xff;
-				lcdtxt_resetposn();
-				break;
-				
-		default:
-				rc = -EINVAL;
-				break;
+	case 1: /* turn scrolling on */
+#if LCDTXT_DEBUG
+		printk(KERN_INFO "lcdtxt:  scrolling enabled\n");
+#endif
+		scrolling = 1;
+		scroll_timer.expires = jiffies + HZ/2;
+		scroll_timer.function = (void *)scroll_text;
+		add_timer(&scroll_timer);
+		break;
+
+	case 2: /* turn scrolling off */
+#if LCDTXT_DEBUG
+		printk(KERN_INFO "lcdtxt:  scrolling disabled\n");
+#endif
+		scrolling = 0;
+		scroll_timer.function = NULL;
+		del_timer(&scroll_timer);
+		break;
+
+	case 3: /* Directly address X/Y cursor position */
+		/*
+		 * This ioctl is essentailly a duplication of the
+		 * 0x1f escape code code in the write routine.
+		 * This version allows a wider range of values to be set
+		 */
+		lcdtxt_pos = arg & 0xff;
+		lcdtxt_line = (arg >> 8) & 0xff;
+		lcdtxt_resetposn();
+		break;
+		
+	default:
+		rc = -EINVAL;
+		break;
 	}
 
 	return(rc);
 }
-/*****************************************************************************/
 
+/*****************************************************************************/
 
 /*
  *	Exported file operations structure for driver...
  */
 
 struct file_operations	lcdtxt_fops = {
-	NULL,		/* lseek */
-	NULL,		/* read */
-	lcdtxt_write,	/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	lcdtxt_ioctl,	/* ioctl */
-	NULL,		/* mmap */
-	lcdtxt_open,	/* open */
-	lcdtxt_release,	/* release */
-	NULL,		/* fsync */
-	NULL,		/* fasync */
-	NULL,		/* check_media_change */
-	NULL		/* revalidate */
+	write:		lcdtxt_write,	/* write */
+	ioctl:		lcdtxt_ioctl,	/* ioctl */
+	open:		lcdtxt_open,	/* open */
+	release:	lcdtxt_release,	/* release */
 };
+
 
 /*****************************************************************************/
 
-void lcdtxt_init(void)
+static int __init lcdtxt_init(void)
 {
 	int	rc;
 
@@ -531,7 +513,7 @@ void lcdtxt_init(void)
 	if ((rc = register_chrdev(LCDTXT_MAJOR, "lcdtxt", &lcdtxt_fops)) < 0) {
 		printk(KERN_WARNING "LCDTXT: can't get major %d\n",
 			LCDTXT_MAJOR);
-		return;
+		return (-EBUSY);
 	}
 
 	printk("LCDTXT: Copyright (C) 2000-2001, Greg Ungerer "
@@ -563,6 +545,10 @@ void lcdtxt_init(void)
 	scroll_timer.expires = jiffies + HZ/2;
 	scroll_timer.function = (void *)scroll_text;
 	add_timer(&scroll_timer);
+
+	return 0;
 }
+
+module_init(lcdtxt_init);
 
 /*****************************************************************************/

@@ -32,6 +32,7 @@
    of the assembly has to go. */
 
 #include <net/checksum.h>
+#include <asm/checksum.h>
 
 static inline unsigned short from32to16(unsigned long x)
 {
@@ -118,8 +119,8 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 
 	/* add in old sum, and carry.. */
 	result += sum;
-	/* 16+c bits -> 16 bits */
-	result = (result & 0xffff) + (result >> 16);
+	if (sum > result)
+		result += 1;
 	return result;
 }
 
@@ -137,8 +138,9 @@ unsigned short ip_compute_csum(const unsigned char * buff, int len)
  */
 
 unsigned int
-csum_partial_copy_fromuser(const char *src, char *dst, int len, int sum)
+csum_partial_copy_from_user(const char *src, char *dst, int len, int sum, int *csum_err)
 {
+	if (csum_err) *csum_err = 0;
 	memcpy(dst, src, len);
 	return csum_partial(dst, len, sum);
 }

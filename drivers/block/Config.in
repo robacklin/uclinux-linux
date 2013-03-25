@@ -2,84 +2,99 @@
 # Block device driver configuration
 #
 mainmenu_option next_comment
-comment 'Floppy, IDE, and other block devices'
+comment 'Block devices'
 
 tristate 'Normal floppy disk support' CONFIG_BLK_DEV_FD
-bool 'Enhanced IDE/MFM/RLL disk/cdrom/tape/floppy support' CONFIG_BLK_DEV_IDE
-comment 'Please see Documentation/ide.txt for help/info on IDE drives'
-if [ "$CONFIG_BLK_DEV_IDE" = "n" ]; then
-   bool 'Old harddisk (MFM/RLL/IDE) driver' CONFIG_BLK_DEV_HD_ONLY
-else
-   bool '  Use old disk-only driver on primary interface' CONFIG_BLK_DEV_HD_IDE
-   if [ "$CONFIG_BLK_DEV_HD_IDE" != "n" ]; then
-      bool '    Use multi-mode by default' CONFIG_IDEDISK_MULTI_MODE
-   fi
-   bool '  Include IDE/ATAPI CDROM support' CONFIG_BLK_DEV_IDECD
-   bool '  Include IDE/ATAPI TAPE support' CONFIG_BLK_DEV_IDETAPE
-   bool '  Include IDE/ATAPI FLOPPY support (new)' CONFIG_BLK_DEV_IDEFLOPPY
-   bool '  SCSI emulation support' CONFIG_BLK_DEV_IDESCSI
-   bool '  Support removable IDE interfaces (PCMCIA)' CONFIG_BLK_DEV_IDE_PCMCIA
-   bool '  CMD640 chipset bugfix/support' CONFIG_BLK_DEV_CMD640
-   if [ "$CONFIG_BLK_DEV_CMD640" = "y" ]; then
-      bool '    CMD640 enhanced support' CONFIG_BLK_DEV_CMD640_ENHANCED
-   fi
-   if [ "$CONFIG_PCI" = "y" ]; then
-      bool '  RZ1000 chipset bugfix/support' CONFIG_BLK_DEV_RZ1000
-      bool '  Intel 82371 PIIX (Triton I/II) DMA support' CONFIG_BLK_DEV_TRITON
-      if [ "$CONFIG_BLK_DEV_TRITON" = "y" ]; then
-	 bool '    Boot off-board chipsets first support' CONFIG_BLK_DEV_OFFBOARD
-      fi
-   fi
-   bool '  Other IDE chipset support' CONFIG_IDE_CHIPSETS
-   if [ "$CONFIG_IDE_CHIPSETS" = "y" ]; then
-      comment 'Note: most of these also require special kernel boot parameters'
-      bool '    ALI M14xx       support' CONFIG_BLK_DEV_ALI14XX
-      bool '    DTC-2278        support' CONFIG_BLK_DEV_DTC2278
-      bool '    Holtek HT6560B  support' CONFIG_BLK_DEV_HT6560B
-      if [ "$CONFIG_EXPERIMENTAL" = "y" ]; then
-	 bool '    PROMISE DC4030  support (EXPERIMENTAL)' CONFIG_BLK_DEV_PROMISE
-      fi
-      bool '    QDI QD6580      support' CONFIG_BLK_DEV_QD6580
-      bool '    UMC 8672        support' CONFIG_BLK_DEV_UMC8672
+if [ "$CONFIG_AMIGA" = "y" ]; then
+   tristate 'Amiga floppy support' CONFIG_AMIGA_FLOPPY
+fi
+if [ "$CONFIG_ATARI" = "y" ]; then
+   tristate 'Atari floppy support' CONFIG_ATARI_FLOPPY
+fi
+if [ "$CONFIG_MAC" = "y" ]; then
+   dep_bool 'Macintosh IIfx/Quadra 900/Quadra 950 floppy support (EXPERIMENTAL)' CONFIG_BLK_DEV_SWIM_IOP $CONFIG_EXPERIMENTAL
+fi
+if [ "$CONFIG_MCA" = "y" ]; then
+   tristate 'PS/2 ESDI hard disk support' CONFIG_BLK_DEV_PS2
+fi
+if [ "$CONFIG_ZORRO" = "y" ]; then
+   tristate 'Amiga Zorro II ramdisk support' CONFIG_AMIGA_Z2RAM
+fi
+if [ "$CONFIG_ATARI" = "y" ]; then
+   tristate 'Atari ACSI support' CONFIG_ATARI_ACSI
+   if [ "$CONFIG_ATARI_ACSI" != "n" ]; then
+      comment 'Some devices (e.g. CD jukebox) support multiple LUNs'
+      bool '  Probe all LUNs on each ACSI device' CONFIG_ACSI_MULTI_LUN
+      tristate '  Atari SLM laser printer support' CONFIG_ATARI_SLM
    fi
 fi
-
-comment 'Additional Block Devices'
-
-tristate 'Loopback device support' CONFIG_BLK_DEV_LOOP
-bool 'Multiple devices driver support' CONFIG_BLK_DEV_MD
-if [ "$CONFIG_BLK_DEV_MD" = "y" ]; then
-   tristate '  Linear (append) mode' CONFIG_MD_LINEAR
-   tristate '  RAID-0 (striping) mode' CONFIG_MD_STRIPED
-   tristate '  RAID-1 (mirroring) mode' CONFIG_MD_MIRRORING
-   tristate '  RAID-4/RAID-5 mode' CONFIG_MD_RAID5
+if [ "$CONFIG_COBRA5282" = "y" ]; then
+   tristate 'Multi Media Card support for COBRA5282' CONFIG_BLK_DEV_MMC
 fi
-tristate 'RAM disk support' CONFIG_BLK_DEV_RAM
-if [ "$CONFIG_BLK_DEV_RAM" = "y" ]; then
-   bool '  Release empty RAM disk blocks' CONFIG_RD_RELEASE_BLOCKS
-   bool '  Initial RAM disk (initrd) support' CONFIG_BLK_DEV_INITRD
+if [ "$CONFIG_COBRA5272" = "y" ]; then
+   tristate 'Multi Media Card support for COBRA5272' CONFIG_BLK_DEV_MMC
 fi
-tristate 'ROM disk memory block device' CONFIG_BLK_DEV_BLKMEM
-tristate 'XT harddisk support' CONFIG_BLK_DEV_XD
-if [ "$CONFIG_PCI" = "y" ]; then
-   bool 'Mylex DAC960 PCI RAID Controller support' CONFIG_BLK_DEV_DAC960
-fi
-
-tristate 'Compaq SMART2 support' CONFIG_BLK_CPQ_DA
-if [ "$CONFIG_BLK_CPQ_DA" = "y" -o "$CONFIG_BLK_CPQ_DA" = "m" ]; then
-   bool '  Support for PCI SMART-2 Controllers' CONFIG_BLK_CPQ_DA_PCI
-   bool '  Support for EISA SMART-2 Controllers' CONFIG_BLK_CPQ_DA_EISA
-fi
-
-tristate 'Parallel port IDE device support' CONFIG_PARIDE 
+dep_tristate 'XT hard disk support' CONFIG_BLK_DEV_XD $CONFIG_ISA
+dep_tristate 'Parallel port IDE device support' CONFIG_PARIDE $CONFIG_PARPORT
 if [ "$CONFIG_PARIDE" = "y" -o "$CONFIG_PARIDE" = "m" ]; then
    source drivers/block/paride/Config.in
 fi
+dep_tristate 'Compaq SMART2 support' CONFIG_BLK_CPQ_DA $CONFIG_PCI
+dep_tristate 'Compaq Smart Array 5xxx support' CONFIG_BLK_CPQ_CISS_DA $CONFIG_PCI 
+dep_mbool '       SCSI tape drive support for Smart Array 5xxx' CONFIG_CISS_SCSI_TAPE $CONFIG_BLK_CPQ_CISS_DA $CONFIG_SCSI
+dep_mbool '       Enable monitor thread' CONFIG_CISS_MONITOR_THREAD $CONFIG_BLK_CPQ_CISS_DA
+dep_tristate 'Mylex DAC960/DAC1100 PCI RAID Controller support' CONFIG_BLK_DEV_DAC960 $CONFIG_PCI
+dep_tristate 'Micro Memory MM5415 Battery Backed RAM support (EXPERIMENTAL)' CONFIG_BLK_DEV_UMEM $CONFIG_PCI $CONFIG_EXPERIMENTAL
+dep_tristate 'Promise SATA SX8 support' CONFIG_BLK_DEV_SX8 $CONFIG_PCI
 
-if [ "$CONFIG_BLK_DEV_HD_IDE" = "y" -o "$CONFIG_BLK_DEV_HD_ONLY" = "y" ]; then
-   define_bool CONFIG_BLK_DEV_HD y
-else
-   define_bool CONFIG_BLK_DEV_HD n
+tristate 'Loopback device support' CONFIG_BLK_DEV_LOOP
+dep_tristate 'Network block device support' CONFIG_BLK_DEV_NBD $CONFIG_NET
+
+tristate 'RAM disk support' CONFIG_BLK_DEV_RAM
+if [ "$CONFIG_BLK_DEV_RAM" = "y" -o "$CONFIG_BLK_DEV_RAM" = "m" ]; then
+   int '  Default RAM disk size' CONFIG_BLK_DEV_RAM_SIZE 4096
 fi
+dep_bool '  Initial RAM disk (initrd) support' CONFIG_BLK_DEV_INITRD $CONFIG_BLK_DEV_RAM
+dep_bool '  RAM disk data block compiled in' CONFIG_BLK_DEV_RAMDISK_DATA $CONFIG_BLK_DEV_INITRD
+
+tristate 'ROM disk memory block device (blkmem)' CONFIG_BLK_DEV_BLKMEM $CONFIG_BLK_DEV_BLKMEM
+if [ "$CONFIG_BLK_DEV_BLKMEM" = "y" -o "$CONFIG_BLK_DEV_BLKMEM" = "m" ]; then
+    choice '  FLASH type' \
+        "NONE   CONFIG_NOFLASH \
+         AMD    CONFIG_AMDFLASH \
+         INTEL  CONFIG_INTELFLASH" NONE
+    if [ "$CONFIG_AMDFLASH" = "y" -o "$CONFIG_INTELFLASH" = "y" ]; then
+        choice '  FLASH size' \
+                " AUTO  CONFIG_FLASHAUTO \
+                 128KB  CONFIG_FLASH128KB \
+                   1MB  CONFIG_FLASH1MB \
+                   2MB  CONFIG_FLASH2MB \
+                   4MB  CONFIG_FLASH4MB \
+                   6MB  CONFIG_FLASH6MB \
+                   8MB  CONFIG_FLASH8MB \
+                  16MB  CONFIG_FLASH16MB" AUTO
+        choice '  FLASH bit width' \
+                " AUTO  CONFIG_FLASHAUTOBIT \
+                  8bit  CONFIG_FLASH8BIT \
+                 16bit  CONFIG_FLASH16BIT \
+                 32bit  CONFIG_FLASH32bit" AUTO
+        bool '  2nd flash in /dev/rom8' CONFIG_EXTRA_FLASH
+    fi
+    if [ "$CONFIG_BOARD_MBA44" = "y" ]; then
+       hex 'ROM Disk Base Address ' ROMARRAY_BASE 0x0C600000
+    fi
+    if [ "$CONFIG_BOARD_SMDK40100" = "y" ]; then
+       hex 'ROM Disk Base Address ' ROMARRAY_BASE 0x00600000
+    fi
+else
+    if [ "$CONFIG_BOARD_MBA44" = "y" ]; then
+       define_hex ROMARRAY_BASE 0x0C600000
+    fi
+    if [ "$CONFIG_BOARD_SMDK40100" = "y" ]; then
+       define_hex ROMARRAY_BASE 0x00600000
+    fi
+fi
+
+bool 'Per partition statistics in /proc/partitions' CONFIG_BLK_STATS
 
 endmenu

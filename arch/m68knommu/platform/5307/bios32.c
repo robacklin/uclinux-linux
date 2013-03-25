@@ -3,7 +3,7 @@
 /*
  *	bios32.c -- PCI access code for embedded CO-MEM Lite PCI controller.
  *
- *	(C) Copyright 1999-2000, Greg Ungerer (gerg@moreton.com.au).
+ *	(C) Copyright 1999-2003, Greg Ungerer (gerg@snapgear.com).
  *	(C) Copyright 2000, Lineo (www.lineo.com)
  */
 
@@ -12,10 +12,9 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
-#include <linux/tasks.h>
-#include <linux/bios32.h>
 #include <linux/pci.h>
 #include <linux/ptrace.h>
+#include <linux/spinlock.h>
 #include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <asm/coldfire.h>
@@ -63,8 +62,8 @@ unsigned long	pci_slotmask = 0;
  *	really assign any resources we like to devices, as long as
  *	they do not clash with other PCI devices.
  */
-unsigned int	pci_iobase = 0x100;		/* Arbitary start address */
-unsigned int	pci_membase = 0x00010000;	/* Arbitary start address */
+unsigned int	pci_iobase = PCIBIOS_MIN_IO;	/* Arbitary start address */
+unsigned int	pci_membase = PCIBIOS_MIN_MEM;	/* Arbitary start address */
 
 #define	PCI_MINIO	0x100			/* 256 byte minimum I/O */
 #define	PCI_MINMEM	0x00010000		/* 64k minimum chunk */
@@ -259,7 +258,7 @@ int pcibios_enable(int slot)
 
 /*****************************************************************************/
 
-unsigned long pcibios_init(unsigned long mem_start, unsigned long mem_end)
+void pcibios_init(void)
 {
 	volatile unsigned long	*rp;
 	unsigned long		sel, id;
@@ -279,7 +278,7 @@ unsigned long pcibios_init(unsigned long mem_start, unsigned long mem_end)
 	rp = (volatile unsigned long *) COMEM_BASE;
 	if ((rp[LREG(COMEM_LBUSCFG)] & 0xff) != 0x50) {
 		printk("PCI: no PCI bus present\n");
-		return(mem_start);
+		return;
 	}
 
 #ifdef COMEM_BRIDGEDEV
@@ -294,7 +293,7 @@ unsigned long pcibios_init(unsigned long mem_start, unsigned long mem_end)
 	id = rp[LREG(COMEM_PCIBUS)];
 	if ((id == 0) || ((id & 0xffff0000) == (sel & 0xffff0000))) {
 		printk("PCI: no PCI bus bridge present\n");
-		return(mem_start);
+		return;
 	}
 
 	printk("PCI: bridge device at slot=%d id=%08x\n", slot, (int) id);
@@ -328,8 +327,6 @@ unsigned long pcibios_init(unsigned long mem_start, unsigned long mem_end)
 	} else {
 		mcf_autovector(COMEM_IRQ);
 	}
-
-	return(mem_start);
 }
 
 /*****************************************************************************/
@@ -546,7 +543,7 @@ int pcibios_find_device(unsigned short vendor, unsigned short devid,
 		return(PCIBIOS_BAD_VENDOR_ID);
 
 	vendev = (devid << 16) | vendor;
-	for (devnr = 0; (devnr < 128); devnr += 8) {
+	for (devnr = 0; (devnr < 32); devnr++) {
 		pcibios_read_config_dword(0, devnr, PCI_VENDOR_ID, &val);
 		if (vendev == val) {
 			if (index-- == 0) {

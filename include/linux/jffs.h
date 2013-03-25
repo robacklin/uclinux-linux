@@ -1,5 +1,5 @@
 /*
- * JFFS -- Journaling Flash File System, Linux implementation.
+ * JFFS -- Journalling Flash File System, Linux implementation.
  *
  * Copyright (C) 1999, 2000  Axis Communications AB.
  *
@@ -10,12 +10,18 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * $Id: jffs.h,v 1.2 2000-10-06 08:50:37 davidm Exp $
+ * $Id: jffs.h,v 1.20 2001/09/18 21:33:37 dwmw2 Exp $
+ *
+ * Ported to Linux 2.3.x and MTD:
+ * Copyright (C) 2000  Alexander Larsson (alex@cendio.se), Cendio Systems AB
  *
  */
 
 #ifndef __LINUX_JFFS_H__
 #define __LINUX_JFFS_H__
+
+#include <linux/types.h>
+#include <linux/completion.h>
 
 #define JFFS_VERSION_STRING "1.0"
 
@@ -57,9 +63,6 @@
 #define JFFS_MODIFY_NAME  0x02
 #define JFFS_MODIFY_DATA  0x04
 #define JFFS_MODIFY_EXIST 0x08
-
-/* Using the garbage collection mechanism.  */
-#define USE_GC
 
 struct jffs_control;
 
@@ -152,8 +155,7 @@ struct jffs_file
 	struct jffs_file *children; /* Always NULL for plain files.  */
 	struct jffs_file *sibling_prev; /* Siblings in the same directory.  */
 	struct jffs_file *sibling_next;
-	struct jffs_file *hash_prev;    /* Previous file in hash list.  */
-	struct jffs_file *hash_next;    /* Next file in hash list.  */
+	struct list_head hash;    /* hash list.  */
 	struct jffs_node *range_head;   /* The final data.  */
 	struct jffs_node *range_tail;   /* The first data.  */
 	struct jffs_node *version_head; /* The youngest node.  */
@@ -163,7 +165,7 @@ struct jffs_file
 
 /* This is just a definition of a simple list used for keeping track of
    files deleted due to a rename.  This list is only used during the
-   mounting of the file system and only if the have been rename operations
+   mounting of the file system and only if there have been rename operations
    earlier.  */
 struct jffs_delete_list
 {
@@ -176,16 +178,20 @@ struct jffs_delete_list
    jffs_control structs are named `c' in the source code.  */
 struct jffs_control
 {
-	struct super_block *sb;  /* Reference to the VFS super block.  */
-	struct jffs_file *root;  /* The root directory file.  */
-	struct jffs_file **hash; /* Hash table for finding files by ino.  */
-	struct jffs_fmcontrol *fmc; /* Flash memory control structure.  */
-	__u32 hash_len;    /* The size of the hash table.  */
-	__u32 next_ino;    /* Next inode number to use for new files.  */
-	__u16 building_fs; /* Is the file system being built right now?  */
-	int rename_lock;   /* Used by jffs_rename().  */
-	struct wait_queue *rename_wait; /* Likewise.  */
+	struct super_block *sb;		/* Reference to the VFS super block.  */
+	struct jffs_file *root;		/* The root directory file.  */
+	struct list_head *hash;		/* Hash table for finding files by ino.  */
+	struct jffs_fmcontrol *fmc;	/* Flash memory control structure.  */
+	__u32 hash_len;			/* The size of the hash table.  */
+	__u32 next_ino;			/* Next inode number to use for new files.  */
+	__u16 building_fs;		/* Is the file system being built right now?  */
 	struct jffs_delete_list *delete_list; /* Track deleted files.  */
+	pid_t thread_pid;		/* GC thread's PID */
+	struct task_struct *gc_task;	/* GC task struct */
+	struct completion gc_thread_comp; /* GC thread exit mutex */
+	__u32 gc_minfree_threshold;	/* GC trigger thresholds */
+	__u32 gc_maxdirty_threshold;
+	__u16 gc_background;		/* GC currently running in background */
 };
 
 
@@ -202,9 +208,9 @@ struct jffs_flash_status
 /* This stuff could be used for finding memory leaks.  */
 #define JFFS_MEMORY_DEBUG 0
 
-#if defined(JFFS_MEMORY_DEBUG) && JFFS_MEMORY_DEBUG
-extern long no_jffs_file;
 extern long no_jffs_node;
+extern long no_jffs_file;
+#if defined(JFFS_MEMORY_DEBUG) && JFFS_MEMORY_DEBUG
 extern long no_jffs_control;
 extern long no_jffs_raw_inode;
 extern long no_jffs_node_ref;
@@ -216,10 +222,5 @@ extern long no_name;
 #else
 #define DJM(x)
 #endif
-
-
-#ifdef __KERNEL__
-extern int init_jffs_fs(void);
-#endif /* __KERNEL__ */
 
 #endif /* __LINUX_JFFS_H__ */

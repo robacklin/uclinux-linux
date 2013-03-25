@@ -1,70 +1,81 @@
 VERSION = 2
-PATCHLEVEL = 0
-SUBLEVEL = 39
-UCRELEASE = uc2
+PATCHLEVEL = 4
+SUBLEVEL = 34
+EXTRAVERSION = .5-uc0
 
-#ARCH = m68knommu
-#ARCH = armnommu
-#ARCH = h8300
-#ARCH = sparcnommu
-#ARCH = shnommu
+KERNELRELEASE=$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)$(EXTRAVERSION)
 
-# Set the following to `true' to make a debuggable build.
-# Leave this set to `false' for production use.
-DODEBUG = false
+# ARCH := armnommu
+# ARCH := m68knommu
+# ARCH := h8300
+# ARCH := niosnommu
+# ARCH := e1nommu
 
-# If you are running a cross compiler, you may want to set this
-# to something more appropriate for your platform
-#CROSS_COMPILE  = m68k-elf-
-#CROSS_COMPILE  = m68k-linux-
-#CROSS_COMPILE  = arm-linux-
-#CROSS_COMPILE  = sparc-elf-
+# SUBARCH tells the usermode build what the underlying arch is.  That is set
+# first, and if a usermode build is happening, the "ARCH=um" on the command
+# line overrides the setting of ARCH below.  If a native build is happening,
+# then ARCH is assigned, getting whatever value it gets normally, and 
+# SUBARCH is subsequently ignored.
+ 
+ifndef SUBARCH
+SUBARCH := $(shell uname -m | sed -e s/i.86/i386/ -e s/sun4u/sparc64/ -e s/arm.*/arm/ -e s/sa110/arm/)
+endif
 
-#
-# For SMP kernels, set this. We don't want to have this in the config file
-# because it makes re-config very ugly and too many fundamental files depend
-# on "CONFIG_SMP"
-#
-# NOTE! SMP is experimental. See the file Documentation/SMP.txt
-#
-# SMP = 1
-#
-# SMP profiling options
-# SMP_PROF = 1
+ifndef ARCH
+ARCH := $(SUBARCH)
+endif
 
-#--------------------------------------------------------
 
-.EXPORT_ALL_VARIABLES:
+KERNELPATH=kernel-$(shell echo $(KERNELRELEASE) | sed -e "s/-//g")
 
 CONFIG_SHELL := $(shell if [ -x "$$BASH" ]; then echo $$BASH; \
 	  else if [ -x /bin/bash ]; then echo /bin/bash; \
 	  else echo sh; fi ; fi)
-TOPDIR	:= $(shell if [ "$$PWD" != "" ]; then echo $$PWD; else pwd; fi)
+TOPDIR	:= $(shell /bin/pwd)
 
 HPATH   	= $(TOPDIR)/include
-FINDHPATH	= $(HPATH)/asm $(HPATH)/linux $(HPATH)/scsi $(HPATH)/net
+FINDHPATH	= $(HPATH)/asm $(HPATH)/linux $(HPATH)/scsi $(HPATH)/net $(HPATH)/math-emu
 
-HOSTCC  	= gcc -I$(HPATH)
-ifdef CONFIG_FULLDEBUG
-HOSTCFLAGS	= -g -O2
-else
-HOSTCFLAGS	= -O2 -fomit-frame-pointer
+HOSTCC  	= unset GCC_EXEC_PREFIX; gcc
+HOSTCFLAGS	= -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer
+
+# CROSS_COMPILE 	= m68k-elf-
+# CROSS_COMPILE 	= arm-elf-
+# CROSS_COMPILE 	= h8300-elf-
+# CROSS_COMPILE 	= nios-elf-
+# CROSS_COMPILE		= e1-coff-
+ifndef CROSS_COMPILE
+CROSS_COMPILE 	=
 endif
 
-ifeq ($(DODEBUG),true)
-    DEBUG_FLAG=-g
-else
-    DEBUG_FLAG=-g
-endif
+#
+# Include the make variables (CC, etc...)
+#
 
-AS	=$(CROSS_COMPILE)as
-LD	=$(CROSS_COMPILE)ld $(DEBUG_FLAG)
-CC	=$(CROSS_COMPILE)gcc $(DEBUG_FLAG) -D__KERNEL__ -I$(HPATH)
-CPP	=$(CC) -E
-AR	=$(CROSS_COMPILE)ar
-NM	=$(CROSS_COMPILE)nm
-STRIP	=$(CROSS_COMPILE)strip
-MAKE	=make
+AS		= $(CROSS_COMPILE)as
+LD		= $(CROSS_COMPILE)ld
+CC		= $(CROSS_COMPILE)gcc
+CPP		= $(CC) -E
+AR		= $(CROSS_COMPILE)ar
+NM		= $(CROSS_COMPILE)nm
+STRIP		= $(CROSS_COMPILE)strip
+OBJCOPY		= $(CROSS_COMPILE)objcopy
+OBJDUMP		= $(CROSS_COMPILE)objdump
+MAKEFILES	= $(TOPDIR)/.config
+GENKSYMS	= /sbin/genksyms
+DEPMOD		= /sbin/depmod
+MODFLAGS	= -DMODULE $(ARCHMODFLAGS)
+CFLAGS_KERNEL	=
+PERL		= perl
+AWK		= awk
+RPM 		:= $(shell if [ -x "/usr/bin/rpmbuild" ]; then echo rpmbuild; \
+		    	else echo rpm; fi)
+
+export	VERSION PATCHLEVEL SUBLEVEL EXTRAVERSION KERNELRELEASE ARCH \
+	CONFIG_SHELL TOPDIR HPATH HOSTCC HOSTCFLAGS CROSS_COMPILE AS LD CC \
+	CPP AR NM STRIP OBJCOPY OBJDUMP MAKE MAKEFILES GENKSYMS MODFLAGS PERL AWK
+
+.PHONY: dummy
 
 all:	do-it-all
 
@@ -72,17 +83,16 @@ all:	do-it-all
 # Make "config" the default target if there is no configuration file or
 # "depend" the target if there is no top-level dependency information.
 #
+
 ifeq (.config,$(wildcard .config))
 include .config
 ifeq (.depend,$(wildcard .depend))
 include .depend
-
-ifdef CONFIG_UCLINUX
-LINUX = linux
+ifndef CONFIG_UCLINUX
+	LINUX=vmlinux
 else
-LINUX = vmlinux
+	LINUX=linux
 endif
-
 do-it-all:	Version $(LINUX)
 else
 CONFIGURATION = depend
@@ -94,132 +104,265 @@ do-it-all:	config
 endif
 
 #
+# INSTALL_PATH specifies where to place the updated kernel and system map
+# images.  Uncomment if you want to place them anywhere other than root.
+#
+
+#export	INSTALL_PATH=/boot
+
+#
+# INSTALL_MOD_PATH specifies a prefix to MODLIB for module directory
+# relocations required by build roots.  This is not defined in the
+# makefile but the arguement can be passed to make if needed.
+#
+
+MODLIB	:= $(INSTALL_MOD_PATH)/lib/modules/$(KERNELRELEASE)
+export MODLIB
+
+#
+# standard CFLAGS
+#
+
+CPPFLAGS := -D__KERNEL__ -I$(HPATH)
+CPPFLAGS += $(KERNEL_EXTRA_CFLAGS)
+
+ifndef CONFIG_FULLDEBUG
+CFLAGS := $(CPPFLAGS) -Wall -Wstrict-prototypes -Wno-trigraphs -O2 \
+	  -fno-strict-aliasing -fno-common
+else
+CFLAGS := $(CPPFLAGS) -Wall -Wstrict-prototypes -Wno-trigraphs -O1 \
+          -g -fno-strict-aliasing -fno-common
+CONFIG_FRAME_POINTER := y
+endif
+CFLAGS += -fno-builtin-sprintf
+ifndef CONFIG_FRAME_POINTER
+CFLAGS += -fomit-frame-pointer
+endif
+AFLAGS := -D__ASSEMBLY__ $(CPPFLAGS)
+
+check_gcc = $(shell if $(CC) $(1) -S -o /dev/null -xc /dev/null > /dev/null 2>&1; then echo "$(1)"; else echo "$(2)"; fi)
+
+# disable pointer signedness warnings in gcc 4.0
+CFLAGS += $(call check_gcc,-Wno-pointer-sign,)
+
+#
 # ROOT_DEV specifies the default root-device when making the image.
 # This can be either FLOPPY, CURRENT, /dev/xxxx or empty, in which case
 # the default of FLOPPY is used by 'build'.
+# This is i386 specific.
 #
 
-ROOT_DEV = CURRENT
-
-#
-# INSTALL_PATH specifies where to place the updated kernel and system map
-# images.  Uncomment if you want to place them anywhere other than root.
-
-#INSTALL_PATH=/boot
+export ROOT_DEV = CURRENT
 
 #
 # If you want to preset the SVGA mode, uncomment the next line and
 # set SVGA_MODE to whatever number you want.
 # Set it to -DSVGA_MODE=NORMAL_VGA if you just want the EGA/VGA mode.
 # The number is the same as you would ordinarily press at bootup.
+# This is i386 specific.
 #
 
-SVGA_MODE=	-DSVGA_MODE=NORMAL_VGA
+export SVGA_MODE = -DSVGA_MODE=NORMAL_VGA
 
 #
-# standard CFLAGS
+# If you want the RAM disk device, define this to be the size in blocks.
+# This is i386 specific.
 #
 
-ifdef CONFIG_FULLDEBUG
-#CFLAGS = -g -Wall -Wstrict-prototypes -O2 -fno-strength-reduce
-CFLAGS = -g -Wall -Wstrict-prototypes -O1 -fno-strength-reduce
-else
-CFLAGS = -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -fno-strength-reduce
-endif
+#export RAMDISK = -DRAMDISK=512
 
-ifdef CONFIG_CPP
-CFLAGS := $(CFLAGS) -x c++
-endif
+ifndef CONFIG_UCLINUX
 
-ifdef SMP
-CFLAGS += -D__SMP__
-AFLAGS += -D__SMP__
+CORE_FILES	=kernel/kernel.o mm/mm.o fs/fs.o ipc/ipc.o
+NETWORKS	=net/network.o
 
-ifdef SMP_PROF
-CFLAGS += -D__SMP_PROF__
-AFLAGS += -D__SMP_PROF__
-endif
-endif
-
-#
-# if you want the ram-disk device, define this to be the
-# size in blocks.
-#
-
-#RAMDISK = -DRAMDISK=512
-
-# Include the make variables (CC, etc...)
-#
-
-ARCHIVES	=kernel/kernel.o fs/fs.o ipc/ipc.o net/network.a
-FILESYSTEMS	=fs/filesystems.a
-DRIVERS		=drivers/block/block.a \
-		 drivers/char/char.a
 LIBS		=$(TOPDIR)/lib/lib.a
-SUBDIRS		=kernel drivers fs net ipc lib
+SUBDIRS		=kernel drivers mm fs net ipc lib crypto
 
-ifdef CONFIG_UCLINUX 
-ARCHIVES := $(ARCHIVES) mmnommu/mm.o
-SUBDIRS := $(SUBDIRS) mmnommu
-else
-ARCHIVES := $(ARCHIVES) mm/mm.o
-SUBDIRS := $(SUBDIRS) mm
+else # CONFIG_UCLINUX
+CORE_FILES	=kernel/kernel.o mmnommu/mmnommu.o fs/fs.o ipc/ipc.o
+NETWORKS	=net/network.o
+LIBS		=$(TOPDIR)/lib/lib.a
+SUBDIRS		=kernel drivers mmnommu fs net ipc lib crypto
+endif # CONFIG_UCLINUX
+
+DRIVERS-n :=
+DRIVERS-y :=
+DRIVERS-m :=
+DRIVERS-  :=
+
+DRIVERS-$(CONFIG_ACPI_BOOT) += drivers/acpi/acpi.o
+DRIVERS-$(CONFIG_PARPORT) += drivers/parport/driver.o
+DRIVERS-y += drivers/char/char.o \
+	drivers/serial/serial.o \
+	drivers/block/block.o \
+	drivers/misc/misc.o \
+	drivers/net/net.o
+DRIVERS-$(CONFIG_AGP) += drivers/char/agp/agp.o
+DRIVERS-$(CONFIG_DRM_NEW) += drivers/char/drm/drm.o
+DRIVERS-$(CONFIG_DRM_OLD) += drivers/char/drm-4.0/drm.o
+DRIVERS-$(CONFIG_NUBUS) += drivers/nubus/nubus.a
+DRIVERS-$(CONFIG_NET_FC) += drivers/net/fc/fc.o
+DRIVERS-$(CONFIG_DEV_APPLETALK) += drivers/net/appletalk/appletalk.o
+DRIVERS-$(CONFIG_TR) += drivers/net/tokenring/tr.o
+DRIVERS-$(CONFIG_WAN) += drivers/net/wan/wan.o
+DRIVERS-$(CONFIG_ARCNET) += drivers/net/arcnet/arcnetdrv.o
+DRIVERS-$(CONFIG_ATM) += drivers/atm/atm.o
+DRIVERS-$(CONFIG_IDE) += drivers/ide/idedriver.o
+DRIVERS-$(CONFIG_FC4) += drivers/fc4/fc4.a
+DRIVERS-$(CONFIG_SCSI) += drivers/scsi/scsidrv.o
+DRIVERS-$(CONFIG_FUSION_BOOT) += drivers/message/fusion/fusion.o
+DRIVERS-$(CONFIG_IEEE1394) += drivers/ieee1394/ieee1394drv.o
+DRIVERS-$(CONFIG_FUJITSU) += drivers/fujitsu/fujitsu.o
+DRIVERS-$(CONFIG_FRV_ACPI_EMU) += drivers/frv_acpi/frvacpi.o
+
+ifneq ($(CONFIG_CD_NO_IDESCSI)$(CONFIG_BLK_DEV_IDECD)$(CONFIG_BLK_DEV_SR)$(CONFIG_PARIDE_PCD),)
+DRIVERS-y += drivers/cdrom/driver.o
 endif
 
-ifeq ($(CONFIG_ISDN),y)
-DRIVERS := $(DRIVERS) drivers/isdn/isdn.a
-endif
+DRIVERS-$(CONFIG_SOUND) += drivers/sound/sounddrivers.o
+DRIVERS-$(CONFIG_PCI) += drivers/pci/driver.o
+DRIVERS-$(CONFIG_MTD) += drivers/mtd/mtdlink.o
+DRIVERS-$(CONFIG_PCMCIA) += drivers/pcmcia/pcmcia.o
+DRIVERS-$(CONFIG_NET_PCMCIA) += drivers/net/pcmcia/pcmcia_net.o
+DRIVERS-$(CONFIG_NET_WIRELESS) += drivers/net/wireless/wireless_net.o
+DRIVERS-$(CONFIG_PCMCIA_CHRDEV) += drivers/char/pcmcia/pcmcia_char.o
+DRIVERS-$(CONFIG_DIO) += drivers/dio/dio.a
+DRIVERS-$(CONFIG_SBUS) += drivers/sbus/sbus_all.o
+DRIVERS-$(CONFIG_ZORRO) += drivers/zorro/driver.o
+DRIVERS-$(CONFIG_FC4) += drivers/fc4/fc4.a
+DRIVERS-$(CONFIG_PPC32) += drivers/macintosh/macintosh.o
+DRIVERS-$(CONFIG_MAC) += drivers/macintosh/macintosh.o
+DRIVERS-$(CONFIG_ISAPNP) += drivers/pnp/pnp.o
+DRIVERS-$(CONFIG_I2C) += drivers/i2c/i2c.o
+DRIVERS-$(CONFIG_SPI) += drivers/spi/spi.o
+DRIVERS-$(CONFIG_VT) += drivers/video/video.o
+DRIVERS-$(CONFIG_PARIDE) += drivers/block/paride/paride.a
+DRIVERS-$(CONFIG_HAMRADIO) += drivers/net/hamradio/hamradio.o
+DRIVERS-$(CONFIG_TC) += drivers/tc/tc.a
+DRIVERS-$(CONFIG_USB) += drivers/usb/usbdrv.o
+DRIVERS-$(CONFIG_USB_GADGET) += drivers/usb/gadget/built-in.o
+DRIVERS-y +=drivers/media/media.o
+DRIVERS-$(CONFIG_INPUT) += drivers/input/inputdrv.o
+DRIVERS-$(CONFIG_HIL) += drivers/hil/hil.o
+DRIVERS-$(CONFIG_I2O) += drivers/message/i2o/i2o.o
+DRIVERS-$(CONFIG_IRDA) += drivers/net/irda/irda.o
+DRIVERS-$(CONFIG_PHONE) += drivers/telephony/telephony.o
+DRIVERS-$(CONFIG_MD) += drivers/md/mddev.o
+DRIVERS-$(CONFIG_GSC) += drivers/gsc/gscbus.o
+DRIVERS-$(CONFIG_BLUEZ) += drivers/bluetooth/bluetooth.o
+DRIVERS-$(CONFIG_HOTPLUG_PCI) += drivers/hotplug/vmlinux-obj.o
+DRIVERS-$(CONFIG_ISDN_BOOL) += drivers/isdn/vmlinux-obj.o
+DRIVERS-$(CONFIG_CRYPTO) += crypto/crypto.o
+DRIVERS-$(CONFIG_ARCH_AT91RM9200) += drivers/at91/at91drv.o
 
-DRIVERS := $(DRIVERS) drivers/net/net.a
+DRIVERS := $(DRIVERS-y)
 
-ifdef CONFIG_CD_NO_IDESCSI
-DRIVERS := $(DRIVERS) drivers/cdrom/cdrom.a
-endif
 
-ifeq ($(CONFIG_SCSI),y)
-DRIVERS := $(DRIVERS) drivers/scsi/scsi.a
-endif
+# files removed with 'make clean'
+CLEAN_FILES = \
+	kernel/ksyms.lst include/linux/compile.h \
+	$(LINUX) System.map \
+	.tmp* \
+	drivers/char/consolemap_deftbl.c drivers/video/promcon_tbl.c \
+	drivers/char/conmakehash \
+	drivers/char/drm/*-mod.c \
+	drivers/pci/devlist.h drivers/pci/classlist.h drivers/pci/gen-devlist \
+	drivers/zorro/devlist.h drivers/zorro/gen-devlist \
+	drivers/sound/bin2hex drivers/sound/hex2hex \
+	drivers/atm/fore200e_mkfirm drivers/atm/{pca,sba}*{.bin,.bin1,.bin2} \
+	drivers/scsi/aic7xxx/aicasm/aicasm \
+	drivers/scsi/aic7xxx/aicasm/aicasm_gram.c \
+	drivers/scsi/aic7xxx/aicasm/aicasm_gram.h \
+	drivers/scsi/aic7xxx/aicasm/aicasm_macro_gram.c \
+	drivers/scsi/aic7xxx/aicasm/aicasm_macro_gram.h \
+	drivers/scsi/aic7xxx/aicasm/aicasm_macro_scan.c \
+	drivers/scsi/aic7xxx/aicasm/aicasm_scan.c \
+	drivers/scsi/aic7xxx/aicasm/aicdb.h \
+	drivers/scsi/aic7xxx/aicasm/y.tab.h \
+	drivers/scsi/53c700_d.h \
+	drivers/tc/lk201-map.c \
+	net/khttpd/make_times_h \
+	net/khttpd/times.h \
+	net/ipsec/*.c \
+	submenu* \
+	drivers/ieee1394/oui.c
+# directories removed with 'make clean'
+CLEAN_DIRS = \
+	modules
 
-ifeq ($(CONFIG_SOUND),y)
-DRIVERS := $(DRIVERS) drivers/sound/sound.a
-endif
+# files removed with 'make mrproper'
+MRPROPER_FILES = \
+	include/linux/autoconf.h include/linux/version.h \
+	lib/crc32table.h lib/gen_crc32table \
+	drivers/net/hamradio/soundmodem/sm_tbl_{afsk1200,afsk2666,fsk9600}.h \
+	drivers/net/hamradio/soundmodem/sm_tbl_{hapn4800,psk4800}.h \
+	drivers/net/hamradio/soundmodem/sm_tbl_{afsk2400_7,afsk2400_8}.h \
+	drivers/net/hamradio/soundmodem/gentbl \
+	drivers/sound/*_boot.h drivers/sound/.*.boot \
+	drivers/sound/msndinit.c \
+	drivers/sound/msndperm.c \
+	drivers/sound/pndsperm.c \
+	drivers/sound/pndspini.c \
+	drivers/atm/fore200e_*_fw.c drivers/atm/.fore200e_*.fw \
+	.version .config* config.in config.old \
+	scripts/tkparse scripts/kconfig.tk scripts/kconfig.tmp \
+	scripts/lxdialog/*.o scripts/lxdialog/lxdialog \
+	.menuconfig.log \
+	include/asm \
+	.hdepend scripts/mkdep scripts/split-include scripts/docproc \
+	$(TOPDIR)/include/linux/modversions.h \
+	kernel.spec
 
-ifdef CONFIG_PCI
-DRIVERS := $(DRIVERS) drivers/pci/pci.a
-endif
-
-ifdef CONFIG_SBUS
-DRIVERS := $(DRIVERS) drivers/sbus/sbus.a
-endif
-
-ifeq ($(CONFIG_PARIDE),y)
-DRIVERS := $(DRIVERS) drivers/block/paride/paride.a
-endif
+# directories removed with 'make mrproper'
+MRPROPER_DIRS = \
+	include/config \
+	$(TOPDIR)/include/linux/modules
 
 include arch/$(ARCH)/Makefile
 
+# Extra cflags for kbuild 2.4.  The default is to forbid includes by kernel code
+# from user space headers.  Some UML code requires user space headers, in the
+# UML Makefiles add 'kbuild_2_4_nostdinc :=' before include Rules.make.  No
+# other kernel code should include user space headers, if you need
+# 'kbuild_2_4_nostdinc :=' or -I/usr/include for kernel code and you are not UML
+# then your code is broken!  KAO.
+
+kbuild_2_4_nostdinc	:= -nostdinc -iwithprefix include
+export kbuild_2_4_nostdinc
+
+export	CPPFLAGS CFLAGS CFLAGS_KERNEL AFLAGS AFLAGS_KERNEL
+
+export	NETWORKS DRIVERS LIBS HEAD LDFLAGS LINKFLAGS MAKEBOOT ASFLAGS
+
 .S.s:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -E -o $*.s $<
+	$(CPP) $(AFLAGS) $(AFLAGS_KERNEL) -traditional -o $*.s $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) $(AFLAGS_KERNEL) -traditional -c -o $*.o $<
 
 Version: dummy
 	@rm -f include/linux/compile.h
 
 boot: $(LINUX)
-	@$(MAKE) -C arch/$(ARCH)/boot
+	@$(MAKE) CFLAGS="$(CFLAGS) $(CFLAGS_KERNEL)" LINUX="$(LINUX)" -C arch/$(ARCH)/boot
 
-$(LINUX): $(CONFIGURATION) init/main.o init/version.o linuxsubdirs
-	$(LD) $(LINKFLAGS) $(HEAD) init/main.o init/version.o \
-		$(ARCHIVES) \
-		$(FILESYSTEMS) \
+$(LINUX): include/linux/version.h $(CONFIGURATION) init/main.o init/version.o init/do_mounts.o linuxsubdirs
+	$(LD) $(LINKFLAGS) $(HEAD) init/main.o init/version.o init/do_mounts.o \
+		--start-group \
+		$(CORE_FILES) \
 		$(DRIVERS) \
-		$(LIBS) -o $(LINUX)
-	$(NM) $(LINUX) | grep -v '\(compiled\)\|\(\.o$$\)\|\( a \)' | sort > System.map
+		$(NETWORKS) \
+		$(LIBS) \
+		--end-group \
+		-o $(LINUX)
+	$(NM) $(LINUX) | grep -v '\(compiled\)\|\(\.o$$\)\|\( [aUw] \)\|\(\.\.ng$$\)\|\(LASH[RL]DI\)' | sort > System.map
 
 symlinks:
 	rm -f include/asm
 	( cd include ; ln -sf asm-$(ARCH) asm)
+	@if [ ! -d include/linux/modules ]; then \
+		mkdir include/linux/modules; \
+	fi
 
 oldconfig: symlinks
 	$(CONFIG_SHELL) scripts/Configure -d arch/$(ARCH)/config.in
@@ -228,123 +371,136 @@ xconfig: symlinks
 	$(MAKE) -C scripts kconfig.tk
 	wish -f scripts/kconfig.tk
 
-menuconfig: include/linux/version.h symlinks 
+menuconfig: include/linux/version.h symlinks
 	$(MAKE) -C scripts/lxdialog all
 	$(CONFIG_SHELL) scripts/Menuconfig arch/$(ARCH)/config.in
 
 config: symlinks
 	$(CONFIG_SHELL) scripts/Configure arch/$(ARCH)/config.in
 
-linuxsubdirs: dummy
-	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i; done
+include/config/MARKER: scripts/split-include include/linux/autoconf.h
+	scripts/split-include include/linux/autoconf.h include/config
+	@ touch include/config/MARKER
+
+linuxsubdirs: $(patsubst %, _dir_%, $(SUBDIRS))
+
+$(patsubst %, _dir_%, $(SUBDIRS)) : dummy include/linux/version.h include/config/MARKER
+	$(MAKE) CFLAGS="$(CFLAGS) $(CFLAGS_KERNEL)" -C $(patsubst _dir_%, %, $@)
 
 $(TOPDIR)/include/linux/version.h: include/linux/version.h
 $(TOPDIR)/include/linux/compile.h: include/linux/compile.h
 
 newversion:
-	@if [ ! -f .version ]; then \
-		echo 1 > .version; \
-	else \
-		expr 0`cat .version` + 1 > .version; \
-	fi
+	. scripts/mkversion > .tmpversion
+	@mv -f .tmpversion .version
+
+uts_len		:= 64
+uts_truncate	:= sed -e 's/\(.\{1,$(uts_len)\}\).*/\1/'
+uts_nodomain	:= sed -e 's/[.].*$$//'
 
 include/linux/compile.h: $(CONFIGURATION) include/linux/version.h newversion
-	@if [ -f .name ]; then \
-	   echo \#define UTS_VERSION \"$(VENDOR_UTS_VERSION)`cat .version`-`cat .name` `date`\"; \
-	 else \
-	   echo \#define UTS_VERSION \"$(VENDOR_UTS_VERSION)`cat .version` `date`\";  \
-	 fi >> .ver
-	@echo \#define LINUX_COMPILE_TIME \"`date +%T`\" >> .ver
+	@echo -n \#`cat .version` > .ver1
+	@if [ -n "$(CONFIG_SMP)" ] ; then echo -n " SMP" >> .ver1; fi
+	@if [ -f .name ]; then  echo -n \-`cat .name` >> .ver1; fi
+	@LANG=C echo ' '`date` >> .ver1
+	@echo \#define UTS_VERSION \"`cat .ver1 | $(uts_truncate)`\" > .ver
+	@LANG=C echo \#define LINUX_COMPILE_TIME \"`date +%T`\" >> .ver
 	@echo \#define LINUX_COMPILE_BY \"`whoami`\" >> .ver
-	@echo \#define LINUX_COMPILE_HOST \"`hostname`\" >> .ver
-	@if [ -x /bin/dnsdomainname ]; then \
-	   echo \#define LINUX_COMPILE_DOMAIN \"`dnsdomainname`\"; \
-	 elif [ -x /bin/domainname ]; then \
-	   echo \#define LINUX_COMPILE_DOMAIN \"`domainname`\"; \
-	 else \
-	   echo \#define LINUX_COMPILE_DOMAIN ; \
-	 fi >> .ver
-	@echo \#define LINUX_COMPILER \"`$(CC) -v 2>&1 | tail -1`\" >> .ver
+	@echo \#define LINUX_COMPILE_HOST \"`hostname | $(uts_truncate) | $(uts_nodomain)`\" >> .ver
+	@([ -x /bin/dnsdomainname ] && /bin/dnsdomainname > .ver1) || \
+	 ([ -x /bin/domainname ] && /bin/domainname > .ver1) || \
+	 echo > .ver1
+	@echo \#define LINUX_COMPILE_DOMAIN \"`cat .ver1 | $(uts_truncate)`\" >> .ver
+	@echo \#define LINUX_COMPILER \"`$(CC) $(CFLAGS) -v 2>&1 | tail -n 1`\" >> .ver
 	@mv -f .ver $@
+	@rm -f .ver1
 
-ifdef CONFIG_UCLINUX
-include/linux/version.h: ./Makefile .config
-	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL).$(SUBLEVEL).$(UCRELEASE)\" > .ver
-	@echo \#define LINUX_VERSION_CODE `expr $(VERSION) \\* 65536 + $(PATCHLEVEL) \\* 256 + $(SUBLEVEL)` >> .ver
-	@echo '#define KERNEL_VERSION(a,b,c) (((a)<<16)|((b)<<8)|(c))' >> .ver
-	@mv -f .ver $@
-else
 include/linux/version.h: ./Makefile
-	@echo \#define UTS_RELEASE \"$(VERSION).$(PATCHLEVEL).$(SUBLEVEL)\" > .ver
+	@expr length "$(KERNELRELEASE)" \<= $(uts_len) > /dev/null || \
+	  (echo KERNELRELEASE \"$(KERNELRELEASE)\" exceeds $(uts_len) characters >&2; false)
+	@echo \#define UTS_RELEASE \"$(KERNELRELEASE)\" > .ver
 	@echo \#define LINUX_VERSION_CODE `expr $(VERSION) \\* 65536 + $(PATCHLEVEL) \\* 256 + $(SUBLEVEL)` >> .ver
+	@echo '#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))' >>.ver
 	@mv -f .ver $@
-endif
 
-init/version.o: init/version.c include/linux/compile.h
-	$(CC) $(CFLAGS) -DUTS_MACHINE='"$(ARCH)"' -c -o init/version.o init/version.c
+comma	:= ,
 
-init/main.o: init/main.c
-	$(CC) $(CFLAGS) $(PROFILING) -c -o $*.o $<
+init/version.o: init/version.c include/linux/compile.h include/config/MARKER
+	$(CC) $(CFLAGS) $(CFLAGS_KERNEL) -DUTS_MACHINE='"$(ARCH)"' -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) -c -o init/version.o init/version.c
 
-fs: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=fs
+init/main.o: init/main.c include/config/MARKER
+	$(CC) $(CFLAGS) $(CFLAGS_KERNEL) $(PROFILING) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) -c -o $@ $<
 
-lib: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=lib
+init/do_mounts.o: init/do_mounts.c include/config/MARKER
+	$(CC) $(CFLAGS) $(CFLAGS_KERNEL) $(PROFILING) -DKBUILD_BASENAME=$(subst $(comma),_,$(subst -,_,$(*F))) -c -o $@ $<
 
-mm: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=mm
+fs lib mm ipc kernel drivers net: dummy
+	$(MAKE) CFLAGS="$(CFLAGS) $(CFLAGS_KERNEL)" $(subst $@, _dir_$@, $@)
 
-mmnommu: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=mmnommu
+TAGS: dummy
+	{ find include/asm-${ARCH} -name '*.h' -print ; \
+	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print ; \
+	find $(SUBDIRS) init arch/${ARCH} -name '*.[chS]' ; } | grep -v SCCS | grep -v '\.svn' | etags -
 
-ipc: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=ipc
+# Exuberant ctags works better with -I
+tags: dummy
+	CTAGSF=`ctags --version | grep -i exuberant >/dev/null && echo "-I __initdata,__exitdata,EXPORT_SYMBOL,EXPORT_SYMBOL_NOVERS"`; \
+	ctags $$CTAGSF `find include/asm-$(ARCH) -name '*.h'` && \
+	find include -type d \( -name "asm-*" -o -name config \) -prune -o -name '*.h' -print | xargs ctags $$CTAGSF -a && \
+	find $(SUBDIRS) init -name '*.[ch]' | xargs ctags $$CTAGSF -a
 
-kernel: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=kernel
-
-drivers: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=drivers
-
-net: dummy
-	$(MAKE) linuxsubdirs SUBDIRS=net
-
-MODFLAGS = -DMODULE
 ifdef CONFIG_MODULES
 ifdef CONFIG_MODVERSIONS
 MODFLAGS += -DMODVERSIONS -include $(HPATH)/linux/modversions.h
 endif
 
-modules: include/linux/version.h
-	@set -e; \
-	for i in $(SUBDIRS); \
-	do $(MAKE) -C $$i CFLAGS="$(CFLAGS) $(MODFLAGS)" MAKING_MODULES=1 modules; \
-	done
+.PHONY: modules
+modules: $(patsubst %, _mod_%, $(SUBDIRS))
 
-modules_install:
-	@( \
-	MODLIB=$(INSTALL_MOD_PATH)/lib/modules/$(VERSION).$(PATCHLEVEL).$(SUBLEVEL); \
-	[ "$(UCRELEASE)" ] && MODLIB="$$MODLIB.$(UCRELEASE)"; \
-	cd modules; \
-	MODULES=""; \
-	inst_mod() { These="`cat $$1`"; MODULES="$$MODULES $$These"; \
-		mkdir -p $$MODLIB/$$2; cp -p $$These $$MODLIB/$$2; \
-		echo Installing modules under $$MODLIB/$$2; \
-	}; \
-	\
-	if [ -f BLOCK_MODULES ]; then inst_mod BLOCK_MODULES block; fi; \
-	if [ -f NET_MODULES   ]; then inst_mod NET_MODULES   net;   fi; \
-	if [ -f IPV4_MODULES  ]; then inst_mod IPV4_MODULES  ipv4;  fi; \
-	if [ -f SCSI_MODULES  ]; then inst_mod SCSI_MODULES  scsi;  fi; \
-	if [ -f FS_MODULES    ]; then inst_mod FS_MODULES    fs;    fi; \
-	if [ -f CDROM_MODULES ]; then inst_mod CDROM_MODULES cdrom; fi; \
-	\
-	ls *.o > .allmods; \
-	echo $$MODULES | tr ' ' '\n' | sort | comm -23 .allmods - > .misc; \
-	if [ -s .misc ]; then inst_mod .misc misc; fi; \
-	rm -f .misc .allmods; \
-	)
+.PHONY: $(patsubst %, _mod_%, $(SUBDIRS))
+$(patsubst %, _mod_%, $(SUBDIRS)) : include/linux/version.h include/config/MARKER
+	$(MAKE) -C $(patsubst _mod_%, %, $@) CFLAGS="$(CFLAGS) $(MODFLAGS)" MAKING_MODULES=1 modules
+
+.PHONY: modules_install
+modules_install: _modinst_ $(patsubst %, _modinst_%, $(SUBDIRS)) _modinst_post
+
+.PHONY: _modinst_
+ifeq (y,y)
+_modinst_:
+else
+_modinst_:
+	@rm -rf $(MODLIB)/kernel
+	@rm -f $(MODLIB)/build
+	@mkdir -p $(MODLIB)/kernel
+	@ln -s $(TOPDIR) $(MODLIB)/build
+endif
+
+# If System.map exists, run depmod.  This deliberately does not have a
+# dependency on System.map since that would run the dependency tree on
+# vmlinux.  This depmod is only for convenience to give the initial
+# boot a modules.dep even before / is mounted read-write.  However the
+# boot script depmod is the master version.
+ifeq "$(strip $(INSTALL_MOD_PATH))" ""
+depmod_opts	:=
+else
+depmod_opts	:= -b $(INSTALL_MOD_PATH)/lib/modules -r
+endif
+.PHONY: _modinst_post
+_modinst_post: _modinst_post_pcmcia
+	if [ -r System.map ]; then $(DEPMOD) -ae -F System.map $(depmod_opts) $(KERNELRELEASE); fi
+
+# Backwards compatibilty symlinks for people still using old versions
+# of pcmcia-cs with hard coded pathnames on insmod.  Remove
+# _modinst_post_pcmcia for kernel 2.4.1.
+.PHONY: _modinst_post_pcmcia
+_modinst_post_pcmcia:
+	cd $(MODLIB); \
+	mkdir -p pcmcia; \
+	find kernel -path '*/pcmcia/*' -name '*.o' | xargs -i -r ln -sf ../{} pcmcia
+
+.PHONY: $(patsubst %, _modinst_%, $(SUBDIRS))
+$(patsubst %, _modinst_%, $(SUBDIRS)) :
+	$(MAKE) -C $(patsubst _modinst_%, %, $@) modules_install
 
 # modules disabled....
 
@@ -359,71 +515,77 @@ modules modules_install: dummy
 endif
 
 clean:	archclean
-	rm -f kernel/ksyms.lst include/linux/compile.h
-	rm -f core `find . -name '*.[oas]' ! -regex '.*lxdialog/.*' -print`
-	rm -f core `find . -type f -name 'core' -print`
-	rm -f core `find . -name '*.rh' -print`
-	rm -f $(LINUX) System.map
-	rm -f .tmp* drivers/sound/configure
-	rm -fr modules/*
-	rm -f submenu*
+	find . \( -name '*.[oas]' -o -name core -o -name '.*.flags' \) -type f -print \
+		| grep -v lxdialog/ | xargs rm -f
+	rm -f $(CLEAN_FILES)
+	rm -rf $(CLEAN_DIRS)
+	$(MAKE) -C Documentation/DocBook clean
 
-mrproper: clean
-	rm -f include/linux/autoconf.h include/linux/version.h
-	rm -f drivers/sound/local.h drivers/sound/.defines
-	rm -f drivers/char/uni_hash.tbl drivers/char/conmakehash
-	rm -f drivers/net/soundmodem/sm_tbl_{afsk1200,afsk2666,fsk9600}.h
-	rm -f drivers/net/soundmodem/sm_tbl_{hapn4800,psk4800}.h
-	rm -f drivers/net/soundmodem/sm_tbl_{afsk2400_7,afsk2400_8}.h
-	rm -f drivers/net/soundmodem/gentbl
-	rm -f .version .config* config.in config.old
-	rm -f scripts/tkparse scripts/kconfig.tk scripts/kconfig.tmp
-	rm -f scripts/lxdialog/*.o scripts/lxdialog/lxdialog
-	rm -f .menuconfig .menuconfig.log
-	rm -f include/asm
-	rm -f .depend `find . -name .depend -print`
-	rm -f .hdepend scripts/mkdep
-	rm -f $(TOPDIR)/include/linux/modversions.h
-	rm -f $(TOPDIR)/include/linux/modules/*
-
+mrproper: clean archmrproper
+	find . \( -size 0 -o -name .depend \) -type f -print | xargs rm -f
+	rm -f $(MRPROPER_FILES)
+	rm -rf $(MRPROPER_DIRS)
+	$(MAKE) -C Documentation/DocBook mrproper
 
 distclean: mrproper
-	rm -f core `find . \( -name '*.orig' -o -name '*.rej' -o -name '*~' \
-                -o -name '*.bak' -o -name '#*#' -o -name '.*.orig' \
-                -o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -print` TAGS
+	rm -f core `find . \( -not -type d \) -and \
+		\( -name '*.orig' -o -name '*.rej' -o -name '*~' \
+		-o -name '*.bak' -o -name '#*#' -o -name '.*.orig' \
+		-o -name '.*.rej' -o -name '.SUMS' -o -size 0 \) -type f -print` TAGS tags
 
 backup: mrproper
 	cd .. && tar cf - linux/ | gzip -9 > backup.gz
 	sync
 
+sgmldocs: 
+	chmod 755 $(TOPDIR)/scripts/docgen
+	chmod 755 $(TOPDIR)/scripts/gen-all-syms
+	chmod 755 $(TOPDIR)/scripts/kernel-doc
+	$(MAKE) -C $(TOPDIR)/Documentation/DocBook books
+
+psdocs: sgmldocs
+	$(MAKE) -C Documentation/DocBook ps
+
+pdfdocs: sgmldocs
+	$(MAKE) -C Documentation/DocBook pdf
+
+htmldocs: sgmldocs
+	$(MAKE) -C Documentation/DocBook html
+
+mandocs:
+	chmod 755 $(TOPDIR)/scripts/kernel-doc
+	chmod 755 $(TOPDIR)/scripts/split-man
+	$(MAKE) -C Documentation/DocBook man
+
 sums:
 	find . -type f -print | sort | xargs sum > .SUMS
 
 dep-files: scripts/mkdep archdep include/linux/version.h
-	echo Platform $(PLATFORM) Board $(BOARD) Model $(MODEL)
-	scripts/mkdep init/*.c > .tmpdepend
-	scripts/mkdep `find $(FINDHPATH) -follow -name \*.h ! -name modversions.h -print` > .hdepend
-	set -e; for i in $(SUBDIRS); do $(MAKE) -C $$i fastdep; done
-	mv .tmpdepend .depend
-
-# Prepare source tree for RCS version control using Emacs VC;
-# make all needed RCS directories and write-lock nearly everything.
-vc:
-	chmod a-w COPYING CREDITS MAINTAINERS Makefile README Rules.make
-	find . -type d ! -name "*RCS" -exec mkdir {}/RCS \;
-	find . -type f \( -name *.[chS] -o -name "*Makefile" -o -name "*README*" -o -name "*Config.in" -o -name "*.txt" \) -exec chmod a-w {} \;
-	find Documentation scripts -type f -exec chmod a-w {} \;
-
-MODVERFILE :=
+	rm -f .depend .hdepend
+	$(MAKE) $(patsubst %,_sfdep_%,$(SUBDIRS)) _FASTDEP_ALL_SUB_DIRS="$(SUBDIRS)"
+ifdef CONFIG_MODVERSIONS
+	$(MAKE) update-modverfile
+endif
+	find $(FINDHPATH) \( -name SCCS -o -name .svn \) -prune -o -follow -name \*.h ! -name modversions.h -print | xargs scripts/mkdep --  > .hdepend
+	scripts/mkdep -- init/*.c > .depend
 
 ifdef CONFIG_MODVERSIONS
 MODVERFILE := $(TOPDIR)/include/linux/modversions.h
+else
+MODVERFILE :=
 endif
+export	MODVERFILE
 
-depend dep: dep-files $(MODVERFILE)
+depend dep: dep-files
 
 checkconfig:
-	perl -w scripts/checkconfig.pl `find * -name '*.[hcS]' -print | sort`
+	find * -name '*.[hcS]' -type f -print | sort | xargs $(PERL) -w scripts/checkconfig.pl
+
+checkhelp:
+	find * -name [cC]onfig.in -print | sort | xargs $(PERL) -w scripts/checkhelp.pl
+
+checkincludes:
+	find * -name '*.[hcS]' -type f -print | sort | xargs $(PERL) -w scripts/checkincludes.pl
 
 ifdef CONFIGURATION
 ..$(CONFIGURATION):
@@ -453,3 +615,33 @@ include Rules.make
 
 scripts/mkdep: scripts/mkdep.c
 	$(HOSTCC) $(HOSTCFLAGS) -o scripts/mkdep scripts/mkdep.c
+
+scripts/split-include: scripts/split-include.c
+	$(HOSTCC) $(HOSTCFLAGS) -o scripts/split-include scripts/split-include.c
+
+#
+# RPM target
+#
+#	If you do a make spec before packing the tarball you can rpm -ta it
+#
+spec:
+	. scripts/mkspec >kernel.spec
+
+#
+#	Build a tar ball, generate an rpm from it and pack the result
+#	There arw two bits of magic here
+#	1) The use of /. to avoid tar packing just the symlink
+#	2) Removing the .dep files as they have source paths in them that
+#	   will become invalid
+#
+rpm:	clean spec
+	find . \( -size 0 -o -name .depend -o -name .hdepend \) -type f -print | xargs rm -f
+	set -e; \
+	cd $(TOPDIR)/.. ; \
+	ln -sf $(TOPDIR) $(KERNELPATH) ; \
+	tar -cvz --exclude CVS -f $(KERNELPATH).tar.gz $(KERNELPATH)/. ; \
+	rm $(KERNELPATH) ; \
+	cd $(TOPDIR) ; \
+	. scripts/mkversion > .version ; \
+	$(RPM) -ta $(TOPDIR)/../$(KERNELPATH).tar.gz ; \
+	rm $(TOPDIR)/../$(KERNELPATH).tar.gz

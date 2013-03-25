@@ -53,10 +53,10 @@ struct rpc_ioreq {
 	struct rpc_wait *	rq_slot;
 	struct sockaddr	*	rq_addr;
 	int			rq_alen;
-	struct iovec		rq_svec[UIO_MAXIOV];
+	struct iovec		rq_svec[UIO_FASTIOV];
 	unsigned int		rq_snr;
 	unsigned long		rq_slen;
-	struct iovec		rq_rvec[UIO_MAXIOV];
+	struct iovec		rq_rvec[UIO_FASTIOV];
 	unsigned int		rq_rnr;
 	unsigned long		rq_rlen;
 };
@@ -77,7 +77,7 @@ struct rpc_wait {
 	struct rpc_wait *	w_next;
 	struct rpc_ioreq *	w_req;
 	int			w_result;
-	struct wait_queue *	w_wait;
+	wait_queue_head_t 	w_wait;
 	rpc_callback_fn_t	w_handler;
 	void *			w_cdata;
 	char			w_queued;
@@ -94,8 +94,8 @@ struct rpc_sock {
 	unsigned long		cwnd;
 	struct rpc_wait *	pending;
 	struct rpc_wait *	free;
-	struct wait_queue *	backlog;
-	struct wait_queue *	shutwait;
+	wait_queue_head_t	backlog;
+	wait_queue_head_t	shutwait;
 	int			shutdown;
 };
 

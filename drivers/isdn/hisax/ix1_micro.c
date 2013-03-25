@@ -1,90 +1,32 @@
-/* $Id: ix1_micro.c,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
-
- * ix1_micro.c  low level stuff for ITK ix1-micro Rev.2 isdn cards
- *              derived from the original file teles3.c from Karsten Keil
+/* $Id: ix1_micro.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Copyright (C) 1997 Klaus-Peter Nischke (ITK AG) (for the modifications to
- *                                                  the original file teles.c)
+ * low level stuff for ITK ix1-micro Rev.2 isdn cards
+ * derived from the original file teles3.c from Karsten Keil
  *
- * Thanks to    Jan den Ouden
- *              Fritz Elfert
- *              Beat Doebeli
+ * Author       Klaus-Peter Nischke
+ * Copyright    by Klaus-Peter Nischke, ITK AG
+ *                                   <klaus@nischke.do.eunet.de>
+ *              by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * $Log: ix1_micro.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.3.2.8  1998/04/08 21:58:41  keil
- * New init code
- *
- * Revision 1.3.2.7  1998/02/11 14:21:01  keil
- * cosmetic fixes
- *
- * Revision 1.3.2.6  1998/01/27 22:37:33  keil
- * fast io
- *
- * Revision 1.3.2.5  1997/11/15 18:50:51  keil
- * new common init function
- *
- * Revision 1.3.2.4  1997/10/17 22:14:09  keil
- * update to last hisax version
- *
- * Revision 2.1  1997/07/27 21:47:09  keil
- * new interface structures
- *
- * Revision 2.0  1997/06/26 11:02:50  keil
- * New Layer and card interface
- *
- * Revision 1.3  1997/04/13 19:54:02  keil
- * Change in IRQ check delay for SMP
- *
- * Revision 1.2  1997/04/06 22:54:21  keil
- * Using SKB's
- *
- * Revision 1.1  1997/01/27 15:43:10  keil
- * first version
- *
- *
+ * Klaus-Peter Nischke
+ * Deusener Str. 287
+ * 44369 Dortmund
+ * Germany
  */
-
-/*
-   For the modification done by the author the following terms and conditions
-   apply (GNU PUBLIC LICENSE)
-
-
-   This program is free software; you can redistribute it and/or modify
-   it under the terms of the GNU General Public License as published by
-   the Free Software Foundation; either version 2 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU General Public License for more details.
-
-   You should have received a copy of the GNU General Public License
-   along with this program; if not, write to the Free Software
-   Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
-
-
-   You may contact Klaus-Peter Nischke by email: klaus@nischke.do.eunet.de
-   or by conventional mail:
-
-   Klaus-Peter Nischke
-   Deusener Str. 287
-   44369 Dortmund
-   Germany
- */
-
 
 #define __NO_VERSION__
+#include <linux/init.h>
+#include <linux/isapnp.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *ix1_revision = "$Revision: 1.1.1.1 $";
+const char *ix1_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -199,7 +141,7 @@ static void
 ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, stat = 0;
+	u_char val;
 
 	if (!cs) {
 		printk(KERN_WARNING "IX1: Spurious interrupt!\n");
@@ -207,16 +149,12 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
-	if (val) {
+	if (val)
 		hscx_int_main(cs, val);
-		stat |= 1;
-	}
 	val = readreg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val) {
+	if (val)
 		isac_interrupt(cs, val);
-		stat |= 2;
-	}
 	val = readreg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_ISTA + 0x40);
 	if (val) {
 		if (cs->debug & L1_DEB_HSCX)
@@ -229,16 +167,12 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ISAC IntStat after IntRoutine");
 		goto Start_ISAC;
 	}
-	if (stat & 1) {
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0xFF);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0xFF);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0);
-	}
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0xFF);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0xFF);
+	writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0);
 }
 
 void
@@ -276,9 +210,6 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_ix1micro(cs);
 			return(0);
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &ix1micro_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscxisac(cs, 3);
 			return(0);
@@ -288,9 +219,24 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
+#ifdef __ISAPNP__
+static struct isapnp_device_id itk_ids[] __initdata = {
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x25), 
+	  (unsigned long) "ITK micro 2" },
+	{ ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29),
+	  ISAPNP_VENDOR('I', 'T', 'K'), ISAPNP_FUNCTION(0x29), 
+	  (unsigned long) "ITK micro 2." },
+	{ 0, }
+};
 
-__initfunc(int
-setup_ix1micro(struct IsdnCard *card))
+static struct isapnp_device_id *idev = &itk_ids[0];
+static struct pci_bus *pnp_c __devinitdata = NULL;
+#endif
+
+
+int __init
+setup_ix1micro(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -300,6 +246,45 @@ setup_ix1micro(struct IsdnCard *card))
 	if (cs->typ != ISDN_CTYPE_IX1MICROR2)
 		return (0);
 
+#ifdef __ISAPNP__
+	if (!card->para[1] && isapnp_present()) {
+		struct pci_bus *pb;
+		struct pci_dev *pd;
+
+		while(idev->card_vendor) {
+			if ((pb = isapnp_find_card(idev->card_vendor,
+				idev->card_device, pnp_c))) {
+				pnp_c = pb;
+				pd = NULL;
+				if ((pd = isapnp_find_dev(pnp_c,
+					idev->vendor, idev->function, pd))) {
+					printk(KERN_INFO "HiSax: %s detected\n",
+						(char *)idev->driver_data);
+					pd->prepare(pd);
+					pd->deactivate(pd);
+					pd->activate(pd);
+					card->para[1] = pd->resource[0].start;
+					card->para[0] = pd->irq_resource[0].start;
+					if (!card->para[0] || !card->para[1]) {
+						printk(KERN_ERR "ITK PnP:some resources are missing %ld/%lx\n",
+						card->para[0], card->para[1]);
+						pd->deactivate(pd);
+						return(0);
+					}
+					break;
+				} else {
+					printk(KERN_ERR "ITK PnP: PnP error card found, no device\n");
+				}
+			}
+			idev++;
+			pnp_c=NULL;
+		} 
+		if (!idev->card_vendor) {
+			printk(KERN_INFO "ITK PnP: no ISAPnP card found\n");
+			return(0);
+		}
+	}
+#endif
 	/* IO-Ports */
 	cs->hw.ix1.isac_ale = card->para[1] + ISAC_COMMAND_OFFSET;
 	cs->hw.ix1.hscx_ale = card->para[1] + HSCX_COMMAND_OFFSET;
@@ -331,6 +316,7 @@ setup_ix1micro(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &ix1_card_msg;
+	cs->irq_func = &ix1micro_interrupt;
 	ISACVersion(cs, "ix1-Micro:");
 	if (HscxVersion(cs, "ix1-Micro:")) {
 		printk(KERN_WARNING

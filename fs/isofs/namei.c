@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/namei.c
  *
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992  Eric Youngdale Modified for ISO 9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
@@ -12,294 +12,171 @@
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-#include <asm/segment.h>
-#include <linux/malloc.h>
-
+#include <linux/slab.h>
 #include <linux/errno.h>
+#include <linux/config.h>	/* Joliet? */
+
+#include <asm/uaccess.h>
 
 /*
  * ok, we cannot use strncmp, as the name is not in our data space.
  * Thus we'll have to use isofs_match. No big problem. Match also makes
  * some sanity tests.
- *
- * NOTE! unlike strncmp, isofs_match returns 1 for success, 0 for failure.
  */
-static int isofs_match(int len,const char * name, const char * compare, int dlen)
+static int
+isofs_cmp(struct dentry * dentry, const char * compare, int dlen)
 {
+	struct qstr qstr;
+
 	if (!compare)
-		return 0;
+		return 1;
 
 	/* check special "." and ".." files */
 	if (dlen == 1) {
 		/* "." */
 		if (compare[0] == 0) {
-			if (!len)
-				return 1;
+			if (!dentry->d_name.len)
+				return 0;
 			compare = ".";
 		} else if (compare[0] == 1) {
 			compare = "..";
 			dlen = 2;
 		}
 	}
-#if 0
-	if (len <= 2) printk("Match: %d %d %s %d %d \n",len,dlen,compare,de->name[0], dlen);
-#endif
-	
-	if (dlen != len)
-		return 0;
-	return !memcmp(name, compare, len);
+
+	qstr.name = compare;
+	qstr.len = dlen;
+	return dentry->d_op->d_compare(dentry, &dentry->d_name, &qstr);
 }
 
 /*
  *	isofs_find_entry()
  *
  * finds an entry in the specified directory with the wanted name. It
- * returns the cache buffer in which the entry was found, and the entry
- * itself (as an inode number). It does NOT read the inode of the
- * entry - you'll have to do that yourself if you want to.
+ * returns the inode number of the found entry, or 0 on error.
  */
-static struct buffer_head *
-isofs_find_entry(struct inode * dir, const char * name, int namelen,
-		 unsigned long * ino, unsigned long * ino_back)
+static unsigned long
+isofs_find_entry(struct inode *dir, struct dentry *dentry,
+	char * tmpname, struct iso_directory_record * tmpde)
 {
+	unsigned long inode_number;
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(dir);
 	unsigned char bufbits = ISOFS_BUFFER_BITS(dir);
-	unsigned int block, i, f_pos, offset, inode_number;
-	struct buffer_head * bh;
-	void * cpnt = NULL;
-	unsigned int old_offset;
-	unsigned int backlink;
-	int dlen, match;
-	char * dpnt;
-	unsigned char *page = NULL;
-	struct iso_directory_record * de;
-	char c;
+	unsigned int block, f_pos, offset;
+	struct buffer_head * bh = NULL;
 
-	*ino = 0;
-	if (!dir) return NULL;
-	
-	if (!(block = dir->u.isofs_i.i_first_extent)) return NULL;
+	if (!dir->u.isofs_i.i_first_extent)
+		return 0;
   
 	f_pos = 0;
+	offset = 0;
+	block = 0;
 
-	offset = f_pos & (bufsize - 1);
-	block = isofs_bmap(dir,f_pos >> bufbits);
-
-	if (!block || !(bh = bread(dir->i_dev,block,bufsize))) return NULL;
-  
 	while (f_pos < dir->i_size) {
-		de = (struct iso_directory_record *) (bh->b_data + offset);
-		backlink = dir->i_ino;
-		inode_number = (block << bufbits) + (offset & (bufsize - 1));
+		struct iso_directory_record * de;
+		int de_len, match, i, dlen;
+		char *dpnt;
 
-		/* If byte is zero, this is the end of file, or time to move to
-		   the next sector. Usually 2048 byte boundaries. */
-		
-		if (*((unsigned char *) de) == 0) {
-			brelse(bh);
-			offset = 0;
-			f_pos = ((f_pos & ~(ISOFS_BLOCK_SIZE - 1))
-				 + ISOFS_BLOCK_SIZE);
-			block = isofs_bmap(dir,f_pos>>bufbits);
-			if (!block || !(bh = bread(dir->i_dev,block,bufsize)))
-				return NULL;
-			continue; /* Will kick out if past end of directory */
+		if (!bh) {
+			bh = isofs_bread(dir, block);
+			if (!bh)
+				return 0;
 		}
 
-		old_offset = offset;
-		offset += *((unsigned char *) de);
-		f_pos += *((unsigned char *) de);
+		de = (struct iso_directory_record *) (bh->b_data + offset);
+		inode_number = (bh->b_blocknr << bufbits) + offset;
 
-		/* Handle case where the directory entry spans two blocks.
-		   Usually 1024 byte boundaries */
-		if (offset >= bufsize) {
-		        unsigned int frag1;
-			frag1 = bufsize - old_offset;
-			cpnt = kmalloc(*((unsigned char *) de),GFP_KERNEL);
-			if (!cpnt) return NULL;
-			memcpy(cpnt, bh->b_data + old_offset, frag1);
-
-			de = (struct iso_directory_record *) cpnt;
+		de_len = *(unsigned char *) de;
+		if (!de_len) {
 			brelse(bh);
-			offset = f_pos & (bufsize - 1);
-			block = isofs_bmap(dir,f_pos>>bufbits);
-			if (!block || !(bh = bread(dir->i_dev,block,bufsize))) {
-			        kfree(cpnt);
-				return NULL;
-			};
-			memcpy((char *)cpnt+frag1, bh->b_data, offset);
+			bh = NULL;
+			f_pos = (f_pos + ISOFS_BLOCK_SIZE) & ~(ISOFS_BLOCK_SIZE - 1);
+			block = f_pos >> bufbits;
+			offset = 0;
+			continue;
+		}
+
+		offset += de_len;
+		f_pos += de_len;
+
+		/* Make sure we have a full directory entry */
+		if (offset >= bufsize) {
+			int slop = bufsize - offset + de_len;
+			memcpy(tmpde, de, slop);
+			offset &= bufsize - 1;
+			block++;
+			brelse(bh);
+			bh = NULL;
+			if (offset) {
+				bh = isofs_bread(dir, block);
+				if (!bh)
+					return 0;
+				memcpy((void *) tmpde + slop, bh->b_data, offset);
+			}
+			de = tmpde;
 		}
 
 		dlen = de->name_len[0];
 		dpnt = de->name;
 
-		/* Handle the '.' case */
-		
-		if (*dpnt==0 && dlen==1) {
-			inode_number = dir->i_ino;
-			backlink = 0;
-		}
-		
-		/* Handle the '..' case */
-
-		else if (*dpnt==1 && dlen==1) {
-#if 0
-			printk("Doing .. (%d %d)",
-			       dir->i_sb->s_firstdatazone,
-			       dir->i_ino);
+		if (dir->i_sb->u.isofs_sb.s_rock &&
+		    ((i = get_rock_ridge_filename(de, tmpname, dir)))) {
+			dlen = i; 	/* possibly -1 */
+			dpnt = tmpname;
+#ifdef CONFIG_JOLIET
+		} else if (dir->i_sb->u.isofs_sb.s_joliet_level) {
+			dlen = get_joliet_filename(de, tmpname, dir);
+			dpnt = tmpname;
 #endif
-			if((dir->i_sb->u.isofs_sb.s_firstdatazone) != dir->i_ino)
- 				inode_number = dir->u.isofs_i.i_backlink;
-			else
-				inode_number = dir->i_ino;
-			backlink = 0;
-		} else {
-			if (dir->i_sb->u.isofs_sb.s_rock ||
-			    dir->i_sb->u.isofs_sb.s_joliet_level) {
-				page = (unsigned char *)
-					__get_free_page(GFP_KERNEL);
-				if (!page) return NULL;
-			}
-			if (dir->i_sb->u.isofs_sb.s_rock &&
-			    ((i = get_rock_ridge_filename(de, page, dir)))){
-				if (i == -1)
-					goto out;/* Relocated deep directory */
-				dlen = i;
-				dpnt = page;
-			} else if (dir->i_sb->u.isofs_sb.s_joliet_level) {
-				dlen = get_joliet_filename(de, dir, page);
-				dpnt = page;
-			} else if (dir->i_sb->u.isofs_sb.s_mapping == 'n') {
-				for (i = 0; i < dlen; i++) {
-					c = dpnt[i];
-					/* lower case */
-					if (c >= 'A' && c <= 'Z') c |= 0x20;
-					if (c == ';' && i == dlen-2 && dpnt[i+1] == '1') {
-						dlen -= 2;
-						break;
-					}
-					if (c == ';') c = '.';
-					dpnt[i] = c;
-				}
-				/* This allows us to match with and without
-				 * a trailing period. */
-				if(dpnt[dlen-1] == '.' && namelen == dlen-1)
-					dlen--;
-			}
+		} else if (dir->i_sb->u.isofs_sb.s_mapping == 'a') {
+			dlen = get_acorn_filename(de, tmpname, dir);
+			dpnt = tmpname;
+		} else if (dir->i_sb->u.isofs_sb.s_mapping == 'n') {
+			dlen = isofs_name_translate(de, tmpname, dir);
+			dpnt = tmpname;
 		}
+
 		/*
 		 * Skip hidden or associated files unless unhide is set 
 		 */
 		match = 0;
-		if(   !(de->flags[-dir->i_sb->u.isofs_sb.s_high_sierra] & 5)
-		   || dir->i_sb->u.isofs_sb.s_unhide == 'y' )
+		if (dlen > 0 &&
+		    (!(de->flags[-dir->i_sb->u.isofs_sb.s_high_sierra] & 5)
+		     || dir->i_sb->u.isofs_sb.s_unhide == 'y'))
 		{
-			match = isofs_match(namelen,name,dpnt,dlen);
+			match = (isofs_cmp(dentry,dpnt,dlen) == 0);
 		}
-
-		if (cpnt)
-		{
-			kfree(cpnt);
-			cpnt = NULL;
-		}
-
-		if (page) free_page((unsigned long) page);
 		if (match) {
-			if(inode_number == -1) {
-				/* Should only happen for the '..' entry */
-				inode_number = 
-					isofs_lookup_grandparent(dir,
-					   find_rock_ridge_relocation(de,dir));
-				if(inode_number == -1){
-					/* Should never happen */
-					printk("Backlink not properly set %x %lx.\n",
-					       isonum_733(de->extent),
-					       dir->i_ino);
-					goto out;
-				}
-			}
-			*ino = inode_number;
-			*ino_back = backlink;
-			return bh;
+			if (bh) brelse(bh);
+			return inode_number;
 		}
 	}
- out:
-	if (cpnt)
-		kfree(cpnt);
-	brelse(bh);
-	return NULL;
+	if (bh) brelse(bh);
+	return 0;
 }
 
-int isofs_lookup(struct inode * dir,const char * name, int len,
-	struct inode ** result)
+struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry)
 {
-	unsigned long ino, ino_back;
-	struct buffer_head * bh;
+	unsigned long ino;
+	struct inode *inode;
+	struct page *page;
 
-#ifdef DEBUG
-	printk("lookup: %x %d\n",dir->i_ino, len);
-#endif
-	*result = NULL;
-	if (!dir)
-		return -ENOENT;
+	dentry->d_op = dir->i_sb->s_root->d_op;
 
-	if (!S_ISDIR(dir->i_mode)) {
-		iput(dir);
-		return -ENOENT;
+	page = alloc_page(GFP_USER);
+	if (!page)
+		return ERR_PTR(-ENOMEM);
+
+	ino = isofs_find_entry(dir, dentry, page_address(page),
+			       1024 + page_address(page));
+	__free_page(page);
+
+	inode = NULL;
+	if (ino) {
+		inode = iget(dir->i_sb, ino);
+		if (!inode)
+			return ERR_PTR(-EACCES);
 	}
-
-	ino = 0;
-
-	if (dcache_lookup(dir, name, len, &ino)) ino_back = dir->i_ino;
-
-
-	if (!ino) {
-		char *lcname;
-
-		/* First try the original name. If that doesn't work and the fs
-		 * was mounted with check=relaxed, convert the name to lower
-		 * case and try again.
-		 */
-		if (!(bh = isofs_find_entry(dir,name,len, &ino, &ino_back))
-		    && dir->i_sb->u.isofs_sb.s_name_check == 'r'
-		    && (lcname = kmalloc(len, GFP_KERNEL)) != NULL) {
-			int i;
-			char c;
-
-			for (i=0; i<len; i++) {
-				c = name[i];
-				if (c >= 'A' && c <= 'Z') c |= 0x20;
-				lcname[i] = c;
-			}
-			bh = isofs_find_entry(dir,lcname,len, &ino, &ino_back);
-			kfree(lcname);
-		}
-
-		if (!bh) {
-			iput(dir);
-	  		return -ENOENT;
-		}
-		if (ino_back == dir->i_ino) {
-			dcache_add(dir, name, len, ino);
-		}
-		brelse(bh);
-	}
-
-	if (!(*result = iget(dir->i_sb,ino))) {
-		iput(dir);
-		return -EACCES;
-	}
-
-	/* We need this backlink for the ".." entry unless the name that we
-	   are looking up traversed a mount point (in which case the inode
-	   may not even be on an iso9660 filesystem, and writing to
-	   u.isofs_i would only cause memory corruption).
-	*/
-	
-	if (ino_back && !(*result)->i_pipe && (*result)->i_sb == dir->i_sb) {
-		(*result)->u.isofs_i.i_backlink = ino_back; 
-	}
-	
-	iput(dir);
-	return 0;
+	d_add(dentry, inode);
+	return NULL;
 }

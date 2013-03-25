@@ -1,5 +1,5 @@
 /***********************************
- * $Id: m68360_enet.h,v 1.2 2002-02-12 15:28:53 davidm Exp $
+ * $Id: m68360_enet.h,v 1.1.1.1 2001/05/18 17:10:11 hamilton Exp $
  ***********************************
  *
  ***************************************
@@ -173,14 +173,5 @@ void ethernet_init(int                       scc_number,
                    ETHER_SPECIFIC            *ether_spec);
 int  ethernet_tx(int scc_number, void *buf, int length);
 
-/* Defines to use port pins. */
-#define PA_RXD1 ((unsigned short)(0x0001 << 0))
-#define PA_TXD1 ((unsigned short)(0x0001 << 1))
-#define PA_CLK1 ((unsigned short)(0x0001 << 8))
-#define PA_CLK2 ((unsigned short)(0x0001 << 9))
-
-#define PC_CTS1 ((unsigned short)(0x0001 << 4))
-#define PC_CD1  ((unsigned short)(0x0001 << 5))
-#define PC_RTS1 ((unsigned short)(0x0001 << 0))
 #endif
 

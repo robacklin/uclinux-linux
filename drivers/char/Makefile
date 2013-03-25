@@ -9,493 +9,487 @@
 # parent makes..
 #
 
-SUB_DIRS     := 
-MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS) ftape
-
 #
 # This file contains the font map for the default (hardware) font
 #
 FONTMAPFILE = cp437.uni
 
-L_TARGET := char.a
-M_OBJS   :=
-L_OBJS   := tty_io.o n_tty.o tty_ioctl.o pty.o mem.o
+O_TARGET := char.o
 
-ifdef CONSOLE_BAUD_RATE
-CFLAGS += -DCONSOLE_BAUD_RATE=$(CONSOLE_BAUD_RATE)
+obj-y	 += mem.o tty_io.o n_tty.o tty_ioctl.o raw.o pty.o misc.o random.o
+
+# All of the (potential) objects that export symbols.
+# This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
+
+export-objs     :=	busmouse.o console.o keyboard.o sysrq.o \
+			misc.o pty.o random.o selection.o serial.o \
+			ledman.o snapdog.o \
+			sonypi.o tty_io.o tty_ioctl.o generic_serial.o \
+			au1000_gpio.o vac-serial.o hp_psaux.o nvram.o \
+			scx200.o fetchop.o fast_timer.o	gio_c5471.o
+
+mod-subdirs	:=	joystick ftape drm drm-4.0 pcmcia
+
+list-multi	:=	
+
+KEYMAP   =defkeymap.o
+KEYBD    =pc_keyb.o
+CONSOLE  =console.o
+SERIAL   =serial.o
+
+ifeq ($(ARCH),frv)
+#  KEYMAP   =
+  KEYBD    =
+#  CONSOLE  =
+#  SERIAL   =
 endif
-ifdef CONSOLE_PORT
-CFLAGS += -DCONSOLE_PORT=$(CONSOLE_PORT)
+
+ifeq ($(ARCH),s390)
+  KEYMAP   =
+  KEYBD    =
+  CONSOLE  =
+  SERIAL   =
 endif
 
-LX_OBJS += random.o
-
-ifeq ($(CONFIG_SERIAL),y)
-  ifndef CONFIG_SUN_SERIAL
-  LX_OBJS += serial.o
+ifeq ($(ARCH),mips)
+  ifneq ($(CONFIG_PC_KEYB),y)
+    KEYBD    =
   endif
-else
-  ifeq ($(CONFIG_SERIAL),m)
-  MX_OBJS += serial.o
-  endif
-endif
-
-ifeq ($(CONFIG_LEON_SERIAL),y)
-L_OBJS += LEONserial.o
-endif
-
-ifeq ($(CONFIG_NIOS_SERIAL),y)
-L_OBJS += NIOSserial.o
-endif
-
-ifeq ($(CONFIG_NIOS_SPI),y)
-L_OBJS += spi.o
-endif
-
-ifeq ($(CONFIG_COLDFIRE_SERIAL),y)
-L_OBJS += mcfserial.o
-else
- ifeq ($(CONFIG_COLDFIRE_SERIAL),m)
- M_OBJS += mcfserial.o
- endif
-endif
-
-ifeq ($(CONFIG_SH7615_SERIAL),y)
-L_OBJS += SH7615serial.o
-endif
-
-ifeq ($(CONFIG_MCF_MBUS),y)
-L_OBJS += mbus.o
-endif
-
-ifeq ($(CONFIG_MCF_QSPI),y)
-L_OBJS += mcf_qspi.o
-else
- ifeq ($(CONFIG_MCF_QSPI),m)
- M_OBJS += mcf_qspi.o
- endif
-endif
-
-ifeq ($(CONFIG_DS1302),y)
-L_OBJS += ds1302.o
-endif
-
-ifeq ($(CONFIG_EXP),y)
-L_OBJS += exp.o
-endif
-
-ifeq ($(CONFIG_WATCHDOG),y)
-L_OBJS += mcfwatchdog.o
-endif
-
-ifeq ($(CONFIG_MAGIC_SYSRQ),y)
-L_OBJS += sysrq.o
-endif
-
-ifeq ($(CONFIG_68302_SERIAL),y)
-L_OBJS += 68302serial.o
-else
-  ifeq ($(CONFIG_68302_SERIAL),m)
-  M_OBJS += 68302serial.o
+  ifeq ($(CONFIG_VR41XX_KIU),y)
+    KEYMAP   =
+    KEYBD    = vr41xx_keyb.o
   endif
 endif
 
-ifeq ($(CONFIG_68328_SERIAL),y)
-L_OBJS += 68328serial.o
-else
-  ifeq ($(CONFIG_68328_SERIAL),m)
-  M_OBJS += 68328serial.o
+ifeq ($(ARCH),s390x)
+  KEYMAP   =
+  KEYBD    =
+  CONSOLE  =
+  SERIAL   =
+endif
+
+ifeq ($(ARCH),m68k)
+   ifdef CONFIG_AMIGA
+      KEYBD = amikeyb.o
+   else
+      ifndef CONFIG_MAC
+	 KEYBD =
+      endif
+   endif
+   SERIAL   =
+endif
+
+ifeq ($(ARCH),m68knommu)
+   ifdef CONFIG_68328_SERIAL
+       KEYBD  =
+       SERIAL = 68328serial.o
+   else
+       KEYBD =
+   endif
+endif
+
+ifeq ($(ARCH),parisc)
+   ifdef CONFIG_GSC_PS2
+      KEYBD   = hp_psaux.o hp_keyb.o
+   else
+      KEYBD   =
+   endif
+   ifdef CONFIG_SERIAL_MUX
+      CONSOLE += mux.o
+   endif
+   ifdef CONFIG_PDC_CONSOLE
+      CONSOLE += pdc_console.o
+   endif
+endif
+
+ifdef CONFIG_Q40
+  KEYBD += q40_keyb.o
+  SERIAL = serial.o
+endif
+
+ifdef CONFIG_APOLLO
+  KEYBD += dn_keyb.o
+endif
+
+ifeq ($(ARCH),parisc)
+   ifdef CONFIG_GSC_PS2
+      KEYBD   = hp_psaux.o hp_keyb.o
+   else
+      KEYBD   =
+   endif
+   ifdef CONFIG_PDC_CONSOLE
+      CONSOLE += pdc_console.o
+   endif
+endif
+
+ifeq ($(ARCH),arm)
+  ifneq ($(CONFIG_PC_KEYMAP),y)
+    KEYMAP   :=
+  endif
+  ifneq ($(CONFIG_PC_KEYB),y)
+    KEYBD    :=
+  endif
+  ifeq ($(CONFIG_KMI_KEYB),y)
+    KEYBD    := amba_kmi_keyb.o
   endif
 endif
 
-ifeq ($(CONFIG_LC7981),y)
-L_OBJS += lc7981.o
-endif
-
-ifeq ($(CONFIG_68332_SERIAL),y)
-L_OBJS += 68332serial.o
-else
-  ifeq ($(CONFIG_68332_SERIAL),m)
-  M_OBJS += 68332serial.o
+ifeq ($(ARCH),armnommu)
+  ifneq ($(CONFIG_PC_KEYB),y)
+    KEYBD    :=
   endif
 endif
 
-ifeq ($(CONFIG_68332_TPU),y)
-L_OBJS += 68332dio.o
-endif
-
-ifeq ($(CONFIG_68332_PORTF),y)
-L_OBJS += 68332dio.o
-endif
-
-ifeq ($(CONFIG_68332_PORTE),y)
-L_OBJS += 68332dio.o
-endif
-
-ifeq ($(CONFIG_MAX311X_SERIAL),y)
-L_OBJS += max311Xserial.o
-endif
-
-ifeq ($(CONFIG_SERIAL_ATMEL),y)
-L_OBJS += serial-atmel.o
-else
-  ifeq ($(CONFIG_SERIAL_ATMEL),m)
-  M_OBJS += serial-atmel.o
+ifeq ($(ARCH),sh)
+  KEYMAP   =
+  KEYBD    =
+  CONSOLE  =
+  ifeq ($(CONFIG_SH_HP600),y)
+  KEYMAP   = defkeymap.o
+  KEYBD    = scan_keyb.o hp600_keyb.o
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_DMIDA),y)
+  # DMIDA does not connect the HD64465 PS/2 keyboard port
+  # but we allow for USB keyboards to be plugged in.
+  KEYMAP   = defkeymap.o
+  KEYBD    = # hd64465_keyb.o pc_keyb.o
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_EC3104),y)
+  KEYMAP   = defkeymap.o
+  KEYBD    = ec3104_keyb.o
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_DREAMCAST),y)
+  KEYMAP   = defkeymap.o
+  KEYBD    =
+  CONSOLE  = console.o
+  endif
+  ifeq ($(CONFIG_SH_KEYWEST),y)
+    ifdef CONFIG_DUMMY_CONSOLE
+      ifdef CONFIG_FB
+        KEYMAP  = defkeymap.o
+        CONSOLE  = console.o
+      else
+        KEYMAP  = defkeymap.o
+#       CONSOLE  = console_sci.o
+        CONSOLE  = console.o
+      endif
+    else
+      KEYMAP  = defkeymap.o
+      CONSOLE  = console.o
+    endif
+    ifdef CONFIG_HD64465
+      KEYBD   = pc_keyb_hd64465.o
+    else
+      KEYBD   = pc_keyb.o
+    endif
   endif
 endif
 
-ifeq ($(CONFIG_LED_ATMEL),y)
-L_OBJS += blip-led.o
-else
-  ifeq ($(CONFIG_LED_ATMEL),m)
-  M_OBJS += blip-led.o
+ifeq ($(ARCH),niosnommu)
+  ifneq ($(CONFIG_PC_KEYB),y)
+    KEYBD    :=
+    KEYMAP   := defkeymap.o
   endif
 endif
 
-ifeq ($(CONFIG_GBATXT),y)
-L_OBJS += gbatxt.o
-else
-  ifeq ($(CONFIG_GBATXT),m)
-  M_OBJS += gbatxt.o
-  endif
+ifeq ($(ARCH),microblaze)
+    subdir-$(CONFIG_PC_KEYB) += xilinx_keyb
+    obj-$(CONFIG_PC_KEYB) += xilinx_keyb/xilinx_keyb.o
 endif
 
-ifeq ($(CONFIG_SC28L91),y)
-L_OBJS += serial-sc28l91.o
-else
-  ifeq ($(CONFIG_SC28L91),m)
-  M_OBJS += serial-sc28l91.o
-  endif
+ifeq ($(CONFIG_DECSTATION),y)
+  KEYMAP   =
+  KEYBD    =
 endif
 
-ifeq ($(CONFIG_68328_DIGI),y)
-M = y
-L_OBJS += mc68328digi.o
-else
-  ifeq ($(CONFIG_68328_DIGI),m)
-  M_OBJS += mc68328digi.o
-  MM = n
-  endif
+ifeq ($(CONFIG_BAGET_MIPS),y)
+  KEYBD    =
+  SERIAL   = vac-serial.o
 endif
 
-ifeq ($(CONFIG_68332_KEYBOARD),y)
-  L_OBJS += 68332keyboard.o defkeymap.o
+ifeq ($(CONFIG_NINO),y)
+  SERIAL   =
 endif
 
-ifeq ($(CONFIG_KEYBOARD),y)
+ifneq ($(CONFIG_SUN_SERIAL),)
+  SERIAL   =
+endif
+
+ifeq ($(CONFIG_QTRONIX_KEYBOARD),y)
+  KEYBD    = qtronix.o
+  KEYMAP   = qtronixmap.o
+endif
+
+ifeq ($(CONFIG_DUMMY_KEYB),y)
+  KEYBD = dummy_keyb.o
+endif
+
+obj-$(CONFIG_VT) += vt.o vc_screen.o consolemap.o consolemap_deftbl.o $(CONSOLE) selection.o
+obj-$(CONFIG_SERIAL) += $(SERIAL)
+obj-$(CONFIG_PARPORT_SERIAL) += parport_serial.o
+obj-$(CONFIG_SERIAL_HCDP) += hcdp_serial.o
+obj-$(CONFIG_SERIAL_21285) += serial_21285.o
+obj-$(CONFIG_SERIAL_SA1100) += serial_sa1100.o
+obj-$(CONFIG_SERIAL_AMBA) += serial_amba.o
+obj-$(CONFIG_TS_AU1X00_ADS7846) += au1000_ts.o
+obj-$(CONFIG_SERIAL_DEC) += decserial.o
+
 ifndef CONFIG_SUN_KEYBOARD
-  L_OBJS += keyboard.o defkeymap.o
-endif
-endif
-
-ifeq ($(CONFIG_DIGI),y)
-L_OBJS += pcxx.o
+  obj-$(CONFIG_VT) += keyboard.o $(KEYMAP) $(KEYBD)
 else
-  ifeq ($(CONFIG_DIGI),m)
-  M_OBJS += pcxx.o
-  endif
+  obj-$(CONFIG_PCI) += keyboard.o $(KEYMAP)
 endif
 
-ifeq ($(CONFIG_CYCLADES),y)
-L_OBJS += cyclades.o
-else
-  ifeq ($(CONFIG_CYCLADES),m)
-  M_OBJS += cyclades.o
-  endif
+obj-$(CONFIG_FUJITSU_FRV_WORKRAM) += frv_workram.o
+
+#
+# uClinux drivers
+#
+obj-$(CONFIG_EB67XDIP_QUADSER) += oki_ml67x_quad.o
+obj-$(CONFIG_MACH_EB67XDIP) += oki_ml67x.o
+obj-$(CONFIG_SERIAL_ML67XXXX) += serial_ml67xxxx.o
+obj-$(CONFIG_68328_SERIAL) += 68328serial.o
+obj-$(CONFIG_SERIAL_DSC21) += serial_dsc21.o
+obj-$(CONFIG_SERIAL_C5471) += serial_c5471.o
+obj-$(CONFIG_SERIAL_ATMEL) += serial_atmel.o
+obj-$(CONFIG_SERIAL_WINBOND) += serial_winbond.o
+obj-$(CONFIG_VDD) += vdd.o
+obj-$(CONFIG_SERIAL_DM270) += serial_dm270.o
+obj-$(CONFIG_ARCH_POLDHU) += serial_isil.o
+obj-$(CONFIG_ARCH_ISL3893) += serial_isil.o
+obj-$(CONFIG_SERIAL_NETARM) += serial_netarm.o
+obj-$(CONFIG_ARCH_POLDHU) += serial_isil.o
+obj-$(CONFIG_ARCH_ISL3893) += serial_isil.o
+obj-$(CONFIG_SERIAL_SAMSUNG) += serial_samsung.o
+obj-$(CONFIG_SERIAL_S3C2500) += serial_s3c2500.o
+obj-$(CONFIG_SERIAL_S3C3410) += serial_s3c3410.o
+obj-$(CONFIG_SERIAL_S3C44B0X) += serial_s3c44b0x.o
+obj-$(CONFIG_SERIAL_S3C4530) += serial_s3c4530.o
+obj-$(CONFIG_SERIAL_CNXT) += cnxtserial.o
+obj-$(CONFIG_SERIAL_KS8695) += serial_ks8695.o generic_serial.o
+obj-$(CONFIG_V850E_UART) += v850e_uart.o generic_serial.o
+obj-$(CONFIG_COLDFIRE_SERIAL) += mcfserial.o
+obj-$(CONFIG_COLDFIRE_USB) += mcf_usb.o
+obj-$(CONFIG_MCF_QSPI) += mcf_qspi.o
+obj-$(CONFIG_LEDMAN) += ledman.o
+obj-$(CONFIG_LCDTXT) += lcdtxt.o
+obj-$(CONFIG_IDETEST) += idetest.o
+obj-$(CONFIG_68328_DIGI) += mc68328digi.o
+obj-$(CONFIG_MCFWATCHDOG) += mcfwatchdog.o
+obj-$(CONFIG_M5249AUDIO) += m5249audio.o
+obj-$(CONFIG_M5272AUDIO) += m5272audio.o
+obj-$(CONFIG_DRAGONIX_SPI) += dragonixspi.o
+obj-$(CONFIG_DS1302) += ds1302.o
+obj-$(CONFIG_M41T11M6) += m41t11m6.o
+obj-$(CONFIG_DRAGEN2_EEPROM) += de2spi.o de2eeprom.o
+obj-$(CONFIG_DRAGEN2_TS) += de2spi.o de2ts.o
+obj-$(CONFIG_DRAGEN2_FPGA) += de2fpga.o
+obj-$(CONFIG_NIOS_SERIAL) += NIOSserial.o
+obj-$(CONFIG_NIOS_SPI) += spi.o
+obj-$(CONFIG_XYMEM) += xymem.o
+obj-$(CONFIG_AU1X00_SERIAL_CONSOLE) += au1x00-serial.o
+obj-$(CONFIG_SERIAL_BF535) += bf535_serial.o
+obj-$(CONFIG_SERIAL_BF533) += bf533_serial.o
+mod-subdirs += can4linux
+subdir-$(CONFIG_CAN4LINUX) += can4linux
+obj-$(CONFIG_CAN4LINUX) += can4linux/Can.o
+# Support for Xilinx GPIO driver
+mod-subdirs += xilinx_gpio
+subdir-$(CONFIG_XILINX_GPIO) += xilinx_gpio
+obj-$(CONFIG_XILINX_GPIO) += xilinx_gpio/xilinx_gpio.o
+obj-$(CONFIG_TA7_WDT) += ta7_watchdog.o
+obj-$(CONFIG_COLDFIRE_WATCHDOG) += colddog.o
+obj-$(CONFIG_C5471_GIO) += gio_c5471.o
+obj-$(CONFIG_C5471_WDT) += wdt_c5471.o
+obj-$(CONFIG_MBA44B0_TOUCH) += mba44b0touch.o
+obj-$(CONFIG_SNAPDOG) += snapdog.o
+obj-$(CONFIG_FAST_TIMER) += fast_timer.o
+obj-$(CONFIG_TA7_WDT) += ta7_watchdog.o
+ifeq ($(CONFIG_EP93XX_VT),y)
+	obj-$(CONFIG_EP93XX_KBD_USB) += defkeymap.o ep93xx_usb_kbd.o
+	obj-$(CONFIG_EP93XX_KBD_SPI) += defkeymap.o ep93xx_spi_kbd.o
+	obj-$(CONFIG_EP93XX_KBD_SCANNED) += ep93xx_keymap.o ep93xx_scan_keyb.o
+	obj-$(CONFIG_EP93XX_TOUCHSCREEN) += ep93xx_ts.o
 endif
 
-ifeq ($(CONFIG_STALLION),y)
-L_OBJS += stallion.o
-else
-  ifeq ($(CONFIG_STALLION),m)
-  M_OBJS += stallion.o
-  endif
+
+obj-$(CONFIG_HIL) += hp_keyb.o
+obj-$(CONFIG_MAGIC_SYSRQ) += sysrq.o
+obj-$(CONFIG_ATARI_DSP56K) += dsp56k.o
+obj-$(CONFIG_ROCKETPORT) += rocket.o
+obj-$(CONFIG_MOXA_SMARTIO) += mxser.o
+obj-$(CONFIG_MOXA_INTELLIO) += moxa.o
+obj-$(CONFIG_DIGI) += pcxx.o
+obj-$(CONFIG_DIGIEPCA) += epca.o
+obj-$(CONFIG_CYCLADES) += cyclades.o
+obj-$(CONFIG_STALLION) += stallion.o
+obj-$(CONFIG_ISTALLION) += istallion.o
+obj-$(CONFIG_SIBYTE_SB1250_DUART) += sb1250_duart.o
+obj-$(CONFIG_COMPUTONE) += ip2.o ip2main.o
+obj-$(CONFIG_RISCOM8) += riscom8.o
+obj-$(CONFIG_ISI) += isicom.o
+obj-$(CONFIG_ESPSERIAL) += esp.o
+obj-$(CONFIG_SYNCLINK) += synclink.o
+obj-$(CONFIG_SYNCLINKMP) += synclinkmp.o
+obj-$(CONFIG_N_HDLC) += n_hdlc.o
+obj-$(CONFIG_SPECIALIX) += specialix.o
+obj-$(CONFIG_AMIGA_BUILTIN_SERIAL) += amiserial.o
+obj-$(CONFIG_A2232) += ser_a2232.o generic_serial.o
+obj-$(CONFIG_SX) += sx.o generic_serial.o
+obj-$(CONFIG_RIO) += rio/rio.o generic_serial.o
+obj-$(CONFIG_SH_SCI) += sh-sci.o generic_serial.o
+obj-$(CONFIG_SERIAL167) += serial167.o
+obj-$(CONFIG_MVME147_SCC) += generic_serial.o vme_scc.o
+obj-$(CONFIG_MVME162_SCC) += generic_serial.o vme_scc.o
+obj-$(CONFIG_BVME6000_SCC) += generic_serial.o vme_scc.o
+obj-$(CONFIG_HVC_CONSOLE) += hvc_console.o
+obj-$(CONFIG_SERIAL_TX3912) += generic_serial.o serial_tx3912.o
+obj-$(CONFIG_TXX927_SERIAL) += serial_txx927.o
+obj-$(CONFIG_SERIAL_TXX9) += generic_serial.o serial_txx9.o
+obj-$(CONFIG_IP22_SERIAL) += sgiserial.o
+obj-$(CONFIG_AU1X00_UART) += au1x00-serial.o
+obj-$(CONFIG_SGI_L1_SERIAL) += sn_serial.o
+
+subdir-$(CONFIG_RIO) += rio
+subdir-$(CONFIG_INPUT) += joystick
+
+obj-$(CONFIG_KBDOP77A_S3C3410) += kbd_op77a.o
+obj-$(CONFIG_LEDOP77A_S3C3410) += led_op77a.o
+obj-$(CONFIG_KBDKTP178_S3C44B0X) += kbd_ktp178.o
+obj-$(CONFIG_BEEPKTP178_S3C44B0X) += beep_ktp178.o
+
+obj-$(CONFIG_ATIXL_BUSMOUSE) += atixlmouse.o
+obj-$(CONFIG_LOGIBUSMOUSE) += logibusmouse.o
+obj-$(CONFIG_PRINTER) += lp.o
+obj-$(CONFIG_TIPAR) += tipar.o
+obj-$(CONFIG_OBMOUSE) += obmouse.o
+
+ifeq ($(CONFIG_INPUT),y)
+obj-y += joystick/js.o
 endif
 
-ifeq ($(CONFIG_ISTALLION),y)
-L_OBJS += istallion.o
-else
-  ifeq ($(CONFIG_ISTALLION),m)
-  M_OBJS += istallion.o
-  endif
+obj-$(CONFIG_FETCHOP) += fetchop.o
+obj-$(CONFIG_BUSMOUSE) += busmouse.o
+obj-$(CONFIG_DTLK) += dtlk.o
+obj-$(CONFIG_R3964) += n_r3964.o
+obj-$(CONFIG_APPLICOM) += applicom.o
+obj-$(CONFIG_SONYPI) += sonypi.o
+obj-$(CONFIG_MS_BUSMOUSE) += msbusmouse.o
+obj-$(CONFIG_82C710_MOUSE) += qpmouse.o
+obj-$(CONFIG_AMIGAMOUSE) += amigamouse.o
+obj-$(CONFIG_ATARIMOUSE) += atarimouse.o
+obj-$(CONFIG_ADBMOUSE) += adbmouse.o
+obj-$(CONFIG_PC110_PAD) += pc110pad.o
+obj-$(CONFIG_MK712_MOUSE) += mk712.o
+obj-$(CONFIG_EDB7312_TS) += edb7312_ts.o
+obj-$(CONFIG_TP177_TOUCH) += tp177touch.o
+obj-$(CONFIG_RTC) += rtc.o
+obj-$(CONFIG_GEN_RTC) += genrtc.o
+obj-$(CONFIG_EFI_RTC) += efirtc.o
+obj-$(CONFIG_SGI_DS1286) += ds1286.o
+obj-$(CONFIG_MIPS_RTC) += mips_rtc.o
+obj-$(CONFIG_SGI_IP27_RTC) += ip27-rtc.o
+obj-$(CONFIG_X1226_RTC) += x1226-rtc.o
+ifeq ($(CONFIG_PPC),)
+  obj-$(CONFIG_NVRAM) += nvram.o
 endif
+obj-$(CONFIG_TOSHIBA) += toshiba.o
+obj-$(CONFIG_I8K) += i8k.o
+obj-$(CONFIG_DS1620) += ds1620.o
+obj-$(CONFIG_DS1742) += ds1742.o
+obj-$(CONFIG_INTEL_RNG) += i810_rng.o
+obj-$(CONFIG_AMD_RNG) += amd768_rng.o
+obj-$(CONFIG_HW_RANDOM) += hw_random.o
+obj-$(CONFIG_AMD_PM768) += amd76x_pm.o
+obj-$(CONFIG_BRIQ_PANEL) += briq_panel.o
 
-ifeq ($(CONFIG_RISCOM8),y)
-L_OBJS += riscom8.o
-else
-  ifeq ($(CONFIG_RISCOM8),m)
-  M_OBJS += riscom8.o
-  endif
-endif
+obj-$(CONFIG_ITE_GPIO) += ite_gpio.o
+obj-$(CONFIG_AU1X00_GPIO) += au1000_gpio.o
+obj-$(CONFIG_AU1X00_USB_TTY) += au1000_usbtty.o
+obj-$(CONFIG_AU1X00_USB_RAW) += au1000_usbraw.o
+obj-$(CONFIG_COBALT_LCD) += lcd.o
 
-ifeq ($(CONFIG_SPECIALIX),y)
-L_OBJS += specialix.o
-else
-  ifeq ($(CONFIG_SPECIALIX),m)
-  M_OBJS += specialix.o
-  endif
-endif
+obj-$(CONFIG_QIC02_TAPE) += tpqic02.o
 
-ifeq ($(CONFIG_ISI),y)
-L_OBJS += isicom.o
-else
-  ifeq ($(CONFIG_ISI),m)
-  M_OBJS += isicom.o
-  endif
-endif
-
-
-ifeq ($(CONFIG_ATIXL_BUSMOUSE),y)
-M = y
-L_OBJS += atixlmouse.o
-else
-  ifeq ($(CONFIG_ATIXL_BUSMOUSE),m)
-  M_OBJS += atixlmouse.o
-  MM = m
-  endif
-endif
-
-ifeq ($(CONFIG_BUSMOUSE),y)
-M = y
-L_OBJS += busmouse.o
-else
-  ifeq ($(CONFIG_BUSMOUSE),m)
-  M_OBJS += busmouse.o
-  MM = m
-  endif
-endif
-
-ifeq ($(CONFIG_PRINTER),y)
-L_OBJS += lp.o
-else
-  ifeq ($(CONFIG_PRINTER),m)
-  M_OBJS += lp.o
-  endif
-endif
-
-ifeq ($(CONFIG_MS_BUSMOUSE),y)
-M = y
-L_OBJS += msbusmouse.o
-else
-  ifeq ($(CONFIG_MS_BUSMOUSE),m)
-  M_OBJS += msbusmouse.o
-  MM = m
-  endif
-endif
-
-ifeq ($(CONFIG_PSMOUSE),y)
-M = y
-L_OBJS += psaux.o
-else
-  ifeq ($(CONFIG_PSMOUSE),m)
-  M_OBJS += psaux.o
-  MM = m
-  endif
-endif
-
-ifeq ($(CONFIG_UMISC),y)
-# To support third-party modules, misc.c must reside in the kernel
-M = y
-endif
-
-ifeq ($(CONFIG_M68360_SIM_WDT),y)
-M = y
-endif
-
-ifeq ($(CONFIG_DS1743),y)
-M = y
-L_OBJS += ds1743.o
-endif
-
-ifeq ($(CONFIG_SOFT_WATCHDOG),y)
-M = y
-L_OBJS += softdog.o
-else
-  ifeq ($(CONFIG_SOFT_WATCHDOG),m)
-  M_OBJS += softdog.o
-  MM = m
-  endif   
-endif
-
-ifeq ($(CONFIG_PCWATCHDOG),y)
-M = y
-L_OBJS += pcwd.o
-else
-  ifeq ($(CONFIG_PCWATCHDOG),m)
-  M_OBJS += pcwd.o
-  MM = m
-  endif
-endif
-
-ifdef CONFIG_SUN_MOUSE
-M = y
-endif
-
-ifeq ($(CONFIG_WDT),y)
-M = y
-L_OBJS += wdt.o
-else
-  ifeq ($(CONFIG_WDT),m)
-    M_OBJS += wdt.o
-    MM = m
-  endif
-endif
-
-ifeq ($(CONFIG_RTC),y)
-M = y
-L_OBJS += rtc.o
-endif
-
-ifdef CONFIG_QIC02_TAPE
-L_OBJS += tpqic02.o 
-endif
+subdir-$(CONFIG_FTAPE) += ftape
+subdir-$(CONFIG_DRM_OLD) += drm-4.0
+subdir-$(CONFIG_DRM_NEW) += drm
+subdir-$(CONFIG_PCMCIA) += pcmcia
+subdir-$(CONFIG_AGP) += agp
 
 ifeq ($(CONFIG_FTAPE),y)
-SUB_DIRS += ftape
-L_OBJS += ftape/ftape.o
-else
-  ifeq ($(CONFIG_FTAPE),m)
-  MOD_SUB_DIRS += ftape
-  endif
+obj-y       += ftape/ftape.o
 endif
 
-ifdef CONFIG_APM
-M = y
+obj-$(CONFIG_H8) += h8.o
+obj-$(CONFIG_PPDEV) += ppdev.o
+obj-$(CONFIG_DZ) += dz.o
+obj-$(CONFIG_NWBUTTON) += nwbutton.o
+obj-$(CONFIG_NWFLASH) += nwflash.o
+obj-$(CONFIG_SCx200) += scx200.o
+obj-$(CONFIG_SCx200_GPIO) += scx200_gpio.o
+
+# Only one watchdog can succeed. We probe the hardware watchdog
+# drivers first, then the softdog driver.  This means if your hardware
+# watchdog dies or is 'borrowed' for some reason the software watchdog
+# still gives you some cover.
+
+obj-$(CONFIG_PCWATCHDOG) += pcwd.o
+obj-$(CONFIG_ACQUIRE_WDT) += acquirewdt.o
+obj-$(CONFIG_ADVANTECH_WDT) += advantechwdt.o
+obj-$(CONFIG_IB700_WDT) += ib700wdt.o
+obj-$(CONFIG_MIXCOMWD) += mixcomwd.o
+obj-$(CONFIG_60XX_WDT) += sbc60xxwdt.o
+obj-$(CONFIG_W83877F_WDT) += w83877f_wdt.o
+obj-$(CONFIG_SC520_WDT) += sc520_wdt.o
+obj-$(CONFIG_WDT) += wdt.o
+obj-$(CONFIG_WDTPCI) += wdt_pci.o
+obj-$(CONFIG_21285_WATCHDOG) += wdt285.o
+obj-$(CONFIG_977_WATCHDOG) += wdt977.o
+obj-$(CONFIG_I810_TCO) += i810-tco.o
+obj-$(CONFIG_MACHZ_WDT) += machzwd.o
+obj-$(CONFIG_SH_WDT) += shwdt.o
+obj-$(CONFIG_EUROTECH_WDT) += eurotechwdt.o
+obj-$(CONFIG_ALIM7101_WDT) += alim7101_wdt.o
+obj-$(CONFIG_ALIM1535_WDT) += alim1535d_wdt.o
+obj-$(CONFIG_INDYDOG) += indydog.o
+obj-$(CONFIG_SC1200_WDT) += sc1200wdt.o
+obj-$(CONFIG_SCx200_WDT) += scx200_wdt.o
+obj-$(CONFIG_WAFER_WDT) += wafer5823wdt.o
+obj-$(CONFIG_SOFT_WATCHDOG) += softdog.o
+obj-$(CONFIG_INDYDOG) += indydog.o
+obj-$(CONFIG_8xx_WDT) += mpc8xx_wdt.o
+obj-$(CONFIG_C5471_WDT) += wdt_c5471.o
+
+subdir-$(CONFIG_MWAVE) += mwave
+ifeq ($(CONFIG_MWAVE),y)
+  obj-y += mwave/mwave.o
 endif
 
-ifdef CONFIG_H8
-LX_OBJS += h8.o
-M = y
+subdir-$(CONFIG_IPMI_HANDLER) += ipmi
+ifeq ($(CONFIG_IPMI_HANDLER),y)
+  obj-y += ipmi/ipmi.o
 endif
-
-ifdef M
-LX_OBJS += misc.o
-else
-  ifdef MM
-  MX_OBJS += misc.o
-  endif
-endif
-  
-ifeq ($(CONFIG_SCC),y)
-L_OBJS += scc.o
-else
-  ifeq ($(CONFIG_SCC),m)
-  M_OBJS += scc.o
-  endif
-endif  
-
-ifeq ($(CONFIG_CONSOLE),y)
-  ifeq ($(CONFIG_FRAMEBUFFER),y)
-  LX_OBJS += fbmem.o
-  endif
-  L_OBJS += console.o vc_screen.o consolemap.o selection.o vt.o
-
-  ifdef CONFIG_TGA_CONSOLE
-    L_OBJS += tga.o
-    ifdef CONFIG_VGA_CONSOLE
-    L_OBJS += vga.o vesa_blank.o
-    endif
-  else
-    ifndef CONFIG_SUN_CONSOLE
-    L_OBJS += vga.o vesa_blank.o
-    endif
-  endif
-endif
-
-ifdef CONFIG_LCDDMA
-L_OBJS += lcddma.o
-endif
-
-ifdef CONFIG_DAC0800
-L_OBJS += dac0800.o
-endif
-
-ifeq ($(CONFIG_PWM),y)
-L_OBJS += pwm328.o
-endif
-
-ifeq ($(CONFIG_AD1845),y)
-L_OBJS += ad1845.o
-else
-  ifeq ($(CONFIG_AD1845),m)
-  M_OBJS += ad1845.o
-  endif
-endif  
-
-ifeq ($(CONFIG_M5249AUDIO),y)
-L_OBJS += m5249audio.o
-else
-  ifeq ($(CONFIG_M5249AUDIO),m)
-  M_OBJS += m5249audio.o
-  endif
-endif  
-
-ifdef CONFIG_DACI2S
-L_OBJS += daci2s.o
-endif
-
-ifdef CONFIG_LCDTXT
-L_OBJS += lcdtxt.o
-endif
-
-ifdef CONFIG_KEYPAD
-L_OBJS += keypad.o
-endif
-
-ifeq ($(CONFIG_KEY),y)
-L_OBJS += key.o
-else
-  ifeq ($(CONFIG_KEY),m)
-  M_OBJS += key.o
-  endif
-endif  
-
-ifdef CONFIG_T6963_DMA 
-L_OBJS += t6963fb.o
-endif
-
-ifdef CONFIG_T6963_PIO 
-L_OBJS += t6963fb.o
-endif
-
-ifdef CONFIG_LEDMAN
-L_OBJS += ledman.o
-endif
-
-ifdef CONFIG_LIRC_SERIAL
-L_OBJS += lirc_serial.o
-endif
-
-ifdef CONFIG_LIRC_INTR
-L_OBJS += lirc_intr.o
-endif
-
-ifeq ($(CONFIG_IDETEST),y)
-L_OBJS += idetest.o
-else
-  ifeq ($(CONFIG_IDETEST),m)
-  M_OBJS += idetest.o
-  endif
-endif  
-
-ifdef CONFIG_HITACHI_SCI
-L_OBJS += hitachi-sci.o
-endif
-
-ifeq ($(CONFIG_72001_SERIAL),y)
-L_OBJS += pd72001_serial.o
-endif
-
 
 include $(TOPDIR)/Rules.make
 
-fastdep: uni_hash.tbl
-
-consolemap.o:
+fastdep:
 
 conmakehash: conmakehash.c
-	$(HOSTCC) -o conmakehash conmakehash.c
+	$(HOSTCC) $(HOSTCFLAGS) -o conmakehash conmakehash.c
 
-uni_hash.tbl: $(FONTMAPFILE) conmakehash
-	./conmakehash $(FONTMAPFILE) > uni_hash.tbl
+consolemap_deftbl.c: $(FONTMAPFILE) conmakehash
+	./conmakehash $(FONTMAPFILE) > consolemap_deftbl.c
+
+consolemap_deftbl.o: consolemap_deftbl.c $(TOPDIR)/include/linux/types.h
+
+.DELETE_ON_ERROR:
+
+defkeymap.c: defkeymap.map
+	set -e ; loadkeys --mktable $< | sed -e 's/^static *//' > $@
+
+qtronixmap.c: qtronixmap.map
+	set -e ; loadkeys --mktable $< | sed -e 's/^static *//' > $@

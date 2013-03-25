@@ -1,32 +1,58 @@
 /*
- * linux/include/asm-arm/procinfo.h
+ *  linux/include/asm-arm/procinfo.h
  *
- * Copyright (C) 1996 Russell King
+ *  Copyright (C) 1996-1999 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-
 #ifndef __ASM_PROCINFO_H
 #define __ASM_PROCINFO_H
 
+#ifndef __ASSEMBLY__
+
 #include <asm/proc-fns.h>
 
-#define F_MEMC   (1<<0)
-#define F_MMU    (1<<1)
-#define F_32BIT  (1<<2)
-#define F_CACHE  (1<<3)
-#define F_IOEB   (1<<31)
-
-#ifndef __ASSEMBLER__
-
-struct armversions {
-	unsigned long id;
-	unsigned long mask;
-	unsigned long features;
-	const char *manu;
-	const char *name;
-	const struct processor *proc;
+struct proc_info_item {
+	const char	 *manufacturer;
+	const char	 *cpu_name;
 };
 
+/*
+ * Note!  struct processor is always defined if we're
+ * using MULTI_CPU, otherwise this entry is unused,
+ * but still exists.
+ *
+ * NOTE! The following structure is defined by assembly
+ * language, NOT C code.  For more information, check:
+ *  arch/arm/mm/proc-*.S and arch/arm/kernel/head-armv.S
+ */
+struct proc_info_list {
+	unsigned int	 cpu_val;
+	unsigned int	 cpu_mask;
+	unsigned long	 __cpu_mmu_flags;	/* used by head-armv.S */
+	unsigned long	 __cpu_flush;		/* used by head-armv.S */
+	const char	 *arch_name;
+	const char	 *elf_name;
+	unsigned int	 elf_hwcap;
+	struct proc_info_item *info;
+#ifdef MULTI_CPU
+	struct processor *proc;
+#else
+	void		 *unused;
 #endif
+};
+
+#endif	/* __ASSEMBLY__ */
+
+#define HWCAP_SWP	 1
+#define HWCAP_HALF	 2
+#define HWCAP_THUMB	 4
+#define HWCAP_26BIT	 8	/* Play it safe */
+#define HWCAP_FAST_MULT	 16
+#define HWCAP_FPA        32
+#define HWCAP_VFP        64
+#define HWCAP_EDSP	 128
 
 #endif
-

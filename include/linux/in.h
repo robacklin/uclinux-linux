@@ -19,6 +19,7 @@
 #define _LINUX_IN_H
 
 #include <linux/types.h>
+#include <linux/socket.h>
 
 /* Standard well-defined IP protocols.  */
 enum {
@@ -31,12 +32,19 @@ enum {
   IPPROTO_PUP = 12,		/* PUP protocol				*/
   IPPROTO_UDP = 17,		/* User Datagram Protocol		*/
   IPPROTO_IDP = 22,		/* XNS IDP protocol			*/
-  IPPROTO_GRE = 47,		/* GRE Encapsulation used by PPTP et al	*/
-  IPPROTO_ESP = 50,		/* Encapsulation Security Payload protocol */
-  IPPROTO_AH = 51,		/* Authentication Header protocol	*/
-  IPPROTO_COMP = 108,		/* Compression Header protocol		*/
+  IPPROTO_RSVP = 46,		/* RSVP protocol			*/
+  IPPROTO_GRE = 47,		/* Cisco GRE tunnels (rfc 1701,1702)	*/
 
-  IPPROTO_RAW = 255,		/* Raw IP packets			*/
+  IPPROTO_IPV6	 = 41,		/* IPv6-in-IPv4 tunnelling		*/
+
+  IPPROTO_PIM    = 103,		/* Protocol Independent Multicast	*/
+
+  IPPROTO_ESP = 50,            /* Encapsulation Security Payload protocol */
+  IPPROTO_AH = 51,             /* Authentication Header protocol       */
+  IPPROTO_COMP   = 108,                /* Compression Header protocol */
+  IPPROTO_SCTP   = 132,		/* Stream Control Transport Protocol    */
+
+  IPPROTO_RAW	 = 255,		/* Raw IP packets			*/
   IPPROTO_MAX
 };
 
@@ -46,6 +54,55 @@ struct in_addr {
 	__u32	s_addr;
 };
 
+#define IP_TOS		1
+#define IP_TTL		2
+#define IP_HDRINCL	3
+#define IP_OPTIONS	4
+#define IP_ROUTER_ALERT	5
+#define IP_RECVOPTS	6
+#define IP_RETOPTS	7
+#define IP_PKTINFO	8
+#define IP_PKTOPTIONS	9
+#define IP_MTU_DISCOVER	10
+#define IP_RECVERR	11
+#define IP_RECVTTL	12
+#define	IP_RECVTOS	13
+#define IP_MTU		14
+#define IP_FREEBIND	15
+
+/* BSD compatibility */
+#define IP_RECVRETOPTS	IP_RETOPTS
+
+/* IP_MTU_DISCOVER values */
+#define IP_PMTUDISC_DONT		0	/* Never send DF frames */
+#define IP_PMTUDISC_WANT		1	/* Use per route hints	*/
+#define IP_PMTUDISC_DO			2	/* Always DF		*/
+
+#define IP_MULTICAST_IF			32
+#define IP_MULTICAST_TTL 		33
+#define IP_MULTICAST_LOOP 		34
+#define IP_ADD_MEMBERSHIP		35
+#define IP_DROP_MEMBERSHIP		36
+#define IP_UNBLOCK_SOURCE		37
+#define IP_BLOCK_SOURCE			38
+#define IP_ADD_SOURCE_MEMBERSHIP	39
+#define IP_DROP_SOURCE_MEMBERSHIP	40
+#define IP_MSFILTER			41
+#define MCAST_JOIN_GROUP		42
+#define MCAST_BLOCK_SOURCE		43
+#define MCAST_UNBLOCK_SOURCE		44
+#define MCAST_LEAVE_GROUP		45
+#define MCAST_JOIN_SOURCE_GROUP		46
+#define MCAST_LEAVE_SOURCE_GROUP	47
+#define MCAST_MSFILTER			48
+
+#define MCAST_EXCLUDE	0
+#define MCAST_INCLUDE	1
+
+/* These need to appear somewhere around here */
+#define IP_DEFAULT_MULTICAST_TTL        1
+#define IP_DEFAULT_MULTICAST_LOOP       1
+
 /* Request struct for multicast socket ops */
 
 struct ip_mreq 
@@ -54,11 +111,68 @@ struct ip_mreq
 	struct in_addr imr_interface;	/* local IP address of interface */
 };
 
+struct ip_mreqn
+{
+	struct in_addr	imr_multiaddr;		/* IP multicast address of group */
+	struct in_addr	imr_address;		/* local IP address of interface */
+	int		imr_ifindex;		/* Interface index */
+};
+
+struct ip_mreq_source {
+	__u32		imr_multiaddr;
+	__u32		imr_interface;
+	__u32		imr_sourceaddr;
+};
+
+struct ip_msfilter {
+	__u32		imsf_multiaddr;
+	__u32		imsf_interface;
+	__u32		imsf_fmode;
+	__u32		imsf_numsrc;
+	__u32		imsf_slist[1];
+};
+
+#define IP_MSFILTER_SIZE(numsrc) \
+	(sizeof(struct ip_msfilter) - sizeof(__u32) \
+	+ (numsrc) * sizeof(__u32))
+
+struct group_req
+{
+	__u32				 gr_interface;	/* interface index */
+	struct __kernel_sockaddr_storage gr_group;	/* group address */
+};
+
+struct group_source_req
+{
+	__u32				 gsr_interface;	/* interface index */
+	struct __kernel_sockaddr_storage gsr_group;	/* group address */
+	struct __kernel_sockaddr_storage gsr_source;	/* source address */
+};
+
+struct group_filter
+{
+	__u32				 gf_interface;	/* interface index */
+	struct __kernel_sockaddr_storage gf_group;	/* multicast address */
+	__u32				 gf_fmode;	/* filter mode */
+	__u32				 gf_numsrc;	/* number of sources */
+	struct __kernel_sockaddr_storage gf_slist[1];	/* interface index */
+};
+
+#define GROUP_FILTER_SIZE(numsrc) \
+	(sizeof(struct group_filter) - sizeof(struct __kernel_sockaddr_storage) \
+	+ (numsrc) * sizeof(struct __kernel_sockaddr_storage))
+
+struct in_pktinfo
+{
+	int		ipi_ifindex;
+	struct in_addr	ipi_spec_dst;
+	struct in_addr	ipi_addr;
+};
 
 /* Structure describing an Internet (IP) socket address. */
 #define __SOCK_SIZE__	16		/* sizeof(struct sockaddr)	*/
 struct sockaddr_in {
-  short int		sin_family;	/* Address family		*/
+  sa_family_t		sin_family;	/* Address family		*/
   unsigned short int	sin_port;	/* Port number			*/
   struct in_addr	sin_addr;	/* Internet address		*/
 
@@ -95,8 +209,8 @@ struct sockaddr_in {
 #define	IN_MULTICAST(a)		IN_CLASSD(a)
 #define IN_MULTICAST_NET	0xF0000000
 
-#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xe0000000) == 0xe0000000)
-#define	IN_BADCLASS(a)		((((long int) (a)) & 0xf0000000) == 0xf0000000)
+#define	IN_EXPERIMENTAL(a)	((((long int) (a)) & 0xf0000000) == 0xf0000000)
+#define	IN_BADCLASS(a)		IN_EXPERIMENTAL((a))
 
 /* Address to accept any incoming messages. */
 #define	INADDR_ANY		((unsigned long int) 0x00000000)
@@ -115,47 +229,23 @@ struct sockaddr_in {
 #define	IN_LOOPBACK(a)		((((long int) (a)) & 0xff000000) == 0x7f000000)
 
 /* Defines for Multicast INADDR */
-#define INADDR_UNSPEC_GROUP   	0xe0000000      /* 224.0.0.0   */
-#define INADDR_ALLHOSTS_GROUP 	0xe0000001      /* 224.0.0.1   */
-#define INADDR_MAX_LOCAL_GROUP  0xe00000ff      /* 224.0.0.255 */
+#define INADDR_UNSPEC_GROUP   	0xe0000000U	/* 224.0.0.0   */
+#define INADDR_ALLHOSTS_GROUP 	0xe0000001U	/* 224.0.0.1   */
+#define INADDR_ALLRTRS_GROUP    0xe0000002U	/* 224.0.0.2 */
+#define INADDR_MAX_LOCAL_GROUP  0xe00000ffU	/* 224.0.0.255 */
+
 
 /* <asm/byteorder.h> contains the htonl type stuff.. */
-
 #include <asm/byteorder.h> 
 
-/* Some random defines to make it easier in the kernel.. */
 #ifdef __KERNEL__
-
-#define LOOPBACK(x)	(((x) & htonl(0xff000000)) == htonl(0x7f000000))
-#define MULTICAST(x)	(((x) & htonl(0xf0000000)) == htonl(0xe0000000))
+/* Some random defines to make it easier in the kernel.. */
+#define LOOPBACK(x)	(((x) & __constant_htonl(0xff000000)) == __constant_htonl(0x7f000000))
+#define MULTICAST(x)	(((x) & __constant_htonl(0xf0000000)) == __constant_htonl(0xe0000000))
+#define BADCLASS(x)	(((x) & __constant_htonl(0xf0000000)) == __constant_htonl(0xf0000000))
+#define ZERONET(x)	(((x) & __constant_htonl(0xff000000)) == __constant_htonl(0x00000000))
+#define LOCAL_MCAST(x)	(((x) & __constant_htonl(0xFFFFFF00)) == __constant_htonl(0xE0000000))
 
 #endif
-
-/*
- *	IPv6 definitions as we start to include them. This is just
- *	a beginning -- don't get excited 8)
- */
- 
-struct in6_addr
-{
-	union
-	{
-		__u8	u6_addr8[16];
-		__u16	u6_addr16[8];
-		__u32	u6_addr32[4];
-	} in6_u;
-#define s6_addr		in6_u.u6_addr8
-#define s6_addr16	in6_u.u6_addr16
-#define s6_addr32	in6_u.u6_addr32
-};
-
-struct sockaddr_in6
-{
-	unsigned short sin6_family;
-	unsigned short sin6_port;
-	unsigned long sin6_flowinfo;
-	struct in6_addr sin6_addr;
-};
-
 
 #endif	/* _LINUX_IN_H */

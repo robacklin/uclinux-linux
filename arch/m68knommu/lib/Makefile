@@ -6,6 +6,6 @@
 	$(CC) $(AFLAGS) -D__ASSEMBLY__ -traditional -c $< -o $@
 
 L_TARGET = lib.a
-L_OBJS  = ashrdi3.o bzero.o checksum.o memcmp.o memcpy.o memset.o semaphore.o
+obj-y  = ashrdi3.o checksum.o semaphore.o memcpy.o memset.o delay.o
 
 include $(TOPDIR)/Rules.make

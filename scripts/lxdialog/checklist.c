@@ -51,6 +51,10 @@ print_item (WINDOW * win, const char *item, int status,
     mvwaddch(win, choice, item_x, item[0]);
     wattrset (win, selected ? item_selected_attr : item_attr);
     waddstr (win, (char *)item+1);
+    if (selected) {
+    	wmove (win, choice, check_x+1);
+    	wrefresh (win);
+    }
 }
 
 /*
@@ -207,12 +211,14 @@ dialog_checklist (const char *title, const char *prompt, int height, int width,
 		    status[i+scroll], i, i == choice);
     }
 
-    wnoutrefresh (list);
-
     print_arrows(dialog, choice, item_no, scroll,
 			box_y, box_x + check_x + 5, list_height);
 
     print_buttons(dialog, height, width, 0);
+
+    wnoutrefresh (list);
+    wnoutrefresh (dialog);
+    doupdate ();
 
     while (key != ESC) {
 	key = wgetch (dialog);
@@ -351,7 +357,11 @@ dialog_checklist (const char *title, const char *prompt, int height, int width,
 	case ESC:
 	    break;
 	}
+
+	/* Now, update everything... */
+	doupdate ();
     }
+    
 
     delwin (dialog);
     free (status);

@@ -27,6 +27,8 @@
 #include <linux/config.h>
 #include <linux/if.h>
 
+#if defined(CONFIG_DLCI) || defined(CONFIG_DLCI_MODULE)
+
 /* Structures and constants associated with the DLCI device driver */
 
 struct dlci_add
@@ -129,13 +131,13 @@ struct frad_conf
 /* these are the fields of an RFC 1490 header */
 struct frhdr
 {
-   unsigned char  control	__attribute__((packed));
+   unsigned char  control;
 
    /* for IP packets, this can be the NLPID */
-   unsigned char  pad		__attribute__((packed)); 
+   unsigned char  pad	; 
 
-   unsigned char  NLPID		__attribute__((packed));
-   unsigned char  OUI[3]	__attribute__((packed));
+   unsigned char  NLPID	;
+   unsigned char  OUI[3];
    unsigned short PID		__attribute__((packed));
 
 #define IP_NLPID pad 
@@ -152,21 +154,21 @@ struct frhdr
 
 struct dlci_local
 {
-   struct enet_statistics stats;
-   struct device          *slave;
+   struct net_device_stats stats;
+   struct net_device          *slave;
    struct dlci_conf       config;
    int                    configured;
 
    /* callback function */
-   void              (*receive)(struct sk_buff *skb, struct device *);
+   void              (*receive)(struct sk_buff *skb, struct net_device *);
 };
 
 struct frad_local
 {
-   struct enet_statistics stats;
+   struct net_device_stats stats;
 
    /* devices which this FRAD is slaved to */
-   struct device     *master[CONFIG_DLCI_MAX];
+   struct net_device     *master[CONFIG_DLCI_MAX];
    short             dlci[CONFIG_DLCI_MAX];
 
    struct frad_conf  config;
@@ -174,11 +176,11 @@ struct frad_local
    int               initialized;	/* mem_start, port, irq set ? */
 
    /* callback functions */
-   int               (*activate)(struct device *, struct device *);
-   int               (*deactivate)(struct device *, struct device *);
-   int               (*assoc)(struct device *, struct device *);
-   int               (*deassoc)(struct device *, struct device *);
-   int               (*dlci_conf)(struct device *, struct device *, int get);
+   int               (*activate)(struct net_device *, struct net_device *);
+   int               (*deactivate)(struct net_device *, struct net_device *);
+   int               (*assoc)(struct net_device *, struct net_device *);
+   int               (*deassoc)(struct net_device *, struct net_device *);
+   int               (*dlci_conf)(struct net_device *, struct net_device *, int get);
 
    /* fields that are used by the Sangoma SDLA cards */
    struct timer_list timer;
@@ -190,6 +192,10 @@ struct frad_local
 int register_frad(const char *name);
 int unregister_frad(const char *name);
 
-#endif __KERNEL__
+extern int (*dlci_ioctl_hook)(unsigned int, void *);
+
+#endif /* __KERNEL__ */
+
+#endif /* CONFIG_DLCI || CONFIG_DLCI_MODULE */
 
 #endif

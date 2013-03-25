@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -67,81 +67,38 @@
 #include <linux/version.h>
 #endif
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 #include <stdarg.h>
-#include <asm/io.h>
 #include <asm/irq.h>
-#include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/kernel.h>
-#include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
-#if LINUX_VERSION_CODE <= CVT_LINUX_VERSION(2,1,92)
-#include <linux/bios32.h>
-#endif
 #include <linux/pci.h>
-#include <linux/proc_fs.h>
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,23)
 #include <linux/init.h>
-#endif
 #include <linux/blk.h>
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
-#include <asm/spinlock.h>
-#endif
-#include "sd.h"
-#include "scsi.h"
-#include "hosts.h"
-#include "inia100.h"
+#include <linux/spinlock.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
-#include <linux/config.h>
-
-
-#else
-
 #include <linux/kernel.h>
-#include <linux/head.h>
-#include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
-
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
-#include <asm/system.h>
 #include <asm/io.h>
-#include "../block/blk.h"
 #include "scsi.h"
 #include "sd.h"
 #include "hosts.h"
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include "inia100.h"
-#endif
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = INIA100;
+static Scsi_Host_Template driver_template = INIA100;
 #include "scsi_module.c"
-#endif
 
 #define ORC_RDWORD(x,y)         (short)(inl((int)((ULONG)((ULONG)x+(UCHAR)y)) ))
 
 char *inia100_Copyright = "Copyright (C) 1998-99";
 char *inia100_InitioName = "by Initio Corporation";
 char *inia100_ProductName = "INI-A100U2W";
-char *inia100_Version = "v1.02a";
-
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
-struct proc_dir_entry proc_scsi_inia100 =
-{
-	PROC_SCSI_INIA100, 7, "INIA100",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2,
-	0, 0, 0, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
-#endif
+char *inia100_Version = "v1.02c";
 
 /* set by inia100_setup according to the command line */
 static int setup_called = 0;
@@ -151,7 +108,6 @@ static int orc_num_ch = MAX_SUPPORTED_ADAPTERS;		/* Maximum 4 adapters          
 #define NUMBER(arr)     (sizeof(arr) / sizeof(arr[0]))
 static char *setup_str = (char *) NULL;
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr0(int irq, void *dev_id, struct pt_regs *);
 static void inia100_intr1(int irq, void *dev_id, struct pt_regs *);
 static void inia100_intr2(int irq, void *dev_id, struct pt_regs *);
@@ -160,16 +116,6 @@ static void inia100_intr4(int irq, void *dev_id, struct pt_regs *);
 static void inia100_intr5(int irq, void *dev_id, struct pt_regs *);
 static void inia100_intr6(int irq, void *dev_id, struct pt_regs *);
 static void inia100_intr7(int irq, void *dev_id, struct pt_regs *);
-#else
-static void inia100_intr0(int irq, struct pt_regs *);
-static void inia100_intr1(int irq, struct pt_regs *);
-static void inia100_intr2(int irq, struct pt_regs *);
-static void inia100_intr3(int irq, struct pt_regs *);
-static void inia100_intr4(int irq, struct pt_regs *);
-static void inia100_intr5(int irq, struct pt_regs *);
-static void inia100_intr6(int irq, struct pt_regs *);
-static void inia100_intr7(int irq, struct pt_regs *);
-#endif
 
 static void inia100_panic(char *msg);
 void inia100SCBPost(BYTE * pHcb, BYTE * pScb);
@@ -203,12 +149,7 @@ static void inia100AppendSRBToQueue(ORC_HCS * pHCB, Scsi_Cmnd * pSRB)
 {
 	ULONG flags;
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spin_lock_irqsave(&(pHCB->pSRB_lock), flags);
-#else
-	save_flags(flags);
-	cli();
-#endif
 
 	pSRB->next = NULL;	/* Pointer to next */
 	if (pHCB->pSRB_head == NULL)
@@ -216,11 +157,7 @@ static void inia100AppendSRBToQueue(ORC_HCS * pHCB, Scsi_Cmnd * pSRB)
 	else
 		pHCB->pSRB_tail->next = pSRB;	/* Pointer to next */
 	pHCB->pSRB_tail = pSRB;
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spin_unlock_irqrestore(&(pHCB->pSRB_lock), flags);
-#else
-	restore_flags(flags);
-#endif
 	return;
 }
 
@@ -235,22 +172,12 @@ static Scsi_Cmnd *inia100PopSRBFromQueue(ORC_HCS * pHCB)
 {
 	Scsi_Cmnd *pSRB;
 	ULONG flags;
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spin_lock_irqsave(&(pHCB->pSRB_lock), flags);
-#else
-	save_flags(flags);
-	cli();
-#endif
-
 	if ((pSRB = (Scsi_Cmnd *) pHCB->pSRB_head) != NULL) {
 		pHCB->pSRB_head = pHCB->pSRB_head->next;
 		pSRB->next = NULL;
 	}
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spin_unlock_irqrestore(&(pHCB->pSRB_lock), flags);
-#else
-	restore_flags(flags);
-#endif
 	return (pSRB);
 }
 
@@ -297,7 +224,6 @@ int orc_ReturnNumberOfAdapters(void)
 		};
 
 		unsigned int dRegValue;
-		unsigned short command;
 		WORD wBIOS, wBASE;
 		BYTE bPCIBusNum, bInterrupt, bPCIDeviceNum;
 
@@ -305,29 +231,19 @@ int orc_ReturnNumberOfAdapters(void)
 		unsigned long page_offset, base;
 #endif
 
-#if LINUX_VERSION_CODE > CVT_LINUX_VERSION(2,1,92)
 		struct pci_dev *pdev = NULL;
-#else
-		int index;
-		unsigned char pci_bus, pci_devfn;
-#endif
 
 		bPCIBusNum = 0;
 		bPCIDeviceNum = 0;
 		init_inia100Adapter_table();
 		for (i = 0; i < NUMBER(inia100_pci_devices); i++) {
-#if LINUX_VERSION_CODE > CVT_LINUX_VERSION(2,1,92)
 			pdev = NULL;
 			while ((pdev = pci_find_device(inia100_pci_devices[i].vendor_id,
 					inia100_pci_devices[i].device_id,
 						       pdev)))
-#else
-			index = 0;
-			while (!(pcibios_find_device(inia100_pci_devices[i].vendor_id,
-					inia100_pci_devices[i].device_id,
-					 index++, &pci_bus, &pci_devfn)))
-#endif
 			{
+				if (pci_enable_device(pdev))
+					continue;
 				if (iAdapters >= MAX_SUPPORTED_ADAPTERS)
 					break;	/* Never greater than maximum   */
 
@@ -340,46 +256,24 @@ int orc_ReturnNumberOfAdapters(void)
 					/*
 					 * Read sundry information from PCI BIOS.
 					 */
-#if LINUX_VERSION_CODE > CVT_LINUX_VERSION(2,1,92)
 					bPCIBusNum = pdev->bus->number;
 					bPCIDeviceNum = pdev->devfn;
-					dRegValue = pdev->base_address[0];
+					dRegValue = pci_resource_start(pdev, 0);
 					if (dRegValue == -1) {	/* Check return code            */
 						printk("\n\rinia100: orchid read configuration error.\n");
 						return (0);	/* Read configuration space error  */
 					}
+
 					/* <02> read from base address + 0x50 offset to get the wBIOS balue. */
 					wBASE = (WORD) dRegValue;
 
-					/* Now read the interrupt line  */
+					/* Now read the interrupt line value */
 					dRegValue = pdev->irq;
-					bInterrupt = dRegValue & 0xFF;	/* Assign interrupt line      */
-					pci_read_config_word(pdev, PCI_COMMAND, &command);
-					pci_write_config_word(pdev, PCI_COMMAND,
-							      command | PCI_COMMAND_MASTER | PCI_COMMAND_IO);
+					bInterrupt = dRegValue;		/* Assign interrupt line      */
 
-#else
-					bPCIBusNum = pci_bus;
-					bPCIDeviceNum = pci_devfn;
-					pcibios_read_config_dword(pci_bus, pci_devfn, PCI_BASE_ADDRESS_0,
-							     &dRegValue);
-					if (dRegValue == -1) {	/* Check return code            */
-						printk("\n\rinia100: Orchid read configuration error.\n");
-						return (0);	/* Read configuration space error  */
-					}
-					/* <02> read from base address + 0x50 offset to get the wBIOS balue. */
-					wBASE = (WORD) dRegValue;
-
-					/* Now read the interrupt line  */
-					pcibios_read_config_dword(pci_bus, pci_devfn, PCI_INTERRUPT_LINE,
-							     &dRegValue);
-					bInterrupt = dRegValue & 0xFF;	/* Assign interrupt line      */
-					pcibios_read_config_word(pci_bus, pci_devfn, PCI_COMMAND, &command);
-					pcibios_write_config_word(pci_bus, pci_devfn, PCI_COMMAND,
-								  command | PCI_COMMAND_MASTER | PCI_COMMAND_IO);
-#endif
-					wBASE &= PCI_BASE_ADDRESS_IO_MASK;
 					wBIOS = ORC_RDWORD(wBASE, 0x50);
+
+					pci_set_master(pdev);
 
 #ifdef MMAPIO
 					base = wBASE & PAGE_MASK;
@@ -389,11 +283,7 @@ int orc_ReturnNumberOfAdapters(void)
 					 * replace the next line with this one if you are using 2.1.x:
 					 * temp_p->maddr = ioremap(base, page_offset + 256);
 					 */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,0)
 					wBASE = ioremap(base, page_offset + 256);
-#else
-					wBASE = (WORD) vremap(base, page_offset + 256);
-#endif
 					if (wBASE) {
 						wBASE += page_offset;
 					}
@@ -426,9 +316,7 @@ int inia100_detect(Scsi_Host_Template * tpnt)
 	ULONG dBiosAdr;
 	BYTE *pbBiosAdr;
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
-	tpnt->proc_dir = &proc_scsi_inia100;
-#endif
+	tpnt->proc_name = "INIA100";
 	if (setup_called) {
 		/* Setup by inia100_setup          */
 		printk("inia100: processing commandline: ");
@@ -458,9 +346,8 @@ int inia100_detect(Scsi_Host_Template * tpnt)
 
 		pHCB->pSRB_head = NULL;		/* Initial SRB save queue       */
 		pHCB->pSRB_tail = NULL;		/* Initial SRB save queue       */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 		pHCB->pSRB_lock = SPIN_LOCK_UNLOCKED; /* SRB save queue lock */
-#endif
+		pHCB->BitAllocFlagLock = SPIN_LOCK_UNLOCKED;
 		/* Get total memory needed for SCB */
 		sz = orc_num_scb * sizeof(ORC_SCB);
 		if ((pHCB->HCS_virScbArray = (PVOID) kmalloc(sz, GFP_ATOMIC | GFP_DMA)) == NULL) {
@@ -474,37 +361,36 @@ int inia100_detect(Scsi_Host_Template * tpnt)
 		sz = orc_num_scb * sizeof(ESCB);
 		if ((pHCB->HCS_virEscbArray = (PVOID) kmalloc(sz, GFP_ATOMIC | GFP_DMA)) == NULL) {
 			printk("inia100: ESCB memory allocation error\n");
+			/* ?? does pHCB->HCS_virtScbArray leak ??*/
 			return (0);
 		}
 		memset((unsigned char *) pHCB->HCS_virEscbArray, 0, sz);
 		pHCB->HCS_physEscbArray = (U32) VIRT_TO_BUS(pHCB->HCS_virEscbArray);
 
-		request_region(pHCB->HCS_Base, 0x100, "inia100");	/* Register */
 		get_orcPCIConfig(pHCB, i);
 
 		dBiosAdr = pHCB->HCS_BIOS;
 		dBiosAdr = (dBiosAdr << 4);
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 		pbBiosAdr = phys_to_virt(dBiosAdr);
-#endif
 
 		if (init_orchid(pHCB)) {	/* Initial orchid chip    */
 			printk("inia100: initial orchid fail!!\n");
 			return (0);
 		}
+		request_region(pHCB->HCS_Base, 256, "inia100");	/* Register */
+
 		hreg = scsi_register(tpnt, sizeof(ORC_HCS));
 		if (hreg == NULL) {
-			printk("Invalid scsi_register pointer.\n");
+			release_region(pHCB->HCS_Base, 256);	/* Register */
+			return 0;
 		}
 		hreg->io_port = pHCB->HCS_Base;
 		hreg->n_io_port = 0xff;
 		hreg->can_queue = orc_num_scb;	/* 03/05/98                   */
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 		hreg->unique_id = pHCB->HCS_Base;
 		hreg->max_id = pHCB->HCS_MaxTar;
-#endif
 
 		hreg->max_lun = 32;	/* 10/21/97                     */
 /*
@@ -513,7 +399,7 @@ int inia100_detect(Scsi_Host_Template * tpnt)
  */
 		hreg->irq = pHCB->HCS_Intr;
 		hreg->this_id = pHCB->HCS_SCSI_ID;	/* Assign HCS index           */
-		hreg->base = (UCHAR *) pHCB;
+		hreg->base = (unsigned long)pHCB;
 
 #if 1
 		hreg->sg_tablesize = TOTAL_SG_ENTRY;	/* Maximun support is 32 */
@@ -523,30 +409,29 @@ int inia100_detect(Scsi_Host_Template * tpnt)
 
 		/* Initial orc chip           */
 		switch (i) {
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 		case 0:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr0, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr0, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 1:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr1, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr1, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 2:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr2, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr2, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 3:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr3, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr3, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 4:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr4, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr4, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 5:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr5, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr5, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 6:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr6, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr6, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		case 7:
-			ok = request_irq(pHCB->HCS_Intr, inia100_intr7, SA_INTERRUPT | SA_SHIRQ, "inia100", NULL);
+			ok = request_irq(pHCB->HCS_Intr, inia100_intr7, SA_INTERRUPT | SA_SHIRQ, "inia100", hreg);
 			break;
 		default:
 			inia100_panic("inia100: Too many host adapters\n");
@@ -568,7 +453,6 @@ int inia100_detect(Scsi_Host_Template * tpnt)
 			}
 			inia100_panic("inia100: driver needs an IRQ.\n");
 		}
-#endif
 	}
 
 	tpnt->this_id = -1;
@@ -610,21 +494,13 @@ static void inia100BuildSCB(ORC_HCS * pHCB, ORC_SCB * pSCB, Scsi_Cmnd * SCpnt)
 			pSCB->SCB_SGLen = (U32) (SCpnt->use_sg * 8);
 			pSrbSG = (struct scatterlist *) SCpnt->request_buffer;
 			for (i = 0; i < SCpnt->use_sg; i++, pSG++, pSrbSG++) {
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 				pSG->SG_Ptr = (U32) (VIRT_TO_BUS(pSrbSG->address));
-#else
-				pSG->SG_Ptr = (U32) pSrbSG->address;
-#endif
 				pSG->SG_Len = (U32) pSrbSG->length;
 				TotalLen += (U32) pSrbSG->length;
 			}
 		} else {	/* Non SG                       */
 			pSCB->SCB_SGLen = 0x8;
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 			pSG->SG_Ptr = (U32) (VIRT_TO_BUS(SCpnt->request_buffer));
-#else
-			pSG->SG_PTR = (U32) SCpnt->request_buffer;
-#endif
 			pSG->SG_Len = (U32) SCpnt->request_bufflen;
 		}
 	}
@@ -814,11 +690,7 @@ void inia100SCBPost(BYTE * pHcb, BYTE * pScb)
  Output         : None.
  Return         : pSRB  -       Pointer to SCSI request block.
 *****************************************************************************/
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 int inia100_biosparam(Scsi_Disk * disk, kdev_t dev, int *info_array)
-#else
-int inia100_biosparam(Scsi_Disk * disk, int dev, int *info_array)
-#endif
 {
 	ORC_HCS *pHcb;		/* Point to Host adapter control block */
 	ORC_TCS *pTcb;
@@ -847,96 +719,58 @@ int inia100_biosparam(Scsi_Disk * disk, int dev, int *info_array)
 
 static void subIntr(ORC_HCS * pHCB, int irqno)
 {
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	unsigned long flags;
 
 	spin_lock_irqsave(&io_request_lock, flags);
-#endif
 
 	if (pHCB->HCS_Intr != irqno) {
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 		spin_unlock_irqrestore(&io_request_lock, flags);
-#endif
 		return;
 	}
 	orc_interrupt(pHCB);
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spin_unlock_irqrestore(&io_request_lock, flags);
-#endif
 }
 
 /*
  * Interrupts handler (main routine of the driver)
  */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr0(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr0(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[0], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr1(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr1(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[1], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr2(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr2(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[2], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr3(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr3(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[3], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr4(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr4(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[4], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr5(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr5(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[5], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr6(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr6(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[6], irqno);
 }
 
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
 static void inia100_intr7(int irqno, void *dev_id, struct pt_regs *regs)
-#else
-static void inia100_intr7(int irqno, struct pt_regs *regs)
-#endif
 {
 	subIntr(&orc_hcs[7], irqno);
 }
@@ -950,4 +784,15 @@ static void inia100_panic(char *msg)
 	panic("inia100 panic");
 }
 
+/*
+ * Release ressources
+ */
+int inia100_release(struct Scsi_Host *hreg)
+{
+        free_irq(hreg->irq, hreg);
+        release_region(hreg->io_port, 256);
+        return 0;
+} 
+
+MODULE_LICENSE("Dual BSD/GPL");
 /*#include "inia100scsi.c" */

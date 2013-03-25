@@ -6,7 +6,6 @@
  *
  * Based on include/asm-m68knommu/MC68332.h
  * Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- *                     The Silver Hammer Group, Ltd.
  *
  */
 
@@ -294,7 +293,7 @@
 /*
  * Here go the bitmasks themselves
  */
-#define IMR_MSPIM 	(1 << SPIM_IRQ_NUM)	/* Mask SPI Master interrupt */
+#define IMR_MSPIM 	(1 << SPIM _IRQ_NUM)	/* Mask SPI Master interrupt */
 #define	IMR_MTMR2	(1 << TMR2_IRQ_NUM)	/* Mask Timer 2 interrupt */
 #define IMR_MUART	(1 << UART_IRQ_NUM)	/* Mask UART interrupt */	
 #define	IMR_MWDT	(1 << WDT_IRQ_NUM)	/* Mask Watchdog Timer interrupt */
@@ -328,7 +327,7 @@
 #define IWR_ADDR	0xfffff308
 #define IWR		LONG_REF(IWR_ADDR)
 
-#define IWR_SPIM 	(1 << SPIM_IRQ_NUM)	/* SPI Master interrupt */
+#define IWR_SPIM 	(1 << SPIM _IRQ_NUM)	/* SPI Master interrupt */
 #define	IWR_TMR2	(1 << TMR2_IRQ_NUM)	/* Timer 2 interrupt */
 #define IWR_UART	(1 << UART_IRQ_NUM)	/* UART interrupt */	
 #define	IWR_WDT		(1 << WDT_IRQ_NUM)	/* Watchdog Timer interrupt */
@@ -358,7 +357,7 @@
 #define ISR_ADDR	0xfffff30c
 #define ISR		LONG_REF(ISR_ADDR)
 
-#define ISR_SPIM 	(1 << SPIM_IRQ_NUM)	/* SPI Master interrupt */
+#define ISR_SPIM 	(1 << SPIM _IRQ_NUM)	/* SPI Master interrupt */
 #define	ISR_TMR2	(1 << TMR2_IRQ_NUM)	/* Timer 2 interrupt */
 #define ISR_UART	(1 << UART_IRQ_NUM)	/* UART interrupt */	
 #define	ISR_WDT		(1 << WDT_IRQ_NUM)	/* Watchdog Timer interrupt */
@@ -392,7 +391,7 @@
 #define IPR_ADDR	0xfffff310
 #define IPR		LONG_REF(IPR_ADDR)
 
-#define IPR_SPIM 	(1 << SPIM_IRQ_NUM)	/* SPI Master interrupt */
+#define IPR_SPIM 	(1 << SPIM _IRQ_NUM)	/* SPI Master interrupt */
 #define	IPR_TMR2	(1 << TMR2_IRQ_NUM)	/* Timer 2 interrupt */
 #define IPR_UART	(1 << UART_IRQ_NUM)	/* UART interrupt */	
 #define	IPR_WDT		(1 << WDT_IRQ_NUM)	/* Watchdog Timer interrupt */
@@ -970,6 +969,32 @@
 #define UMISC_LOOP	 0x1000	/* Serial Loopback Enable */
 #define UMISC_FORCE_PERR 0x2000	/* Force Parity Error */
 #define UMISC_CLKSRC	 0x4000	/* Clock Source */
+
+
+/* generalization of uart control registers to support multiple ports: */
+typedef volatile struct {
+  volatile unsigned short int ustcnt;
+  volatile unsigned short int ubaud;
+  union {
+    volatile unsigned short int w;
+    struct {
+      volatile unsigned char status;
+      volatile unsigned char rxdata;
+    } b;
+  } urx;
+  union {
+    volatile unsigned short int w;
+    struct {
+      volatile unsigned char status;
+      volatile unsigned char txdata;
+    } b;
+  } utx;
+  volatile unsigned short int umisc;
+  volatile unsigned short int pad1;
+  volatile unsigned short int pad2;
+  volatile unsigned short int pad3;
+} m68328_uart __attribute__((packed));
+
 
 /**********
  *

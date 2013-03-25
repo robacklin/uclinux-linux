@@ -792,6 +792,32 @@
 #define NIPR_SELECT_SHIFT	8
 #define NIPR_PRE_SEL		0x8000	/* Non-integer prescaler select */
 
+
+/* generalization of uart control registers to support multiple ports: */
+typedef volatile struct {
+  volatile unsigned short int ustcnt;
+  volatile unsigned short int ubaud;
+  union {
+    volatile unsigned short int w;
+    struct {
+      volatile unsigned char status;
+      volatile unsigned char rxdata;
+    } b;
+  } urx;
+  union {
+    volatile unsigned short int w;
+    struct {
+      volatile unsigned char status;
+      volatile unsigned char txdata;
+    } b;
+  } utx;
+  volatile unsigned short int umisc;
+  volatile unsigned short int nipr;
+  volatile unsigned short int pad1;
+  volatile unsigned short int pad2;
+} m68328_uart __attribute__((packed));
+
+
 /**********
  *
  * 0xFFFFFAxx -- LCD Controller

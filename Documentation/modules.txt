@@ -3,15 +3,18 @@ in the Linux kernel. This is not a technical description on
 the internals of module, but mostly a sample of how to compile
 and use modules.
 
-Note: You should ensure that the modules-X.Y.Z.tar.gz you are using
+Note: You should ensure that the modutils-X.Y.Z.tar.gz you are using
 is the most up to date one for this kernel. The "X.Y.Z" will reflect
 the kernel version at the time of the release of the modules package.
 Some older modules packages aren't aware of some of the newer modular
-features that the kernel now supports. (If you are unsure, you can 
-usually find out what the current release of the modules-X.Y.Z.tar.gz
-package is by looking up the URL listed for "Bjorn Ekwall" in the 
-file ./linux/CREDITS)
+features that the kernel now supports.  The current required version
+is listed in the file linux/Documentation/Changes.
 
+* * * NOTE * * *
+The kernel has been changed to remove kerneld support and use
+the new kmod support.  Keep this in mind when reading this file.  Kmod
+does the exact same thing as kerneld, but doesn't require an external
+program (see Documentation/kmod.txt)
 
 In the beginning...
 -------------------
@@ -22,7 +25,7 @@ file linux/README.  It generally goes like:
 	make config
 	make dep
 	make clean
-	make zImage or make bzImage or make zlilo
+	make zImage or make zlilo
 
 In "make config", you select what you want to include in the "resident"
 kernel and what features you want to have available as loadable modules.
@@ -49,14 +52,14 @@ the official kernel sources, you will certainly like this option...
 
 Here is a sample of the available modules included in the kernel sources:
 
-	Most filesystems: minix, xiafs, msdos, umsdos, sysv, isofs, hpfs,
+	Most filesystems: minix, msdos, umsdos, sysv, isofs, hpfs,
 			  smbfs, nfs
 
 	Mid-level SCSI support (required by top and low level scsi drivers).
 	Most low-level SCSI drivers: (i.e. aha1542, in2000)
 	All SCSI high-level drivers: disk, tape, cdrom, generic.
 
-	Most ethernet drivers: (too many to list, please see the file
+	Most Ethernet drivers: (too many to list, please see the file
 				./Documentation/networking/net-modules.txt)
 
 	Most CDROM drivers:
@@ -114,7 +117,7 @@ Using the modprobe utility, you can load any module like this:
 without paying much attention to which kernel you are running, or what
 other modules this module depends on.
 
-With the help of the modprobe configuration file: "/etc/conf.modules"
+With the help of the modprobe configuration file: "/etc/modules.conf"
 you can tune the behaviour of modprobe in many ways, including an
 automatic setting of insmod options for each module.
 And, yes, there _are_ man-pages for all this...
@@ -132,6 +135,39 @@ Then if you do, for example
 
 you will automatically load _both_ the msdos and umsdos modules,
 since umsdos runs piggyback on msdos.
+
+
+Using modinfo:
+--------------
+
+Sometimes you need to know what parameters are accepted by a
+module or you've found a bug and want to contact the maintainer.
+Then modinfo comes in very handy.
+
+Every module (normally) contains the author/maintainer,
+a description and a list of parameters.
+
+For example "modinfo -a eepro100" will return:
+
+	Maintainer: Andrey V. Savochkin <saw@saw.sw.com.sg>
+
+and "modinfo -d eepro100" will return a description:
+
+	Intel i82557/i82558 PCI EtherExpressPro driver
+
+and more important "modinfo -p eepro100" will return this list:
+
+	debug int
+	options int array (min = 1, max = 8)
+	full_duplex int array (min = 1, max = 8)
+	congenb int
+	txfifo int
+	rxfifo int
+	txdmacount int
+	rxdmacount int
+	rx_copybreak int
+	max_interrupt_work int
+	multicast_filter_limit int
 
 
 The "ultimate" utility:
@@ -161,10 +197,10 @@ This is what happens:
 	  fits this symbolic description.
 	- modprobe looks into its internal "alias" translation table
 	  to see if there is a match.  This table can be reconfigured
-	  and expanded by having "alias" lines in "/etc/conf.modules".
+	  and expanded by having "alias" lines in "/etc/modules.conf".
 	- insmod is then asked to insert the module(s) that modprobe
 	  has decided that the kernel needs.  Every module will be
-	  configured according to the "options" lines in "/etc/conf.modules".
+	  configured according to the "options" lines in "/etc/modules.conf".
 	- modprobe exits and kerneld tells the kernel that the request
 	  succeeded (or failed...)
 	- The kernel uses the freshly installed feature just as if it
@@ -188,7 +224,7 @@ for maintainers of distributions.
 
 To use kerneld with the least amount of "hassle", you need modprobe from
 a release that can be considered "recent" w.r.t. your kernel, and also
-a configuration file for modprobe ("/etc/conf.modules").
+a configuration file for modprobe ("/etc/modules.conf").
 Since modprobe already knows about most modules, the minimal configuration
 file could look something like this:
 
@@ -204,10 +240,6 @@ You could add these lines as well, but they are only "cosmetic":
 	alias net-pf-3 off	# no ax25 module available (yet)
 	alias net-pf-4 off	# if you don't use the ipx module
 	alias net-pf-5 off	# if you don't use the appletalk module
-
-Finally, for the "purists":
-You can name the modprobe configuration either "/etc/conf.modules" or
-"/etc/modules.conf", since modprobe knows what to do in each case...
 
 
 Written by:

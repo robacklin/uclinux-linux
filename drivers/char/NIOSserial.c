@@ -2,12 +2,12 @@
  *
  * Copyright (C) 1995       David S. Miller    <davem@caip.rutgers.edu>
  * Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
- * Copyright (C) 1998-2000  D. Jeff Dionne     <jeff@lineo.ca>
+ * Copyright (C) 1998-2000  D. Jeff Dionne     <jeff@uClinux.org>
  * Copyright (C) 1999       Vladimir Gurevich  <vgurevic@cisco.com>
  * Copyright (C) 2001       Vic Phillips       <vic@microtronix.com>
- *
+ * Copyright (C) 2001       Wentao Xu          <wentao@microtronix.com>
  */
- 
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -21,6 +21,10 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
+#include <linux/console.h>
+#include <linux/reboot.h>
+#include <linux/keyboard.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -28,15 +32,14 @@
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/delay.h>
+#include <asm/uaccess.h>
 
 #include "NIOSserial.h"
 
-static struct NIOS_serial NIOS_soft;
+extern void hard_reset_now(void);
 
-struct tty_struct NIOS_ttys;
-struct NIOS_serial *NIOS_consinfo = 0;
-
-#define NIOS_CLOCK (20000000) 
+//struct tty_struct NIOS_ttys;
+//struct NIOS_serial *NIOS_consinfo = 0;
 
 DECLARE_TASK_QUEUE(tq_serial);
 
@@ -46,7 +49,7 @@ static int serial_refcount;
 /* serial subtype definitions */
 #define SERIAL_TYPE_NORMAL	1
 #define SERIAL_TYPE_CALLOUT	2
-  
+
 /* number of characters left in xmit buffer before we ask for more */
 #define WAKEUP_CHARS 256
 
@@ -63,9 +66,30 @@ static int serial_refcount;
 
 static void change_speed(struct NIOS_serial *info);
 
-static struct tty_struct *serial_table[2];
-static struct termios *serial_termios[2];
-static struct termios *serial_termios_locked[2];
+/*
+ *	Configuration table, UARTs to look for at startup.
+ */
+static struct NIOS_serial nios_soft[] = {
+//	{ 0,0,1,0,0,0,0, (nasys_printf_uart), (nasys_printf_uart_irq) }, /* ttyS0 */
+	{ 0,0,1,0,0,0,0, (int) (na_uart0), (na_uart0_irq) },		/* ttyS0 */
+#ifdef na_uart1
+//	{ 0,0,0,0,0,0,0, (nasys_gdb_uart), (nasys_gdb_uart_irq) },		  /* ttyS1 */
+	{ 0,0,0,0,0,0,0, (int) (na_uart1), (na_uart1_irq) },		/* ttyS1 */
+#endif
+#ifdef na_uart2
+	{ 0,0,0,0,0,0,0, (int) (na_uart2), (na_uart2_irq) },		/* ttyS2 */
+#endif
+#ifdef na_uart3
+	{ 0,0,0,0,0,0,0, (int) (na_uart3), (na_uart3_irq) },		/* ttyS3 */
+#endif
+};
+
+#define	NR_PORTS	(sizeof(nios_soft) / sizeof(struct NIOS_serial))
+
+
+static struct tty_struct *serial_table[NR_PORTS];
+static struct termios *serial_termios[NR_PORTS];
+static struct termios *serial_termios_locked[NR_PORTS];
 
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
@@ -82,7 +106,7 @@ static struct termios *serial_termios_locked[2];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char tmp_buf[SERIAL_XMIT_SIZE]; /* This is cheating */
-static struct semaphore tmp_buf_sem = MUTEX;
+DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct NIOS_serial *info,
 					dev_t device, const char *routine)
@@ -108,11 +132,9 @@ static inline int serial_paranoia_check(struct NIOS_serial *info,
 /*
  * This is used to figure out the divisor speeds and the timeouts
  */
-#if 0
 static int baud_table[] = {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
 	9600, 19200, 38400, 57600, 115200, 0 };
-#endif
 
 /* Sets or clears DTR/RTS on the requested line */
 static inline void NIOS_rtsdtr(struct NIOS_serial *ss, int set)
@@ -142,27 +164,29 @@ static inline int get_baud(struct NIOS_serial *ss)
 static void rs_stop(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
+	np_uart *	uart= (np_uart *)(info->port);
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "rs_stop"))
 		return;
-	
+
 	save_flags(flags); cli();
-	nasys_printf_uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
+	uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
 	restore_flags(flags);
 }
 
-void rs_put_char(char ch)
+void rs_put_char(char ch, struct NIOS_serial *info)
 {
 	int flags, loops = 0;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	save_flags(flags); cli();
 
-	while (!(nasys_printf_uart->np_uartstatus & np_uartstatus_trdy_mask) && (loops < 1000)) {
+	while (!(uart->np_uartstatus & np_uartstatus_trdy_mask) && (loops < 1000)) {
 		loops++;
 	}
 
-	nasys_printf_uart->np_uarttxdata = ch;
+	uart->np_uarttxdata = ch;
 	restore_flags(flags);
 }
 
@@ -170,14 +194,15 @@ static void rs_start(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
 	unsigned long flags;
-	
+	np_uart *	uart= (np_uart *)(info->port);
+
 	if (serial_paranoia_check(info, tty->device, "rs_start"))
 		return;
-	
+
 	save_flags(flags); cli();
-	if (info->xmit_cnt && info->xmit_buf && !(nasys_printf_uart->np_uartcontrol & np_uartcontrol_itrdy_mask)) {
+	if (info->xmit_cnt && info->xmit_buf && !(uart->np_uartcontrol & np_uartcontrol_itrdy_mask)) {
 #ifdef USE_INTS
-		nasys_printf_uart->np_uartcontrol &= np_uartcontrol_itrdy_mask;
+		uart->np_uartcontrol &= np_uartcontrol_itrdy_mask;
 #endif
 	}
 	restore_flags(flags);
@@ -205,7 +230,7 @@ static _INLINE_ void rs_sched_event(struct NIOS_serial *info,
 				    int event)
 {
 	info->event |= 1 << event;
-	queue_task_irq_off(&info->tqueue, &tq_serial);
+	queue_task(&info->tqueue, &tq_serial);
 	mark_bh(SERIAL_BH);
 }
 
@@ -213,14 +238,16 @@ static _INLINE_ void receive_chars(struct NIOS_serial *info, struct pt_regs *reg
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	/*
-	 * This do { } while() loop will get ALL chars out of Rx FIFO 
+	 * This do { } while() loop will get ALL chars out of Rx FIFO
          */
 	do {
-		ch = nasys_printf_uart->np_uartrxdata;
-	
+		ch = uart->np_uartrxdata;
+
 		if(info->is_cons) {
+#ifdef CONFIG_MAGIC_SYSRQ
 			if(rx & np_uartstatus_brk_mask) {
 				batten_down_hatches();
 				return;
@@ -240,18 +267,17 @@ static _INLINE_ void receive_chars(struct NIOS_serial *info, struct pt_regs *reg
 				return;			/* (won't be coming back) */
 #endif
 			}
-			/* It is a 'keyboard interrupt' ;-) */
-			wake_up(&keypress_wait);
+#endif /* CONFIG_MAGIC_SYSRQ */
 		}
 
 		if(!tty)
 			goto clear_and_exit;
-		
+
 		/*
 		 * Make sure that we do not overflow the buffer
 		 */
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
-			queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+			queue_task(&tty->flip.tqueue, &tq_timer);
 			return;
 		}
 
@@ -273,9 +299,9 @@ static _INLINE_ void receive_chars(struct NIOS_serial *info, struct pt_regs *reg
 		*tty->flip.char_buf_ptr++ = ch;
 		tty->flip.count++;
 
-	} while((rx = nasys_printf_uart->np_uartstatus) & np_uartstatus_rrdy_mask);
+	} while((rx = uart->np_uartstatus) & np_uartstatus_rrdy_mask);
 
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 
 clear_and_exit:
 	return;
@@ -283,21 +309,22 @@ clear_and_exit:
 
 static _INLINE_ void transmit_chars(struct NIOS_serial *info)
 {
+	np_uart *	uart= (np_uart *)(info->port);
 	if (info->x_char) {
 		/* Send next char */
-		nasys_printf_uart->np_uarttxdata = info->x_char;
+		uart->np_uarttxdata = info->x_char;
 		info->x_char = 0;
 		goto clear_and_return;
 	}
 
 	if((info->xmit_cnt <= 0) || info->tty->stopped) {
 		/* That's peculiar... TX ints off */
-		nasys_printf_uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
+		uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
 		goto clear_and_return;
 	}
 
 	/* Send char */
-	nasys_printf_uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
+	uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
 	info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 	info->xmit_cnt--;
 
@@ -306,7 +333,7 @@ static _INLINE_ void transmit_chars(struct NIOS_serial *info)
 
 	if(info->xmit_cnt <= 0) {
 		/* All done for now... TX ints off */
-		nasys_printf_uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
+		uart->np_uartcontrol &= ~np_uartcontrol_itrdy_mask;
 		goto clear_and_return;
 	}
 
@@ -320,9 +347,10 @@ clear_and_return:
  */
 void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct NIOS_serial * info = &NIOS_soft;
-	unsigned short stat = nasys_printf_uart->np_uartstatus;
-	nasys_printf_uart->np_uartstatus = 0;		/* clear any error status */
+	struct NIOS_serial * info = (struct NIOS_serial *) dev_id;
+	np_uart *	uart= (np_uart *)(info->port);
+	unsigned short stat = uart->np_uartstatus;
+	uart->np_uartstatus = 0;		/* clear any error status */
 
 	if (stat & np_uartstatus_rrdy_mask) receive_chars(info, regs, stat);
 	if (stat & np_uartstatus_trdy_mask) transmit_chars(info);
@@ -347,12 +375,12 @@ static void do_softint(void *private_)
 {
 	struct NIOS_serial	*info = (struct NIOS_serial *) private_;
 	struct tty_struct	*tty;
-	
+
 	tty = info->tty;
 	if (!tty)
 		return;
 
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
 		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
@@ -367,13 +395,13 @@ static void do_softint(void *private_)
  *
  * 	serial interrupt routine -> (scheduler tqueue) ->
  * 	do_serial_hangup() -> tty->hangup() -> rs_hangup()
- * 
+ *
  */
 static void do_serial_hangup(void *private_)
 {
 	struct NIOS_serial	*info = (struct NIOS_serial *) private_;
 	struct tty_struct	*tty;
-	
+
 	tty = info->tty;
 	if (!tty)
 		return;
@@ -382,22 +410,12 @@ static void do_serial_hangup(void *private_)
 }
 
 
-/*
- * This subroutine is called when the RS_TIMER goes off.  It is used
- * by the serial driver to handle ports that do not have an interrupt
- * NIOS does, we had better never get here.
- */
- 
-static void rs_timer(void)
-{
-	panic("rs_timer called\n");
-	return;
-}
 
 static int startup(struct NIOS_serial * info)
 {
 	unsigned long flags;
-	
+	np_uart *	uart= (np_uart *)(info->port);
+
 	if (info->flags & S_INITIALIZED)
 		return 0;
 
@@ -417,10 +435,10 @@ static int startup(struct NIOS_serial * info)
 	change_speed(info);
 
 	info->xmit_fifo_size = 1;
-	nasys_printf_uart->np_uartcontrol = np_uartcontrol_itrdy_mask
+	uart->np_uartcontrol = np_uartcontrol_itrdy_mask
 												 | np_uartcontrol_irrdy_mask
 												 | np_uartcontrol_ibrk_mask;
-	nasys_printf_uart->np_uartrxdata;
+	uart->np_uartrxdata;
 
 	if (info->tty)
 		clear_bit(TTY_IO_ERROR, &info->tty->flags);
@@ -438,13 +456,14 @@ static int startup(struct NIOS_serial * info)
 static void shutdown(struct NIOS_serial * info)
 {
 	unsigned long	flags;
+	np_uart *	uart= (np_uart *)(info->port);
 
-	nasys_printf_uart->np_uartcontrol = 0; /* All off! */
+	uart->np_uartcontrol = 0; /* All off! */
 	if (!(info->flags & S_INITIALIZED))
 		return;
 
 	save_flags(flags); cli(); /* Disable interrupts */
-	
+
 	if (info->xmit_buf) {
 		free_page((unsigned long) info->xmit_buf);
 		info->xmit_buf = 0;
@@ -452,7 +471,7 @@ static void shutdown(struct NIOS_serial * info)
 
 	if (info->tty)
 		set_bit(TTY_IO_ERROR, &info->tty->flags);
-	
+
 	info->flags &= ~S_INITIALIZED;
 	restore_flags(flags);
 }
@@ -463,49 +482,48 @@ static void shutdown(struct NIOS_serial * info)
  */
 static void change_speed(struct NIOS_serial *info)
 {
-#if 0		/* NIOS usually has a fixed speed */
-/* FIXME - not implemented yet */
-	unsigned long ustcnt;
+#if 1		/* NIOS usually has a fixed speed */
+
+//	unsigned long ustcnt;
 	unsigned cflag;
+	unsigned divisor;
 	int	i;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	if (!info->tty || !info->tty->termios)
 		return;
 	cflag = info->tty->termios->c_cflag;
 
-	ustcnt = nasys_printf_uart->np_uartcontrol;
-	nasys_printf_uart->np_uartcontrol = ustcnt & ~UCTRL_TE;
+//	ustcnt = uart->np_uartcontrol;
+//	uart->np_uartcontrol = ustcnt & ~UCTRL_TE;
 
 	i = cflag & CBAUD;
-        if (i & CBAUDEX) {
-                i = (i & ~CBAUDEX) + B38400;
-        }
-
-	info->baud = baud_table[i];
-	nios->uartscaler1 = (NIOS_CLOCK << 3) / baud_table[i];
-
-	ustcnt &= ~(UCTRL_PE | UCTRL_PS);
-#if 0	
-	if ((cflag & CSIZE) == CS8)
-		ustcnt |= USTCNT_8_7;
-		
-	if (cflag & CSTOPB)
-		ustcnt |= USTCNT_STOP;
-#endif
-	if (cflag & PARENB)
-		ustcnt |= UCTRL_PE;
-	if (!(cflag & PARODD))
-		ustcnt |= UCTRL_PS;
-	
-	if (cflag & CRTSCTS) {
-		ustcnt |= UCTRL_FL;
-	} else {
-		ustcnt &= ~UCTRL_FL;
+	if (i & CBAUDEX) {
+		i = (i & ~CBAUDEX) + B38400;
 	}
 
-	ustcnt |= UCTRL_TE;
-	
-	nios->uartctrl1 = ustcnt;
+	divisor = (unsigned)(((unsigned)nasys_clock_freq *1.0 / baud_table[i]) + 1) -1;
+	uart->np_uartdivisor = divisor;
+	if (uart->np_uartdivisor == divisor)
+		info->baud = baud_table[i];
+
+//	ustcnt &= ~(UCTRL_PE | UCTRL_PS);
+//	if ((cflag & CSIZE) == CS8)
+//		ustcnt |= USTCNT_8_7;
+//	if (cflag & CSTOPB)
+//		ustcnt |= USTCNT_STOP;
+//	if (cflag & PARENB)
+//		ustcnt |= UCTRL_PE;
+//	if (!(cflag & PARODD))
+//		ustcnt |= UCTRL_PS;
+//	if (cflag & CRTSCTS) {
+//		ustcnt |= UCTRL_FL;
+//	} else {
+//		ustcnt &= ~UCTRL_FL;
+//	}
+//	ustcnt |= UCTRL_TE;
+//	uart->np_uartcontrol = ustcnt;
+
 #endif
 }
 
@@ -517,7 +535,7 @@ static void rs_fair_output(void)
 {
 	int left;		/* Output no more than that */
 	unsigned long flags;
-	struct NIOS_serial *info = &NIOS_soft;
+	struct NIOS_serial *info = &nios_soft;
 	char c;
 
 	if (info == 0) return;
@@ -531,7 +549,7 @@ static void rs_fair_output(void)
 		info->xmit_cnt--;
 		restore_flags(flags);
 
-		rs_put_char(c);
+		rs_put_char(c, info);
 
 		save_flags(flags);  cli();
 		left = MIN(info->xmit_cnt, left-1);
@@ -551,11 +569,11 @@ static void rs_fair_output(void)
 void console_print_NIOS(const char *p)
 {
 	char c;
-	
+
 	while((c=*(p++)) != 0) {
 		if(c == '\n')
-			rs_put_char('\r');
-		rs_put_char(c);
+			rs_put_char('\r', nios_soft);
+		rs_put_char(c, nios_soft);
 	}
 
 	/* Comment this if you want to have a strict interrupt-driven output */
@@ -572,7 +590,7 @@ static void rs_set_ldisc(struct tty_struct *tty)
 		return;
 
 	info->is_cons = (tty->termios->c_line == N_TTY);
-	
+
 	printk("ttyS%d console mode %s\n", info->line, info->is_cons ? "on" : "off");
 }
 
@@ -580,25 +598,29 @@ static void rs_flush_chars(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
 	unsigned long flags;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	if (serial_paranoia_check(info, tty->device, "rs_flush_chars"))
 		return;
 
-	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
-	    !info->xmit_buf)
-		return;
-
-	/* Enable transmitter */
 	save_flags(flags); cli();
 
-	nasys_printf_uart->np_uartcontrol |= np_uartcontrol_itrdy_mask;
+	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
+	    !info->xmit_buf)
+		goto flush_exit;
 
-	if (nasys_printf_uart->np_uartstatus & np_uartstatus_trdy_mask) {
+	/* Enable transmitter */
+
+	uart->np_uartcontrol |= np_uartcontrol_itrdy_mask;
+
+	if (uart->np_uartstatus & np_uartstatus_trdy_mask) {
 		/* Send char */
-		nasys_printf_uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
+		uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
 		info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 		info->xmit_cnt--;
 	}
+
+flush_exit:
 	restore_flags(flags);
 }
 
@@ -610,6 +632,7 @@ static int rs_write(struct tty_struct * tty, int from_user,
 	int	c, total = 0;
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
 	unsigned long flags;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	if (serial_paranoia_check(info, tty->device, "rs_write"))
 		return 0;
@@ -619,7 +642,7 @@ static int rs_write(struct tty_struct * tty, int from_user,
 
 	save_flags(flags);
 	while (1) {
-		cli();		
+		cli();
 		c = MIN(count, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				   SERIAL_XMIT_SIZE - info->xmit_head));
 		if (c <= 0)
@@ -627,7 +650,7 @@ static int rs_write(struct tty_struct * tty, int from_user,
 
 		if (from_user) {
 			down(&tmp_buf_sem);
-			memcpy_fromfs(tmp_buf, buf, c);
+			copy_from_user(tmp_buf, buf, c);
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 			memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
@@ -644,12 +667,12 @@ static int rs_write(struct tty_struct * tty, int from_user,
 
 	if (info->xmit_cnt && !tty->stopped && !tty->hw_stopped) {
 		/* Enable transmitter */
-		cli();		
+		cli();
 
-		nasys_printf_uart->np_uartcontrol |= np_uartcontrol_itrdy_mask;
+		uart->np_uartcontrol |= np_uartcontrol_itrdy_mask;
 
-		if (nasys_printf_uart->np_uartstatus & np_uartstatus_trdy_mask) {
-			nasys_printf_uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
+		if (uart->np_uartstatus & np_uartstatus_trdy_mask) {
+			uart->np_uarttxdata = info->xmit_buf[info->xmit_tail++];
 			info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 			info->xmit_cnt--;
 		}
@@ -664,7 +687,7 @@ static int rs_write_room(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
 	int	ret;
-				
+
 	if (serial_paranoia_check(info, tty->device, "rs_write_room"))
 		return 0;
 	ret = SERIAL_XMIT_SIZE - info->xmit_cnt - 1;
@@ -676,7 +699,7 @@ static int rs_write_room(struct tty_struct *tty)
 static int rs_chars_in_buffer(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
-				
+
 	if (serial_paranoia_check(info, tty->device, "rs_chars_in_buffer"))
 		return 0;
 	return info->xmit_cnt;
@@ -685,7 +708,7 @@ static int rs_chars_in_buffer(struct tty_struct *tty)
 static void rs_flush_buffer(struct tty_struct *tty)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
-				
+
 	if (serial_paranoia_check(info, tty->device, "rs_flush_buffer"))
 		return;
 	cli();
@@ -700,7 +723,7 @@ static void rs_flush_buffer(struct tty_struct *tty)
 /*
  * ------------------------------------------------------------
  * rs_throttle()
- * 
+ *
  * This routine is called by the upper-layer tty layer to signal that
  * incoming characters should be throttled.
  * ------------------------------------------------------------
@@ -711,7 +734,7 @@ static void rs_throttle(struct tty_struct * tty)
 
 	if (serial_paranoia_check(info, tty->device, "rs_throttle"))
 		return;
-	
+
 	if (I_IXOFF(tty))
 		info->x_char = STOP_CHAR(tty);
 
@@ -724,7 +747,7 @@ static void rs_unthrottle(struct tty_struct * tty)
 
 	if (serial_paranoia_check(info, tty->device, "rs_unthrottle"))
 		return;
-	
+
 	if (I_IXOFF(tty)) {
 		if (info->x_char)
 			info->x_char = 0;
@@ -745,7 +768,7 @@ static int get_serial_info(struct NIOS_serial * info,
 			   struct serial_struct * retinfo)
 {
 	struct serial_struct tmp;
-  
+
 	if (!retinfo)
 		return -EFAULT;
 	memset(&tmp, 0, sizeof(tmp));
@@ -758,7 +781,7 @@ static int get_serial_info(struct NIOS_serial * info,
 	tmp.close_delay = info->close_delay;
 	tmp.closing_wait = info->closing_wait;
 	tmp.custom_divisor = info->custom_divisor;
-	memcpy_tofs(retinfo,&tmp,sizeof(*retinfo));
+	copy_to_user(retinfo,&tmp,sizeof(*retinfo));
 	return 0;
 }
 
@@ -771,7 +794,7 @@ static int set_serial_info(struct NIOS_serial * info,
 
 	if (!new_info)
 		return -EFAULT;
-	memcpy_fromfs(&new_serial,new_info,sizeof(new_serial));
+	copy_from_user(&new_serial,new_info,sizeof(new_serial));
 	old_info = *info;
 
 	if (!suser()) {
@@ -815,7 +838,7 @@ check_and_exit:
  * 	    release the bus after transmitting. This must be done when
  * 	    the transmit shift register is empty, not be done when the
  * 	    transmit holding register is empty.  This functionality
- * 	    allows an RS485 driver to be written in user space. 
+ * 	    allows an RS485 driver to be written in user space.
  */
 static int get_lsr_info(struct NIOS_serial * info, unsigned int *value)
 {
@@ -849,7 +872,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 		if (tty->flags & (1 << TTY_IO_ERROR))
 		    return -EIO;
 	}
-	
+
 	switch (cmd) {
 		case TCSBRK:	/* SVID version: non-zero arg --> no break */
 			retval = tty_check_change(tty);
@@ -870,11 +893,11 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
 			if (error)
 				return error;
-			put_fs_long(C_CLOCAL(tty) ? 1 : 0,
+			put_user(C_CLOCAL(tty) ? 1 : 0,
 				    (unsigned long *) arg);
 			return 0;
 		case TIOCSSOFTCAR:
-			arg = get_fs_long((unsigned long *) arg);
+			get_user(arg, (unsigned long *) arg);
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
@@ -902,10 +925,10 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 						sizeof(struct NIOS_serial));
 			if (error)
 				return error;
-			memcpy_tofs((struct NIOS_serial *) arg,
+			copy_to_user((struct NIOS_serial *) arg,
 				    info, sizeof(struct NIOS_serial));
 			return 0;
-			
+
 		default:
 			return -ENOIOCTLCMD;
 		}
@@ -915,24 +938,30 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 {
 	struct NIOS_serial *info = (struct NIOS_serial *)tty->driver_data;
+	int	oldbaud = info->baud;
 
 	if (tty->termios->c_cflag == old_termios->c_cflag)
 		return;
 
 	change_speed(info);
 
+	if (info->baud == oldbaud) /* can not change */
+		tty->termios->c_cflag = old_termios->c_cflag;
+	else	/* only speed can be changed */
+		tty->termios->c_cflag = (tty->termios->c_cflag & CBAUD) | CS8 | CREAD | HUPCL | CLOCAL;
+#if 0
 	if ((old_termios->c_cflag & CRTSCTS) &&
 	    !(tty->termios->c_cflag & CRTSCTS)) {
 		tty->hw_stopped = 0;
 		rs_start(tty);
 	}
-	
+#endif
 }
 
 /*
  * ------------------------------------------------------------
  * rs_close()
- * 
+ *
  * This routine is called when the serial port gets closed.  First, we
  * wait for the last remaining data to be sent.  Then, we unlink its
  * S structure from the interrupt chain if necessary, and we free
@@ -943,17 +972,18 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 {
 	struct NIOS_serial * info = (struct NIOS_serial *)tty->driver_data;
 	unsigned long flags;
+	np_uart *	uart= (np_uart *)(info->port);
 
 	if (!info || serial_paranoia_check(info, tty->device, "rs_close"))
 		return;
-	
+
 	save_flags(flags); cli();
-	
+
 	if (tty_hung_up_p(filp)) {
 		restore_flags(flags);
 		return;
 	}
-	
+
 	if ((tty->count == 1) && (info->count != 1)) {
 		/*
 		 * Uh, oh.  tty->count is 1, which means that the tty
@@ -985,7 +1015,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	if (info->flags & S_CALLOUT_ACTIVE)
 		info->callout_termios = *tty->termios;
 	/*
-	 * Now we wait for the transmit buffer to clear; and we notify 
+	 * Now we wait for the transmit buffer to clear; and we notify
 	 * the line discipline to only process XON/XOFF characters.
 	 */
 	tty->closing = 1;
@@ -998,7 +1028,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	 * line status register.
 	 */
 
-	nasys_printf_uart->np_uartcontrol &= ~(np_uartcontrol_irrdy_mask);
+	uart->np_uartcontrol &= ~(np_uartcontrol_irrdy_mask);
 
 	shutdown(info);
 	if (tty->driver.flush_buffer)
@@ -1008,10 +1038,10 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
-	if (tty->ldisc.num != ldiscs[N_TTY].num) {
+	if (tty->ldisc.num != tty_ldiscs[N_TTY].num) {
 		if (tty->ldisc.close)
 			(tty->ldisc.close)(tty);
-		tty->ldisc = ldiscs[N_TTY];
+		tty->ldisc = tty_ldiscs[N_TTY];
 		tty->termios->c_line = N_TTY;
 		if (tty->ldisc.open)
 			(tty->ldisc.open)(tty);
@@ -1019,8 +1049,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	if (info->blocked_open) {
 		if (info->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + info->close_delay;
-			schedule();
+			schedule_timeout(info->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -1036,10 +1065,10 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 void rs_hangup(struct tty_struct *tty)
 {
 	struct NIOS_serial * info = (struct NIOS_serial *)tty->driver_data;
-	
+
 	if (serial_paranoia_check(info, tty->device, "rs_hangup"))
 		return;
-	
+
 	rs_flush_buffer(tty);
 	shutdown(info);
 	info->event = 0;
@@ -1057,7 +1086,7 @@ void rs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct NIOS_serial *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
 
@@ -1095,7 +1124,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		info->flags |= S_CALLOUT_ACTIVE;
 		return 0;
 	}
-	
+
 	/*
 	 * If non-blocking mode is set, or the port is not enabled,
 	 * then make the check up front and then exit.
@@ -1115,7 +1144,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		if (tty->termios->c_cflag & CLOCAL)
 			do_clocal = 1;
 	}
-	
+
 	/*
 	 * Block waiting for the carrier detect and the line to become
 	 * free (i.e., not in use by the callout).  While we are in
@@ -1140,7 +1169,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			if (info->flags & S_HUP_NOTIFY)
 				retval = -EAGAIN;
 			else
-				retval = -ERESTARTSYS;	
+				retval = -ERESTARTSYS;
 #else
 			retval = -EAGAIN;
 #endif
@@ -1149,7 +1178,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		if (!(info->flags & S_CALLOUT_ACTIVE) &&
 		    !(info->flags & S_CLOSING) && do_clocal)
 			break;
-		if (current->signal & ~current->blocked) {
+		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1165,7 +1194,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		return retval;
 	info->flags |= S_NORMAL_ACTIVE;
 	return 0;
-}	
+}
 
 /*
  * This routine is called whenever a serial port is opened.  It
@@ -1179,11 +1208,11 @@ int rs_open(struct tty_struct *tty, struct file * filp)
 	int 			retval, line;
 
 	line = MINOR(tty->device) - tty->driver.minor_start;
-	
-	if (line != 0) /* we have exactly one */
+
+	if (line >=serial_driver.num) /* too many */
 		return -ENODEV;
 
-	info = &NIOS_soft;
+	info = &nios_soft[line];
 
 	if (serial_paranoia_check(info, tty->device, "rs_open"))
 		return -ENODEV;
@@ -1207,7 +1236,7 @@ int rs_open(struct tty_struct *tty, struct file * filp)
 	if ((info->count == 1) && (info->flags & S_SPLIT_TERMIOS)) {
 		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
 			*tty->termios = info->normal_termios;
-		else 
+		else
 			*tty->termios = info->callout_termios;
 		change_speed(info);
 	}
@@ -1225,39 +1254,37 @@ static void show_serial_version(void)
 	printk("NIOS serial driver version 0.0\n");
 }
 
-extern void register_console(void (*proc)(const char *));
 
 volatile int test_done;
 
 /* rs_init inits the driver */
-int rsNIOS_init(void)
+static int __init rs_nios_init(void)
 {
 	int flags;
 	struct NIOS_serial *info;
-	
+	int			i;
+
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	show_serial_version();
 
 	/* Initialize the tty_driver structure */
 	/* SPARC: Not all of this is exactly right for us. */
-	
+
 	memset(&serial_driver, 0, sizeof(struct tty_driver));
 	serial_driver.magic = TTY_DRIVER_MAGIC;
 	serial_driver.name = "ttyS";
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64;
-	serial_driver.num = 1;
+	serial_driver.num = NR_PORTS;
 	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
 	serial_driver.subtype = SERIAL_TYPE_NORMAL;
 	serial_driver.init_termios = tty_std_termios;
 
-	
-        serial_driver.init_termios.c_cflag = 
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+
+        serial_driver.init_termios.c_cflag =
+		B115200 | CS8 | CREAD | HUPCL | CLOCAL;
 
 	serial_driver.flags = TTY_DRIVER_REAL_RAW;
 	serial_driver.refcount = &serial_refcount;
@@ -1294,40 +1321,40 @@ int rsNIOS_init(void)
 		panic("Couldn't register serial driver\n");
 	if (tty_register_driver(&callout_driver))
 		panic("Couldn't register callout driver\n");
-	
+
 	save_flags(flags); cli();
 
-	info = &NIOS_soft;
-	info->magic = SERIAL_MAGIC;
-	info->port = 1;
-	info->tty = 0;
-	info->irq = nasys_printf_uart_irq;
-	info->custom_divisor = 16;
-	info->close_delay = 50;
-	info->closing_wait = 3000;
-	info->x_char = 0;
-	info->event = 0;
-	info->count = 0;
-	info->blocked_open = 0;
-	info->tqueue.routine = do_softint;
-	info->tqueue.data = info;
-	info->tqueue_hangup.routine = do_serial_hangup;
-	info->tqueue_hangup.data = info;
-	info->callout_termios =callout_driver.init_termios;
-	info->normal_termios = serial_driver.init_termios;
-	info->open_wait = 0;
-	info->close_wait = 0;
-	info->line = 0;
-	info->is_cons = 1; /* Means shortcuts work */
-	
-	printk("%s%d (irq = %d) is a builtin NIOS UART\n",
-		 serial_driver.name, info->line, info->irq);
+	/*
+	 *	Configure all the attached serial ports.
+	 */
+	for (i = 0, info = nios_soft; (i < NR_PORTS); i++, info++) {
+		info->magic = SERIAL_MAGIC;
+		info->tty = 0;
+		info->custom_divisor = 16;
+		info->close_delay = 50;
+		info->closing_wait = 3000;
+		info->x_char = 0;
+		info->event = 0;
+		info->count = 0;
+		info->blocked_open = 0;
+		info->tqueue.routine = do_softint;
+		info->tqueue.data = info;
+		info->tqueue_hangup.routine = do_serial_hangup;
+		info->tqueue_hangup.data = info;
+		info->callout_termios =callout_driver.init_termios;
+		info->normal_termios = serial_driver.init_termios;
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
+		info->line = i;
 
-        if (request_irq(info->irq,
-                        rs_interrupt,
-                        0,
-                        "NIOS serial", NULL))
-                panic("Unable to attach NIOS serial interrupt\n");
+		printk("%s%d (irq = %d) is a builtin NIOS UART\n",
+			serial_driver.name, info->line, info->irq);
+
+//		rs_setsignals(info, 0, 0);
+		if (request_irq(info->irq, rs_interrupt, 0, "NIOS serial", info))
+			panic("Unable to attach NIOS serial interrupt\n");
+	}
+
 	restore_flags(flags);
 	return 0;
 }
@@ -1345,4 +1372,49 @@ int register_serial(struct serial_struct *req)
 void unregister_serial(int line)
 {
 	return;
+}
+
+module_init(rs_nios_init);
+
+int nios_console_setup(struct console *cp, char *arg)
+{
+	return 0;
+}
+
+
+static kdev_t nios_console_device(struct console *c)
+{
+	return MKDEV(TTY_MAJOR, 64 + c->index);
+}
+
+
+void nios_console_write (struct console *co, const char *str,
+			   unsigned int count)
+{
+    while (count--) {
+        if (*str == '\n')
+           rs_put_char('\r', nios_soft);
+        rs_put_char( *str++, nios_soft);
+    }
+}
+
+
+static struct console nios_driver = {
+	name:		"ttyS",
+	write:		nios_console_write,
+	read:		NULL,
+	device:		nios_console_device,
+	/*wait_key:	NULL,*/
+	unblank:	NULL,
+	setup:		nios_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
+	cflag:		0,
+	next:		NULL
+};
+
+
+void nios_console_init(void)
+{
+	register_console(&nios_driver);
 }

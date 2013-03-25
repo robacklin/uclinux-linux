@@ -22,23 +22,59 @@
  * C language equivalents written by Theodore Ts'o, 9/26/92
  */
 
-extern __inline__ int set_bit(int nr, void * a)
+extern __inline__ void set_bit(int nr, volatile void * a)
 {
-	int 	* addr = a;
-	int	mask, retval;
+	int * addr = (int *) a;
+	int	mask;
 
 	addr += nr >> 5;
 	mask = 1 << (nr & 0x1f);
 	_disable_interrupts();
-	retval = (mask & *addr) != 0;
 	*addr |= mask;
 	_enable_interrupts();
-	return retval;
 }
 
-extern __inline__ int clear_bit(int nr, void * a)
+extern __inline__ void __set_bit(int nr, volatile void * a)
 {
-	int 	* addr = a;
+	int * addr = (int *) a;
+	int	mask;
+
+	addr += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	*addr |= mask;
+}
+
+/*
+ * clear_bit() doesn't provide any barrier for the compiler.
+ */
+#define smp_mb__before_clear_bit()	barrier()
+#define smp_mb__after_clear_bit()	barrier()
+
+extern __inline__ void clear_bit(int nr, volatile void * a)
+{
+	int * addr = (int *) a;
+	int	mask;
+
+	addr += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	_disable_interrupts();
+	*addr &= ~mask;
+	_enable_interrupts();
+}
+
+extern __inline__ void __clear_bit(int nr, volatile void * a)
+{
+	int * addr = (int *) a;
+	int	mask;
+
+	addr += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	*addr &= ~mask;
+}
+
+extern __inline__ int test_and_clear_bit(int nr, volatile void * a)
+{
+	int * addr = (int *) a;
 	int	mask, retval;
 
 	addr += nr >> 5;
@@ -50,30 +86,116 @@ extern __inline__ int clear_bit(int nr, void * a)
 	return retval;
 }
 
-extern __inline__ unsigned long change_bit(unsigned long nr,  void *addr)
+extern __inline__ int __test_and_clear_bit(int nr, volatile void * a)
+{
+	int * addr = (int *) a;
+	int	mask, retval;
+
+	addr += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	retval = (mask & *addr) != 0;
+	*addr &= ~mask;
+	return retval;
+}
+
+extern __inline__ void change_bit(unsigned long nr, volatile void *addr)
 {
 	int mask;
 	unsigned long *ADDR = (unsigned long *) addr;
-	unsigned long oldbit;
 
 	ADDR += nr >> 5;
 	mask = 1 << (nr & 31);
 	_disable_interrupts();
-	oldbit = (mask & *ADDR);
 	*ADDR ^= mask;
 	_enable_interrupts();
-	return oldbit != 0;
 }
 
-extern __inline__ int test_bit(int nr, void * a)
+extern __inline__ void __change_bit(unsigned long nr, volatile void *addr)
 {
-	int 	* addr = a;
-	int	mask;
+	int mask;
+	unsigned long *ADDR = (unsigned long *) addr;
+
+	ADDR += nr >> 5;
+	mask = 1 << (nr & 31);
+	*ADDR ^= mask;
+}
+
+extern __inline__ int test_and_set_bit(int nr, volatile void * a)
+{
+	volatile unsigned int *addr = (volatile unsigned int *) a;
+	int	mask,retval;
 
 	addr += nr >> 5;
 	mask = 1 << (nr & 0x1f);
-	return ((mask & *addr) != 0);
+	_disable_interrupts();
+	retval = (mask & *addr) != 0;
+	*addr |= mask;
+	_enable_interrupts();
+	return retval;
 }
+
+extern __inline__ int __test_and_set_bit(int nr, volatile void * a)
+{
+	volatile unsigned int *addr = (volatile unsigned int *) a;
+	int	mask,retval;
+
+	addr += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	retval = (mask & *addr) != 0;
+	*addr |= mask;
+	return retval;
+}
+
+extern __inline__ int test_and_change_bit(int nr, volatile void * addr)
+{
+	int	mask, retval;
+	volatile unsigned int *a = (volatile unsigned int *) addr;
+
+	a += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	_disable_interrupts();
+	retval = (mask & *a) != 0;
+	*a ^= mask;
+	_enable_interrupts();
+
+	return retval;
+}
+
+extern __inline__ int __test_and_change_bit(int nr, volatile void * addr)
+{
+	int	mask, retval;
+	volatile unsigned int *a = (volatile unsigned int *) addr;
+
+	a += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	retval = (mask & *a) != 0;
+	*a ^= mask;
+	return retval;
+}
+
+/*
+ * This routine doesn't need to be atomic.
+ */
+extern __inline__ int __constant_test_bit(int nr, const volatile void * addr)
+{
+	return ((1UL << (nr & 31)) & (((const volatile unsigned int *) addr)[nr >> 5])) != 0;
+}
+
+extern __inline__ int __test_bit(int nr, volatile void * addr)
+{
+	int * a = (int *) addr;
+	int	mask;
+
+	a += nr >> 5;
+	mask = 1 << (nr & 0x1f);
+	return ((mask & *a) != 0);
+}
+
+#define test_bit(nr,addr) \
+(__builtin_constant_p(nr) ? \
+ __constant_test_bit((nr),(addr)) : \
+ __test_bit((nr),(addr)))
+
 
 /* The easy/cheese version for now. */
 extern __inline__ unsigned long ffz(unsigned long word)
@@ -140,11 +262,11 @@ found_middle:
  * Both NIOS and ext2 are little endian, so these are the same as above.
  */
 
-#define __ext2_set_bit   set_bit
-#define __ext2_clear_bit clear_bit
-#define __ext2_test_bit  test_bit
+#define ext2_set_bit   test_and_set_bit
+#define ext2_clear_bit test_and_clear_bit
+#define ext2_test_bit  test_bit
 
-#define __ext2_find_first_zero_bit find_first_zero_bit
-#define __ext2_find_next_zero_bit  find_next_zero_bit
+#define ext2_find_first_zero_bit find_first_zero_bit
+#define ext2_find_next_zero_bit  find_next_zero_bit
 
 #endif /* _ASM_NIOS_BITOPS_H */

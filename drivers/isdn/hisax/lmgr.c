@@ -1,33 +1,12 @@
-/* $Id: lmgr.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+/* $Id: lmgr.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
+ * Layermanagement module
  *
- *  Layermanagement module
- *
- * $Log: lmgr.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.5  1998/11/03 00:07:21  keil
- * certification related changes
- * fixed logging for smaller stack use
- *
- * Revision 1.1.2.4  1998/05/27 18:06:15  keil
- * HiSax 3.0
- *
- * Revision 1.1.2.3  1998/03/07 23:15:37  tsbogend
- * made HiSax working on Linux/Alpha
- *
- * Revision 1.1.2.2  1997/11/15 18:54:19  keil
- * cosmetics
- *
- * Revision 1.1.2.1  1997/10/17 22:10:53  keil
- * new files on 2.0
- *
- * Revision 1.1  1997/06/26 11:17:25  keil
- * first version
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -56,7 +35,7 @@ hisax_manager(struct PStack *st, int pr, void *arg)
 		case (MDL_ERROR | INDICATION):
 			Code = (long) arg;
 			HiSax_putstatus(st->l1.hardware, "manager: MDL_ERROR",
-				"%c %s\n", (char)Code, 
+				" %c %s", (char)Code, 
 				test_bit(FLG_LAPD, &st->l2.flag) ?
 				"D-channel" : "B-channel");
 			if (test_bit(FLG_LAPD, &st->l2.flag))

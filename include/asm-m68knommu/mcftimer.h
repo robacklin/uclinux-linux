@@ -3,7 +3,7 @@
 /*
  *	mcftimer.h -- ColdFire internal TIMER support defines.
  *
- *	(C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com)
+ *	(C) Copyright 1999-2003, Greg Ungerer (gerg@snapgear.com)
  * 	(C) Copyright 2000, Lineo Inc. (www.lineo.com) 
  */
 
@@ -28,8 +28,6 @@
 #elif defined(CONFIG_M5249) || defined(CONFIG_M5307) || defined(CONFIG_M5407)
 #define MCFTIMER_BASE1		0x140           /* Base address of TIMER1 */
 #define MCFTIMER_BASE2		0x180           /* Base address of TIMER2 */
-#else
-#error "I don't know what sort of ColdFire you are??"
 #endif
 
 

@@ -6,96 +6,56 @@
 # unless it's something special (ie not a .c file).
 #
 
-.S.s:
-	$(CPP) $(CFLAGS) $< -o $*.s
-.S.o:
-	$(CC) $(CFLAGS) -c $< -o $*.o
+USE_STANDARD_AS_RULE := true
 
-all:	kernel.o head.o
-EXTRA_ASFLAGS = -mips3 -mcpu=r4000
+all:	kernel.o head.o init_task.o
+
 O_TARGET := kernel.o
-O_OBJS	:= process.o signal.o entry.o traps.o irq.o ptrace.o vm86.o ioport.o \
-	setup.o syscall.o sysmips.o time.o bios32.o ipc.o
 
-#
-# Kernel debugging
-#
-ifdef CONFIG_REMOTE_DEBUG
-OBJS += gdb-low.o gdb-stub.o 
+export-objs	= irq.o mips_ksyms.o pci-dma.o setup.o semaphore.o smp.o time.o
+
+obj-y		+= branch.o cpu-probe.o irq.o process.o signal.o entry.o \
+		   traps.o ptrace.o reset.o semaphore.o setup.o syscall.o \
+		   sysmips.o ipc.o scall_o32.o time.o unaligned.o
+
+obj-$(CONFIG_MODULES)		+= mips_ksyms.o
+
+obj-$(CONFIG_CPU_R3000)		+= r2300_fpu.o r2300_switch.o
+obj-$(CONFIG_CPU_TX39XX)	+= r2300_fpu.o r2300_switch.o
+obj-$(CONFIG_CPU_TX49XX)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4000)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_VR41XX)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4300)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R4X00)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R5000)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R5432)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_RM7000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_RM9000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_NEVADA)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R10000)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_SB1)		+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_MIPS32)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_MIPS64)	+= r4k_fpu.o r4k_switch.o
+obj-$(CONFIG_CPU_R6000)		+= r6000_fpu.o r4k_switch.o
+
+obj-$(CONFIG_SMP)		+= smp.o
+
+obj-$(CONFIG_I8259)		+= i8259.o
+obj-$(CONFIG_IRQ_CPU)		+= irq_cpu.o
+obj-$(CONFIG_IRQ_CPU_RM7K)	+= irq-rm7000.o
+
+obj-$(CONFIG_BINFMT_IRIX)	+= irixelf.o irixioctl.o irixsig.o sysirix.o \
+				   irixinv.o
+obj-$(CONFIG_KGDB)		+= gdb-low.o gdb-stub.o
+obj-$(CONFIG_PROC_FS)		+= proc.o
+
+obj-$(CONFIG_RTL865X)		+= lexra.o
+
+ifndef CONFIG_MAPPED_PCI_IO
+obj-y				+= pci-dma.o
 endif
-
-#
-# Board specific code
-#
-ifdef CONFIG_MIPS_JAZZ
-O_OBJS += jazzdma.o jazz-c.o
-endif
-
-ifdef CONFIG_ACER_PICA_61
-O_OBJS += pica.o
-endif
-
-ifdef CONFIG_DESKSTATION_TYNE
-O_OBJS += tyne.o tyne-c.o
-endif
-
-ifdef CONFIG_MIPS_MAGNUM_4000
-O_OBJS += magnum4000.o
-endif
-
-#
-# CPU model specific code
-#
-ifdef CONFIG_CPU_R2000
-O_OBJS += r3000.o
-endif
-
-ifdef CONFIG_CPU_R3000
-O_OBJS += r3000.o
-endif
-
-ifdef CONFIG_CPU_R4X00
-O_OBJS += r4xx0.o
-endif
-
-ifdef CONFIG_CPU_R4600
-O_OBJS += r4xx0.o
-endif
-
-ifdef CONFIG_CPU_R6000
-	exit 1			# no detailed information about CPU yet.
-endif
-
-ifdef CONFIG_CPU_R8000
-	exit 1			# no detailed information about CPU yet.
-endif
-
-ifdef CONFIG_CPU_R10000
-O_OBJS += r4xx0.o
-endif
-
-#
-# Since we add the same object files to O_OBJS for different configurations.
-# O_OBJS might contain duplicate files.  We correct this by filtering out
-# duplicate files.  Just to avoid users having to know about all the
-# compatibility stuff between various boards and boards.
-#
-O_OBJS := $(sort $(O_OBJS))
-
-all: kernel.o head.o
 
 entry.o: entry.S
-
 head.o: head.S
-
-magnum4000.o: magnum4000.S
-
-pica.o: pica.S
-
-r4xx0.o: r4xx0.S
-
-tyne.o: tyne.S
-
-clean:
 
 include $(TOPDIR)/Rules.make

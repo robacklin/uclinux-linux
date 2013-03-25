@@ -1,12 +1,11 @@
 /*
  *  Amiga Linux/m68k Ariadne Ethernet Driver
  *
- *  © Copyright 1995 by Geert Uytterhoeven
- *		       (Geert.Uytterhoeven@cs.kuleuven.ac.be)
+ *  © Copyright 1995 by Geert Uytterhoeven (geert@linux-m68k.org)
  *			Peter De Schrijver
  *		       (Peter.DeSchrijver@linux.cc.kuleuven.ac.be)
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  This program is based on
  *
@@ -20,13 +19,13 @@
  *	MC68230:	Parallel Interface/Timer (PI/T)
  *			Motorola Semiconductors, December, 1983
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License.  See the file COPYING in the main directory of the Linux
  *  distribution for more details.
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  The Ariadne is a Zorro-II board made by Village Tronic. It contains:
  *
@@ -44,18 +43,18 @@
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
+#include <linux/init.h>
 
 #include <asm/bitops.h>
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
-#include <asm/zorro.h>
-#include <asm/bootinfo.h>
-#include <asm/io.h>
+#include <linux/zorro.h>
+
 #include <asm/irq.h>
 
 #include "ariadne.h"
@@ -97,17 +96,16 @@ int ariadne_debug = 1;
      */
 
 struct ariadne_private {
-    struct AriadneBoard *board;
-    struct TDRE *tx_ring[TX_RING_SIZE];
-    struct RDRE *rx_ring[RX_RING_SIZE];
-    u_short *tx_buff[TX_RING_SIZE];
-    u_short *rx_buff[RX_RING_SIZE];
+    volatile struct TDRE *tx_ring[TX_RING_SIZE];
+    volatile struct RDRE *rx_ring[RX_RING_SIZE];
+    volatile u_short *tx_buff[TX_RING_SIZE];
+    volatile u_short *rx_buff[RX_RING_SIZE];
     int cur_tx, cur_rx;			/* The next free ring entry */
     int dirty_tx;			/* The ring entries to be free()ed. */
-    struct enet_statistics stats;
+    struct net_device_stats stats;
     char tx_full;
-    unsigned long lock;
-    int key;
+    struct net_device *dev;		/* Backpointer */
+    struct ariadne_private *next_module;
 };
 
 
@@ -122,20 +120,25 @@ struct lancedata {
     u_short rx_buff[RX_RING_SIZE][PKT_BUF_SIZE/sizeof(u_short)];
 };
 
+#ifdef MODULE
+static struct ariadne_private *root_ariadne_dev;
+#endif
 
-static int ariadne_open(struct device *dev);
-static void ariadne_init_ring(struct device *dev);
-static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev);
-static int ariadne_rx(struct device *dev);
-static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data);
-static int ariadne_close(struct device *dev);
-static struct enet_statistics *ariadne_get_stats(struct device *dev);
+static int ariadne_open(struct net_device *dev);
+static void ariadne_init_ring(struct net_device *dev);
+static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev);
+static void ariadne_tx_timeout(struct net_device *dev);
+static int ariadne_rx(struct net_device *dev);
+static void ariadne_reset(struct net_device *dev);
+static void ariadne_interrupt(int irq, void *data, struct pt_regs *fp);
+static int ariadne_close(struct net_device *dev);
+static struct net_device_stats *ariadne_get_stats(struct net_device *dev);
 #ifdef HAVE_MULTICAST
-static void set_multicast_list(struct device *dev);
+static void set_multicast_list(struct net_device *dev);
 #endif
 
 
-static void memcpyw(u_short *dest, u_short *src, int len)
+static void memcpyw(volatile u_short *dest, u_short *src, int len)
 {
     while (len >= 2) {
 	*(dest++) = *(src++);
@@ -146,79 +149,102 @@ static void memcpyw(u_short *dest, u_short *src, int len)
 }
 
 
-int ariadne_probe(struct device *dev)
+static int __init ariadne_probe(void)
 {
-    int key;
-    struct ConfigDev *cd;
-    u_long board;
+    struct zorro_dev *z = NULL;
+    struct net_device *dev;
     struct ariadne_private *priv;
+    int res = -ENODEV;
 
-    /* Ethernet is part 0, Parallel is part 1 */
-    if ((key = zorro_find(MANUF_VILLAGE_TRONIC, PROD_ARIADNE, 0, 0))) {
-	cd = zorro_get_board(key);
-	if ((board = (u_long)cd->cd_BoardAddr)) {
-	    dev->dev_addr[0] = 0x00;
-	    dev->dev_addr[1] = 0x60;
-	    dev->dev_addr[2] = 0x30;
-	    dev->dev_addr[3] = (cd->cd_Rom.er_SerialNumber>>16)&0xff;
-	    dev->dev_addr[4] = (cd->cd_Rom.er_SerialNumber>>8)&0xff;
-	    dev->dev_addr[5] = cd->cd_Rom.er_SerialNumber&0xff;
-	    printk("%s: Ariadne at 0x%08lx, Ethernet Address "
-		   "%02x:%02x:%02x:%02x:%02x:%02x\n", dev->name, board,
-		   dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
-		   dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
+    while ((z = zorro_find_device(ZORRO_PROD_VILLAGE_TRONIC_ARIADNE, z))) {
+	unsigned long board = z->resource.start;
+	unsigned long base_addr = board+ARIADNE_LANCE;
+	unsigned long mem_start = board+ARIADNE_RAM;
+	struct resource *r1, *r2;
 
-	    init_etherdev(dev, 0);
-
-	    dev->priv = kmalloc(sizeof(struct ariadne_private), GFP_KERNEL);
-	    priv = (struct ariadne_private *)dev->priv;
-	    memset(priv, 0, sizeof(struct ariadne_private));
-
-	    priv->board = (struct AriadneBoard *)ZTWO_VADDR(board);
-	    priv->key = key;
-
-	    dev->open = &ariadne_open;
-	    dev->stop = &ariadne_close;
-	    dev->hard_start_xmit = &ariadne_start_xmit;
-	    dev->get_stats = &ariadne_get_stats;
-	    dev->set_multicast_list = &set_multicast_list;
-
-	    zorro_config_board(key, 0);
-	    return(0);
+	r1 = request_mem_region(base_addr, sizeof(struct Am79C960),
+		    		"Am79C960");
+	if (!r1) continue;
+	r2 = request_mem_region(mem_start, ARIADNE_RAM_SIZE, "RAM");
+	if (!r2) {
+	    release_resource(r1);
+	    continue;
 	}
+
+	dev = init_etherdev(NULL, sizeof(struct ariadne_private));
+
+	if (dev == NULL) {
+	    release_resource(r1);
+	    release_resource(r2);
+	    return -ENOMEM;
+	}
+	SET_MODULE_OWNER(dev);
+	priv = dev->priv;
+
+	r1->name = dev->name;
+	r2->name = dev->name;
+
+	priv->dev = dev;
+	dev->dev_addr[0] = 0x00;
+	dev->dev_addr[1] = 0x60;
+	dev->dev_addr[2] = 0x30;
+	dev->dev_addr[3] = (z->rom.er_SerialNumber>>16) & 0xff;
+	dev->dev_addr[4] = (z->rom.er_SerialNumber>>8) & 0xff;
+	dev->dev_addr[5] = z->rom.er_SerialNumber & 0xff;
+	printk("%s: Ariadne at 0x%08lx, Ethernet Address "
+	       "%02x:%02x:%02x:%02x:%02x:%02x\n", dev->name, board,
+	       dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
+	       dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
+
+	dev->base_addr = ZTWO_VADDR(base_addr);
+	dev->mem_start = ZTWO_VADDR(mem_start);
+	dev->mem_end = dev->mem_start+ARIADNE_RAM_SIZE;
+
+	dev->open = &ariadne_open;
+	dev->stop = &ariadne_close;
+	dev->hard_start_xmit = &ariadne_start_xmit;
+	dev->tx_timeout = &ariadne_tx_timeout;
+	dev->watchdog_timeo = 5*HZ;
+	dev->get_stats = &ariadne_get_stats;
+	dev->set_multicast_list = &set_multicast_list;
+
+#ifdef MODULE
+	priv->next_module = root_ariadne_dev;
+	root_ariadne_dev = priv;
+#endif
+	res = 0;
     }
-    return(ENODEV);
+    return res;
 }
 
 
-static int ariadne_open(struct device *dev)
+static int ariadne_open(struct net_device *dev)
 {
-    struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
-    struct lancedata *lancedata;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     u_short in;
     u_long version;
+    int i;
 
     /* Reset the LANCE */
-    in = board->Lance.Reset;
+    in = lance->Reset;
 
     /* Stop the LANCE */
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-    board->Lance.RDP = STOP;
+    lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
+    lance->RDP = STOP;
 
     /* Check the LANCE version */
-    board->Lance.RAP = CSR88;	/* Chip ID */
-    version = swapw(board->Lance.RDP);
-    board->Lance.RAP = CSR89;	/* Chip ID */
-    version |= swapw(board->Lance.RDP)<<16;
+    lance->RAP = CSR88;		/* Chip ID */
+    version = swapw(lance->RDP);
+    lance->RAP = CSR89;		/* Chip ID */
+    version |= swapw(lance->RDP)<<16;
     if ((version & 0x00000fff) != 0x00000003) {
 	printk("ariadne_open: Couldn't find AMD Ethernet Chip\n");
-	return(-EAGAIN);
+	return -EAGAIN;
     }
     if ((version & 0x0ffff000) != 0x00003000) {
 	printk("ariadne_open: Couldn't find Am79C960 (Wrong part number = %ld)\n",
 	       (version & 0x0ffff000)>>12);
-	return(-EAGAIN);
+	return -EAGAIN;
     }
 #if 0
     printk("ariadne_open: Am79C960 (PCnet-ISA) Revision %ld\n",
@@ -228,192 +254,189 @@ static int ariadne_open(struct device *dev)
     ariadne_init_ring(dev);
 
     /* Miscellaneous Stuff */
-    board->Lance.RAP = CSR3;	/* Interrupt Masks and Deferral Control */
-    board->Lance.RDP = 0x0000;
-    board->Lance.RAP = CSR4;	/* Test and Features Control */
-    board->Lance.RDP = DPOLL|APAD_XMT|MFCOM|RCVCCOM|TXSTRTM|JABM;
+    lance->RAP = CSR3;		/* Interrupt Masks and Deferral Control */
+    lance->RDP = 0x0000;
+    lance->RAP = CSR4;		/* Test and Features Control */
+    lance->RDP = DPOLL|APAD_XMT|MFCOM|RCVCCOM|TXSTRTM|JABM;
 
     /* Set the Multicast Table */
-    board->Lance.RAP = CSR8;	/* Logical Address Filter, LADRF[15:0] */
-    board->Lance.RDP = 0x0000;
-    board->Lance.RAP = CSR9;	/* Logical Address Filter, LADRF[31:16] */
-    board->Lance.RDP = 0x0000;
-    board->Lance.RAP = CSR10;	/* Logical Address Filter, LADRF[47:32] */
-    board->Lance.RDP = 0x0000;
-    board->Lance.RAP = CSR11;	/* Logical Address Filter, LADRF[63:48] */
-    board->Lance.RDP = 0x0000;
+    lance->RAP = CSR8;		/* Logical Address Filter, LADRF[15:0] */
+    lance->RDP = 0x0000;
+    lance->RAP = CSR9;		/* Logical Address Filter, LADRF[31:16] */
+    lance->RDP = 0x0000;
+    lance->RAP = CSR10;		/* Logical Address Filter, LADRF[47:32] */
+    lance->RDP = 0x0000;
+    lance->RAP = CSR11;		/* Logical Address Filter, LADRF[63:48] */
+    lance->RDP = 0x0000;
 
     /* Set the Ethernet Hardware Address */
-    board->Lance.RAP = CSR12;	/* Physical Address Register, PADR[15:0] */
-    board->Lance.RDP = ((u_short *)&dev->dev_addr[0])[0];
-    board->Lance.RAP = CSR13;	/* Physical Address Register, PADR[31:16] */
-    board->Lance.RDP = ((u_short *)&dev->dev_addr[0])[1];
-    board->Lance.RAP = CSR14;	/* Physical Address Register, PADR[47:32] */
-    board->Lance.RDP = ((u_short *)&dev->dev_addr[0])[2];
+    lance->RAP = CSR12;		/* Physical Address Register, PADR[15:0] */
+    lance->RDP = ((u_short *)&dev->dev_addr[0])[0];
+    lance->RAP = CSR13;		/* Physical Address Register, PADR[31:16] */
+    lance->RDP = ((u_short *)&dev->dev_addr[0])[1];
+    lance->RAP = CSR14;		/* Physical Address Register, PADR[47:32] */
+    lance->RDP = ((u_short *)&dev->dev_addr[0])[2];
 
     /* Set the Init Block Mode */
-    board->Lance.RAP = CSR15;	/* Mode Register */
-    board->Lance.RDP = 0x0000;
-
-    lancedata = (struct lancedata *)offsetof(struct AriadneBoard, RAM);
+    lance->RAP = CSR15;		/* Mode Register */
+    lance->RDP = 0x0000;
 
     /* Set the Transmit Descriptor Ring Pointer */
-    board->Lance.RAP = CSR30;	/* Base Address of Transmit Ring */
-    board->Lance.RDP = swloww((u_long)&lancedata->tx_ring);
-    board->Lance.RAP = CSR31;	/* Base Address of transmit Ring */
-    board->Lance.RDP = swhighw((u_long)&lancedata->tx_ring);
+    lance->RAP = CSR30;		/* Base Address of Transmit Ring */
+    lance->RDP = swloww(ARIADNE_RAM+offsetof(struct lancedata, tx_ring));
+    lance->RAP = CSR31;		/* Base Address of transmit Ring */
+    lance->RDP = swhighw(ARIADNE_RAM+offsetof(struct lancedata, tx_ring));
 
     /* Set the Receive Descriptor Ring Pointer */
-    board->Lance.RAP = CSR24;	/* Base Address of Receive Ring */
-    board->Lance.RDP = swloww((u_long)&lancedata->rx_ring);
-    board->Lance.RAP = CSR25;	/* Base Address of Receive Ring */
-    board->Lance.RDP = swhighw((u_long)&lancedata->rx_ring);
+    lance->RAP = CSR24;		/* Base Address of Receive Ring */
+    lance->RDP = swloww(ARIADNE_RAM+offsetof(struct lancedata, rx_ring));
+    lance->RAP = CSR25;		/* Base Address of Receive Ring */
+    lance->RDP = swhighw(ARIADNE_RAM+offsetof(struct lancedata, rx_ring));
 
     /* Set the Number of RX and TX Ring Entries */
-    board->Lance.RAP = CSR76;	/* Receive Ring Length */
-    board->Lance.RDP = swapw(((u_short)-RX_RING_SIZE));
-    board->Lance.RAP = CSR78;	/* Transmit Ring Length */
-    board->Lance.RDP = swapw(((u_short)-TX_RING_SIZE));
+    lance->RAP = CSR76;		/* Receive Ring Length */
+    lance->RDP = swapw(((u_short)-RX_RING_SIZE));
+    lance->RAP = CSR78;		/* Transmit Ring Length */
+    lance->RDP = swapw(((u_short)-TX_RING_SIZE));
 
     /* Enable Media Interface Port Auto Select (10BASE-2/10BASE-T) */
-    board->Lance.RAP = ISACSR2;	/* Miscellaneous Configuration */
-    board->Lance.IDP = ASEL;
+    lance->RAP = ISACSR2;	/* Miscellaneous Configuration */
+    lance->IDP = ASEL;
 
     /* LED Control */
-    board->Lance.RAP = ISACSR5;	/* LED1 Status */
-    board->Lance.IDP = PSE|XMTE;
-    board->Lance.RAP = ISACSR6;	/* LED2 Status */
-    board->Lance.IDP = PSE|COLE;
-    board->Lance.RAP = ISACSR7;	/* LED3 Status */
-    board->Lance.IDP = PSE|RCVE;
+    lance->RAP = ISACSR5;	/* LED1 Status */
+    lance->IDP = PSE|XMTE;
+    lance->RAP = ISACSR6;	/* LED2 Status */
+    lance->IDP = PSE|COLE;
+    lance->RAP = ISACSR7;	/* LED3 Status */
+    lance->IDP = PSE|RCVE;
 
-    dev->tbusy = 0;
-    dev->interrupt = 0;
-    dev->start = 1;
+    netif_start_queue(dev);
 
-    if (!add_isr(IRQ_AMIGA_PORTS, ariadne_interrupt, 0, dev,
-    		 "Ariadne Ethernet"))
-	return(-EAGAIN);
+    i = request_irq(IRQ_AMIGA_PORTS, ariadne_interrupt, SA_SHIRQ,
+                    dev->name, dev);
+    if (i) return i;
 
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-    board->Lance.RDP = INEA|STRT;
+    lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
+    lance->RDP = INEA|STRT;
 
-    MOD_INC_USE_COUNT;
-
-    return(0);
+    return 0;
 }
 
 
-static void ariadne_init_ring(struct device *dev)
+static void ariadne_init_ring(struct net_device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
-    struct lancedata *lancedata;	/* LANCE point of view */
-    struct lancedata *alancedata;	/* Amiga point of view */
+    volatile struct lancedata *lancedata = (struct lancedata *)dev->mem_start;
     int i;
 
-    priv->lock = 0, priv->tx_full = 0;
+    netif_stop_queue(dev);
+
+    priv->tx_full = 0;
     priv->cur_rx = priv->cur_tx = 0;
     priv->dirty_tx = 0;
 
-    lancedata = (struct lancedata *)offsetof(struct AriadneBoard, RAM);
-    alancedata = (struct lancedata *)board->RAM;
-
     /* Set up TX Ring */
     for (i = 0; i < TX_RING_SIZE; i++) {
-	alancedata->tx_ring[i].TMD0 = swloww((u_long)lancedata->tx_buff[i]);
-	alancedata->tx_ring[i].TMD1 = swhighw((u_long)lancedata->tx_buff[i])|TF_STP|TF_ENP;
-	alancedata->tx_ring[i].TMD2 = swapw((u_short)-PKT_BUF_SIZE);
-	alancedata->tx_ring[i].TMD3 = 0;
-	priv->tx_ring[i] = &alancedata->tx_ring[i];
-	priv->tx_buff[i] = alancedata->tx_buff[i];
+	volatile struct TDRE *t = &lancedata->tx_ring[i];
+	t->TMD0 = swloww(ARIADNE_RAM+offsetof(struct lancedata, tx_buff[i]));
+	t->TMD1 = swhighw(ARIADNE_RAM+offsetof(struct lancedata, tx_buff[i])) |
+		  TF_STP | TF_ENP;
+	t->TMD2 = swapw((u_short)-PKT_BUF_SIZE);
+	t->TMD3 = 0;
+	priv->tx_ring[i] = &lancedata->tx_ring[i];
+	priv->tx_buff[i] = lancedata->tx_buff[i];
 #if 0
-	printk("TX Entry %2d @ 0x%08x (LANCE 0x%08x), Buf @ 0x%08x (LANCE 0x%08x)\n",
-	       i, (int)&alancedata->tx_ring[i], (int)&lancedata->tx_ring[i],
-	       (int)alancedata->tx_buff[i], (int)lancedata->tx_buff[i]);
+	printk("TX Entry %2d at %p, Buf at %p\n", i, &lancedata->tx_ring[i],
+	       lancedata->tx_buff[i]);
 #endif
     }
 
     /* Set up RX Ring */
     for (i = 0; i < RX_RING_SIZE; i++) {
-	alancedata->rx_ring[i].RMD0 = swloww((u_long)lancedata->rx_buff[i]);
-	alancedata->rx_ring[i].RMD1 = swhighw((u_long)lancedata->rx_buff[i])|RF_OWN;
-	alancedata->rx_ring[i].RMD2 = swapw((u_short)-PKT_BUF_SIZE);
-	alancedata->rx_ring[i].RMD3 = 0x0000;
-	priv->rx_ring[i] = &alancedata->rx_ring[i];
-	priv->rx_buff[i] = alancedata->rx_buff[i];
+	volatile struct RDRE *r = &lancedata->rx_ring[i];
+	r->RMD0 = swloww(ARIADNE_RAM+offsetof(struct lancedata, rx_buff[i]));
+	r->RMD1 = swhighw(ARIADNE_RAM+offsetof(struct lancedata, rx_buff[i])) |
+		  RF_OWN;
+	r->RMD2 = swapw((u_short)-PKT_BUF_SIZE);
+	r->RMD3 = 0x0000;
+	priv->rx_ring[i] = &lancedata->rx_ring[i];
+	priv->rx_buff[i] = lancedata->rx_buff[i];
 #if 0
-	printk("RX Entry %2d @ 0x%08x (LANCE 0x%08x), Buf @ 0x%08x (LANCE 0x%08x)\n",
-	       i, (int)&alancedata->rx_ring[i], (int)&lancedata->rx_ring[i],
-	       (int)alancedata->rx_buff[i], (int)lancedata->rx_buff[i]);
+	printk("RX Entry %2d at %p, Buf at %p\n", i, &lancedata->rx_ring[i],
+	       lancedata->rx_buff[i]);
 #endif
     }
 }
 
 
-static int ariadne_close(struct device *dev)
+static int ariadne_close(struct net_device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
 
-    dev->start = 0;
-    dev->tbusy = 1;
+    netif_stop_queue(dev);
 
-    board->Lance.RAP = CSR112;	/* Missed Frame Count */
-    priv->stats.rx_missed_errors = swapw(board->Lance.RDP);
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
+    lance->RAP = CSR112;	/* Missed Frame Count */
+    priv->stats.rx_missed_errors = swapw(lance->RDP);
+    lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
 
     if (ariadne_debug > 1) {
 	printk("%s: Shutting down ethercard, status was %2.2x.\n", dev->name,
-	       board->Lance.RDP);
-	printk("%s: %d packets missed\n", dev->name,
+	       lance->RDP);
+	printk("%s: %lu packets missed\n", dev->name,
 	       priv->stats.rx_missed_errors);
     }
 
     /* We stop the LANCE here -- it occasionally polls memory if we don't. */
-    board->Lance.RDP = STOP;
+    lance->RDP = STOP;
 
-    remove_isr(IRQ_AMIGA_PORTS, ariadne_interrupt, dev);
+    free_irq(IRQ_AMIGA_PORTS, dev);
 
-    MOD_DEC_USE_COUNT;
-
-    return(0);
+    return 0;
 }
 
 
-static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data)
+static inline void ariadne_reset(struct net_device *dev)
 {
-    struct device *dev = (struct device *)data;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
+
+    lance->RAP = CSR0;	/* PCnet-ISA Controller Status */
+    lance->RDP = STOP;
+    ariadne_init_ring(dev);
+    lance->RDP = INEA|STRT;
+    netif_start_queue(dev);
+}
+
+
+static void ariadne_interrupt(int irq, void *data, struct pt_regs *fp)
+{
+    struct net_device *dev = (struct net_device *)data;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     struct ariadne_private *priv;
-    struct AriadneBoard *board;
-    int csr0, boguscnt = 10;
+    int csr0, boguscnt;
 
     if (dev == NULL) {
 	printk("ariadne_interrupt(): irq for unknown device.\n");
 	return;
     }
 
+    lance->RAP = CSR0;			/* PCnet-ISA Controller Status */
+
+    if (!(lance->RDP & INTR))		/* Check if any interrupt has been */
+	return;				/* generated by the board. */
+
     priv = (struct ariadne_private *)dev->priv;
-    board = priv->board;
 
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-
-    if (!(board->Lance.RDP & INTR))	/* Check if any interrupt has been
-	return;				   generated by the board. */
-
-    if (dev->interrupt)
-	printk("%s: Re-entering the interrupt handler.\n", dev->name);
-
-    dev->interrupt = 1;
-
-    while ((csr0 = board->Lance.RDP) & (ERR|RINT|TINT) && --boguscnt >= 0) {
+    boguscnt = 10;
+    while ((csr0 = lance->RDP) & (ERR|RINT|TINT) && --boguscnt >= 0) {
 	/* Acknowledge all of the current interrupt sources ASAP. */
-	board->Lance.RDP = csr0 & ~(INEA|TDMD|STOP|STRT|INIT);
+	lance->RDP = csr0 & ~(INEA|TDMD|STOP|STRT|INIT);
 
 #if 0
 	if (ariadne_debug > 5) {
 	    printk("%s: interrupt  csr0=%#2.2x new csr=%#2.2x.", dev->name,
-		   csr0, board->Lance.RDP);
+		   csr0, lance->RDP);
 	    printk("[");
 	    if (csr0 & INTR)
 		printk(" INTR");
@@ -483,7 +506,7 @@ static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data)
 			printk("%s: Tx FIFO error! Status %4.4x.\n", dev->name,
 			       csr0);
 			/* Restart the chip. */
-			board->Lance.RDP = STRT;
+			lance->RDP = STRT;
 		    }
 		} else {
 		    if (status & (TF_MORE|TF_ONE))
@@ -501,12 +524,11 @@ static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data)
 	    }
 #endif
 
-	    if (priv->tx_full && dev->tbusy &&
+	    if (priv->tx_full && netif_queue_stopped(dev) &&
 		dirty_tx > priv->cur_tx - TX_RING_SIZE + 2) {
-		/* The ring is no longer full, clear tbusy. */
+		/* The ring is no longer full. */
 		priv->tx_full = 0;
-		dev->tbusy = 0;
-		mark_bh(NET_BH);
+		netif_wake_queue(dev);
 	    }
 
 	    priv->dirty_tx = dirty_tx;
@@ -521,96 +543,58 @@ static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data)
 	    printk("%s: Bus master arbitration failure, status %4.4x.\n",
 		   dev->name, csr0);
 	    /* Restart the chip. */
-	    board->Lance.RDP = STRT;
+	    lance->RDP = STRT;
 	}
     }
 
     /* Clear any other interrupt, and set interrupt enable. */
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-    board->Lance.RDP = INEA|BABL|CERR|MISS|MERR|IDON;
+    lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
+    lance->RDP = INEA|BABL|CERR|MISS|MERR|IDON;
 
 #if 0
     if (ariadne_debug > 4)
-	printk("%s: exiting interrupt, csr%d=%#4.4x.\n", dev->name,
-	       board->Lance.RAP, board->Lance.RDP);
+	printk("%s: exiting interrupt, csr%d=%#4.4x.\n", dev->name, lance->RAP,
+	       lance->RDP);
 #endif
-
-    dev->interrupt = 0;
     return;
 }
 
 
-static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
+static void ariadne_tx_timeout(struct net_device *dev)
+{
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
+
+    printk(KERN_ERR "%s: transmit timed out, status %4.4x, resetting.\n",
+	   dev->name, lance->RDP);
+    ariadne_reset(dev);
+    netif_wake_queue(dev);
+}
+
+
+static int ariadne_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     int entry;
-
-    /* Transmitter timeout, serious problems. */
-    if (dev->tbusy) {
-	int tickssofar = jiffies - dev->trans_start;
-	if (tickssofar < 20)
-	    return(1);
-	board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-	printk("%s: transmit timed out, status %4.4x, resetting.\n", dev->name,
-	       board->Lance.RDP);
-	board->Lance.RDP = STOP;
-	priv->stats.tx_errors++;
-#ifndef final_version
-	{
-	    int i;
-	    printk(" Ring data dump: dirty_tx %d cur_tx %d%s cur_rx %d.",
-		   priv->dirty_tx, priv->cur_tx, priv->tx_full ? " (full)" : "",
-		   priv->cur_rx);
-	    for (i = 0 ; i < RX_RING_SIZE; i++)
-		printk("%s %08x %04x %04x", i & 0x3 ? "" : "\n ",
-		       (swapw((priv->rx_ring[i]->RMD1))<<16)|swapw(priv->rx_ring[i]->RMD0),
-		       swapw(-priv->rx_ring[i]->RMD2), swapw(priv->rx_ring[i]->RMD3));
-	    for (i = 0 ; i < TX_RING_SIZE; i++)
-		printk("%s %08x %04x %04x", i & 0x3 ? "" : "\n ",
-		       (swapw((priv->tx_ring[i]->TMD1))<<16)|swapw(priv->tx_ring[i]->TMD0),
-		       swapw(-priv->tx_ring[i]->TMD2), priv->tx_ring[i]->TMD3);
-	    printk("\n");
-	}
-#endif
-	ariadne_init_ring(dev);
-	board->Lance.RDP = INEA|STRT;
-
-	dev->tbusy = 0;
-	dev->trans_start = jiffies;
-	dev_kfree_skb(skb, FREE_WRITE);
-	return(0);
-    }
-
-    if (skb == NULL) {
-	dev_tint(dev);
-	return(0);
-    }
-
-    if (skb->len <= 0)
-	return(0);
+    unsigned long flags;
+    int len = skb->len;
 
 #if 0
     if (ariadne_debug > 3) {
-	board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
+	lance->RAP = CSR0;	/* PCnet-ISA Controller Status */
 	printk("%s: ariadne_start_xmit() called, csr0 %4.4x.\n", dev->name,
-	       board->Lance.RDP);
-	board->Lance.RDP = 0x0000;
+	       lance->RDP);
+	lance->RDP = 0x0000;
     }
 #endif
 
-    /* Block a timer-based transmit from overlapping.  This could better be
-	done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-    if (set_bit(0, (void*)&dev->tbusy) != 0) {
-	printk("%s: Transmitter access conflict.\n", dev->name);
-	return(1);
-    }
-
-    if (set_bit(0, (void*)&priv->lock) != 0) {
-	if (ariadne_debug > 0)
-	    printk("%s: tx queue lock!.\n", dev->name);
-	/* don't clear dev->tbusy flag. */
-	return(1);
+    /* FIXME: is the 79C960 new enough to do its own padding right ? */
+    if(skb->len < ETH_ZLEN)
+    {
+    	skb = skb_padto(skb, ETH_ZLEN);
+    	if(skb == NULL)
+    	    return 0;
+    	len = ETH_ZLEN;
     }
 
     /* Fill in a Tx ring entry */
@@ -633,6 +617,9 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
     printk(" data 0x%08x len %d\n", (int)skb->data, (int)skb->len);
 #endif
 
+    save_flags(flags);
+    cli();
+
     entry = priv->cur_tx % TX_RING_SIZE;
 
     /* Caution: the write order is important here, set the base address with
@@ -640,7 +627,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 
     priv->tx_ring[entry]->TMD2 = swapw((u_short)-skb->len);
     priv->tx_ring[entry]->TMD3 = 0x0000;
-    memcpyw(priv->tx_buff[entry], (u_short *)skb->data, skb->len);
+    memcpyw(priv->tx_buff[entry], (u_short *)skb->data, len);
 
 #if 0
     {
@@ -663,7 +650,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 
     priv->tx_ring[entry]->TMD1 = (priv->tx_ring[entry]->TMD1&0xff00)|TF_OWN|TF_STP|TF_ENP;
 
-    dev_kfree_skb(skb, FREE_WRITE);
+    dev_kfree_skb(skb);
 
     priv->cur_tx++;
     if ((priv->cur_tx >= TX_RING_SIZE) && (priv->dirty_tx >= TX_RING_SIZE)) {
@@ -678,24 +665,22 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
     }
 
     /* Trigger an immediate send poll. */
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-    board->Lance.RDP = INEA|TDMD;
+    lance->RAP = CSR0;		/* PCnet-ISA Controller Status */
+    lance->RDP = INEA|TDMD;
 
     dev->trans_start = jiffies;
 
-    cli();
-    priv->lock = 0;
-    if (lowb(priv->tx_ring[(entry+1) % TX_RING_SIZE]->TMD1) == 0)
-	dev->tbusy = 0;
-    else
+    if (lowb(priv->tx_ring[(entry+1) % TX_RING_SIZE]->TMD1) != 0) {
+	netif_stop_queue(dev);
 	priv->tx_full = 1;
-    sti();
+    }
+    restore_flags(flags);
 
-    return(0);
+    return 0;
 }
 
 
-static int ariadne_rx(struct device *dev)
+static int ariadne_rx(struct net_device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
     int entry = priv->cur_rx % RX_RING_SIZE;
@@ -767,7 +752,9 @@ static int ariadne_rx(struct device *dev)
 #endif
 
 	    netif_rx(skb);
+	    dev->last_rx = jiffies;
 	    priv->stats.rx_packets++;
+	    priv->stats.rx_bytes += pkt_len;
 	}
 
 	priv->rx_ring[entry]->RMD1 |= RF_OWN;
@@ -779,24 +766,26 @@ static int ariadne_rx(struct device *dev)
     /* We should check that at least two ring entries are free.	 If not,
        we should free one and mark stats->rx_dropped++. */
 
-    return(0);
+    return 0;
 }
 
 
-static struct enet_statistics *ariadne_get_stats(struct device *dev)
+static struct net_device_stats *ariadne_get_stats(struct net_device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
     short saved_addr;
+    unsigned long flags;
 
+    save_flags(flags);
     cli();
-    saved_addr = board->Lance.RAP;
-    board->Lance.RAP = CSR112;	/* Missed Frame Count */
-    priv->stats.rx_missed_errors = swapw(board->Lance.RDP);
-    board->Lance.RAP = saved_addr;
-    sti();
+    saved_addr = lance->RAP;
+    lance->RAP = CSR112;		/* Missed Frame Count */
+    priv->stats.rx_missed_errors = swapw(lance->RDP);
+    lance->RAP = saved_addr;
+    restore_flags(flags);
 
-    return(&priv->stats);
+    return &priv->stats;
 }
 
 
@@ -806,20 +795,25 @@ static struct enet_statistics *ariadne_get_stats(struct device *dev)
     num_addrs > 0	Multicast mode, receive normal and MC packets, and do
 			best-effort filtering.
  */
-static void set_multicast_list(struct device *dev)
+static void set_multicast_list(struct net_device *dev)
 {
-    struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
-    struct AriadneBoard *board = priv->board;
+    volatile struct Am79C960 *lance = (struct Am79C960*)dev->base_addr;
+
+    if (!netif_running(dev))
+	return;
+
+    netif_stop_queue(dev);
 
     /* We take the simple way out and always enable promiscuous mode. */
-    board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
-    board->Lance.RDP = STOP;	/* Temporarily stop the lance. */
+    lance->RAP = CSR0;			/* PCnet-ISA Controller Status */
+    lance->RDP = STOP;			/* Temporarily stop the lance. */
+    ariadne_init_ring(dev);
 
     if (dev->flags & IFF_PROMISC) {
 	/* Log any net taps. */
 	printk("%s: Promiscuous mode enabled.\n", dev->name);
-	board->Lance.RAP = CSR15;	/* Mode Register */
-	board->Lance.RDP = PROM;	/* Set promiscuous mode */
+	lance->RAP = CSR15;		/* Mode Register */
+	lance->RDP = PROM;		/* Set promiscuous mode */
     } else {
 	short multicast_table[4];
 	int num_addrs = dev->mc_count;
@@ -828,48 +822,39 @@ static void set_multicast_list(struct device *dev)
 	memset(multicast_table, (num_addrs == 0) ? 0 : -1,
 	       sizeof(multicast_table));
 	for (i = 0; i < 4; i++) {
-	    board->Lance.RAP = CSR8+(i<<8);	/* Logical Address Filter */
-	    board->Lance.RDP = swapw(multicast_table[i]);
+	    lance->RAP = CSR8+(i<<8);	/* Logical Address Filter */
+	    lance->RDP = swapw(multicast_table[i]);
 	}
-	board->Lance.RAP = CSR15;	/* Mode Register */
-	board->Lance.RDP = 0x0000;	/* Unset promiscuous mode */
+	lance->RAP = CSR15;		/* Mode Register */
+	lance->RDP = 0x0000;		/* Unset promiscuous mode */
     }
 
-    board->Lance.RAP = CSR0;		/* PCnet-ISA Controller Status */
-    board->Lance.RDP = INEA|STRT|IDON;	/* Resume normal operation. */
+    lance->RAP = CSR0;			/* PCnet-ISA Controller Status */
+    lance->RDP = INEA|STRT|IDON;	/* Resume normal operation. */
+
+    netif_wake_queue(dev);
 }
 
 
+static void __exit ariadne_cleanup(void)
+{
 #ifdef MODULE
-static char devicename[9] = { 0, };
+    struct ariadne_private *next;
+    struct net_device *dev;
 
-static struct device ariadne_dev =
-{
-    devicename,				/* filled in by register_netdev() */
-    0, 0, 0, 0,				/* memory */
-    0, 0,				/* base, irq */
-    0, 0, 0, NULL, ariadne_probe,
-};
-
-int init_module(void)
-{
-    int err;
-
-    if ((err = register_netdev(&ariadne_dev))) {
-	if (err == -EIO)
-	    printk("No Ariadne board found. Module not loaded.\n");
-	return(err);
+    while (root_ariadne_dev) {
+	next = root_ariadne_dev->next_module;
+	dev = root_ariadne_dev->dev;
+	unregister_netdev(dev);
+	release_mem_region(ZTWO_PADDR(dev->base_addr), sizeof(struct Am79C960));
+	release_mem_region(ZTWO_PADDR(dev->mem_start), ARIADNE_RAM_SIZE);
+	kfree(dev);
+	root_ariadne_dev = next;
     }
-    return(0);
+#endif
 }
 
-void cleanup_module(void)
-{
-    struct ariadne_private *priv = (struct ariadne_private *)ariadne_dev.priv;
+module_init(ariadne_probe);
+module_exit(ariadne_cleanup);
 
-    unregister_netdev(&ariadne_dev);
-    zorro_unconfig_board(priv->key, 0);
-    kfree(priv);
-}
-
-#endif /* MODULE */
+MODULE_LICENSE("GPL");

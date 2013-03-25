@@ -1,10 +1,24 @@
 /*****************************************************************************/
 
 /*
- *	crt0_ram.S -- startup code for MCF5272 ColdFire based MOTOROLA boards.
+ *	crt0_ram.S -- startup code for COBRA5272 board.
  *
- *	(C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com).
  *	(C) Copyright 2000, Lineo (www.lineo.com).
+ *	(C) Copyright 1999, Greg Ungerer (gerg@snapgear.com).
+ *
+ *    1999/02/24 Modified for the 5307 processor David W. Miller
+ *    2002/03/20 Modified for senTec COBRA5272 board (H. Degenhardt)
+ *    2002/07/22 We now check the CONFIG_RAM??MB vars, and set up the
+ *               ram size accordingly.
+ *               (H. Degenhardt)
+ *    2003/03/20 We now support the EPSON S1D13706 LCD controller.
+ *               It gets initialized if CONFIG_FB_COBRA5272 is set
+ *               (hede)
+ *    2003/04/08 We now support the EPSON S1D13806 LCD controller, too.
+ *               It gets initialized if CONFIG_FB_COBRA5272 is set
+ *               (hede)
+ * 
+ * 
  */
 
 /*****************************************************************************/
@@ -16,18 +30,20 @@
 /*****************************************************************************/
 
 /*
- *	Motorola M5272C3 ColdFire eval board, chip select and memory setup.
+ *	COBRA5272 board, chip select and memory setup.
  */
 
 #define	MEM_BASE	0x00000000	/* Memory base at address 0 */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
 
-#if defined(CONFIG_RAM16MB)
-#define	MEM_SIZE	0x01000000	/* Memory size 16Mb */
+#if defined(CONFIG_RAM32MB)
+#define MEM_SIZE        0x02000000      /* Memory size 32Mb */
+#elif defined(CONFIG_RAM16MB)
+#define MEM_SIZE        0x01000000      /* Memory size 16Mb */
 #elif defined(CONFIG_RAM8MB)
-#define	MEM_SIZE	0x00800000	/* Memory size 8Mb */
+#define MEM_SIZE        0x00800000      /* Memory size 8Mb */
 #else
-#define	MEM_SIZE	0x00400000	/* Memory size 4Mb */
+#define MEM_SIZE        0x00400000      /* Memory size 4Mb */
 #endif
 
 /*****************************************************************************/
@@ -84,7 +100,7 @@ _start:
 
 
 	/*
-	 *	Set memory size and initial stack.
+	 *	Set to 4 meg for the Cadre III board (m5206e).
 	 */
 	move.l	#MEM_SIZE, %a0
 
@@ -92,6 +108,7 @@ _start:
 	move.l	%d0, %sp			/* Set up initial stack ptr */
 	move.l	%d0, _ramend			/* Set end ram addr */
 
+   
 #if 1
 	/*
 	 *	Enable CPU internal cache.
@@ -135,6 +152,48 @@ _clear_bss:
 	bne	_clear_bss
 
 	/*
+	 * load the current task pointer and stack
+	 */
+	lea		init_task_union, %a0
+	movel		%a0, _current_task
+	lea		0x2000(%a0), %sp
+
+   /*
+    * hede 20030320:
+    * 
+    * We inititialize the controler if CONFIG_FB_COBRA5272
+    * is set!
+    * init for the lcd controller
+    * ATTENTION!
+    * This has to be after the initialization of
+    * bss!
+    * 
+    * 
+    */
+
+#if defined(CONFIG_FB_COBRA5272)
+#if defined(CONFIG_FB_S1D13706)
+   /* set up CS1: */
+   move.l   #0x40000201, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_CSBR1)
+   move.l   #0xfff0007c, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_CSOR1)
+   /* enable /TA at PB5: */
+   move.l   #0x55554555, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_PBCNT)
+#elif defined(CONFIG_FB_S1D13806) /* set up for S1D13806 */
+   /* set up CS1: */
+   move.l   #0x40000201, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_CSBR1)
+   move.l   #0xff00007c, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_CSOR1)
+   /* enable /TA at PB5: */
+   move.l   #0x55554555, %d0
+   move.l   %d0, (MCF_MBAR + MCFSIM_PBCNT)
+#endif /* end if defined(CONFIG_FB_S1D13706) */
+#endif /* end #if defined(CONFIG_FB_COBRA5272) */
+
+	/*
 	 *	Assember start up done, start code proper.
 	 */
 	jsr	start_kernel			/* Start Linux kernel */
@@ -143,3 +202,4 @@ _exit:
 	jmp	_exit				/* Should never get here */
 
 /*****************************************************************************/
+

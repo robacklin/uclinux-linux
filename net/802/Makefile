@@ -8,27 +8,32 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := 802.o
-O_OBJS	  = p8023.o sysctl_net_802.o
 
-ifdef CONFIG_TR
-O_OBJS += tr.o
-endif
+export-objs = llc_macinit.o p8022.o psnap.o fc.o
 
-ifdef CONFIG_FDDI
-O_OBJS += fddi.o
-endif
+obj-y			:= p8023.o
 
-ifdef CONFIG_IPX
-OX_OBJS += p8022.o psnap.o p8022tr.o
-endif
+obj-$(CONFIG_SYSCTL)	+= sysctl_net_802.o
 
-ifdef CONFIG_ATALK
-ifndef CONFIG_IPX
-OX_OBJS += p8022.o psnap.o p8022tr.o
-endif
-endif
+subdir-$(CONFIG_LLC)	+= transit
+obj-$(CONFIG_LLC)	+= llc_sendpdu.o llc_utility.o cl2llc.o llc_macinit.o
+obj-$(CONFIG_LLC)	+= p8022.o psnap.o
+
+obj-$(CONFIG_TR)	+= p8022.o psnap.o tr.o
+
+obj-$(CONFIG_NET_FC)	+=                 fc.o
+
+obj-$(CONFIG_FDDI)	+=                 fddi.o
+
+obj-$(CONFIG_HIPPI)	+=                 hippi.o
+
+obj-$(CONFIG_IPX)	+= p8022.o psnap.o
+
+obj-$(CONFIG_ATALK)	+= p8022.o psnap.o
+
 
 include $(TOPDIR)/Rules.make
 
-tar:
-		tar -cvf /dev/f1 .
+cl2llc.c: cl2llc.pre
+	@rm -f $@
+	sed -f ./pseudo/opcd2num.sed cl2llc.pre >cl2llc.c

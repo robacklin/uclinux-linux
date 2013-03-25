@@ -1,15 +1,19 @@
-/* $Id: signal.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $ */
+/* $Id: signal.h,v 1.35 1999/09/06 08:22:04 jj Exp $ */
 #ifndef _ASMSPARC_SIGNAL_H
 #define _ASMSPARC_SIGNAL_H
 
 #include <asm/sigcontext.h>
 
+#ifdef __KERNEL__
+#ifndef __ASSEMBLY__
+#include <linux/personality.h>
+#include <linux/types.h>
+#endif
+#endif
+
 /* On the Sparc the signal handlers get passed a 'sub-signal' code
  * for certain signal types, which we document here.
  */
-#define _NSIG             32
-#define NSIG		_NSIG
-
 #define SIGHUP		 1
 #define SIGINT		 2
 #define SIGQUIT		 3
@@ -49,7 +53,8 @@
 #define    SUBSIG_PROTECTION    4
 #define    SUBSIG_SEGERROR      5
 
-#define SIGSYS          12
+#define SIGSYS		12
+
 #define SIGPIPE		13
 #define SIGALRM		14
 #define SIGTERM		15
@@ -70,16 +75,41 @@
 #define SIGPROF		27
 #define SIGWINCH	28
 #define SIGLOST		29
+#define SIGPWR		SIGLOST
 #define SIGUSR1		30
 #define SIGUSR2		31
 
+/* Most things should be clean enough to redefine this at will, if care
+ * is taken to make libc match.
+ */
+
+#define __OLD_NSIG	32
+#define __NEW_NSIG	64
+#define _NSIG_BPW	32
+#define _NSIG_WORDS	(__NEW_NSIG / _NSIG_BPW)
+
+#define SIGRTMIN	32
+#define SIGRTMAX	(__NEW_NSIG - 1)
+
+#if defined(__KERNEL__) || defined(__WANT_POSIX1B_SIGNALS__)
+#define	_NSIG		__NEW_NSIG
+#define __new_sigset_t	sigset_t
+#define __new_sigaction	sigaction
+#define __old_sigset_t	old_sigset_t
+#define __old_sigaction	old_sigaction
+#else
+#define _NSIG		__OLD_NSIG
+#define __old_sigset_t	sigset_t
+#define __old_sigaction	sigaction
+#endif
+
 #ifndef __ASSEMBLY__
 
-typedef unsigned long sigset_t;
+typedef unsigned long __old_sigset_t;
 
-#ifdef __KERNEL__
-#include <asm/sigcontext.h>
-#endif
+typedef struct {
+	unsigned long	sig[_NSIG_WORDS];
+} __new_sigset_t;
 
 /* A SunOS sigstack */
 struct sigstack {
@@ -104,15 +134,27 @@ struct sigstack {
  */
 #define SA_NOCLDSTOP	SV_IGNCHILD
 #define SA_STACK	SV_SSTACK
+#define SA_ONSTACK	SV_SSTACK
 #define SA_RESTART	SV_INTR
 #define SA_ONESHOT	SV_RESET
 #define SA_INTERRUPT	0x10
 #define SA_NOMASK	0x20
 #define SA_SHIRQ	0x40
+#define SA_NOCLDWAIT	0x100	/* not supported yet */
+#define SA_SIGINFO	0x200
 
 #define SIG_BLOCK          0x01	/* for blocking signals */
 #define SIG_UNBLOCK        0x02	/* for unblocking signals */
 #define SIG_SETMASK        0x04	/* for setting the signal mask */
+
+/* 
+ * sigaltstack controls
+ */
+#define SS_ONSTACK	1
+#define SS_DISABLE	2
+
+#define MINSIGSTKSZ	4096
+#define SIGSTKSZ	16384
 
 #ifdef __KERNEL__
 /*
@@ -138,7 +180,7 @@ struct sigstack {
 
 /* Type of a signal handler.  */
 #ifdef __KERNEL__
-typedef void (*__sighandler_t)(int, int, struct sigcontext_struct *, char *);
+typedef void (*__sighandler_t)(int, int, struct sigcontext *, char *);
 #else
 typedef void (*__sighandler_t)(int);
 #endif
@@ -147,11 +189,32 @@ typedef void (*__sighandler_t)(int);
 #define SIG_IGN	((__sighandler_t)1)	/* ignore signal */
 #define SIG_ERR	((__sighandler_t)-1)	/* error return from signal */
 
-struct sigaction {
-	__sighandler_t  sa_handler;
-	sigset_t        sa_mask;
-	unsigned long   sa_flags;
+struct __new_sigaction {
+	__sighandler_t	sa_handler;
+	unsigned long	sa_flags;
+	void		(*sa_restorer)(void);	/* Not used by Linux/SPARC */
+	__new_sigset_t	sa_mask;
 };
+
+#ifdef __KERNEL__
+struct k_sigaction {
+	struct __new_sigaction	sa;
+	void			*ka_restorer;
+};
+#endif
+
+struct __old_sigaction {
+	__sighandler_t	sa_handler;
+	__old_sigset_t	sa_mask;
+	unsigned long	sa_flags;
+	void		(*sa_restorer) (void);	/* not used by Linux/SPARC */
+};
+
+typedef struct sigaltstack {
+	void		*ss_sp;
+	int		ss_flags;
+	size_t		ss_size;
+} stack_t;
 
 #endif /* !(__ASSEMBLY__) */
 

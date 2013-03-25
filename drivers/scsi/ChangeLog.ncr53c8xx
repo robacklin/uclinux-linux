@@ -1,3 +1,216 @@
+Sat May 12 12:00 2001 Gerard Roudier (groudier@club-internet.fr)
+	* version ncr53c8xx-3.4.3b
+	- Ensure LEDC bit in GPCNTL is cleared when reading the NVRAM.
+	  Fix sent by Stig Telfer <stig@api-networks.com>.
+	- Define scsi_set_pci_device() as nil for kernel < 2.4.4.
+
+Mon Feb 12 22:30 2001 Gerard Roudier (groudier@club-internet.fr)
+	* version ncr53c8xx-3.4.3
+	- Call pci_enable_device() as AC wants this to be done.
+	- Get both the BAR cookies actual and PCI BAR values.
+	  (see Changelog.sym53c8xx rev. 1.7.3 for details)
+	- Merge changes for linux-2.4 that declare the host template 
+	  in the driver object also when the driver is statically 
+	  linked with the kernel.
+
+Sun Sep 24 21:30 2000 Gerard Roudier (groudier@club-internet.fr)
+	* version ncr53c8xx-3.4.2
+	- See Changelog.sym53c8xx, driver version 1.7.2.
+
+Wed Jul 26 23:30 2000 Gerard Roudier (groudier@club-internet.fr)
+	* version ncr53c8xx-3.4.1
+	- Provide OpenFirmare path through the proc FS on PPC.
+	- Remove trailing argument #2 from a couple of #undefs.
+
+Sun Jul 09 16:30 2000 Gerard Roudier (groudier@club-internet.fr)
+	* version ncr53c8xx-3.4.0
+	- Remove the PROFILE C and SCRIPTS code.
+	  This facility was not this useful and thus was not longer 
+	  desirable given the increasing complexity of the driver code.
+	- Merges from FreeBSD sym-1.6.2 driver:
+	  * Clarify memory barriers needed by the driver for architectures 
+	    that implement a weak memory ordering.
+	- General cleanup:
+	  Move definitions for barriers and IO/MMIO operations to the 
+	  sym53c8xx_defs.h header files. They are now shared by the 
+	  both drivers.
+	  Use SCSI_NCR_IOMAPPED instead of NCR_IOMAPPED.
+
+Thu May 11   12:30 2000 Pam Delaney (pam.delaney@lsil.com)
+	* revision 3.3b
+ 
+Mon Apr 24 12:00 2000 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2i
+	- Return value 1 (instead of 0) from the driver setup routine.
+	- Let the driver also attach controllers that have been set to 
+	  OFF in the NVRAM as it did prior to revision 3.2g.
+
+Sat Apr 1  12:00 2000 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2h
+	- Fix a compilation problem on Alpha introduced in version 3.2g.
+          (`port' changed to `base_io').
+	- Move from `sym' to this driver a tiny change for __sparc__ that 
+	  applies to cache line size (? Probably from David S Miller).
+	- Make sure no data transfer will happen for Scsi_Cmnd requests 
+	  that supply SCSI_DATA_NONE direction (this avoids some BUG() 
+	  statement in the PCI code when a data buffer is also supplied).
+
+Thu Mar 16   9:30 2000 Pam Delaney (pam.delaney@lsil.com)
+	* revision 3.3b-3
+ 	- Added exclusion for the 53C1010 and 53C1010_66 chips
+	  to the driver (change to sym53c8xx_comm.h).
+
+Mon March 6  23:15 2000 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2g
+	- Add the file sym53c8xx_comm.h that collects code that should 
+	  be shared by sym53c8xx and ncr53c8xx drivers. For now, it is  
+	  a header file that is only included by the ncr53c8xx driver, 
+	  but things will be cleaned up later. This code addresses 
+	  notably:
+	  * Chip detection and PCI related initialisations
+	  * NVRAM detection and reading
+	  * DMA mapping
+	  * Boot setup command
+	  * And some other ...
+	- Add support for the new dynamic dma mapping kernel interface.
+	  Requires Linux-2.3.47 (tested with pre-2.3.47-6).
+	- Get data transfer direction from the scsi command structure 
+	  (Scsi_Cmnd) when this information is available.
+
+Mon March 6  23:15 2000 Gerard Roudier (groudier@club-internet.fr)
+        * revision 3.2g
+        - Add the file sym53c8xx_comm.h that collects code that should
+          be shared by sym53c8xx and ncr53c8xx drivers. For now, it is
+          a header file that is only included by the ncr53c8xx driver,
+          but things will be cleaned up later. This code addresses
+          notably:
+          * Chip detection and PCI related initialisations
+          * NVRAM detection and reading
+          * DMA mapping
+          * Boot setup command
+          * And some other ...
+        - Add support for the new dynamic dma mapping kernel interface.
+          Requires Linux-2.3.47 (tested with pre-2.3.47-6).
+        - Get data transfer direction from the scsi command structure
+          (Scsi_Cmnd) when this information is available.
+
+Fri Jan 14 14:00 2000 Pam Delaney (pam.delaney@lsil.com)
+	* revision pre-3.3b-1
+	- Merge parallel driver series 3.31 and 3.2e 
+
+Tue Jan 11 14:00 2000 Pam Delaney (pam.delaney@lsil.com)
+	* revision 3.31
+	- Added support for mounting disks on wide-narrow-wide
+	  scsi configurations.  
+	- Built off of version 3.30
+
+Mon Jan 10 13:30 2000 Pam Delaney (pam.delaney@lsil.com)
+	* revision 3.30
+	- Added capability to use the integrity checking code
+	  in the kernel (optional).
+	- Disabled support for the 53C1010.
+	- Built off of version 3.2c
+
+Sat Jan 8  22:00 2000 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2e
+	- Add year 2000 copyright.
+	- Display correctly bus signals when bus is detected wrong.
+	- Remove the dead code that broke driver 3.2d.
+
+Mon Dec 6  22:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2d
+	- Change messages written by the driver at initialisation and 
+	  through the /proc FS (rather cosmetic changes that consist in
+	  printing out the PCI bus number and device/function).
+	- Get rid of the old PCI bios interface, but preserve kernel 2.0 
+	  compatibility from a simple wrapper.
+	- Remove the compilation condition about having to acquire the 
+	  io_request_lock since it seems to be a definite feature now.:)
+	- proc_dir structure no longer needed for kernel >= 2.3.27.
+	- Change the driver detection code by the sym53c8xx one, modulo 
+	  some minor changes. The driver can now attach any number of 
+	  controllers (>40) and does no longer hoger stack space at 
+	  initialisation.
+	- Definitely disable overlapped PCI arbitration for all dual 
+	  function chips, since I cannot make sure for what chip revisions 
+	  it is actually safe.
+	- Add support for the SYM53C1510D.
+	- Update the poor Tekram sync factor table.
+	- Remove the compilation condition about having to acquire the 
+	  io_request_lock since it seems to be a definite feature now.:)
+	- proc_dir structure no longer needed for kernel >= 2.3.27.
+
+Sat Sep 11  18:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2c
+	- Handle correctly (hopefully) jiffies wrap-around.
+	- Restore the entry used to detect 875 until revision 0xff.
+	  (I removed it inadvertently, it seems :) )
+	- Replace __initfunc() which is deprecated stuff by __init which 
+	  is not yet so. ;-)
+	- Add support of some 'resource handling' for linux-2.3.13.
+	  Basically the BARs have been changed to something more complex 
+	  in the pci_dev structure.
+	- Remove some deprecated code.
+
+Sat May 10  11:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision pre-3.2b-1
+	- Support for the 53C895A by Pamela Delaney <pam.delaney@lsil.com>
+	  The 53C895A contains all of the features of the 896 but has only 
+	  one channel and has a 32 bit PCI bus. It does 64 bit PCI addressing 
+	  using dual cycle PCI data transfers.
+	- Miscellaneous minor fixes.
+	- Some additions to the README.ncr53c8xx file.
+
+Sun Apr 11  10:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2a
+	- Add 'hostid:#id' boot option. This option allows to change the 
+	  default SCSI id the driver uses for controllers.
+	- Remove nvram layouts and driver set-up structures from the C source,
+	  and use the one defined in sym53c8xx_defs.h file.
+	  (shared by both drivers).
+	- Set for now MAX LUNS to 16 (instead of 8).
+
+Thu Mar 11  23:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.2	  (8xx-896 driver bundle)
+	- Only define the host template in ncr53c8xx.h and include the 
+	  sym53c8xx_defs.h file.
+	- Declare static all symbols that do not need to be visible from 
+	  outside the driver code.
+	- Add 'excl' boot command option that allows to pass to the driver 
+	  io address of devices not to attach.
+	- Add info() function called from the host template to print 
+	  driver/host information.
+	- Minor documentation additions.
+
+Sat Mar 6  11:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.1h
+	- Fix some oooold bug that hangs the bus if a device rejects a 
+	  negotiation. Btw, the corresponding stuff also needed some cleanup 
+	  and thus the change is a bit larger than it could have been.
+	- Still some typo that made compilation fail for 64 bit (trivial fix).
+
+Sun Feb  14:00 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.1g
+	- Deal correctly with 64 bit PCI address registers on Linux 2.2.
+	  Pointed out by Leonard Zubkoff.
+	- Allow to tune request_irq() flags from the boot command line using 
+	  ncr53c8xx=irqm:??, as follows:
+	  a) If bit 0x10 is set in irqm, SA_SHIRQ flag is not used.
+	  b) If bit 0x20 is set in irqm, SA_INTERRUPT flag is not used.
+	  By default the driver uses both SA_SHIRQ and SA_INTERRUPT.
+	  Option 'ncr53c8xx=irqm:0x20' may be used when an IRQ is shared by 
+	  a 53C8XX adapter and a network board.
+	- Tiny mispelling fixed (ABORT instead of ABRT). Was fortunately 
+	  harmless.
+	- Negotiate SYNC data transfers with CCS devices.
+
+Sat Jan 16  17:30 1999 Gerard Roudier (groudier@club-internet.fr)
+	* revision 3.1f
+	- Some PCI fix-ups not needed any more for PPC (from Cort).
+	- Cache line size set to 16 DWORDS for Sparc   (from DSM).
+	- Waiting list look-up didn't work for the first command of the list.
+	- Remove 2 useless lines of code.
+
 Sun Dec 13  18:00 1998 Gerard Roudier (groudier@club-internet.fr)
 	* revision 3.1e
 	- Same work-around as for the 53c876 rev <= 0x15 for 53c896 rev 1:
@@ -31,7 +244,7 @@ Wed Oct 21 21:00 1998 Gerard Roudier (groudier@club-internet.fr)
 	- Changes from Eddie Dost for Sparc and Alpha:
 	  ioremap/iounmap support for Sparc.
 	  pcivtophys changed to bus_dvma_to_phys.
-	- Add the 53c876 description to the chip table. This is only usefull 
+	- Add the 53c876 description to the chip table. This is only useful 
 	  for printing the right name of the controller.
 	- DEL-441 Item 2 work-around for the 53c876 rev <= 5 (0x15).
 	- Add additionnal checking of INQUIRY data:
@@ -97,7 +310,7 @@ Sun Jun 28 12:00 1998 Gerard Roudier (groudier@club-internet.fr)
 Sat Jun 20 20:00 1998 Gerard Roudier (groudier@club-internet.fr)
 	* revision 3.0c
 	- Add a boot setup option that allows to set up device queue depths 
-	  at boot-up. This option is very usefull since Linux does not 
+	  at boot-up. This option is very useful since Linux does not 
 	  allow to change scsi device queue depth once the system has been 
 	  booted up.
 
@@ -126,7 +339,7 @@ Tue Jun 10 23:00 1998 Gerard Roudier (groudier@club-internet.fr)
 	  kernel version >= 2.1.105.
 	- Replace all printf(s) by printk(s). After all, the ncr53c8xx is 
 	  a driver for Linux.
-	- Perform auto-sense on COMMAND TERMINATED. Not sure it is usefull.
+	- Perform auto-sense on COMMAND TERMINATED. Not sure it is useful.
 	- Some other minor changes.
 
 Tue Jun 4 23:00 1998 Gerard Roudier (groudier@club-internet.fr)
@@ -134,7 +347,7 @@ Tue Jun 4 23:00 1998 Gerard Roudier (groudier@club-internet.fr)
 	- Code cleanup and simplification:
 	  Remove kernel 1.2.X and 1.3.X support.
 	  Remove the _old_ target capabilities table.
-	  Remove the error recovery code that have'nt been really usefull.
+	  Remove the error recovery code that have'nt been really useful.
 	  Use a single alignment boundary (CACHE_LINE_SIZE) for data 
 	  structures.
 	- Several aggressive SCRIPTS optimizations and changes:

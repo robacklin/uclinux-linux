@@ -3,7 +3,7 @@
 /*
  *	exp.c -- simple expansion interface driver.
  *
- *	(C) Copyright 2001, Greg Ungerer (gerg@snapgear.com)
+ *	(C) Copyright 2001-2003, Greg Ungerer <gerg@snapgear.com>
  */
 
 /*****************************************************************************/
@@ -15,7 +15,9 @@
 #include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/wait.h>
+#include <linux/init.h>
 #include <asm/param.h>
+#include <asm/uaccess.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
 
@@ -55,20 +57,21 @@ int exp_open(struct inode *inode, struct file *filp)
 
 /*****************************************************************************/
 
-void exp_close(struct inode *inode, struct file *filp)
+int exp_close(struct inode *inode, struct file *filp)
 {
 #ifdef DEBUG
 	printk("exp_close()\n");
 #endif
 	exp_isopen = 0;
+	return(0);
 }
 
 /*****************************************************************************/
 
-int exp_read(struct inode *inode, struct file *fp, char *buf, int count)
+ssize_t exp_read(struct file *fp, char *buf, size_t count, loff_t *ptr)
 {
 	volatile unsigned char	*dp;
-	int			total;
+	ssize_t			total;
 
 #ifdef DEBUG
 	printk("exp_read(buf=%x,count=%d)\n", (int) buf, count);
@@ -88,10 +91,10 @@ int exp_read(struct inode *inode, struct file *fp, char *buf, int count)
 
 /*****************************************************************************/
 
-int exp_write(struct inode *inode, struct file *fp, const char *buf, int count)
+ssize_t exp_write(struct file *fp, const char *buf, size_t count, loff_t *ptr)
 {
 	volatile unsigned char	*dp;
-	int			total;
+	ssize_t			total;
 
 #if 0
 	printk("exp_write(buf=%x,count=%d)\n", (int) buf, count);
@@ -103,7 +106,7 @@ int exp_write(struct inode *inode, struct file *fp, const char *buf, int count)
 		count = EXP_MSIZE - fp->f_pos;
 
 	for (total = 0, dp = &exp_datap[fp->f_pos]; (total < count); total++)
-		*dp++ = get_user(buf++);
+		get_user(*dp++, buf++);
 
 	fp->f_pos += total;
 	return(total);
@@ -162,7 +165,7 @@ struct file_operations	exp_fops = {
 
 /*****************************************************************************/
 
-void exp_init(void)
+int __init exp_init(void)
 {
 	volatile unsigned long	*icrp;
 	int			rc;
@@ -170,9 +173,9 @@ void exp_init(void)
 	if ((rc = register_chrdev(EXP_MAJOR, "exp", &exp_fops)) < 0) {
 		printk(KERN_WARNING "EXP: register_chrdev(major=%d) failed, "
 			"rc=%d\n", EXP_MAJOR, rc);
-		return;
+		return(-EBUSY);
 	}
-	printk("EXP: Copyright (C) 2001, Greg Ungerer (gerg@snapgear.com)\n");
+	printk("EXP: Copyright (C) 2001-2003, Greg Ungerer <gerg@snapgear.com>\n");
 
 	/* Port CS6 setup in boot loader */
 	exp_datap = (volatile unsigned char *) EXP_ADDR;
@@ -181,6 +184,11 @@ void exp_init(void)
 	*icrp = (*icrp & 0x77077777) | 0x00d00000;
 	if (request_irq(EXP_IRQ, exp_isr, SA_INTERRUPT, "exp", NULL))
 		printk(KERN_WARNING "EXP: request_irq(%d) failed\n", EXP_IRQ);
+	return(0);
 }
+
+/*****************************************************************************/
+
+module_init(exp_init);
 
 /*****************************************************************************/

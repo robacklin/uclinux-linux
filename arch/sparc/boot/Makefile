@@ -1,21 +1,49 @@
-# $Id: Makefile,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
-# Makefile for the Sparc low level /boot module.
+# $Id: Makefile,v 1.10 2000/02/23 08:17:46 jj Exp $
+# Makefile for the Sparc boot stuff.
 #
 # Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+# Copyright (C) 1997,1998 Jakub Jelinek (jj@ultra.linux.cz)
 
-OBJS	=bare.o init_me.o ../kernel/promops.o ../lib/lib.a
-BOOTLINKFLAGS = -N -Ttext 0x200000 -e _first_adr_in_text
+ROOT_IMG	=/usr/src/root.img
+ELFTOAOUT	=elftoaout
 
-.S.s:
-	$(CC) -D__ASSEMBLY__ -D__KERNEL__ -ansi -E -o $*.o $<
-.S.o:
-	$(CC) -D__ASSEMBLY__ -D__KERNEL__ -ansi -c -o $*.o $<
+all: btfix.o
 
-all: boot
+tftpboot.img: piggyback
+	$(ELFTOAOUT) $(TOPDIR)/vmlinux -o tftpboot.img
+	./piggyback tftpboot.img $(TOPDIR)/System.map $(ROOT_IMG)
 
-boot: $(OBJS)
-	$(LD) $(BOOTLINKFLAGS) $(OBJS) -o boot
+piggyback: piggyback.c
+	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
 
-dep:
-	$(CPP) -M *.c > .depend
-	$(CPP) -M -D__ASSEMBLY__ -ansi *.S >>.depend
+btfixupprep: btfixupprep.c
+	$(HOSTCC) $(HOSTCFLAGS) -o btfixupprep btfixupprep.c
+
+clean:
+	rm -f btfixupprep piggyback tftpboot.img btfix.o btfix.s
+
+BTOBJS := $(HEAD) init/main.o init/version.o init/do_mounts.o
+BTLIBS := $(CORE_FILES_NO_BTFIX) $(FILESYSTEMS) \
+	$(DRIVERS) $(NETWORKS)
+
+GENFILES := include/linux/version.h include/linux/compile.h $(foreach dirname, $(CORE_FILES_NO_BTFIX), _dir_$(dir $(dirname)))
+.PHONY : $(GENFILES)
+GENFILES += $(BTOBJS)
+
+$(GENFILES):
+	$(MAKE) -C $(TOPDIR) $@
+
+vmlinux.o: $(GENFILES)
+	$(LD) -r $(patsubst %,$(TOPDIR)/%,$(BTOBJS)) \
+		--start-group \
+		$(patsubst %,$(TOPDIR)/%,$(BTLIBS)) \
+		$(LIBS) \
+		--end-group -o vmlinux.o
+
+btfix.s: btfixupprep vmlinux.o
+	$(OBJDUMP) -x vmlinux.o | ./btfixupprep > btfix.s
+
+btfix.o: btfix.s
+	$(CC) -c -o btfix.o btfix.s
+
+include $(TOPDIR)/Rules.make

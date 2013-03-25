@@ -2,14 +2,11 @@
    Rock Ridge extensions are embedded.  It is quite possible that other
    extensions are present on the disk, and this is fine as long as they
    all use SUSP */
-/*
- * Altered for word-aligned structure problems on ARM by Russell King.
- */
 
 struct SU_SP{
   unsigned char magic[2];
   unsigned char skip;
-};
+} __attribute__((packed));
 
 struct SU_CE{
   char extent[8];
@@ -23,11 +20,11 @@ struct SU_ER{
   unsigned char len_src;
   unsigned char ext_ver;
   char data[0];
-};
+} __attribute__((packed));
 
 struct RR_RR{
   char flags[1];
-};
+} __attribute__((packed));
 
 struct RR_PX{
   char mode[8];
@@ -46,17 +43,17 @@ struct SL_component{
   unsigned char flags;
   unsigned char len;
   char text[0];
-};
+} __attribute__((packed));
 
 struct RR_SL{
   unsigned char flags;
-  unsigned char __link,__dummy;
-};
+  struct SL_component link;
+} __attribute__((packed));
 
 struct RR_NM{
   unsigned char flags;
   char name[0];
-};
+} __attribute__((packed));
 
 struct RR_CL{
   char location[8];
@@ -68,11 +65,18 @@ struct RR_PL{
 
 struct stamp{
   char time[7];
-};
+} __attribute__((packed));
 
 struct RR_TF{
   char flags;
-  unsigned char __times[0];
+  struct stamp times[0];  /* Variable number of these beasts */
+} __attribute__((packed));
+
+/* Linux-specific extension for transparent decompression */
+struct RR_ZF{
+  char algorithm[2];
+  char parms[2];
+  char real_size[8];
 };
 
 /* These are the bits and their meanings for flags in the TF structure. */
@@ -101,6 +105,7 @@ struct rock_ridge{
     struct RR_CL CL;
     struct RR_PL PL;
     struct RR_TF TF;
+    struct RR_ZF ZF;
   } u;
 };
 

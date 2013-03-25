@@ -1,4 +1,4 @@
-/* $Id: dma.c,v 1.3 2000-07-25 01:24:33 gerg Exp $
+/* $Id: dma.c,v 1.7 1994/12/28 03:35:33 root Exp root $
  * linux/kernel/dma.c: A DMA channel allocator. Inspired by linux/kernel/irq.c.
  *
  * Written by Hennus Bergman, 1992.
@@ -12,9 +12,12 @@
 
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
 #include <asm/dma.h>
 #include <asm/system.h>
 
+ 
 
 /* A note on resource allocation:
  *
@@ -31,6 +34,14 @@
  * in the kernel.
  */
 
+
+spinlock_t dma_spin_lock = SPIN_LOCK_UNLOCKED;
+
+/*
+ *	If our port doesn't define this it has no PC like DMA
+ */
+
+#ifdef MAX_DMA_CHANNELS
 
 
 /* Channel n is busy iff dma_chan_busy[n].lock != 0.
@@ -50,7 +61,6 @@ static struct dma_chan dma_chan_busy[MAX_DMA_CHANNELS] = {
 	{ 0, 0 },
 #endif
 #ifndef CONFIG_UCLINUX
-	{ 0, 0 },
 	{ 0, 0 },
 	{ 1, "cascade" },
 	{ 0, 0 },
@@ -102,3 +112,21 @@ void free_dma(unsigned int dmanr)
 	}	
 
 } /* free_dma */
+
+#else
+
+int request_dma(unsigned int dmanr, const char *device_id)
+{
+	return -EINVAL;
+}
+
+void free_dma(unsigned int dmanr)
+{
+}
+
+int get_dma_list(char *buf)
+{	
+	strcpy(buf, "No DMA\n");
+	return 7;
+}
+#endif

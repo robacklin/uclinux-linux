@@ -13,7 +13,9 @@
  * enhanced by Bjoern Brauel and Roman Hodek
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
+#include <linux/kernel.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/keyboard.h>
@@ -21,18 +23,16 @@
 #include <linux/timer.h>
 #include <linux/kd.h>
 #include <linux/random.h>
+#include <linux/init.h>
+#include <linux/kbd_ll.h>
+#include <linux/kbd_kern.h>
 
 #include <asm/atariints.h>
 #include <asm/atarihw.h>
 #include <asm/atarikb.h>
-#include <asm/atari_mouse.h>
 #include <asm/atari_joystick.h>
 #include <asm/irq.h>
 
-extern int do_poke_blanked_console;
-extern void process_keycode (int);
-extern int ovsc_switchmode;
-unsigned char mach_keyboard_type;
 static void atakeyb_rep( unsigned long ignore );
 extern unsigned int keymap_count;
 
@@ -41,7 +41,15 @@ void (*atari_MIDI_interrupt_hook) (void);
 /* Hook for mouse driver */
 void (*atari_mouse_interrupt_hook) (char *);
 
-#define ATAKEY_CAPS	(58)
+/* variables for IKBD self test: */
+
+/* state: 0: off; >0: in progress; >1: 0xf1 received */
+static volatile int ikbd_self_test;
+/* timestamp when last received a char */
+static volatile unsigned long self_test_last_rcv;
+/* bitmap of keys reported as broken */
+static unsigned long broken_keys[128/(sizeof(unsigned long)*8)] = { 0, };
+
 #define BREAK_MASK	(0x80)
 
 /*
@@ -83,9 +91,14 @@ void (*atari_mouse_interrupt_hook) (char *);
  *      Alt + Down       -> Scroll forward console (if implemented)
  *      Alt + CapsLock   -> NumLock
  *
+ * ++Andreas:
+ *
+ *  - Help mapped to K_HELP
+ *  - Undo mapped to K_UNDO (= K_F246)
+ *  - Keypad Left/Right Parenthesis mapped to new K_PPAREN[LR]
  */
 
-static u_short ataplain_map[NR_KEYS] = {
+static u_short ataplain_map[NR_KEYS] __initdata = {
 	0xf200, 0xf01b, 0xf031, 0xf032, 0xf033, 0xf034, 0xf035, 0xf036,
 	0xf037, 0xf038, 0xf039, 0xf030, 0xf02d, 0xf03d, 0xf008, 0xf009,
 	0xfb71, 0xfb77, 0xfb65, 0xfb72, 0xfb74, 0xfb79, 0xfb75, 0xfb69,
@@ -98,13 +111,13 @@ static u_short ataplain_map[NR_KEYS] = {
 	0xf603, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
 	0xf600, 0xf200, 0xf115, 0xf07f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf121, 0xf11b, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf11b, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short atashift_map[NR_KEYS] = {
+static u_short atashift_map[NR_KEYS] __initdata = {
 	0xf200, 0xf01b, 0xf021, 0xf040, 0xf023, 0xf024, 0xf025, 0xf05e,
 	0xf026, 0xf02a, 0xf028, 0xf029, 0xf05f, 0xf02b, 0xf008, 0xf009,
 	0xfb51, 0xfb57, 0xfb45, 0xfb52, 0xfb54, 0xfb59, 0xfb55, 0xfb49,
@@ -117,15 +130,15 @@ static u_short atashift_map[NR_KEYS] = {
 	0xf118, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
 	0xf119, 0xf200, 0xf115, 0xf07f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf205, 0xf203, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf205, 0xf203, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short atactrl_map[NR_KEYS] = {
+static u_short atactrl_map[NR_KEYS] __initdata = {
 	0xf200, 0xf200, 0xf200, 0xf000, 0xf01b, 0xf01c, 0xf01d, 0xf01e,
-	0xf01f, 0xf07f, 0xf200, 0xf200, 0xf07f, 0xf200, 0xf008, 0xf200,
+	0xf01f, 0xf07f, 0xf200, 0xf200, 0xf01f, 0xf200, 0xf008, 0xf200,
 	0xf011, 0xf017, 0xf005, 0xf012, 0xf014, 0xf019, 0xf015, 0xf009,
 	0xf00f, 0xf010, 0xf01b, 0xf01d, 0xf201, 0xf702, 0xf001, 0xf013,
 	0xf004, 0xf006, 0xf007, 0xf008, 0xf00a, 0xf00b, 0xf00c, 0xf200,
@@ -136,32 +149,32 @@ static u_short atactrl_map[NR_KEYS] = {
 	0xf603, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
 	0xf600, 0xf200, 0xf115, 0xf07f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf121, 0xf202, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf202, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short atashift_ctrl_map[NR_KEYS] = {
+static u_short atashift_ctrl_map[NR_KEYS] __initdata = {
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf008, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf201, 0xf702, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf700, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf700, 0xf200,
-	0xf703, 0xf200, 0xf207, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf117,
+	0xf200, 0xf200, 0xf200, 0xf200, 0xf01f, 0xf200, 0xf008, 0xf200,
+	0xf011, 0xf017, 0xf005, 0xf012, 0xf014, 0xf019, 0xf015, 0xf009,
+	0xf00f, 0xf010, 0xf200, 0xf200, 0xf201, 0xf702, 0xf001, 0xf013,
+	0xf004, 0xf006, 0xf007, 0xf008, 0xf00a, 0xf00b, 0xf00c, 0xf200,
+	0xf200, 0xf200, 0xf700, 0xf200, 0xf01a, 0xf018, 0xf003, 0xf016,
+	0xf002, 0xf00e, 0xf00d, 0xf200, 0xf200, 0xf07f, 0xf700, 0xf200,
+	0xf703, 0xf200, 0xf207, 0xf100, 0xf101, 0xf102, 0xf103, 0xf104,
+	0xf105, 0xf106, 0xf107, 0xf108, 0xf109, 0xf200, 0xf200, 0xf117,
 	0xf603, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
-	0xf600, 0xf200, 0xf115, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
+	0xf600, 0xf200, 0xf115, 0xf07f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf11b, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short ataalt_map[NR_KEYS] = {
+static u_short ataalt_map[NR_KEYS] __initdata = {
 	0xf200, 0xf81b, 0xf831, 0xf832, 0xf833, 0xf834, 0xf835, 0xf836,
 	0xf837, 0xf838, 0xf839, 0xf830, 0xf82d, 0xf83d, 0xf808, 0xf809,
 	0xf871, 0xf877, 0xf865, 0xf872, 0xf874, 0xf879, 0xf875, 0xf869,
@@ -174,13 +187,13 @@ static u_short ataalt_map[NR_KEYS] = {
 	0xf20b, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
 	0xf20a, 0xf200, 0xf209, 0xf87f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf206, 0xf204, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf907,
+	0xf200, 0xf206, 0xf204, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf907,
 	0xf908, 0xf909, 0xf904, 0xf905, 0xf906, 0xf901, 0xf902, 0xf903,
 	0xf900, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short atashift_alt_map[NR_KEYS] = {
+static u_short atashift_alt_map[NR_KEYS] __initdata = {
 	0xf200, 0xf81b, 0xf821, 0xf840, 0xf823, 0xf824, 0xf825, 0xf85e,
 	0xf826, 0xf82a, 0xf828, 0xf829, 0xf85f, 0xf82b, 0xf808, 0xf809,
 	0xf851, 0xf857, 0xf845, 0xf852, 0xf854, 0xf859, 0xf855, 0xf849,
@@ -193,15 +206,15 @@ static u_short atashift_alt_map[NR_KEYS] = {
 	0xf118, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
 	0xf119, 0xf200, 0xf115, 0xf87f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf11b, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
 };
 
-static u_short atactrl_alt_map[NR_KEYS] = {
+static u_short atactrl_alt_map[NR_KEYS] __initdata = {
 	0xf200, 0xf200, 0xf200, 0xf800, 0xf81b, 0xf81c, 0xf81d, 0xf81e,
-	0xf81f, 0xf87f, 0xf200, 0xf200, 0xf87f, 0xf200, 0xf808, 0xf200,
+	0xf81f, 0xf87f, 0xf200, 0xf200, 0xf81f, 0xf200, 0xf808, 0xf200,
 	0xf811, 0xf817, 0xf805, 0xf812, 0xf814, 0xf819, 0xf815, 0xf809,
 	0xf80f, 0xf810, 0xf81b, 0xf81d, 0xf201, 0xf702, 0xf801, 0xf813,
 	0xf804, 0xf806, 0xf807, 0xf808, 0xf80a, 0xf80b, 0xf80c, 0xf200,
@@ -210,9 +223,9 @@ static u_short atactrl_alt_map[NR_KEYS] = {
 	0xf703, 0xf800, 0xf207, 0xf100, 0xf101, 0xf102, 0xf103, 0xf104,
 	0xf105, 0xf106, 0xf107, 0xf108, 0xf109, 0xf200, 0xf200, 0xf114,
 	0xf603, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
-	0xf600, 0xf200, 0xf115, 0xf07f, 0xf200, 0xf200, 0xf200, 0xf200,
+	0xf600, 0xf200, 0xf115, 0xf87f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf121, 0xf202, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf202, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
@@ -220,18 +233,18 @@ static u_short atactrl_alt_map[NR_KEYS] = {
 
 static u_short atashift_ctrl_alt_map[NR_KEYS] = {
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf808, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf201, 0xf702, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf700, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf700, 0xf200,
-	0xf703, 0xf200, 0xf207, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf117,
+	0xf200, 0xf200, 0xf200, 0xf200, 0xf81f, 0xf200, 0xf808, 0xf200,
+	0xf811, 0xf817, 0xf805, 0xf812, 0xf814, 0xf819, 0xf815, 0xf809,
+	0xf80f, 0xf810, 0xf200, 0xf200, 0xf201, 0xf702, 0xf801, 0xf813,
+	0xf804, 0xf806, 0xf807, 0xf808, 0xf80a, 0xf80b, 0xf80c, 0xf200,
+	0xf200, 0xf200, 0xf700, 0xf200, 0xf81a, 0xf818, 0xf803, 0xf816,
+	0xf802, 0xf80e, 0xf80d, 0xf200, 0xf200, 0xf87f, 0xf700, 0xf200,
+	0xf703, 0xf200, 0xf207, 0xf100, 0xf101, 0xf102, 0xf103, 0xf104,
+	0xf105, 0xf106, 0xf107, 0xf108, 0xf109, 0xf200, 0xf200, 0xf117,
 	0xf603, 0xf200, 0xf30b, 0xf601, 0xf200, 0xf602, 0xf30a, 0xf200,
-	0xf600, 0xf200, 0xf115, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
+	0xf600, 0xf200, 0xf115, 0xf87f, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
-	0xf200, 0xf200, 0xf200, 0xf028, 0xf029, 0xf30d, 0xf30c, 0xf307,
+	0xf200, 0xf1ff, 0xf11b, 0xf312, 0xf313, 0xf30d, 0xf30c, 0xf307,
 	0xf308, 0xf309, 0xf304, 0xf305, 0xf306, 0xf301, 0xf302, 0xf303,
 	0xf300, 0xf310, 0xf30e, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200,
 	0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200, 0xf200
@@ -261,16 +274,14 @@ static unsigned int key_repeat_delay = DEFAULT_KEYB_REP_DELAY;
 static unsigned int key_repeat_rate  = DEFAULT_KEYB_REP_RATE;
 
 static unsigned char rep_scancode;
-static struct timer_list atakeyb_rep_timer = { NULL, NULL, 0, 0, atakeyb_rep };
-
-extern struct pt_regs *pt_regs;
+static struct timer_list atakeyb_rep_timer = { function: atakeyb_rep };
 
 static void atakeyb_rep( unsigned long ignore )
 
 {
-	pt_regs = NULL;
+	kbd_pt_regs = NULL;
 
-	/* Disable keyboard it for the time we call process_keycode(), else a race
+	/* Disable keyboard for the time we call handle_scancode(), else a race
 	 * in the keyboard tty queue may happen */
 	atari_disable_irq( IRQ_MFP_ACIA );
 	del_timer( &atakeyb_rep_timer );
@@ -278,11 +289,11 @@ static void atakeyb_rep( unsigned long ignore )
 	/* A keyboard int may have come in before we disabled the irq, so
 	 * double-check whether rep_scancode is still != 0 */
 	if (rep_scancode) {
+		init_timer(&atakeyb_rep_timer);
 		atakeyb_rep_timer.expires = jiffies + key_repeat_rate;
-		atakeyb_rep_timer.prev = atakeyb_rep_timer.next = NULL;
 		add_timer( &atakeyb_rep_timer );
 
-		process_keycode (rep_scancode);
+		handle_scancode(rep_scancode, 1);
 	}
 
 	atari_enable_irq( IRQ_MFP_ACIA );
@@ -306,14 +317,14 @@ static void atakeyb_rep( unsigned long ignore )
  * because then the keyboard repeat strikes...
  */
 
-static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
+static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
 {
   u_char acia_stat;
   int scancode;
   int break_flag;
 
   /* save frame for register dump */
-  pt_regs = (struct pt_regs *)fp;
+  kbd_pt_regs = fp;
 
  repeat:
   if (acia.mid_ctrl & ACIA_IRQ)
@@ -328,14 +339,17 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
     {
 	/* a very fast typist or a slow system, give a warning */
 	/* ...happens often if interrupts were disabled for too long */
-	printk( "Keyboard overrun\n" );
+	printk( KERN_DEBUG "Keyboard overrun\n" );
 	scancode = acia.key_data;
 	/* Turn off autorepeating in case a break code has been lost */
 	del_timer( &atakeyb_rep_timer );
 	rep_scancode = 0;
-	if (IS_SYNC_CODE(scancode)) {
+	if (ikbd_self_test)
+	    /* During self test, don't do resyncing, just process the code */
+	    goto interpret_scancode;
+	else if (IS_SYNC_CODE(scancode)) {
 	    /* This code seem already to be the start of a new packet or a
-	     * single keycode */
+	     * single scancode */
 	    kb_state.state = KEYBOARD;
 	    goto interpret_scancode;
 	}
@@ -350,6 +364,7 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
     if (acia_stat & ACIA_RDRF)	/* received a character */
     {
 	scancode = acia.key_data;	/* get it or reset the ACIA, I'll get it! */
+	tasklet_schedule(&keyboard_tasklet);
       interpret_scancode:
 	switch (kb_state.state)
 	{
@@ -382,9 +397,46 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
 		kb_state.buf[0] = scancode;
 		break;
 
+	      case 0xF1:
+		/* during self-test, note that 0xf1 received */
+		if (ikbd_self_test) {
+		    ++ikbd_self_test;
+		    self_test_last_rcv = jiffies;
+		    break;
+		}
+		/* FALL THROUGH */
+		
 	      default:
 		break_flag = scancode & BREAK_MASK;
 		scancode &= ~BREAK_MASK;
+
+		if (ikbd_self_test) {
+		    /* Scancodes sent during the self-test stand for broken
+		     * keys (keys being down). The code *should* be a break
+		     * code, but nevertheless some AT keyboard interfaces send
+		     * make codes instead. Therefore, simply ignore
+		     * break_flag...
+		     * */
+		    int keyval = plain_map[scancode], keytyp;
+		    
+		    set_bit( scancode, broken_keys );
+		    self_test_last_rcv = jiffies;
+		    keyval = plain_map[scancode];
+		    keytyp = KTYP(keyval) - 0xf0;
+		    keyval = KVAL(keyval);
+
+		    printk( KERN_WARNING "Key with scancode %d ", scancode );
+		    if (keytyp == KT_LATIN || keytyp == KT_LETTER) {
+			if (keyval < ' ')
+			    printk( "('^%c') ", keyval + '@' );
+			else
+			    printk( "('%c') ", keyval );
+		    }
+		    printk( "is broken -- will be ignored.\n" );
+		    break;
+		}
+		else if (test_bit( scancode, broken_keys ))
+		    break;
 
 		if (break_flag) {
 		    del_timer( &atakeyb_rep_timer );
@@ -394,15 +446,10 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
 		    del_timer( &atakeyb_rep_timer );
 		    rep_scancode = scancode;
 		    atakeyb_rep_timer.expires = jiffies + key_repeat_delay;
-		    atakeyb_rep_timer.prev = atakeyb_rep_timer.next = NULL;
 		    add_timer( &atakeyb_rep_timer );
 		}
 
-		process_keycode( break_flag | scancode );
-		do_poke_blanked_console = 1;
-		mark_bh(CONSOLE_BH);
-		add_keyboard_randomness(scancode);
-
+		handle_scancode(scancode, !break_flag);
 		break;
 	    }
 	    break;
@@ -455,23 +502,6 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
 	}
     }
 
-#ifdef KEYB_WRITE_INTERRUPT
-    if (acia_stat & ACIA_TDRE)	/* transmit of character is finished */
-    {
-	if (kb_state.buf)
-	{
-	    acia.key_data = *kb_state.buf++;
-	    kb_state.len--;
-	    if (kb_state.len == 0)
-	    {
-		kb_state.buf = NULL;
-		if (!kb_state.kernel_mode)
-			/* unblock something */;
-	    }
-	}
-    }
-#endif
-
 #if 0
     if (acia_stat & ACIA_CTS)
 	/* cannot happen */;
@@ -482,32 +512,12 @@ static void keyboard_interrupt(int irq, struct pt_regs *fp, void *dummy)
 	printk("Error in keyboard communication\n");
     }
 
-    /* process_keycode() can take a lot of time, so check again if
+    /* handle_scancode() can take a lot of time, so check again if
 	 * some character arrived
 	 */
     goto repeat;
 }
 
-#ifdef KEYB_WRITE_INTERRUPT
-void ikbd_write(const char *str, int len)
-{
-    u_char acia_stat;
-
-    if (kb_stat.buf)
-	/* wait */;
-    acia_stat = acia.key_ctrl;
-    if (acia_stat & ACIA_TDRE)
-    {
-	if (len != 1)
-	{
-	    kb_stat.buf = str + 1;
-	    kb_stat.len = len - 1;
-	}
-	acia.key_data = *str;
-	/* poll */
-    }
-}
-#else
 /*
  * I write to the keyboard without using interrupts, I poll instead.
  * This takes for the maximum length string allowed (7) at 7812.5 baud
@@ -532,7 +542,6 @@ void ikbd_write(const char *str, int len)
 	}
     }
 }
-#endif
 
 /* Reset (without touching the clock) */
 void ikbd_reset(void)
@@ -754,59 +763,56 @@ void atari_kbd_leds (unsigned int leds)
  * Martin Rogge, 20 Aug 1995
  */
  
-int atari_keyb_init(void)
+int __init atari_keyb_init(void)
 {
     /* setup key map */
-    key_maps[0]  = ataplain_map;
-    key_maps[1]  = atashift_map;
+    memcpy(key_maps[0], ataplain_map, sizeof(plain_map));
+    memcpy(key_maps[1], atashift_map, sizeof(plain_map));
+    memcpy(key_maps[4], atactrl_map, sizeof(plain_map));
+    memcpy(key_maps[5], atashift_ctrl_map, sizeof(plain_map));
+    memcpy(key_maps[8], ataalt_map, sizeof(plain_map));
+    /* Atari doesn't have an altgr_map, so we can reuse its memory for
+       atashift_alt_map */
+    memcpy(key_maps[2], atashift_alt_map, sizeof(plain_map));
+    key_maps[9]  = key_maps[2];
     key_maps[2]  = 0; /* ataaltgr_map */
-    key_maps[4]  = atactrl_map;
-    key_maps[5]  = atashift_ctrl_map;
-    key_maps[8]  = ataalt_map;
-    key_maps[9]  = atashift_alt_map;
-    key_maps[12] = atactrl_alt_map;
+    memcpy(key_maps[12], atactrl_alt_map, sizeof(plain_map));
     key_maps[13] = atashift_ctrl_alt_map;
-    memcpy (plain_map, ataplain_map, sizeof(plain_map));
     keymap_count = 8;
 
     /* say that we don't have an AltGr key */
-    mach_keyboard_type = KB_84;
+    keyboard_type = KB_84;
 
     kb_state.state = KEYBOARD;
     kb_state.len = 0;
 
-    add_isr(IRQ_MFP_ACIA, keyboard_interrupt, IRQ_TYPE_SLOW, NULL,
-	    "keyboard/mouse/MIDI");
+    request_irq(IRQ_MFP_ACIA, keyboard_interrupt, IRQ_TYPE_SLOW,
+                "keyboard/mouse/MIDI", keyboard_interrupt);
 
     atari_turnoff_irq(IRQ_MFP_ACIA);
     do {
-	acia.key_ctrl = ACIA_RESET;		/* reset ACIA */
+	/* reset IKBD ACIA */
+	acia.key_ctrl = ACIA_RESET |
+			(atari_switches & ATARI_SWITCH_IKBD) ? ACIA_RHTID : 0;
 	(void)acia.key_ctrl;
 	(void)acia.key_data;
 
-	acia.mid_ctrl = ACIA_RESET;		/* reset other ACIA */
+	/* reset MIDI ACIA */
+	acia.mid_ctrl = ACIA_RESET |
+			(atari_switches & ATARI_SWITCH_MIDI) ? ACIA_RHTID : 0;
 	(void)acia.mid_ctrl;
 	(void)acia.mid_data;
 
 	/* divide 500kHz by 64 gives 7812.5 baud */
 	/* 8 data no parity 1 start 1 stop bit */
 	/* receive interrupt enabled */
-#ifdef KEYB_WRITE_INTERRUPT
-	/* RTS low, transmit interrupt enabled */
-	if (ovsc_switchmode == 1)
-	    acia.key_ctrl = (ACIA_DIV64|ACIA_D8N1S|ACIA_RHTIE|ACIA_RIE);
-	    /* switch on OverScan via keyboard ACIA */
-	else
-	    acia.key_ctrl = (ACIA_DIV64|ACIA_D8N1S|ACIA_RLTIE|ACIA_RIE);
-#else
-	/* RTS low, transmit interrupt disabled */
-	if (ovsc_switchmode == 1)
-	    acia.key_ctrl = (ACIA_DIV64|ACIA_D8N1S|ACIA_RHTID|ACIA_RIE);
-	else
-	    acia.key_ctrl = (ACIA_DIV64|ACIA_D8N1S|ACIA_RLTID|ACIA_RIE);
-#endif
+	/* RTS low (except if switch selected), transmit interrupt disabled */
+	acia.key_ctrl = (ACIA_DIV64|ACIA_D8N1S|ACIA_RIE) |
+			((atari_switches & ATARI_SWITCH_IKBD) ?
+			 ACIA_RHTID : ACIA_RLTID);
 	   
-	acia.mid_ctrl = ACIA_DIV16 | ACIA_D8N1S;
+	acia.mid_ctrl = ACIA_DIV16 | ACIA_D8N1S |
+			(atari_switches & ATARI_SWITCH_MIDI) ? ACIA_RHTID : 0;
     }
     /* make sure the interrupt line is up */
     while ((mfp.par_dt_reg & 0x10) == 0);
@@ -815,7 +821,18 @@ int atari_keyb_init(void)
     mfp.active_edge &= ~0x10;
     atari_turnon_irq(IRQ_MFP_ACIA);
 
+    ikbd_self_test = 1;
     ikbd_reset();
+    /* wait for a period of inactivity (here: 0.25s), then assume the IKBD's
+     * self-test is finished */
+    self_test_last_rcv = jiffies;
+    while (time_before(jiffies, self_test_last_rcv + HZ/4))
+	barrier();
+    /* if not incremented: no 0xf1 received */
+    if (ikbd_self_test == 1)
+	printk( KERN_ERR "WARNING: keyboard self test failed!\n" );
+    ikbd_self_test = 0;
+    
     ikbd_mouse_disable();
     ikbd_joystick_disable();
 
@@ -845,3 +862,16 @@ int atari_kbdrate( struct kbd_repeat *k )
 	
 	return( 0 );
 }
+
+int atari_kbd_translate(unsigned char keycode, unsigned char *keycodep, char raw_mode)
+{
+#ifdef CONFIG_MAGIC_SYSRQ
+        /* ALT+HELP pressed? */
+        if ((keycode == 98) && ((shift_state & 0xff) == 8))
+                *keycodep = 0xff;
+        else
+#endif
+                *keycodep = keycode;
+        return 1;
+}
+

@@ -27,13 +27,13 @@
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/head.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
+#include <linux/spinlock.h>
 #include <asm/dma.h>
 #include <asm/system.h>
 #include <asm/io.h>
@@ -45,9 +45,6 @@
 #include "psi_chip.h"
 
 #include<linux/stat.h>
-
-struct proc_dir_entry Proc_Scsi_Psi240i =
-	{ PROC_SCSI_PSI240I, 7, "psi240i", S_IFDIR | S_IRUGO | S_IXUGO, 2 };
 
 //#define DEBUG 1
 
@@ -129,7 +126,7 @@ static int WriteData (PADAPTER240I padapter)
 			outsw (pports[PORT_DATA], padapter->buffer, (USHORT)padapter->ide.ide.ide[2] * 256);
 			return 0;
 			}
-		}	while ( timer > jiffies );									// test for timeout
+		}	while ( time_after(timer, jiffies) );									// test for timeout
 
 	padapter->ide.ide.ides.cmd = 0;									// null out the command byte
 	return 1;
@@ -169,7 +166,7 @@ static UCHAR IdeCmd (PADAPTER240I padapter)
 
 			return 0;
 			}
-		}	while ( timer > jiffies );									// test for timeout
+		}	while ( time_after(timer, jiffies) );									// test for timeout
 
 	padapter->ide.ide.ides.cmd = 0;									// null out the command byte
 	return status;
@@ -264,7 +261,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	UCHAR				status;
 	int					z;
 
-	DEB(printk ("\npsi240i recieved interrupt\n"));
+	DEB(printk ("\npsi240i received interrupt\n"));
 
 	shost = PsiHost[irq - 10];
 	if ( !shost )
@@ -370,6 +367,14 @@ irqerror:;
 	SCpnt->result = DecodeError (shost, status);
 	SCpnt->scsi_done (SCpnt);
 	}
+static void do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+	{
+	unsigned long flags;
+
+	spin_lock_irqsave(&io_request_lock, flags);
+	Irq_Handler(irq, dev_id, regs);
+	spin_unlock_irqrestore(&io_request_lock, flags);
+	}
 /****************************************************************
  *	Name:	Psi240i_QueueCommand
  *
@@ -393,7 +398,7 @@ int Psi240i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	padapter->buffer = SCpnt->request_buffer;
 	if (done)
 		{
-		if ( !pdev->device || SCpnt->lun )
+		if ( !pdev->device )
 			{
 			SCpnt->result = DID_BAD_TARGET << 16;
 			done (SCpnt);
@@ -592,10 +597,12 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 			continue;
 
 		pshost = scsi_register (tpnt, sizeof(ADAPTER240I));
+		if(pshost == NULL)
+			continue;
 
 		save_flags (flags);
 		cli ();
-		if ( request_irq (chipConfig.irq, Irq_Handler, 0, "psi240i", NULL) )
+		if ( request_irq (chipConfig.irq, do_Irq_Handler, 0, "psi240i", NULL) )
 			{
 			printk ("Unable to allocate IRQ for PSI-240I controller.\n");
 			restore_flags (flags);
@@ -707,11 +714,10 @@ int Psi240i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	return 0;
 	}
 
+MODULE_LICENSE("GPL");
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = PSI240I;
+static Scsi_Host_Template driver_template = PSI240I;
 
 #include "scsi_module.c"
-#endif
 

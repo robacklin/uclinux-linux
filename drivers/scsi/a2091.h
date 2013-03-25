@@ -1,6 +1,7 @@
 #ifndef A2091_H
+#define A2091_H
 
-/* $Id: a2091.h,v 1.1.1.1 1999-11-22 03:47:27 christ Exp $
+/* $Id: a2091.h,v 1.4 1997/01/19 23:07:09 davem Exp $
  *
  * Header file for the Commodore A2091 Zorro II SCSI controller for Linux
  *
@@ -11,6 +12,7 @@
 #include <linux/types.h>
 
 int a2091_detect(Scsi_Host_Template *);
+int a2091_release(struct Scsi_Host *);
 const char *wd33c93_info(void);
 int wd33c93_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int wd33c93_abort(Scsi_Cmnd *);
@@ -28,37 +30,23 @@ int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 #define CAN_QUEUE 16
 #endif
 
-#ifdef HOSTS_C
-
-extern struct proc_dir_entry proc_scsi_a2091;
-
-#define A2091_SCSI {  /* next */                NULL,            \
-		      /* usage_count */         NULL,	         \
-		      /* proc_dir_entry */      &proc_scsi_a2091, \
-		      /* proc_info */           NULL,            \
-		      /* name */                "Commodore A2091/A590 SCSI", \
-		      /* detect */              a2091_detect,    \
-		      /* release */             NULL,            \
-		      /* info */                NULL,	         \
-		      /* command */             NULL,            \
-		      /* queuecommand */        wd33c93_queuecommand, \
-		      /* abort */               wd33c93_abort,   \
-		      /* reset */               wd33c93_reset,   \
-		      /* slave_attach */        NULL,            \
-		      /* bios_param */          NULL, 	         \
-		      /* can_queue */           CAN_QUEUE,       \
-		      /* this_id */             7,               \
-		      /* sg_tablesize */        SG_ALL,          \
-		      /* cmd_per_lun */	        CMD_PER_LUN,     \
-		      /* present */             0,               \
-		      /* unchecked_isa_dma */   0,               \
-		      /* use_clustering */      DISABLE_CLUSTERING }
-#else
+#define A2091_SCSI {  proc_name:	   "A2901", \
+		      name:                "Commodore A2091/A590 SCSI", \
+		      detect:              a2091_detect,    \
+		      release:             a2091_release,   \
+		      queuecommand:        wd33c93_queuecommand, \
+		      abort:               wd33c93_abort,   \
+		      reset:               wd33c93_reset,   \
+		      can_queue:           CAN_QUEUE,       \
+		      this_id:             7,               \
+		      sg_tablesize:        SG_ALL,          \
+		      cmd_per_lun:	   CMD_PER_LUN,     \
+		      use_clustering:      DISABLE_CLUSTERING }
 
 /*
  * if the transfer address ANDed with this results in a non-zero
  * result, then we can't use DMA.
- */ 
+ */
 #define A2091_XFER_MASK  (0xff000001)
 
 typedef struct {
@@ -101,7 +89,5 @@ typedef struct {
 #define ISTR_OE_INT		(1<<2)
 #define ISTR_FF_FLG		(1<<1)
 #define ISTR_FE_FLG		(1<<0)
-
-#endif /* else def HOSTS_C */
 
 #endif /* A2091_H */

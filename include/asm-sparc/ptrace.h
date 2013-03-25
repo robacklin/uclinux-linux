@@ -1,4 +1,4 @@
-/* $Id: ptrace.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $ */
+/* $Id: ptrace.h,v 1.25 1997/03/04 16:27:25 jj Exp $ */
 #ifndef _SPARC_PTRACE_H
 #define _SPARC_PTRACE_H
 
@@ -45,7 +45,6 @@ struct reg_window {
 	unsigned long ins[8];
 };
 
-
 /* A Sparc stack frame */
 struct sparc_stackf {
 	unsigned long locals[8];
@@ -59,7 +58,6 @@ struct sparc_stackf {
 
 #define TRACEREG_SZ   sizeof(struct pt_regs)
 #define STACKFRAME_SZ sizeof(struct sparc_stackf)
-#define REGWIN_SZ     sizeof(struct reg_window)
 
 #ifdef __KERNEL__
 #define user_mode(regs) (!((regs)->psr & PSR_PS))
@@ -71,36 +69,9 @@ extern void show_regs(struct pt_regs *);
 /* For assembly code. */
 #define TRACEREG_SZ       0x50
 #define STACKFRAME_SZ     0x60
-#define REGWIN_SZ         0x40
 #endif
 
-/* First generic task_struct offsets. sizeof(task_struct)=1576 */
-#define TASK_STATE        0x000
-#define TASK_PRIORITY     0x008
-#define TASK_SIGNAL       0x00c
-#define TASK_BLOCKED      0x010
-#define TASK_FLAGS        0x014
-#define TASK_SAVED_KSTACK 0x054
-#define TASK_KSTACK_PG    0x058
-
-/* Thread stuff. */
-#define THREAD_UMASK      0x210
-#define THREAD_SADDR      0x218
-#define THREAD_SDESC      0x21c
-#define THREAD_KSP        0x220
-#define THREAD_KPC        0x224
-#define THREAD_KPSR       0x228
-#define THREAD_KWIM       0x22c
-#define THREAD_FORK_KPSR  0x230
-#define THREAD_FORK_KWIM  0x234
-#define THREAD_REG_WINDOW 0x238
-#define THREAD_STACK_PTRS 0x438
-#define THREAD_W_SAVED    0x458
-#define THREAD_FLOAT_REGS 0x460
-#define THREAD_FSR        0x560
-#define THREAD_SIGSTK     0x5e8
-#define THREAD_MM     0x620
-#define THREAD_MM_CTX     0x008
+#include <asm/asm_offsets.h>
 
 /* These are for pt_regs. */
 #define PT_PSR    0x0

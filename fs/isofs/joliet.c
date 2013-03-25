@@ -8,33 +8,31 @@
 
 #include <linux/string.h>
 #include <linux/nls.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/iso_fs.h>
+#include <asm/unaligned.h>
 
 /*
- * Convert Unicode 16 to UTF8 or ascii.
+ * Convert Unicode 16 to UTF8 or ASCII.
  */
 static int
-uni16_to_x8(unsigned char *ascii, unsigned char *uni, int len,
-	    struct nls_table *nls)
+uni16_to_x8(unsigned char *ascii, u16 *uni, int len, struct nls_table *nls)
 {
-	unsigned char *ip, *op;
-	unsigned char ch, cl;
-	unsigned char *uni_page;
+	wchar_t *ip, ch;
+	unsigned char *op;
 
 	ip = uni;
 	op = ascii;
 
-	while ((*ip || ip[1]) && len) {
-		ch = *ip++;
-		cl = *ip++;
-
-		uni_page = nls->page_uni2charset[ch];
-		if (uni_page && uni_page[cl]) {
-			*op++ = uni_page[cl];
-		} else {
+	while ((ch = get_unaligned(ip)) && len) {
+		int llen;
+		ch = be16_to_cpu(ch);
+		if ((llen = nls->uni2char(ch, op, NLS_MAX_CHARSET_SIZE)) > 0)
+			op += llen;
+		else
 			*op++ = '?';
-		}
+		ip++;
+
 		len--;
 	}
 	*op = 0;
@@ -73,14 +71,11 @@ wcsntombs_be(__u8 *s, const __u8 *pwcs, int inlen, int maxlen)
 }
 
 int
-get_joliet_filename(struct iso_directory_record * de, struct inode * inode,
-		    unsigned char *outname)
+get_joliet_filename(struct iso_directory_record * de, unsigned char *outname, struct inode * inode)
 {
 	unsigned char utf8;
 	struct nls_table *nls;
 	unsigned char len = 0;
-	int i;
-	char c;
 
 	utf8 = inode->i_sb->u.isofs_sb.s_utf8;
 	nls = inode->i_sb->u.isofs_sb.s_nls_iocharset;
@@ -89,7 +84,7 @@ get_joliet_filename(struct iso_directory_record * de, struct inode * inode,
 		len = wcsntombs_be(outname, de->name,
 				   de->name_len[0] >> 1, PAGE_SIZE);
 	} else {
-		len = uni16_to_x8(outname, de->name,
+		len = uni16_to_x8(outname, (u16 *) de->name,
 				  de->name_len[0] >> 1, nls);
 	}
 	if ((len > 2) && (outname[len-2] == ';') && (outname[len-1] == '1')) {
@@ -97,20 +92,11 @@ get_joliet_filename(struct iso_directory_record * de, struct inode * inode,
 	}
 
 	/*
-	 * Windows doesn't like periods at the end of a name
+	 * Windows doesn't like periods at the end of a name,
+	 * so neither do we
 	 */
 	while (len >= 2 && (outname[len-1] == '.')) {
 		len--;
-	}
-
-        if (inode->i_sb->u.isofs_sb.s_name_check == 'r') {
-               for (i = 0; i < len; i++) {
-                       c = outname[i];
-                       /* lower case */
-                       if (c >= 'A' && c <= 'Z') c |= 0x20;
-                       if (c == ';') c = '.';
-                       outname[i] = c;
-               }
 	}
 
 	return len;

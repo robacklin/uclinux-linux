@@ -1,5 +1,7 @@
-#ifndef _M68K_SHM_H
-#define _M68K_SHM_H
+#ifndef _H8300_SHM_H
+#define _H8300_SHM_H
+
+#include <linux/config.h>
 
 /* format of page table entries that correspond to shared memory pages
    currently out in swap space (see also mm/swap.c):
@@ -12,8 +14,14 @@
    bit 31 (SHM_READ_ONLY) flag whether the page belongs to a read-only attach
 */
 /* on the m68k both bits 0 and 1 must be zero */
+/* format on the sun3 is similar, but bits 30, 31 are set to zero and all
+   others are reduced by 2. --m */
 
+#ifndef CONFIG_SUN3
 #define SHM_ID_SHIFT	9
+#else
+#define SHM_ID_SHIFT	7
+#endif
 #define _SHM_ID_BITS	7
 #define SHM_ID_MASK	((1<<_SHM_ID_BITS)-1)
 
@@ -21,4 +29,4 @@
 #define _SHM_IDX_BITS	15
 #define SHM_IDX_MASK	((1<<_SHM_IDX_BITS)-1)
 
-#endif /* _M68K_SHM_H */
+#endif /* _H8300_SHM_H */

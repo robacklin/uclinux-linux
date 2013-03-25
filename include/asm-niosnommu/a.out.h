@@ -1,8 +1,7 @@
-/* $Id: a.out.h,v 1.1 2003-02-26 04:13:06 gerg Exp $ */
-#ifndef __SPARC_A_OUT_H__
-#define __SPARC_A_OUT_H__
+#ifndef __NIOS_A_OUT_H__
+#define __NIOS_A_OUT_H__
 
-#define SPARC_PGSIZE    0x2000        /* Thanks to the sun4 architecture... */
+#define SPARC_PGSIZE    0x1000        /* Thanks to the sun4 architecture... */
 #define SEGMENT_SIZE    SPARC_PGSIZE  /* whee... */
 
 struct exec {
@@ -47,4 +46,4 @@ struct exec {
 
 #endif
 
-#endif /* __SPARC_A_OUT_H__ */
+#endif /* __NIOS_A_OUT_H__ */

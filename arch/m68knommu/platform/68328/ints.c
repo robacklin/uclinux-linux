@@ -6,7 +6,8 @@
  * for more details.
  *
  * Copyright 1996 Roman Zippel
- * Copyright 1999 D. Jeff Dionne <jeff@rt-control.com>
+ * Copyright 1999 D. Jeff Dionne <jeff@uclinux.org>
+ * Copyright 2000-2001 Lineo, Inc. D. Jefff Dionne <jeff@uClinux.org>
  */
 
 #include <linux/types.h>
@@ -26,39 +27,19 @@
 #define INTERNAL_IRQS (32)
 
 /* assembler routines */
-asmlinkage void system_call(void);
 asmlinkage void buserr(void);
-asmlinkage void trap(void);
-asmlinkage void trap3(void);
-asmlinkage void trap4(void);
-asmlinkage void trap5(void);
-asmlinkage void trap6(void);
-asmlinkage void trap7(void);
-asmlinkage void trap8(void);
-asmlinkage void trap9(void);
-asmlinkage void trap10(void);
-asmlinkage void trap11(void);
-asmlinkage void trap12(void);
-asmlinkage void trap13(void);
-asmlinkage void trap14(void);
-asmlinkage void trap15(void);
-asmlinkage void trap33(void);
-asmlinkage void trap34(void);
-asmlinkage void trap35(void);
-asmlinkage void trap36(void);
-asmlinkage void trap37(void);
-asmlinkage void trap38(void);
-asmlinkage void trap39(void);
-asmlinkage void trap40(void);
-asmlinkage void trap41(void);
-asmlinkage void trap42(void);
-asmlinkage void trap43(void);
-asmlinkage void trap44(void);
-asmlinkage void trap45(void);
-asmlinkage void trap46(void);
-asmlinkage void trap47(void);
+asmlinkage void exception3(void);
+asmlinkage void exception4(void);
+asmlinkage void exception5(void);
+asmlinkage void exception6(void);
+asmlinkage void exception7(void);
+asmlinkage void exception8(void);
+asmlinkage void exception9(void);
+asmlinkage void exception10(void);
+asmlinkage void exception11(void);
+asmlinkage void exception14(void);
+asmlinkage void exception15(void);
 asmlinkage void bad_interrupt(void);
-asmlinkage void inthandler(void);
 asmlinkage void inthandler1(void);
 asmlinkage void inthandler2(void);
 asmlinkage void inthandler3(void);
@@ -66,8 +47,11 @@ asmlinkage void inthandler4(void);
 asmlinkage void inthandler5(void);
 asmlinkage void inthandler6(void);
 asmlinkage void inthandler7(void);
+asmlinkage void system_call(void);
+asmlinkage void trap1(void);
+asmlinkage void trap15(void);
 
-extern void *_ramvec[];
+extern e_vector *_ramvec;
 
 /* irq node variables for the 32 (potential) on chip sources */
 static irq_node_t *int_irq_list[INTERNAL_IRQS];
@@ -89,33 +73,34 @@ void M68328_init_IRQ(void)
 {
 	int i;
 
-	/* set up the vectors */
-#if 0
-	_ramvec[2] = buserr;
-	_ramvec[3] = trap3;
-	_ramvec[4] = trap4;
-	_ramvec[5] = trap5;
-	_ramvec[6] = trap6;
-	_ramvec[7] = trap7;
-	_ramvec[8] = trap8;
-	_ramvec[9] = trap9;
-	_ramvec[10] = trap10;
-	_ramvec[11] = trap11;
-	_ramvec[12] = trap12;
-	_ramvec[13] = trap13;
-	_ramvec[14] = trap14;
-	_ramvec[15] = trap15;
-#endif
-	_ramvec[32] = system_call;
+        /* set up the vectors */
+        for (i=2; i < 32; ++i)
+                _ramvec[i] = bad_interrupt;
 
-	_ramvec[64] = bad_interrupt;
-	_ramvec[65] = inthandler1;
-	_ramvec[66] = inthandler2;
-	_ramvec[67] = inthandler3;
-	_ramvec[68] = inthandler4;
-	_ramvec[69] = inthandler5;
-	_ramvec[70] = inthandler6;
-	_ramvec[71] = inthandler7;
+        _ramvec[2] = buserr;
+        _ramvec[3] = exception3;
+        _ramvec[4] = exception4;
+        _ramvec[5] = exception5;
+        _ramvec[6] = exception6;
+        _ramvec[7] = exception7;
+        _ramvec[8] = exception8;
+        _ramvec[9] = exception9;
+        _ramvec[10] = exception10;
+        _ramvec[11] = exception11;
+        _ramvec[14] = exception14;
+        _ramvec[15] = exception15;
+        _ramvec[32] = system_call;
+        _ramvec[33] = trap1;
+        _ramvec[47] = trap15;
+
+        _ramvec[64] = bad_interrupt;
+        _ramvec[65] = inthandler1;
+        _ramvec[66] = inthandler2;
+        _ramvec[67] = inthandler3;
+        _ramvec[68] = inthandler4;
+        _ramvec[69] = inthandler5;
+        _ramvec[70] = inthandler6;
+        _ramvec[71] = inthandler7;
  
 	IVR = 0x40; /* Set DragonBall IVR (interrupt base) to 64 */
 
@@ -325,7 +310,7 @@ inline int M68328_do_irq(int vec, struct pt_regs *fp)
 		}
 
 		if (int_irq_list[irq] && int_irq_list[irq]->handler) {
-			int_irq_list[irq]->handler(irq | IRQ_MACHSPEC, int_irq_list[irq]->dev_id, fp);
+			int_irq_list[irq]->handler(irq, int_irq_list[irq]->dev_id, fp);
 			int_irq_count[irq]++;
 		} else {
 			printk("unregistered interrupt %d!\nTurning it off in the IMR...\n", irq);
@@ -366,3 +351,11 @@ void config_M68328_irq(void)
 	mach_get_irq_list    = M68328_get_irq_list;
 	mach_process_int     = M68328_do_irq;
 }
+
+
+void init_irq_proc(void);
+void init_irq_proc(void)
+{
+	/* Insert /proc/irq driver here */
+}
+

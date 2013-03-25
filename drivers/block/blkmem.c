@@ -1,9 +1,10 @@
 /* blkmem.c: Block access to memory spaces
  *
- * Copyright (C) 2000, 2001  Lineo Inc.  (www.lineo.com)   
- * Copyright (C) 1997, 1998  D. Jeff Dionne <jeff@lineo.ca>,
+ * Copyright (C) 2001  SnapGear Inc. <davidm@snapgear.com>
+ * Copyright (C) 2000  Lineo, Inc.  (www.lineo.com)   
+ * Copyright (C) 1997, 1998  D. Jeff Dionne <jeff@uclinux.org>,
  *                           Kenneth Albanowski <kjahds@kjahds.com>,
- * Copyright (C) 2000-2002   Greg Ungerer <gerg@snapgear.com>
+ * Copyright (C) 1999-2003   Greg Ungerer <gerg@snapgear.com>
  *
  * Based z2ram - Amiga pseudo-driver to access 16bit-RAM in ZorroII space
  * Copyright (C) 1994 by Ingo Wilken (Ingo.Wilken@informatik.uni-oldenburg.de)
@@ -14,22 +15,28 @@
  * copyright notice and this permission notice appear in supporting
  * documentation.  This software is provided "as is" without express or
  * implied warranty.
+ *
+ * NOV/2000 -- hacked for Linux kernel 2.2 and NETtel/x86 (gerg@snapgear.com)
+ * VZ Support/Fixes             Evan Stawnyczy <e@lineo.ca>
+ * SEP/2002 -- file_system_type & file_system_name added to the arena stucture
+ *             by Oleksandr Zhadan <Oleks@ArcturusNetworks.com>
+ * JUL/2003 Merged into latest (Phil Wilshire)
  */
 
-
+#include <linux/module.h>
 #include <linux/config.h>
 #include <linux/major.h>
-#include <linux/malloc.h>
-
-#define MAJOR_NR    BLKMEM_MAJOR
-
-#include <linux/blk.h>
-#include <linux/blkmem.h>
-#if defined(MODULE)
-#include <linux/module.h>
-#endif
-#include <asm/bitops.h>
-#include <asm/delay.h>
+#include <linux/slab.h>
+#include <linux/reboot.h>
+#include <linux/ledman.h>
+#include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
+#include <linux/tqueue.h>
+#include <linux/romfs_fs.h>
+#include <linux/cramfs_fs.h>
+#include <asm/semaphore.h>
+#include <asm/uaccess.h>
+#include <asm/io.h>
 
 #undef VERBOSE
 #undef DEBUG
@@ -37,8 +44,46 @@
 #define TRUE                  (1)
 #define FALSE                 (0)
 
+#define	BLKMEM_MAJOR	31
+
+#define MAJOR_NR BLKMEM_MAJOR
+
+#if defined(CONFIG_ARCH_CX821XX)
+#ifdef CONFIG_BD_TIBURON
+#define	FIXED_ROMARRAY	0x4b0000
+#else
+#define	FIXED_ROMARRAY	0x500000
+#endif
+#elif defined(CONFIG_ARCH_CNXT)
+#define	CONFIG_FLASH_SNAPGEAR	1
+#define DEVEL  1 /* everything in SDRAM for now */
+#endif
+
+// #define DEVICE_NAME "blkmem"
+#define DEVICE_REQUEST do_blkmem_request
+#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
+#define DEVICE_NO_RANDOM
+#define TIMEOUT_VALUE (6 * HZ)
+
+#include <linux/blkmem.h>
+#include <linux/blk.h>
+
+#ifdef CONFIG_LEDMAN
+#include <linux/ledman.h>
+#endif
+
+#include <asm/bitops.h>
+#include <asm/delay.h>
+#include <asm/semaphore.h>
+
 /*
  *	Timeout loop counter for FLASH operations.
+ *
+ * On the flash part on the M5272C3, it can take up to 60 seconds for a write
+ * in a non-ideal environment.  The counter above wasn't enough even in an
+ * ideal one.
  */
 #define	FTIMEOUT	990000000
 
@@ -47,123 +92,192 @@
  * Please, configure the ROMFS for your system here
  */
 
-#ifdef __i960__
-extern char __data_rom_start[];
-#define FIXED_ROMARRAY __data_rom_start
+
+/* Samsung S3C4510-SNDS100 arch */
+#ifdef CONFIG_BOARD_SNDS100
+extern char romfs_data[];
+extern char romfs_data_end[];
 #endif
 
-#if defined( CONFIG_M68328 ) || defined ( CONFIG_M68EZ328 )
+/* v850e; this config stuff is ugly, ugly, ugly! */
+#ifdef CONFIG_V850E
+#include <asm/blkmem.h>
+#endif
+
+#ifdef CONFIG_MICROBLAZE
+#include <asm/blkmem.h>
+#endif
+
+#if defined(CONFIG_ARCH_TA7S) || defined(CONFIG_ARCH_TA7V)
+#include <asm/arch/blkmem.h>
+#endif
+
+#ifdef CONFIG_ARCH_DM270
+#include <asm/arch/blkmem.h>
+#endif
+
+/* (es) */
+/* note: this is configured somewhere in arch/m68knommu/kernel/setup.c */
+/* does it need to be here? */
+#if defined( CONFIG_M68328 ) || defined ( CONFIG_M68EZ328 ) || defined( CONFIG_M68VZ328)
 #include <asm/shglports.h>
 #define CAT_ROMARRAY
 #endif
+/* (/es) */
 
 #if defined( CONFIG_PILOT ) && defined( CONFIG_M68EZ328 )
-# ifdef CONFIG_PILOT_INCROMFS
-   extern char _flashstart[];
-#  define FIXED_ROMARRAY _flashstart
-# else
-   #undef CAT_ROMARRAY /* we don't want this guy */
-   extern char _ebss[], _etext[], _edata[], _sdata[];
-#  ifdef CONFIG_RAMKERNEL
-#   define FIXED_ROMARRAY _ebss
-#  else
-#   define FIXED_ROMARRAY ((_etext) + ((_edata) - (_sdata)))
-#  endif
-# endif
+extern char _flashstart[];
+#define FIXED_ROMARRAY _flashstart
 #endif
 
-#if defined(CONFIG_MWI) 
-  #undef CAT_ROMARRAY
-  #if defined(CONFIG_ROMFS_FROM_ROM) && defined(CONFIG_RAMKERNEL)
-    /* get romfs from flash beginning at address 8 */
-    /* kernel is in ram */
-    #define FIXED_ROMARRAY ((unsigned long)8)
-  #elif defined(CONFIG_ROMFS_FROM_ROM) && defined(CONFIG_ROMKERNEL)
-    /* get romfs from flash beginning after the data section in flash */
-    /* kernel is in rom */
-    extern char __romfs[];
-    #define FIXED_ROMARRAY ((unsigned long) __romfs)
-  #elif !defined(CONFIG_ROMFS_FROM_ROM) && defined(CONFIG_RAMKERNEL)
-    /* romfs got copied after bss in ram */
-    /* kernel is in ram */
-    extern char _end[];
-    #define FIXED_ROMARRAY ((unsigned long)_end)
-  #elif !defined(CONFIG_ROMFS_FROM_ROM) && defined(CONFIG_ROMKERNEL)
-    /* '>' prompted and loaded romfs after bss in ram */
-    /* the same as in the upper case */
-    extern char _end[];
-    #define FIXED_ROMARRAY ((unsigned long)_end)
-  #endif
-#endif
-
-#ifdef CONFIG_UCSIMM
+/* (es) */
+#if defined(CONFIG_UCSIMM) || defined(CONFIG_UCDIMM) || defined (CONFIG_DRAGEN2) || defined (CONFIG_CWEZ328) || defined (CONFIG_CWVZ328)
 #define CAT_ROMARRAY
 #endif
+/* (/es) */
 
-#ifdef CONFIG_LEON_2
-extern char _etext[];
-#define FIXED_ROMARRAY	(_etext)
-#endif
-
-#if	defined(CONFIG_M68376) || defined(CONFIG_FR1000)
-extern char _ramend[];
-#define FIXED_ROMARRAY	(_ramend)
-#endif
-
-#if defined(CONFIG_M68EZ328ADS) || defined(CONFIG_ALMA_ANS) || \
-		defined(CONFIG_CWEZ328)
-#ifdef CONFIG_RAMKERNEL
+#ifdef CONFIG_M68EZ328ADS
+#ifdef CONFIG_M68EZ328ADS_RAM
 extern char _flashstart[];
 #define FIXED_ROMARRAY _flashstart
 #else
 #define CAT_ROMARRAY
-#endif
-#endif
-
-#ifdef CONFIG_ARCH_ATMEL
-//#define INTERNAL_ROMARRAY
-/*
- * If nothing has been selected,  then assume we are on
- * the armulator or some similar non-spec platform
- */
- #if !defined(INTERNAL_ROMARRAY) && !defined(FIXED_ROMARRAY)
- #define FIXED_ROMARRAY FLASH_MEM_BASE
- #endif
-#endif
+#endif 
+#endif 
 
 #ifdef CONFIG_ARCH_TRIO
 #define FIXED_ROMARRAY (char*)(3512*1024)
 #endif
 
-#ifdef CONFIG_ARCH_GBA
-extern int	_etext;
-extern int	_sdata;
-extern int	_edata;
+#ifdef CONFIG_EXCALIBUR
+extern char _romfs_start[];
+#define FIXED_ROMARRAY _romfs_start
 #endif
+
+#ifdef CONFIG_ALMA_ANS
+#ifdef CONFIG_ALMA_ANS_RAM
+extern char _flashstart[];
+#define FIXED_ROMARRAY _flashstart
+#else
+#define CAT_ROMARRAY
+#endif 
+#endif 
 
 #ifdef CONFIG_COLDFIRE
 #ifdef CONFIG_TELOS
 #define CAT_ROMARRAY
 #else
-/*
- *	The ROMfs sits after the kernel bss segment.
- */
 unsigned char *romarray;
 extern char _ebss;
 
+#ifndef CONFIG_ROMFS_FROM_ROM
+  #define FIXUP_ARENAS 	arena[0].address = (unsigned long) &_ebss;
+#else
+  #define FIXUP_ARENAS	{ \
+		register char *sp = (char *) arena[4].address; \
+		register char *ep = sp + arena[4].length; \
+		if (strncmp((char *) &_ebss, "-rom1fs-", 8) == 0) { \
+			sp = (char *) &_ebss; \
+		} else { \
+			while (sp < ep && strncmp(sp, "-rom1fs-", 8)) \
+				sp++; \
+			if (sp >= ep) \
+				sp = &_ebss; \
+		} \
+		arena[0].address = (unsigned long) sp; \
+	}
+#endif /* CONFIG_ROMFS_FROM_ROM */
+
 /*
- *	Stub out the LED functions for now.
+ *  Stub out the LED functions for now.
  */
-#define	SET_ALARM_LED(x)
-#define	GET_COMM_STATUS_LED(x)
-#define	SET_COMM_STATUS_LED(x)
-#define	SET_COMM_ERROR_LED(x)
-#endif /* not CONFIG_TELOS */
+#define SET_ALARM_LED(x)
+#define GET_COMM_STATUS_LED(x)
+#define SET_COMM_STATUS_LED(x)
+#define SET_COMM_ERROR_LED(x)
+#endif /* CONFIG_TELOS */
 #endif /* CONFIG_COLDFIRE */
 
-/* 2002-05-21 gc: */
-#if defined( CONFIG_SM2010 ) 
+
+#if defined(CONFIG_ARCH_DSC21) || defined(CONFIG_ARCH_ATMEL)
+#define FIXED_ROMARRAY (char *)(FLASH_MEM_BASE)
+#endif
+
+#if defined( CONFIG_M68360 )
 #define CAT_ROMARRAY
+#endif
+
+/*
+ *	Lineo hardware has similar FLASH layouts on all devices.
+ */
+#if defined(CONFIG_NETtel) ||	\
+    defined(CONFIG_eLIA) ||	\
+    defined(CONFIG_DISKtel) ||	\
+    defined(CONFIG_SECUREEDGEMP3) || \
+    defined(CONFIG_SE1100) || \
+    defined(CONFIG_GILBARCONAP)
+#define	CONFIG_FLASH_SNAPGEAR	1
+#endif
+
+#if defined(CONFIG_BOARD_UC5272) || \
+    defined(CONFIG_BOARD_UC5282) || \
+    defined(CONFIG_GELUNAR_M528X)
+#if !defined(CONFIG_ROMFS_IMAGE)
+extern char _image_start[];
+#define FIXED_ROMARRAY _image_start
+#undef FIXUP_ARENAS
+#else
+#define FIXUP_ARENAS  arena[0].address = (unsigned long) &_ebss;
+#endif
+#endif
+
+#if defined(CONFIG_MACH_UC5471DSP)
+#define FIXED_ROMARRAY 0x40000
+#undef FIXUP_ARENAS
+#endif
+
+
+#if defined(CONFIG_CPU_H8300H) || defined(CONFIG_CPU_H8S)
+#  if defined(CONFIG_INTELFLASH)
+#    define CONFIG_FLASH_SNAPGEAR	1
+     extern char _ebss;
+#    define FIXUP_ARENAS 	arena[0].address = ((unsigned long) &_ebss);
+#  else
+#    ifndef CONFIG_BLKDEV_RESERVE
+#      ifdef CONFIG_ROMKERNEL
+         extern char _blkimg[];
+#        define FIXED_ROMARRAY _blkimg
+#      else
+         extern char _ebss[];
+#        define FIXED_ROMARRAY _ebss
+#      endif
+#    else
+#      define FIXED_ROMARRAY (CONFIG_BLKDEV_RESERVE_ADDRESS)
+#    endif
+#  endif
+#endif
+
+#if defined(CONFIG_BOARD_SMDK40100)
+extern char __romfs_start[];
+#define FIXED_ROMARRAY __romfs_start
+#endif
+
+#if defined(CONFIG_CLIE)
+extern char _ebss;
+#define FIXUP_ARENAS  arena[0].address = (unsigned long) &_ebss;
+#endif
+
+#ifdef CONFIG_ARCH_WINBOND
+	// use Image #2 for ROMFS
+	#include <asm/arch/bootheader.h>
+#define FIXUP_ARENAS \
+	{ 				\
+	winbond_header *h;		\
+	h = find_winbond_part(2); 	\
+	if (h){ 			\
+	  arena[0].address = h->start;	\
+	  arena[0].length  = h->length;	\
+	}}
 #endif
 
 /******* END OF BOARD-SPECIFIC CONFIGURATION ************/
@@ -179,15 +293,15 @@ unsigned char *romarray;
 extern char __data_rom_start[];
 extern char _edata[];
 extern char __data_start[];
+#ifndef FIXUP_ARENAS
+#define FIXUP_ARENAS \
+	arena[0].address = (unsigned long)__data_rom_start + (unsigned long)_edata - (unsigned long)__data_start;
+#endif
 #endif
 
 #if defined(CONFIG_WATCHDOG)
 extern void watchdog_disable(void);
 extern void watchdog_enable(void);
-#endif
-
-#ifdef __H8300H__
-extern char _rootimage[];
 #endif
 
 #ifdef FIXED_ROMARRAY
@@ -217,10 +331,24 @@ void flash_amd8_pair_write(struct arena_t *, unsigned long, unsigned long, char 
 void flash_amd8_pair_erase(struct arena_t *, unsigned long);
 #endif
 
+#if defined(CONFIG_M5272C3) || defined(CONFIG_COBRA5272) || defined(CONFIG_COBRA5282)
+/*
+ *	M5272C3 evaluation board with 16bit AMD FLASH.
+ *	(The COBRA5272 has the same flash)
+ */
+static void flash_amd16_writeall(struct arena_t *, struct blkmem_program_t *);
+static void flash_amd16_write(struct arena_t *, unsigned long, unsigned long, char *);
+static void flash_amd16_erase(struct arena_t *, unsigned long);
+#define	flash_erase	flash_amd16_erase
+#define	flash_write	flash_amd16_write
+#define	flash_writeall	flash_amd16_writeall
+#endif
+
+
 #if defined(CONFIG_FLASH_SNAPGEAR)
 #if defined(CONFIG_INTELFLASH)
 /*
- *	SnapGear hardware with INTEL FLASH.
+ *	Lineo hardware with INTEL FLASH.
  */
 static void flash_intel_writeall(struct arena_t *, struct blkmem_program_t *);
 static void flash_intel_write(struct arena_t *, unsigned long, unsigned long, char *);
@@ -231,7 +359,7 @@ static void flash_intel_erase(struct arena_t *, unsigned long);
 #else
 #ifdef CONFIG_FLASH8BIT
 /*
- *	SnapGear hardware with 8bit AMD FLASH.
+ *	Lineo hardware with 8bit AMD FLASH.
  */
 static void flash_amd8_writeall(struct arena_t *, struct blkmem_program_t *);
 static void flash_amd8_write(struct arena_t *, unsigned long, unsigned long, char *);
@@ -241,7 +369,7 @@ static void flash_amd8_erase(struct arena_t *, unsigned long);
 #define	flash_writeall	flash_amd8_writeall
 #else
 /*
- *	SnapGear hardware with 16bit AMD FLASH (this is the default).
+ *	Lineo hardware with 16bit AMD FLASH (this is the default).
  */
 static void flash_amd16_writeall(struct arena_t *, struct blkmem_program_t *);
 static void flash_amd16_write(struct arena_t *, unsigned long, unsigned long, char *);
@@ -265,13 +393,10 @@ static void flash_amd16_erase(struct arena_t *, unsigned long);
 #define	flash_writeall	flash_amd16_writeall
 #endif
 
-#if defined(CONFIG_MWI) && defined(CONFIG_FLASH1MB)
-static void flash_amd16_writeall(struct arena_t *, struct blkmem_program_t *);
-static void flash_amd16_write(struct arena_t *, unsigned long, unsigned long, char *);
-static void flash_amd16_erase(struct arena_t *, unsigned long);
-#define	flash_erase	flash_amd16_erase
-#define	flash_write	flash_amd16_write
-#define	flash_writeall	flash_amd16_writeall
+#ifdef CONFIG_BLACKFIN
+extern char ramdisk_begin;
+extern char ramdisk_end;
+#define	FIXUP_ARENAS	arena[0].length=&ramdisk_end - &ramdisk_begin;
 #endif
 
 /* This array of structures defines the actual set of memory arenas, including
@@ -292,11 +417,16 @@ struct arena_t {
 	unsigned long blksize; /* Size of block that can be erased at one time, or 0 if N/A */
 	unsigned long unitsize;
 	unsigned char erasevalue; /* Contents of sectors when erased */
-
+	
 	/*unsigned int auto_erase_bits;
 	unsigned int did_erase_bits;*/
-
+        /* The following two are filled in by blkmem_init(): */
+	unsigned int  file_system_type;	  /* file system magic number, or 0 if N/A */
+	unsigned char file_system_name[8]; /* file system name, or "NONE" if N/A   */
 } arena[] = {
+#ifdef CONFIG_BLACKFIN
+	{0, &ramdisk_begin, 0},
+#endif
 
 #ifdef INTERNAL_ROMARRAY
 	{0, (unsigned long)romarray, sizeof(romarray)},
@@ -304,51 +434,62 @@ struct arena_t {
 
 #ifdef CAT_ROMARRAY
 	{0, 0, -1},
-#define FIXUP_ARENAS \
-        arena[0].address = (unsigned long)__data_rom_start + (unsigned long)_edata - (unsigned long)__data_start;
 #endif
 
-#ifdef CONFIG_ARCH_GBA
+#ifdef CONFIG_ARCH_WINBOND
 	{0, 0, -1},
-#define FIXUP_ARENAS \
-	arena[0].address = ((unsigned long) &_etext) + \
-		((unsigned long) &_edata) - ((unsigned long) &_sdata);
 #endif
 
 #ifdef FIXED_ROMARRAY
-#ifndef CONFIG_ROOT_NFS
-	{0, FIXED_ROMARRAY, -1},
+	{0, (unsigned long) FIXED_ROMARRAY, -1},
 #endif
+
+#ifdef CONFIG_BOARD_SNDS100
+	{0, romfs_data, -1},
+#endif
+
+#ifdef CONFIG_ARCH_DM270
+	{0, 0, -1},
+#endif
+
+#if defined(CONFIG_ARCH_CNXT) && !defined(CONFIG_ARCH_CX821XX)
+    /*  AM29LV004T flash
+     *  rom0 -- root file-system
+     */
+#ifdef DEVEL
+	/*
+	 * rom0 currently  in RAM
+	 */
+	{1, 0x800000, 0x100000,0,0, flash_write, flash_erase, 0x10000, 0x10000, 0xff},
+#else	
+	{1, 0x400000, 0x10000,0,0, flash_write, flash_erase, 0x10000, 0x10000, 0xff},
+	{1, 0x410000, 0xf0000,0,0, flash_write, flash_erase, 0x10000, 0x10000, 0xff},
+	{1, 0x500000,0x100000,0,0, flash_write, flash_erase, 0x10000,0x10000,0xff},
+	{1, 0x600000,0x200000,0,0, flash_write, flash_erase,0x10000,0x10000,0xff},
+	{1, 0x801000,0xff000,0,0, flash_write,flash_erase,0xff000,0xff000,0xff},
+#endif
+
+#endif /* CONFIG_ARCH_CNXT*/
+
+#if (defined(CONFIG_CPU_H8300H) || defined(CONFIG_CPU_H8S)) && \
+		defined(CONFIG_INTELFLASH)
+    {0, 0, -1}, /* In RAM romfs */
+    {1,0x00000000,0x020000,0,0,flash_write,flash_erase,0x20000,0x20000,0xff},
+    {1,0x00020000,0x020000,0,0,flash_write,flash_erase,0x20000,0x20000,0xff},
+    {1,0x00040000,0x3c0000,0,0,flash_write,flash_erase,0x20000,0x20000,0xff},
+    {1,0x00000000,0x400000,0,0,flash_write,flash_erase,0x20000,0x20000,0xff},
 #endif
 
 #ifdef CONFIG_COLDFIRE
     /*
-     * The ROM file-system is RAM resident on the ColdFire eval boards.
-     * This arena is defined for access to it.
+     *	The ROM file-system is RAM resident on the ColdFire eval boards.
+     *	This arena is defined for access to it.
      */
     {0, 0, -1},
 
-#ifndef CONFIG_ROMFS_FROM_ROM
-  #define FIXUP_ARENAS 	arena[0].address = (unsigned long) &_ebss;
-#else
-  #define FIXUP_ARENAS	{ \
-		register char *sp = (char *) arena[4].address; \
-		register char *ep = sp + arena[4].length; \
-		if (strncmp((char *) &_ebss, "-rom1fs-", 8) == 0) { \
-			sp = (char *) &_ebss; \
-		} else { \
-			while (sp < ep && strncmp(sp, "-rom1fs-", 8)) \
-				sp++; \
-			if (sp >= ep) \
-				sp = &_ebss; \
-		} \
-		arena[0].address = (unsigned long) sp; \
-	}
-#endif /* CONFIG_ROMFS_FROM_ROM */
-
 #ifdef CONFIG_ARN5206
     /*
-     *  The spare FLASH segment on the Arnewsh 5206 board.
+     *	The spare FLASH segment on the Arnewsh 5206 board.
      */
     {1,0xffe20000,0x20000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x8000,0x20000,0xff},
 #endif
@@ -362,47 +503,119 @@ struct arena_t {
      *  rom4 -- FLASH SA8   16k spare
      *  rom5 -- FLASH SA9   16k spare
      *  rom6 -- FLASH SA10  32k spare
-     */ 
+     */
     {1,0xffe00000,0x20000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x20000,0x20000,0xff},
     {1,0xffe20000,0xc0000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x20000,0xc0000,0xff},
     {1,0xffee0000,0x10000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x10000,0x10000,0xff},
     {1,0xffef0000,0x4000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x4000,0x4000,0xff},
     {1,0xffef4000,0x4000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x4000,0x4000,0xff},
     {1,0xffef8000,0x8000,0,0,flash_amd8_pair_write,flash_amd8_pair_erase,0x8000,0x8000,0xff},
-#endif /* CONFIG_M5206eC3 */
+#endif /* CONFIG_ARNEWSH || CONFING_M5206eC3 */
 
-#if defined(CONFIG_FLASH_SNAPGEAR)
-#if defined(CONFIG_FLASH128K)
-    /*
-     *	SnapGear hardware with 128K FLASH.
-     *	The following devices are supported:
-     *		rom0 -- root file-system (actually in RAM)
-     *		rom1 -- FLASH boot block (16k)
-     *		rom2 -- FLASH boot arguments (16k)
-     *		rom3 -- FLASH MAC addresses (16k)
-     *		rom4 -- FLASH config file-system (64k)
-     *		rom6 -- FLASH spare block (16k)
-     *		rom5 -- FLASH the whole damn thing (128k)!
-     */
+#if defined(CONFIG_SIGNAL_MCP751)
+/*
+ *	Signal MCP751 board with 4MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block 
+ *		rom2 -- FLASH low boot chunks 
+ *		rom3 -- FLASH jbc
+ *		rom4 -- FLASH kernel+file-system binary 
+ *		rom5 -- FLASH user
+ *		rom6 -- FLASH user2
+ *		rom7 -- FLASH the whole thing (4MB)!
+ */
+    {1,0xff000000,0x020000,flash_writeall, 0, 0, 0,    0x02000,0x020000,0xff}, 
+    {1,0xff004000,0x002000,flash_writeall, 0, 0, 0,    0x02000,0x002000,0xff}, 
+    {1,0xff020000,0x020000,flash_writeall, 0, 0, 0,    0x10000,0x020000,0xff}, 
+    {1,0xff040000,0x180000,0,0,flash_write,flash_erase,0x10000,0x180000,0xff}, 
+    {1,0xff1c0000,0x140000,0,0,flash_write,flash_erase,0x10000,0x140000,0xff}, 
+    {1,0xff300000,0x100000,0,0,flash_write,flash_erase,0x10000,0x100000,0xff}, 
+    {1,0xff000000,0x400000,flash_writeall, 0, 0, 0,    0x10000,0x400000,0xff}, 
+#endif
+
+#if defined(CONFIG_M5272C3) || defined(CONFIG_COBRA5272)
+/*
+ *	Motorola M5272C3 evaluation board with 2MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (256k)
+ *		rom2 -- FLASH low boot chunks (32k total)
+ *		rom3 -- FLASH high large boot area hunk (224k)
+ *		rom4 -- FLASH kernel+file-system binary (1792k)
+ *		rom5 -- FLASH config file-system (top 1024k)
+ *		rom6 -- FLASH the whole thing (2MB)!
+ *
+ * (The COBRA5272 board has the same flash layout)
+ */
+    {1,0xffe00000,0x040000,flash_writeall, 0, 0, 0,    0x40000,0x040000,0xff},
+    {1,0xffe00000,0x008000,flash_writeall, 0, 0, 0,    0x08000,0x008000,0xff},
+    {1,0xffe08000,0x038000,0,0,flash_write,flash_erase,0x38000,0x038000,0xff},
+    {1,0xffe40000,0x1c0000,0,0,flash_write,flash_erase,0x40000,0x1c0000,0xff},
+    {1,0xfff00000,0x100000,0,0,flash_write,flash_erase,0x40000,0x100000,0xff},
+    {1,0xffe00000,0x200000,flash_writeall, 0, 0, 0,    0x40000,0x200000,0xff},
+#endif
+
+#if defined(CONFIG_COBRA5282)
+/*
+ *	senTec COBRA5282 board with 4MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (256k)
+ *		rom2 -- FLASH low boot chunks (32k total)
+ *		rom3 -- FLASH high large boot area hunk (224k)
+ *		rom4 -- FLASH kernel+file-system binary (3840k)
+ *		rom5 -- FLASH config file-system (top 1024k)
+ *		rom6 -- FLASH the whole thing (4MB)!
+ *
+ * (The COBRA5272 board has the same flash layout)
+ */
+    {1,0xffc00000,0x040000,flash_writeall, 0, 0, 0,    0x40000,0x040000,0xff},
+    {1,0xffc00000,0x008000,flash_writeall, 0, 0, 0,    0x08000,0x008000,0xff},
+    {1,0xffc08000,0x038000,0,0,flash_write,flash_erase,0x38000,0x038000,0xff},
+    {1,0xffc40000,0x3c0000,0,0,flash_write,flash_erase,0x40000,0x3c0000,0xff},
+    {1,0xffd00000,0x100000,0,0,flash_write,flash_erase,0x40000,0x100000,0xff},
+    {1,0xffc00000,0x400000,flash_writeall, 0, 0, 0,    0x40000,0x400000,0xff},
+#endif
+
+
+    
+#if defined(CONFIG_SE1100)
+/* SE1100 hardware has a slightly different layout to the standard
+ * snapgear image.  We've got a disproportionately large config area which
+ * we've splatted to the end of the flash, rather than the start.  This lets
+ * us adjust sizes more easily later but hurts if we change flash size.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (16k)
+ *		rom2 -- FLASH boot arguments (8k)
+ *		rom3 -- FLASH MAC addresses (8k)
+ *		rom4 -- FLASH kernel+file-system binary (1792k)
+ *		rom5 -- FLASH config file-system (192k)
+ *		rom6 -- FLASH the whole damn thing (2Mb)!
+ *		rom7 -- FLASH spare block (32k)
+ */
     {1,0xf0000000,0x004000,flash_writeall, 0, 0, 0,    0x04000,0x004000,0xff},
-    {1,0xf0004000,0x004000,0,0,flash_write,flash_erase,0x04000,0x004000,0xff},
-    {1,0xf0008000,0x004000,0,0,flash_write,flash_erase,0x04000,0x004000,0xff},
-    {1,0xf000c000,0x004000,0,0,flash_write,flash_erase,0x04000,0x004000,0xff},
-    {1,0xf0010000,0x010000,flash_writeall,0,flash_write,flash_erase,0x04000,0x010000,0xff},
-    {1,0xf0000000,0x020000,flash_writeall, 0, 0, 0,    0x04000,0x020000,0xff},
-#elif defined(CONFIG_FLASH8MB)
-    /*
-     *	SnapGear hardware with 8MB FLASH.
-     *	The following devices are supported:
-     *		rom0 -- root file-system (actually in RAM)
-     *		rom1 -- FLASH boot block (128k)
-     *		rom2 -- FLASH boot arguments (128k)
-     *		rom3 -- FLASH MAC addresses (128k)
-     *		rom4 -- FLASH kernel+file-system binary (7mb)
-     *		rom5 -- FLASH config file-system (512k)
-     *		rom6 -- FLASH the whole damn thing (8Mb)!
-     *		rom7 -- FLASH spare block (128k)
-     */
+    {1,0xf0004000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
+    {1,0xf0006000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
+    {1,0xf0010000,0x1c0000,flash_writeall, 0, 0, 0,    0x10000,0x1e0000,0xff},
+    {1,0xf01d0000,0x030000,0,0,flash_write,flash_erase,0x10000,0x010000,0xff},
+    {1,0xf0000000,0x200000,flash_writeall, 0, 0, 0,    0x10000,0x200000,0xff},
+    {1,0xf0008000,0x08000,flash_writeall,0,flash_write,flash_erase,0x08000,0x08000,0xff},
+#elif defined(CONFIG_FLASH_SNAPGEAR)
+#if defined(CONFIG_FLASH8MB)
+/*
+ *	SnapGear hardware with 8MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (128k)
+ *		rom2 -- FLASH boot arguments (128k)
+ *		rom3 -- FLASH MAC addresses (128k)
+ *		rom4 -- FLASH kernel+file-system binary (7mb)
+ *		rom5 -- FLASH config file-system (512k)
+ *		rom6 -- FLASH the whole damn thing (8Mb)!
+ *		rom7 -- FLASH spare block (128k)
+ */
     {1,0xf0000000,0x020000,flash_writeall, 0, 0, 0,    0x20000,0x020000,0xff},
     {1,0xf0020000,0x020000,0,0,flash_write,flash_erase,0x20000,0x020000,0xff},
     {1,0xf0040000,0x020000,0,0,flash_write,flash_erase,0x20000,0x020000,0xff},
@@ -410,21 +623,51 @@ struct arena_t {
     {1,0xf0080000,0x080000,0,0,flash_write,flash_erase,0x20000,0x080000,0xff},
     {1,0xf0000000,0x800000,flash_writeall, 0, 0, 0,    0x20000,0x800000,0xff},
     {1,0xf0060000,0x020000,flash_writeall,0,flash_write,flash_erase,0x20000,0x02000,0xff},
-#elif defined(CONFIG_FLASH2MB) || defined(CONFIG_FLASH4MB)
-    /*
-     *	SnapGear hardware with 2MB/4MB FLASH.
-     *	The following devices are supported:
-     *		rom0 -- root file-system (actually in RAM)
-     *		rom1 -- FLASH boot block (16k)
-     *		rom2 -- FLASH boot arguments (8k)
-     *		rom3 -- FLASH MAC addresses (8k)
-     *		rom4 -- FLASH kernel+file-system binary (1920k)
-     *		rom5 -- FLASH config file-system (64k)
-     *		rom6 -- FLASH the whole damn thing (2Mb)!
-     *		rom7 -- FLASH spare block (32k)
-     *		rom8 -- FLASH2 kernel+file-system binary (1920k) (4MB only)
-     *		rom9 -- FLASH2 the whole damn thing (2Mb)!
-     */
+#if defined(CONFIG_EXTRA_FLASH)
+/*
+ *		rom8 -- FLASH extra.
+ */
+    {1,0xf0800000,0x800000,flash_writeall, 0, 0, 0,  0x10000,0x800000,0xff},
+#endif /* CONFIG_EXTRA_FLASH */
+#elif defined(CONFIG_FLASH4MB)
+/*
+ *	SnapGear hardware with 4MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (16k)
+ *		rom2 -- FLASH boot arguments (8k)
+ *		rom3 -- FLASH MAC addresses (8k)
+ *		rom4 -- FLASH kernel+file-system binary (3920k)
+ *		rom5 -- FLASH config file-system (64k)
+ *		rom6 -- FLASH the whole damn thing (4Mb)!
+ *		rom7 -- FLASH spare block (32k)
+ */
+    {1,0xf0000000,0x004000,flash_writeall, 0, 0, 0,    0x04000,0x004000,0xff},
+    {1,0xf0004000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
+    {1,0xf0006000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
+    {1,0xf0020000,0x3e0000,flash_writeall, 0, 0, 0,    0x10000,0x3e0000,0xff},
+    {1,0xf0010000,0x010000,0,0,flash_write,flash_erase,0x10000,0x010000,0xff},
+    {1,0xf0000000,0x400000,flash_writeall, 0, 0, 0,    0x10000,0x400000,0xff},
+    {1,0xf0008000,0x08000,flash_writeall,0,flash_write,flash_erase,0x08000,0x08000,0xff},
+#if defined(CONFIG_EXTRA_FLASH)
+/*
+ *		rom8 -- FLASH extra.
+ */
+    {1,0xf0400000,0x400000,flash_writeall, 0, 0, 0,  0x10000,0x400000,0xff},
+#endif /* CONFIG_EXTRA_FLASH */
+#elif defined(CONFIG_FLASH2MB)
+/*
+ *	SnapGear hardware with primary 2MB FLASH.
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (16k)
+ *		rom2 -- FLASH boot arguments (8k)
+ *		rom3 -- FLASH MAC addresses (8k)
+ *		rom4 -- FLASH kernel+file-system binary (1920k)
+ *		rom5 -- FLASH config file-system (64k)
+ *		rom6 -- FLASH the whole damn thing (2Mb)!
+ *		rom7 -- FLASH spare block (32k)
+ */
     {1,0xf0000000,0x004000,flash_writeall, 0, 0, 0,    0x04000,0x004000,0xff},
     {1,0xf0004000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
     {1,0xf0006000,0x002000,0,0,flash_write,flash_erase,0x02000,0x002000,0xff},
@@ -432,23 +675,25 @@ struct arena_t {
     {1,0xf0010000,0x010000,0,0,flash_write,flash_erase,0x10000,0x010000,0xff},
     {1,0xf0000000,0x200000,flash_writeall, 0, 0, 0,    0x10000,0x200000,0xff},
     {1,0xf0008000,0x08000,flash_writeall,0,flash_write,flash_erase,0x08000,0x08000,0xff},
-#if defined(CONFIG_FLASH4MB)
-    {1,0xf0220000,0x1e0000,flash_writeall, 0, 0, 0,    0x10000,0x1e0000,0xff},
-    {1,0xf0200000,0x200000,flash_writeall, 0, 0, 0,    0x10000,0x200000,0xff},
-#endif
+#if defined(CONFIG_EXTRA_FLASH)
+/*
+ *		rom8 -- FLASH extra.
+ */
+    {1,0xf0200000,0x200000,flash_writeall, 0, 0, 0,  0x10000,0x200000,0xff},
+#endif /* CONFIG_EXTRA_FLASH */
 #else
-    /*
-     *	SnapGear hardware FLASH erase/program entry points (1MB FLASH).
-     *	The following devices are supported:
-     *		rom0 -- root file-system (actually in RAM)
-     *		rom1 -- FLASH boot block (16k)
-     *		rom2 -- FLASH boot arguments (8k)
-     *		rom3 -- FLASH MAC addresses (8k)
-     *		rom4 -- FLASH kernel+file-system binary (896k)
-     *		rom5 -- FLASH config file-system (64k)
-     *		rom6 -- FLASH the whole damn thing (1Mb)!
-     *		rom7 -- FLASH spare block (32k)
-     */
+/*
+ *	SnapGear hardware FLASH erase/program entry points (1MB FLASH).
+ *	The following devices are supported:
+ *		rom0 -- root file-system (actually in RAM)
+ *		rom1 -- FLASH boot block (16k)
+ *		rom2 -- FLASH boot arguments (8k)
+ *		rom3 -- FLASH MAC addresses (8k)
+ *		rom4 -- FLASH kernel+file-system binary (896k)
+ *		rom5 -- FLASH config file-system (64k)
+ *		rom6 -- FLASH the whole damn thing (1Mb)!
+ *		rom7 -- FLASH spare block (32k)
+ */
     {1,0xf0000000,0x04000,flash_writeall, 0, 0, 0,    0x04000,0x04000,0xff},
     {1,0xf0004000,0x02000,0,0,flash_write,flash_erase,0x02000,0x02000,0xff},
     {1,0xf0006000,0x02000,0,0,flash_write,flash_erase,0x02000,0x02000,0xff},
@@ -456,12 +701,12 @@ struct arena_t {
     {1,0xf00f0000,0x10000,0,0,flash_write,flash_erase,0x10000,0x10000,0xff},
     {1,0xf0000000,0x100000,flash_writeall, 0, 0, 0,  0x10000,0x100000,0xff},
     {1,0xf0008000,0x08000,flash_writeall,0,flash_write,flash_erase,0x08000,0x08000,0xff},
-#if defined(CONFIG_EXTRA_FLASH1MB)
-    /*
-     *		rom8 -- FLASH extra. where the NETtel3540 stores the dsl image
-     */
+#if defined(CONFIG_EXTRA_FLASH)
+/*
+ *		rom8 -- FLASH extra. where the NETtel3540 stores the dsl image
+ */
     {1,0xf0100000,0x100000,flash_writeall, 0, 0, 0,  0x10000,0x100000,0xff},
-#endif /* CONFIG_EXTRA_FLASH1MB */
+#endif /* CONFIG_EXTRA_FLASH */
 #endif /* CONFIG_FLASH2MB */
 #endif /* CONFIG_FLASH_SNAPGEAR */
 
@@ -537,37 +782,6 @@ struct arena_t {
 #endif /* CONFIG_COLDFIRE */
 
 
-
-#if defined(CONFIG_MWI) && defined(CONFIG_FLASH1MB)
-    /*
-     *	MWI hardware FLASH erase/program entry points (1MB FLASH).
-     *	The following devices are supported:
-     *		rom0 -- root file-system (actually in RAM)
-     *		rom1 -- FLASH boot block (16k)
-     *		rom2 -- FLASH boot arguments (8k)
-     *		rom3 -- FLASH MAC addresses (8k)
-     *		rom4 -- FLASH kernel+file-system binary (896k)
-     *		rom5 -- FLASH config file-system (64k)
-     *		rom6 -- FLASH the whole damn thing (1Mb)!
-     *		rom7 -- FLASH spare block (32k)
-     */
-    {1,0x000000, 0x100000, flash_writeall, 0, 0, 0,  0x10000, 0x100000, 0xff},
-#if 0
-    {1,0x000000, 0x004000, flash_writeall, 0, 0, 0,    0x04000, 0x04000, 0xff},
-    {1,0x004000, 0x002000, 0, 0, flash_write, flash_erase, 0x02000, 0x02000, 0xff},
-    {1,0x006000, 0x002000, 0, 0, flash_write, flash_erase, 0x02000, 0x02000, 0xff},
-    {1,0x010000, 0x0e0000, flash_writeall, 0, 0, 0,    0x10000, 0xe0000, 0xff},
-    {1,0x0f0000, 0x010000, 0, 0, flash_write, flash_erase, 0x10000, 0x10000, 0xff},
-    {1,0x000000, 0x100000, flash_writeall, 0, 0, 0,  0x10000, 0x100000, 0xff},
-    {1,0x008000, 0x008000, flash_writeall, 0, flash_write, flash_erase, 0x08000, 0x08000, 0xff},
-#endif
-#endif
-
-#ifdef __H8300H__
-	{0,_rootimage,-1},
-#endif
-
-
 #ifdef CONFIG_SHGLCORE
 
 #ifdef CONFIG_SHGLCORE_2MEG
@@ -593,15 +807,16 @@ struct arena_t {
 
 static int blkmem_blocksizes[arenas];
 static int blkmem_sizes[arenas];
+static devfs_handle_t devfs_handle;
 
 
 #if defined(CONFIG_ARNEWSH) || defined(CONFIG_M5206eC3)
 
-static struct semaphore spare_lock = MUTEX;
+static DECLARE_MUTEX(spare_lock);
 
 /*
- *	FLASH erase and programming routines for the AMD 8bit, odd/even
- *	FLASH pairs.
+ *	FLASH erase and programming routines for the odd/even FLASH
+ *	pair on the ColdFire eval boards.
  */
 
 void flash_amd8_pair_write(struct arena_t * a, unsigned long pos, unsigned long length, char * buffer)
@@ -671,7 +886,7 @@ void flash_amd8_pair_erase(struct arena_t * a, unsigned long pos)
   
 #if 0
     printk("%s(%d): flash_amd8_pair_erase(): addr:%x, len:%x, pos:%x\n",
-		__FILE__, __LINE__, a->address, a->length, pos);
+	__FILE__, __LINE__, a->address, a->length, pos);
 #endif
 
   if (pos >= a->length)
@@ -725,14 +940,37 @@ void flash_amd8_pair_erase(struct arena_t * a, unsigned long pos)
 #endif    /* CONFIG_ARNEWSH || CONFIG_M5206eC3 */
 
 /****************************************************************************/
-/*                      SNAPGEAR FLASH SUPPORT                              */
+/*                       SNAPGEAR FLASH SUPPORT                             */
 /****************************************************************************/
 
-#if defined(CONFIG_FLASH_SNAPGEAR) || defined(CONFIG_HW_FEITH) || (defined(CONFIG_MWI) && defined(CONFIG_FLASH1MB))
+#if defined(CONFIG_FLASH_SNAPGEAR) || defined(CONFIG_HW_FEITH) || defined(CONFIG_M5272C3) || defined(CONFIG_COBRA5272) || defined(CONFIG_COBRA5282)
 
-static struct semaphore spare_lock = MUTEX;
+static DECLARE_MUTEX(spare_lock);
 
-unsigned long flash_29lv800[] = { 0x4000, 0x2000, 0x2000, 0x8000 };
+/*
+ *	Offsets to support the small boot segments of bottom booter flash.
+ */
+unsigned long flash_bootsegs[] = {
+#if defined(CONFIG_FLASH4MB)
+	/* This supports the AMD 29lv320 -- 8 * 8k segments */
+	0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000,
+#else
+	/* This supports the AMD 29lv800, 29lv160, etc -- 16k + 8k + 8k + 32k */
+	0x4000, 0x2000, 0x2000, 0x8000,
+#endif
+};
+
+#if defined(CONFIG_FLASH2MB)
+#define	FLASHMASK	0x001fffff
+#elif defined(CONFIG_FLASH4MB)
+#define	FLASHMASK	0x003fffff
+#elif defined(CONFIG_FLASH8MB)
+#define	FLASHMASK	0x007fffff
+#elif defined(CONFIG_FLASH16MB)
+#define	FLASHMASK	0x00ffffff
+#else
+#define	FLASHMASK	0x000fffff
+#endif
 
 /*
  *	Support erasing and dumping to scratch FLASH segment.
@@ -748,19 +986,6 @@ void flash_writedump(char *buf, int len)
 {
 	flash_write(arena + 7, 0, len, (char *) buf);
 }
-
-#ifdef CONFIG_KEY
-void flash_readext(char *buf, unsigned long len)
-{
-	memcpy(buf, (arena+2)->address, len);
-}
-
-void flash_writeext(char *buf, unsigned long len)
-{
-	flash_erase(arena+2, 0);
-	flash_write(arena+2, 0, len, buf);
-}
-#endif
 
 /****************************************************************************/
 /*                            AMD 8bit FLASH                                */
@@ -799,20 +1024,11 @@ static void flash_amd8_erase(struct arena_t *a, unsigned long pos)
 #endif
 
   /* Erase this sector */
-#if CONFIG_FLASH128K
-  *((volatile unsigned char *) (fbase | 0x555)) = 0xaa;
-  *((volatile unsigned char *) (fbase | 0x2aa)) = 0x55;
-  *((volatile unsigned char *) (fbase | 0x555)) = 0x80;
-  *((volatile unsigned char *) (fbase | 0x555)) = 0xaa;
-  *((volatile unsigned char *) (fbase | 0x2aa)) = 0x55;
-#else
   *((volatile unsigned char *) (fbase | 0xaaa)) = 0xaa;
   *((volatile unsigned char *) (fbase | 0x555)) = 0x55;
   *((volatile unsigned char *) (fbase | 0xaaa)) = 0x80;
   *((volatile unsigned char *) (fbase | 0xaaa)) = 0xaa;
   *((volatile unsigned char *) (fbase | 0x555)) = 0x55;
-#endif
-
   *address = 0x30;
 
   for (i = 0; (i < FTIMEOUT); i++) {
@@ -865,15 +1081,9 @@ static void flash_amd8_write(struct arena_t * a, unsigned long pos, unsigned lon
     if (*address != *wbuf) {
       save_flags(flags); cli();
 
-#if CONFIG_FLASH128K
-      *((volatile unsigned char *) (fbase | 0x555)) = 0xaa;
-      *((volatile unsigned char *) (fbase | 0x2aa)) = 0x55;
-      *((volatile unsigned char *) (fbase | 0x555)) = 0xa0;
-#else
       *((volatile unsigned char *) (fbase | 0xaaa)) = 0xaa;
       *((volatile unsigned char *) (fbase | 0x555)) = 0x55;
       *((volatile unsigned char *) (fbase | 0xaaa)) = 0xa0;
-#endif
       *address = *wbuf;
 
       for (i = 0; (i < FTIMEOUT); i++) {
@@ -913,7 +1123,7 @@ static void flash_amd8_writeall(struct arena_t * a, struct blkmem_program_t * pr
   unsigned long		ptr, min, max;
   unsigned char		*w, status;
   int			failures;
-  int			i, j, k, l;
+  int			i, j, l;
 
 #if defined(CONFIG_WATCHDOG)
   watchdog_disable();
@@ -926,7 +1136,7 @@ static void flash_amd8_writeall(struct arena_t * a, struct blkmem_program_t * pr
   erased = 0;
 
   cli();
-
+  
   for (i = 0; (i < prog->blocks); i++) {
 
 #if 0
@@ -962,43 +1172,39 @@ flash_redo:
 #endif
 
       /* Erase this sector */
-#if CONFIG_FLASH128K
-      *((volatile unsigned char *) (base | 0x555)) = 0xaa;
-      *((volatile unsigned char *) (base | 0x2aa)) = 0x55;
-      *((volatile unsigned char *) (base | 0x555)) = 0x80;
-      *((volatile unsigned char *) (base | 0x555)) = 0xaa;
-      *((volatile unsigned char *) (base | 0x2aa)) = 0x55;
-#else
       *((volatile unsigned char *) (base | 0xaaa)) = 0xaa;
       *((volatile unsigned char *) (base | 0x555)) = 0x55;
       *((volatile unsigned char *) (base | 0xaaa)) = 0x80;
       *((volatile unsigned char *) (base | 0xaaa)) = 0xaa;
       *((volatile unsigned char *) (base | 0x555)) = 0x55;
-#endif
       *((volatile unsigned char *) ptr) = 0x30;
 
-      for (k = 0; (k < FTIMEOUT); k++) {
+      for (;;) {
 	status = *((volatile unsigned char *) ptr);
-	if ((status & 0x80) || (status & 0x20))
+	if (status & 0x80) {
+	  /* Erase complete */
 	  break;
-      }
-      if ((!(status & 0x80) && (status & 0x20)) || k >= FTIMEOUT) {
-	printk("FLASH: (%d) erase failed\n", __LINE__);
-	/* Reset FLASH unit */
-	*((volatile unsigned char *) base) = 0xf0;
-	failures++;
-	/* Continue (with unerased sector) */
+	}
+	if (status & 0x20) {
+	  printk("FLASH: (%d) erase failed\n", __LINE__);
+	  /* Reset FLASH unit */
+	  *((volatile unsigned char *) base) = 0xf0;
+	  failures++;
+	  /* Continue (with unerased sector) */
+	  break;
+	}
       }
 
       /*
-       *  The 29LV800 part has a bunch of small segments at the bottom.
-       *  These need to be erased individually, ugh...
+       * Some flash have a set of small segments at the top or bottom.
+       * These need to be erased individually, even better, different
+       * devices uses different segment sizes :-(
+       * This code currently only handles bottom booters...
        */
-      if (a->length > flash_29lv800[0]) {
-	if ((ptr & 0x1fffff) < 0x10000) {
-	  ptr += flash_29lv800[j++];
+      if ((ptr & FLASHMASK) < 64*1024) {
+	ptr += flash_bootsegs[j++];
+        if ((ptr - base) < a->length)
 	  goto flash_redo;
-	}
       }
 
       erased |= (0x1 << l);
@@ -1010,6 +1216,18 @@ flash_redo:
     min = prog->block[i].pos+a->address;
     max = prog->block[i].pos+prog->block[i].length+a->address;
     w = (unsigned char *) prog->block[i].data;
+
+    /* Progress indicators... */
+    printk(".");
+#ifdef CONFIG_LEDMAN
+	if (i & 1) {
+		ledman_cmd(LEDMAN_CMD_OFF, LEDMAN_NVRAM_1);
+		ledman_cmd(LEDMAN_CMD_ON,  LEDMAN_NVRAM_2);
+	} else {
+		ledman_cmd(LEDMAN_CMD_ON,  LEDMAN_NVRAM_1);
+		ledman_cmd(LEDMAN_CMD_OFF, LEDMAN_NVRAM_2);
+	}
+#endif
 
 #if 0
     printk("%s(%d): PROGRAM BLOCK min=%x max=%x\n", __FILE__, __LINE__,
@@ -1026,15 +1244,9 @@ flash_redo:
 	  __FILE__, __LINE__, (int) base, (int) offset, (int) ptr, (int) *w);
 #endif
 
-#if CONFIG_FLASH128K
-      *((volatile unsigned char *) (base | 0x555)) = 0xaa;
-      *((volatile unsigned char *) (base | 0x2aa)) = 0x55;
-      *((volatile unsigned char *) (base | 0x555)) = 0xa0;
-#else
       *((volatile unsigned char *) (base | 0xaaa)) = 0xaa;
       *((volatile unsigned char *) (base | 0x555)) = 0x55;
       *((volatile unsigned char *) (base | 0xaaa)) = 0xa0;
-#endif
       *((volatile unsigned char *) ptr) = *w;
 
       for (j = 0; (j < FTIMEOUT); j++) {
@@ -1056,6 +1268,11 @@ flash_redo:
     }
   }
 
+#ifdef CONFIG_LEDMAN
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_1);
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_2);
+#endif
+
   if (failures > 0) {
     printk("FLASH: %d failures programming FLASH!\n", failures);
     return;
@@ -1074,12 +1291,10 @@ flash_redo:
 /*                            AMD 16bit FLASH                               */
 /****************************************************************************/
 
-#endif
-
-#ifdef CONFIG_FLASH16BIT
+#else
 
 /*
- *	FLASH erase routine for the AMD 29LVX00 family devices.
+ *	FLASH erase routine for the AMD 29LVxxx family devices.
  */
 
 static void flash_amd16_erase(struct arena_t *a, unsigned long pos)
@@ -1089,7 +1304,7 @@ static void flash_amd16_erase(struct arena_t *a, unsigned long pos)
   unsigned long flags;
   unsigned short status;
   int i;
-
+  
 #if 0
   printk("%s(%d): flash_amd16_erase(a=%x,pos=%x)\n", __FILE__, __LINE__,
     (int) a, (int) pos);
@@ -1109,7 +1324,6 @@ static void flash_amd16_erase(struct arena_t *a, unsigned long pos)
 #endif
 
   /* Erase this sector */
-  /* FIX: check which byte lane the value needs to be on */
   *((volatile unsigned short *) (fbase | (0x555 << 1))) = 0xaaaa;
   *((volatile unsigned short *) (fbase | (0x2aa << 1))) = 0x5555;
   *((volatile unsigned short *) (fbase | (0x555 << 1))) = 0x8080;
@@ -1138,7 +1352,7 @@ static void flash_amd16_erase(struct arena_t *a, unsigned long pos)
 }
 
 /*
- *	FLASH programming routine for the 29LVX00 device family.
+ *	FLASH programming routine for the 29LVxxx device family.
  */
 
 static void flash_amd16_write(struct arena_t * a, unsigned long pos, unsigned long length, char * buffer)
@@ -1147,9 +1361,11 @@ static void flash_amd16_write(struct arena_t * a, unsigned long pos, unsigned lo
   unsigned long flags, fbase = a->address;
   unsigned short *wbuf, status;
   int i;
-
+  
+#if 0
   printk("%s(%d): flash_amd16_write(a=%x,pos=%x,length=%d,buf=%x)\n",
 	__FILE__, __LINE__, (int) a, (int) pos, (int) length, (int) buffer);
+#endif
 
   down(&spare_lock);
 
@@ -1160,8 +1376,9 @@ static void flash_amd16_write(struct arena_t * a, unsigned long pos, unsigned lo
   address = (unsigned volatile short *) (fbase + pos);
   wbuf = (unsigned short *) buffer;
 
+  length += 1;   /* Fix it so that an odd number of bytes gets written correctly */
   for (length >>= 1; (length > 0); length--, address++, wbuf++) {
-
+  
     if (*address != *wbuf) {
       save_flags(flags); cli();
 
@@ -1207,29 +1424,27 @@ static void flash_amd16_writeall(struct arena_t * a, struct blkmem_program_t * p
   unsigned long		ptr, min, max;
   unsigned short	*w, status;
   int			failures;
-  int			i, j, k, l;
+  int			i, j, l;
 
 #if defined(CONFIG_WATCHDOG)
   watchdog_disable();
 #endif
-
+  
+#if 0
   printk("FLASH: programming");
-
+#endif
   failures = 0;
   erased = 0;
 
   cli();
-
+  
   for (i = 0; (i < prog->blocks); i++) {
 
+#if 0
     printk("%s(%d): block=%d address=%x pos=%x length=%x range=%x-%x\n",
       __FILE__, __LINE__, i, (int) a->address, (int) prog->block[i].pos,
       (int) prog->block[i].length, (int) (prog->block[i].pos + a->address),
       (int) (prog->block[i].pos + prog->block[i].length - 1 + a->address));
-
-#if 0
-    if (prog->block[i].length > 0x100000)
-      break;
 #endif
 
     /*
@@ -1245,15 +1460,17 @@ static void flash_amd16_writeall(struct arena_t * a, struct blkmem_program_t * p
       ptr = l * a->blksize;
       offset = ptr % a->unitsize;
       base = ptr - offset;
-
+	
       base += a->address;
       ptr += a->address;
       j = 0;
 
 flash_redo:
 
+#if 0
       printk("%s(%d): ERASE BLOCK sector=%d base=%x offset=%x ptr=%x\n",
 	  __FILE__, __LINE__, l, (int) base, (int) offset, (int) ptr);
+#endif
 
       /* Erase this sector */
       /* FIX: check which byte lane the value needs to be on */
@@ -1264,28 +1481,32 @@ flash_redo:
       *((volatile unsigned short *) (base | (0x2aa << 1))) = 0x5555;
       *((volatile unsigned short *) ptr) = 0x3030;
 
-      for (k = 0; (k < FTIMEOUT); k++) {
+      for (;;) {
 	status = *((volatile unsigned short *) ptr);
-	if ((status & 0x0080) || (status & 0x0020))
+	if (status & 0x0080) {
+	  /* Erase complete */
 	  break;
-      }
-      if ((!(status & 0x0080) && (status & 0x0020)) || k >= FTIMEOUT) {
-	printk("FLASH: (%d) erase failed\n", __LINE__);
-	/* Reset FLASH unit */
-	*((volatile unsigned char *) base) = 0xf0f0;
-	failures++;
-	/* Continue (with unerased sector) */
+	}
+	if (status & 0x0020) {
+	  printk("FLASH: (%d) erase failed\n", __LINE__);
+	  /* Reset FLASH unit */
+	  *((volatile unsigned short *) base) = 0xf0f0;
+	  failures++;
+	  /* Continue (with unerased sector) */
+	  break;
+	}
       }
 
       /*
-       *  The 29LV800 part has a bunch of small segments at the bottom.
-       *  These need to be erased individually, ugh...
+       * Some flash have a set of small segments at the top or bottom.
+       * These need to be erased individually, even better, different
+       * devices uses different segment sizes :-(
+       * This code currently only handles bottom booters...
        */
-      if (a->length > flash_29lv800[0]) {
-	if ((ptr & 0x1fffff) < 0x10000) {
-	  ptr += flash_29lv800[j++];
+      if ((ptr & FLASHMASK) < 64*1024) {
+	ptr += flash_bootsegs[j++];
+        if ((ptr - base) < a->length)
 	  goto flash_redo;
-	}
       }
 
       erased |= (0x1 << l);
@@ -1298,16 +1519,32 @@ flash_redo:
     max = prog->block[i].pos+prog->block[i].length+a->address;
     w = (unsigned short *) prog->block[i].data;
 
+    /* Progress indicators... */
+    printk(".");
+#ifdef CONFIG_LEDMAN
+	if (i & 1) {
+		ledman_cmd(LEDMAN_CMD_OFF, LEDMAN_NVRAM_1);
+		ledman_cmd(LEDMAN_CMD_ON,  LEDMAN_NVRAM_2);
+	} else {
+		ledman_cmd(LEDMAN_CMD_ON,  LEDMAN_NVRAM_1);
+		ledman_cmd(LEDMAN_CMD_OFF, LEDMAN_NVRAM_2);
+	}
+#endif
+
+#if 0
     printk("%s(%d): PROGRAM BLOCK min=%x max=%x\n", __FILE__, __LINE__,
       (int) min, (int) max);
+#endif
 
     for (ptr = min; (ptr < max); ptr += 2, w++) {
-
+      
       offset = (ptr - a->address) % a->unitsize;
       base = ptr - offset;
 
+#if 0
       printk("%s(%d): PROGRAM base=%x offset=%x ptr=%x value=%x\n",
 	  __FILE__, __LINE__, (int) base, (int) offset, (int) ptr, (int) *w);
+#endif
 
       *((volatile unsigned short *) (base | (0x555 << 1))) = 0xaaaa;
       *((volatile unsigned short *) (base | (0x2aa << 1))) = 0x5555;
@@ -1333,13 +1570,19 @@ flash_redo:
     }
   }
 
+#ifdef CONFIG_LEDMAN
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_1);
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_2);
+#endif
+
   if (failures > 0) {
     printk("FLASH: %d failures programming FLASH!\n", failures);
     return;
   }
 
+#if 0
   printk("\nFLASH: programming successful!\n");
-
+#endif
   if (prog->reset) {
     printk("FLASH: rebooting...\n\n");
     HARD_RESET_NOW();
@@ -1351,6 +1594,12 @@ flash_redo:
 /****************************************************************************/
 /*                             INTEL FLASH                                  */
 /****************************************************************************/
+#if defined(CONFIG_INTELFLASH)
+#if defined(CONFIG_FLASH16BIT)
+	typedef unsigned short itype;
+#else
+	typedef unsigned char itype;
+#endif
 
 /*
  *	FLASH erase routine for the Intel Strata FLASH.
@@ -1358,10 +1607,10 @@ flash_redo:
 
 void flash_intel_erase(struct arena_t *a, unsigned long pos)
 {
-  unsigned volatile char *address;
+  volatile itype *address;
   unsigned long fbase = a->address;
   unsigned long flags;
-  unsigned char status;
+  itype status;
   int i;
   
 #if 0
@@ -1372,7 +1621,12 @@ void flash_intel_erase(struct arena_t *a, unsigned long pos)
   if (pos >= a->length)
     return;
 
-  address = (volatile unsigned char *) (fbase + pos);
+#ifdef CONFIG_LEDMAN
+    ledman_cmd(LEDMAN_CMD_OFF, (pos&0x20000) ? LEDMAN_NVRAM_1 : LEDMAN_NVRAM_2);
+    ledman_cmd(LEDMAN_CMD_ON, (pos&0x20000) ? LEDMAN_NVRAM_2 : LEDMAN_NVRAM_1);
+#endif
+
+  address = (volatile itype *) (fbase + pos);
 
   /* Mutex all access to FLASH memory */
   down(&spare_lock);
@@ -1382,7 +1636,22 @@ void flash_intel_erase(struct arena_t *a, unsigned long pos)
   watchdog_disable();
 #endif
 
-  /* Erase this sector */
+#if 0
+  /* add this in if you want sectors unlocked as you erase them */
+  /* Unlock this sector */
+  *address = 0x60;
+  *address = 0xd0;
+
+  for (i = 0; (i < FTIMEOUT); i++) {
+    status = *address;
+    if (status & 0x80)
+      break;
+  }
+
+  /* Restore FLASH to normal read mode */
+  *address = 0xff;
+#endif
+
   *address = 0x20;
   *address = 0xd0;
 
@@ -1395,7 +1664,7 @@ void flash_intel_erase(struct arena_t *a, unsigned long pos)
   /* Restore FLASH to normal read mode */
   *address = 0xff;
 
-  if (*address != 0xff) {
+  if (*address != (itype) 0xffff) {
      printk("FLASH: (%d): erase failed, address %p iteration=%d "
 		"status=%x\n", __LINE__, address, i, (int) status);
   }
@@ -1416,7 +1685,7 @@ void flash_intel_erase(struct arena_t *a, unsigned long pos)
 void flash_intel_write(struct arena_t * a, unsigned long pos, unsigned long length, char * buffer)
 {
   unsigned long		flags, ptr, min, max;
-  unsigned char		*lp, *lp0, status;
+  itype			*lp, *lp0, status;
   int			failures, j, k, l;
   
 #if 0
@@ -1432,7 +1701,7 @@ void flash_intel_write(struct arena_t * a, unsigned long pos, unsigned long leng
 
   min = (a->address + pos);
   max = min + length;
-  lp = (unsigned char *) buffer;
+  lp = (itype *) buffer;
 
   for (ptr = min; (ptr < max); ptr += l) {
 
@@ -1449,22 +1718,22 @@ void flash_intel_write(struct arena_t * a, unsigned long pos, unsigned long leng
 
       /* Program next buffer bytes */
       for (j = 0; (j < FTIMEOUT); j++) {
-	*((volatile unsigned char *) ptr) = 0xe8;
-	status = *((volatile unsigned char *) ptr);
+	*((volatile itype *) ptr) = 0xe8;
+	status = *((volatile itype *) ptr);
 	if (status & 0x80)
 	  break;
       }
       if ((status & 0x80) == 0)
 	goto writealldone;
 
-      *((volatile unsigned char *) ptr) = (l-1);
-      for (j = 0; (j < l); j++)
-	*((volatile unsigned char *) (ptr+j)) = *lp++;
+      *((volatile itype *) ptr) = (l-1)/sizeof(itype);
+      for (j = 0; j < l; j += sizeof(itype))
+	*((volatile itype *) (ptr+j)) = *lp++;
 
-      *((volatile unsigned char *) ptr) = 0xd0;
+      *((volatile itype *) ptr) = 0xd0;
 
       for (j = 0; (j < FTIMEOUT); j++) {
-	status = *((volatile unsigned char *) ptr);
+	status = *((volatile itype *) ptr);
 	if (status & 0x80) {
 	  /* Program complete */
 	  break;
@@ -1473,13 +1742,13 @@ void flash_intel_write(struct arena_t * a, unsigned long pos, unsigned long leng
 
 writealldone:
       /* Restore FLASH to normal read mode */
-      *((volatile unsigned char *) ptr) = 0xff;
+      *((volatile itype *) ptr) = 0xff;
 
-      for (k = 0; (k < l); k++, lp0++) {
-      	status = *((volatile unsigned char *) (ptr+k));
+      for (k = 0; k < l; k += sizeof(itype), lp0++) {
+      	status = *((volatile itype *) (ptr+k));
         if (status != *lp0) {
-		printk("FLASH: (%d): write failed, addr=%08x wrote=%02x "
-		"read=%02x cnt=%d len=%d\n",
+		printk("FLASH: (%d): write failed, addr=%08x wrote=%x "
+		"read=%x cnt=%d len=%d\n",
 		__LINE__, (int) (ptr+k), (int) *lp0, (int) status, j, l);
 		failures++;
 	}
@@ -1506,7 +1775,7 @@ void flash_intel_writeslow(struct arena_t * a, unsigned long pos, unsigned long 
   unsigned long flags, fbase = a->address;
   unsigned char *lbuf, status;
   int i;
-
+  
 #if 0
   printk("%s(%d): flash_intel_write(a=%x,pos=%x,length=%d,buf=%x)\n",
 	__FILE__, __LINE__, (int) a, (int) pos, (int) length, (int) buffer);
@@ -1649,6 +1918,13 @@ void flash_intel_writeall(struct arena_t * a, struct blkmem_program_t * prog)
     max = prog->block[i].pos+prog->block[i].length+a->address;
     lp = (unsigned char *) prog->block[i].data;
 
+    /* Progress indicators... */
+    printk(".");
+#ifdef CONFIG_LEDMAN
+    ledman_cmd(LEDMAN_CMD_OFF, (i & 1) ? LEDMAN_NVRAM_1 : LEDMAN_NVRAM_2);
+    ledman_cmd(LEDMAN_CMD_ON, (i & 1) ? LEDMAN_NVRAM_2 : LEDMAN_NVRAM_1);
+#endif
+
 #if 0
     printk("%s(%d): PROGRAM BLOCK min=%x max=%x\n", __FILE__, __LINE__,
       (int) min, (int) max);
@@ -1710,6 +1986,11 @@ intelwritealldone:
     }
   }
 
+#ifdef CONFIG_LEDMAN
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_1);
+  ledman_cmd(LEDMAN_CMD_RESET, LEDMAN_NVRAM_2);
+#endif
+
   if (failures > 0) {
     printk("FLASH: %d failures programming FLASH!\n", failures);
     return;
@@ -1724,14 +2005,15 @@ intelwritealldone:
   }
 }
 
+#endif /* defined(CONFIG_INTELFLASH) */
+/****************************************************************************/
 #endif /* CONFIG_FLASH_SNAPGEAR */
+/****************************************************************************/
 
-/****************************************************************************/
-/*                          SHGLCORE FLASH                                  */
-/****************************************************************************/
 
 #ifdef CONFIG_SHGLCORE
-static struct semaphore spare_lock = MUTEX;
+
+static DECLARE_MUTEX(spare_lock);
 
 void read_spare(struct arena_t * a, unsigned long pos, unsigned long length, char * buffer)
 {
@@ -1739,14 +2021,14 @@ void read_spare(struct arena_t * a, unsigned long pos, unsigned long length, cha
 #ifdef DEBUG
   printk("rsl\n");
 #endif
-
+  
   /* Mutex all access to FLASH */
   down(&spare_lock);
-
+  
 #ifdef DEBUG
   printk("rsld\n");
 #endif
-
+  
   /* Just copy the data into target buffer */
   memcpy( buffer, (void*)(a->address+pos), length);
 
@@ -2337,7 +2619,6 @@ void program_main(struct arena_t * a, struct blkmem_program_t * prog)
 }
 #endif /* CONFIG_SHGLCORE */
 
-/****************************************************************************/
 
 int general_program_func(struct inode * inode, struct file * file, struct arena_t * a, struct blkmem_program_t * prog)
 {
@@ -2368,31 +2649,41 @@ int general_program_func(struct inode * inode, struct file * file, struct arena_
     schedule();
   }
 
+#ifdef CONFIG_UCLINUX
   if (prog->reset)
   	HARD_RESET_NOW();
+#endif
   return 0;
 }
 
 
+#if 0
+
 static void complete_request(void * data);
 
-static struct tq_struct complete_tq = {0, 0, complete_request, NULL};
+static struct tq_struct complete_tq = {
+		routine: complete_request,
+		data: NULL
+};
 
 static void
 delay_request( void )
 {
-  queue_task(&complete_tq, &tq_scheduler);
+  schedule_task(&complete_tq);
 }
+
 
 static void
 complete_request( void * data)
 {
   unsigned long start;
   unsigned long len;
-  struct arena_t * a = arena + DEVICE_NR(CURRENT_DEV);
+  struct arena_t * a = arena + CURRENT_DEV;
 
   for(;;) {
   
+  INIT_REQUEST;
+
   /* sectors are 512 bytes */
   start = CURRENT->sector << 9;
   len  = CURRENT->current_nr_sectors << 9;
@@ -2400,35 +2691,43 @@ complete_request( void * data)
   /*printk("blkmem: re-request %d\n", CURRENT->cmd);*/
     
   if ( CURRENT->cmd == READ ) {
-    /*printk("BMre-Read: %lx:%lx > %p\n", a->address + start, len, CURRENT->buffer);*/
+    /*printk("BMre-Read: %lx:%lx > %p\n", a->address + start, len, * CURRENT->buffer);*/
+	if (a->read_func)
     a->read_func(a, start, len, CURRENT->buffer);
+	else {
+	printk("read from unreadable !\n");
+	asm volatile ("halt");
+	}
   }
   else if (CURRENT->cmd == WRITE) {
     /*printk("BMre-Write: %p > %lx:%lx\n", CURRENT->buffer, a->address + start, len);*/
+	if (a->write_func)
     a->write_func(a, start, len, CURRENT->buffer);
+	else {
+	printk("write to unwritable !\n");
+	asm volatile ("halt");
+	}
   }
   /*printk("ending blkmem request\n");*/
   end_request( TRUE );
   
-  INIT_REQUEST;
   }
-  
-#if 0
-  if (CURRENT)
-    do_blkmem_request(); /* Process subsequent requests */
-#endif
 }
+
+#endif
 
 
 static void
-do_blkmem_request( void )
+do_blkmem_request(request_queue_t *q)
 {
   unsigned long start;
   unsigned long len;
-  struct arena_t * a = arena + DEVICE_NR(CURRENT_DEV);
+  struct arena_t * a = arena + CURRENT_DEV;
+
 #if 0
   printk( KERN_ERR DEVICE_NAME ": request\n");
 #endif
+
   while ( TRUE ) {
     INIT_REQUEST;
     
@@ -2446,7 +2745,7 @@ do_blkmem_request( void )
       continue;
     }
 
-    /*printk("blkmem: request %d\n", CURRENT->cmd);*/
+    /*printk("blkmem: request %d\n", current->cmd);*/
     
     if ( ( CURRENT->cmd != READ ) 
 	 && ( CURRENT->cmd != WRITE ) 
@@ -2457,46 +2756,48 @@ do_blkmem_request( void )
     }
     
     if ( CURRENT->cmd == READ ) {
-      /*printk("BMRead %d, pid %d: %lx:%lx > %p\n", DEVICE_NR(CURRENT_DEV), current->pid, a->address + start, len, CURRENT->buffer);*/
       if (a->read_func) {
+#if 0
         delay_request();
         return;
-        /*a->read_func(a, start, len, CURRENT->buffer);*/
-      }
-      else
+#else
+        a->read_func(a, start, len, CURRENT->buffer);
+#endif
+      } else
         memcpy( CURRENT->buffer, (void*)(a->address + start), len );
-    }
-    else if (CURRENT->cmd == WRITE) {
-      /*printk("BMWrite %d: %p > %lx:%lx\n", DEVICE_NR(CURRENT_DEV), CURRENT->buffer, a->address + start, len);*/
+
+    } else if (CURRENT->cmd == WRITE) {
+
       if (a->write_func) {
+#if 0
         delay_request();
         return;
-        /*a->write_func(a, start, len, CURRENT->buffer);*/
+#else
+        a->write_func(a, start, len, CURRENT->buffer);
+#endif
       } else
         memcpy( (void*)(a->address + start), CURRENT->buffer, len );
     }
-    /*printk("ending blkmem request\n");*/
+
+    /* printk("ending blkmem request\n"); */
     end_request( TRUE );
   }
 }
 
-
 #ifdef MAGIC_ROM_PTR
 static int
-blkmem_romptr( struct inode *inode, struct file *filp, struct vm_area_struct * vma)
+blkmem_romptr( kdev_t dev, struct vm_area_struct * vma)
 {
-  struct arena_t * a = arena + MINOR(inode->i_rdev);
-  
+  struct arena_t * a = arena + MINOR(dev);
+  int len;
+
   if (a->read_func)
     return -ENOSYS; /* Can't do it, as this arena isn't in the main address space */
 
-  vma->vm_start = a->address + vma->vm_offset;
-  return 0;
-}
-#else
-static int
-blkmem_romptr( struct inode *inode, struct file *filp, struct vm_area_struct * vma)
-{
+  len = vma->vm_end - vma->vm_start;
+
+  vma->vm_start = a->address + (vma->vm_pgoff << PAGE_SHIFT);
+  vma->vm_end   = vma->vm_start + len;
   return 0;
 }
 #endif
@@ -2505,50 +2806,28 @@ static int blkmem_ioctl (struct inode *inode, struct file *file,
                          unsigned int cmd, unsigned long arg)
 {
   struct arena_t * a = arena + MINOR(inode->i_rdev);
-  int err;
 
   switch (cmd) {
+
   case BMGETSIZES:   /* Return device size in sectors */
-  
     if (!arg)
       return -EINVAL;
-    
-    err = verify_area(VERIFY_WRITE, (unsigned long *) arg, sizeof(unsigned long));
-    if (err)
-      return err;
-
-    put_user(a->blksize ? (a->length / a->blksize) : 0, (unsigned long *) arg);
-    
+    return(put_user(a->blksize ? (a->length / a->blksize) : 0, (unsigned long *) arg));
     break;
 
   case BMGETSIZEB:   /* Return device size in bytes */
-  
-    if (!arg)
-      return -EINVAL;
-    
-    err = verify_area(VERIFY_WRITE, (unsigned long *) arg, sizeof(unsigned long));
-    if (err)
-      return err;
-
-    put_user(a->length, (unsigned long *) arg);
-    
+    return(put_user(a->length, (unsigned long *) arg));
     break;
 
   case BMSERASE:
     if (a->erase_func) {
 
-#if 0
-      printk("Erase of sector at pos %lx of arena %d (address %p)\n", arg, MINOR(inode->i_rdev), (void*)(a->address+arg));
-#endif
       if (arg >= a->length)
         return -EINVAL;
     
       /* Mandatory flush of all dirty buffers */
       fsync_dev(inode->i_rdev);
       
-      /* Invalidate any buffers pointing to the section that will be erased */
-      invalidate_buffers_by_byte(inode->i_rdev, arg * a->blksize, a->blksize);
-
       /* Invoke erase function */
       a->erase_func(a, arg);
     } else
@@ -2556,70 +2835,59 @@ static int blkmem_ioctl (struct inode *inode, struct file *file,
     break;
     
   case BMSGSIZE:
-  
-    if (!arg)
-      return -EINVAL;
-  
-    err = verify_area(VERIFY_WRITE, (unsigned long*)arg, sizeof(unsigned long));
-    if (err)
-      return err;
-      
-    put_user(a->blksize, (unsigned long*)arg);
+    return(put_user(a->blksize, (unsigned long*)arg));
     break;
 
   case BMSGERASEVALUE:
-    err = verify_area(VERIFY_WRITE, (unsigned char*)arg, sizeof(unsigned char));
-    if (err)
-      return err;
-      
-    *(unsigned char*)arg = a->erasevalue;
+    return(put_user(a->erasevalue, (unsigned char *) arg));
     break;
 
   case BMPROGRAM:
   {
-    struct blkmem_program_t * prog;
-    int i;
-    if (!arg)
-      return -EINVAL;
-  
-    prog = (struct blkmem_program_t*)arg;
-    
-    /* Extensive checks to verify that the programming data makes sense */
-    
-    err = verify_area(VERIFY_READ, prog, sizeof(struct blkmem_program_t));
-    if (err)
-      return err;
+    struct blkmem_program_t *prog = NULL, dummy;
+    int i, rc = 0, size;
 
-    if ((prog->magic1 != BMPROGRAM_MAGIC_1) ||
-        (prog->magic2 != BMPROGRAM_MAGIC_2))
-      return -EINVAL;
+    if (copy_from_user(&dummy, (void *) arg, sizeof(dummy)))
+      return(-EFAULT);
 
-    err = verify_area(VERIFY_READ, prog, sizeof(struct blkmem_program_t) + sizeof(prog->block[0]) * prog->blocks);
-    if (err)
-      return err;
+    if ((dummy.magic1 != BMPROGRAM_MAGIC_1) ||
+        (dummy.magic2 != BMPROGRAM_MAGIC_2))
+      return(-EINVAL);
 
-    for(i=0;i<prog->blocks;i++)
-      if(prog->block[i].magic3 != BMPROGRAM_MAGIC_3)
-        return -EINVAL;
+	size = sizeof(dummy) + sizeof(dummy.block[0]) * dummy.blocks;
+
+    prog = (struct blkmem_program_t *) kmalloc(size, GFP_KERNEL);
+    if (prog == NULL)
+      return(-ENOMEM);
+
+    if (copy_from_user(prog, (void *) arg, size)) {
+      rc = -EFAULT;
+      goto early_exit;
+	}
+
+    for(i=0;i<prog->blocks;i++) {
+      if(prog->block[i].magic3 != BMPROGRAM_MAGIC_3) {
+        rc = -EINVAL;
+        goto early_exit;
+      }
+    }
 
     for(i=0;i<prog->blocks;i++)
       if ((prog->block[i].pos > a->length) ||
-          ((prog->block[i].pos+prog->block[i].length-1) > a->length))
-        return -EINVAL;
+          ((prog->block[i].pos+prog->block[i].length-1) > a->length)) {
+        rc = -EINVAL;
+        goto early_exit;
+      }
 
-    for(i=0;i<prog->blocks;i++) {
-      err = verify_area(VERIFY_READ, prog->block[i].data, prog->block[i].length);
-      if (err)
-        return err;
-    }
-
-    if (a->program_func) {
+    if (a->program_func)
       a->program_func(a, prog);
-    } else {
-      return general_program_func(inode, file, a, prog);
-    }
+    else
+      rc = general_program_func(inode, file, a, prog);
 
-    break;
+  early_exit:
+    if (prog)
+      kfree(prog);
+    return(rc);
   }
 
   default:
@@ -2635,9 +2903,9 @@ blkmem_open( struct inode *inode, struct file *filp )
   struct arena_t * a;
 
   device = DEVICE_NR( inode->i_rdev );
-#ifdef DEBUG
+
+#if 0
   printk( KERN_ERR DEVICE_NAME ": open: %d\n", device );
-  printk( "MINOR: %d\tarenas: %d\n", MINOR(device), arenas);
 #endif
 
   if ((MINOR(device) < 0) || (MINOR(device) >= arenas))  {
@@ -2647,17 +2915,13 @@ blkmem_open( struct inode *inode, struct file *filp )
   
   a = &arena[MINOR(device)];
 
-#ifdef DEBUG
-  printk("Open of blkmem arena %d at %lx, length %lx\n", MINOR(device), a->address, a->length);
-#endif
-
 #if defined(MODULE)
   MOD_INC_USE_COUNT;
 #endif
   return 0;
 }
 
-static void 
+static int 
 blkmem_release( struct inode *inode, struct file *filp )
 {
 #if 0
@@ -2670,40 +2934,24 @@ blkmem_release( struct inode *inode, struct file *filp )
   MOD_DEC_USE_COUNT;
 #endif
 
-  return;
+  return(0);
 }
 
-static struct file_operations blkmem_fops =
+static struct block_device_operations blkmem_fops=
 {
-  NULL,                   /* lseek - default */
-  block_read,             /* read - general block-dev read */
-  block_write,            /* write - general block-dev write */
-  NULL,                   /* readdir - bad */
-  NULL,                   /* poll */
-  blkmem_ioctl,           /* ioctl */
-  NULL,
-  blkmem_open,            /* open */
-  blkmem_release,         /* release */
-  block_fsync,            /* fsync */
-  NULL,			  /* fasync */
-  NULL,			  /* check media change */
-  NULL,			  /* revalidate */
+	open:		blkmem_open,
+	release:	blkmem_release,
+	ioctl:		blkmem_ioctl,
 #ifdef MAGIC_ROM_PTR
-  blkmem_romptr,          /* romptr */
-#else
-  NULL
+	romptr:		blkmem_romptr,
 #endif
 };
 
-int
-blkmem_init( void )
+
+int __init blkmem_init( void )
 {
   int i;
-  if ( register_blkdev( MAJOR_NR, DEVICE_NAME, &blkmem_fops )) {
-    printk( KERN_ERR DEVICE_NAME ": Unable to get major %d\n",
-            MAJOR_NR );
-    return -EBUSY;
-  }
+  unsigned long realaddrs[arenas];
 
 #ifdef FIXUP_ARENAS
   {
@@ -2712,65 +2960,114 @@ blkmem_init( void )
 #endif
 
   for(i=0;i<arenas;i++) {
-    if (arena[i].length == -1) {
-      /* Since genromfs fills the header in with network order longs, we need to read it as such. */
-      arena[i].length = ntohl(*(volatile unsigned long *)(arena[i].address + 8));
+
+    /*------------------------------------< Fill out the arena filesystem types >--*/
+    
+    if (strncmp((char *)arena[i].address, "-rom1fs-", 8) == 0) {
+      arena[i].file_system_type = ROMFS_MAGIC;
+      strcpy((char*)arena[i].file_system_name, "ROMFS");
+    } else if (strncmp((char *)(arena[i].address+0x10), 
+		       "Compressed ROMFS", 16) == 0) {
+      arena[i].file_system_type = CRAMFS_MAGIC;
+      strcpy((char*)arena[i].file_system_name, "CRAMFS");
+    } else {
+      arena[i].file_system_type = 0;
+      strcpy((char*)arena[i].file_system_name, "NONE");
     }
+
+    /*-----------------------< Find the length of the image, if not specified >--*/
+
+    if (arena[i].length == -1)
+	switch (arena[i].file_system_type) {
+	case ROMFS_MAGIC: 
+	  arena[i].length = 
+	    ntohl(*(volatile unsigned long *)(arena[i].address+8));
+	  break;
+
+	case CRAMFS_MAGIC:
+	  arena[i].length =
+	    (*(volatile unsigned long *)(arena[i].address+4));
+#if defined(__BIG_ENDIAN)
+	  arena[i].length = __swab32(arena[i].length);
+#endif
+	  break;
+
+	default:
+	  arena[i].length = 0;
+	}
+
     blkmem_blocksizes[i] = 1024;
     blkmem_sizes[i] = (arena[i].length + (1 << 10) - 1) >> 10; /* Round up */
     arena[i].length = blkmem_sizes[i] << 10;
+
+    realaddrs[i] = arena[i].address;
+    arena[i].address = (unsigned long) ioremap_nocache((int) arena[i].address, arena[i].length);
   }
 
-  printk("Blkmem copyright 1998,1999 D. Jeff Dionne\n"
-	 "Blkmem copyright 1998 Kenneth Albanowski\n"
-	 "Blkmem %d disk images:\n", (int) arenas);
+
+  printk("Blkmem copyright 1998,1999 D. Jeff Dionne\nBlkmem copyright 1998 Kenneth Albanowski\nBlkmem %d disk images:\n", (int) arenas);
 
   for(i=0;i<arenas;i++) {
-    printk("%d: %lX-%lX (%s)\n", i,
+    printk("%d: %lX-%lX [VIRTUAL %lX-%lX] (%s) <%s>\n", i,
+	realaddrs[i], realaddrs[i]+arena[i].length-1,
 	arena[i].address, arena[i].address+arena[i].length-1,
     	arena[i].rw 
     		? "RW"
-    		: "RO"
+	        : "RO",
+       arena[i].file_system_name
     );
   }
 
+  if (register_blkdev(MAJOR_NR, DEVICE_NAME, &blkmem_fops )) {
+    printk( KERN_ERR DEVICE_NAME ": Unable to get major %d\n",
+            MAJOR_NR );
+    return -EBUSY;
+  }
+
+  devfs_handle = devfs_mk_dir(NULL, "blkmem", NULL);
+  devfs_register_series(devfs_handle, "%u", arenas,
+      DEVFS_FL_DEFAULT, MAJOR_NR, 0, S_IFBLK | S_IRUSR | S_IWUSR,
+      &blkmem_fops, NULL);
+
+  blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), &do_blkmem_request);
+
   read_ahead[ MAJOR_NR ] = 0;
-  blk_dev[ MAJOR_NR ].request_fn = DEVICE_REQUEST;
   blksize_size[ MAJOR_NR ] = blkmem_blocksizes;
   blk_size[ MAJOR_NR ] = blkmem_sizes;
   
 #ifdef ROOT_ARENA
   ROOT_DEV = MKDEV(MAJOR_NR,ROOT_ARENA);
 #endif
-
+#if !defined(MODULE)
+#if !defined(CONFIG_COLDFIRE) && !defined(CONFIG_M68328) && !defined(CONFIG_EXCALIBUR) && !defined(CONFIG_ARCH_TA7S) && !defined(CONFIG_ARCH_TA7V)
+  /*if (MAJOR(ROOT_DEV) == FLOPPY_MAJOR) {*/
+  /*
+   * This used to set the minor # to 1, which didn't work...
+   * --gmcnutt
+   */
+#if !defined(CONFIG_ROOT_NFS)
+    ROOT_DEV = MKDEV(MAJOR_NR,0);
+#endif
+  /*}*/
+#endif
+#endif
   return 0;
 }
 
-#if defined(MODULE)
-
-int
-init_module( void )
+static void __exit
+blkmem_exit(void )
 {
-  int error;
-    
-  error = blkmem_init();
-  if ( error == 0 ) {
-    printk( KERN_INFO DEVICE_NAME ": loaded as module\n" );
-  }
-    
-  return error;
-}
+  int i;
 
-void
-cleanup_module( void )
-{
+  for(i=0;i<arenas;i++)
+      iounmap((void *) arena[i].address);
+
   if ( unregister_blkdev( MAJOR_NR, DEVICE_NAME ) != 0 )
     printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
-
-  if ( current_device != -1 ) {
-    /* free whatever we resources remain here */
-  }
-
-  return;
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+
+module_init(blkmem_init);
+module_exit(blkmem_exit);
+

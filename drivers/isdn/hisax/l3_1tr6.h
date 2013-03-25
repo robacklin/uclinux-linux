@@ -1,24 +1,12 @@
-/* $Id: l3_1tr6.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
+/* $Id: l3_1tr6.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- *  German 1TR6 D-channel protocol defines
+ * German 1TR6 D-channel protocol defines
  *
- * $Log: l3_1tr6.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.2  1998/09/27 13:06:46  keil
- * Apply most changes from 2.1.X (HiSax 3.1)
- *
- * Revision 1.1.2.1  1997/10/17 22:14:15  keil
- * update to last hisax version
- *
- * Revision 2.0  1997/07/27 21:15:47  keil
- * New Callref based layer3
- *
- * Revision 1.1  1996/10/13 20:03:48  keil
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
+
 #ifndef l3_1tr6
 #define l3_1tr6
 

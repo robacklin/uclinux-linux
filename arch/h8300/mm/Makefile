@@ -1,5 +1,5 @@
 #
-# Makefile for the uClinux (w/o MMU) H8/300H-specific parts of the memory manager.
+# Makefile for the linux m68k-specific parts of the memory manager.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -8,6 +8,6 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := mm.o
-O_OBJS	 := init.o fault.o memory.o
+obj-y	 := init.o fault.o memory.o kmap.o
 
 include $(TOPDIR)/Rules.make

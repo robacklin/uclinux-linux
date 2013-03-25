@@ -8,14 +8,9 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := ipc.o
-O_OBJS   := util.o
 
-ifdef CONFIG_KERNELD
-CONFIG_SYSVIPC=1
-endif
+obj-y   := util.o
 
-ifdef CONFIG_SYSVIPC
-O_OBJS += msg.o sem.o shm.o
-endif
+obj-$(CONFIG_SYSVIPC) += msg.o sem.o shm.o
 
 include $(TOPDIR)/Rules.make

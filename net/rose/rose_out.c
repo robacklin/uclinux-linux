@@ -1,7 +1,7 @@
 /*
  *	ROSE release 003
  *
- *	This code REQUIRES 2.1.0 or higher/ NET3.029
+ *	This code REQUIRES 2.1.15 or higher/ NET3.038
  *
  *	This module:
  *		This module is free software; you can redistribute it and/or
@@ -11,10 +11,10 @@
  *
  *	History
  *	ROSE 001	Jonathan(G4KLX)	Cloned from nr_out.c
+ *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
+ *					Removed M bit processing.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -48,6 +48,8 @@ static void rose_send_iframe(struct sock *sk, struct sk_buff *skb)
 
 	skb->data[2] |= (sk->protinfo.rose->vr << 5) & 0xE0;
 	skb->data[2] |= (sk->protinfo.rose->vs << 1) & 0x0E;
+
+	rose_start_idletimer(sk);
 
 	rose_transmit_link(skb, sk->protinfo.rose->neighbour);	
 }
@@ -87,6 +89,8 @@ void rose_kick(struct sock *sk)
 			break;
 		}
 
+		skb_set_owner_w(skbn, sk);
+
 		/*
 		 * Transmit the frame copy.
 		 */
@@ -103,7 +107,8 @@ void rose_kick(struct sock *sk)
 
 	sk->protinfo.rose->vl         = sk->protinfo.rose->vr;
 	sk->protinfo.rose->condition &= ~ROSE_COND_ACK_PENDING;
-	sk->protinfo.rose->timer      = 0;
+
+	rose_stop_timer(sk);
 }
 
 /*
@@ -120,7 +125,6 @@ void rose_enquiry_response(struct sock *sk)
 
 	sk->protinfo.rose->vl         = sk->protinfo.rose->vr;
 	sk->protinfo.rose->condition &= ~ROSE_COND_ACK_PENDING;
-	sk->protinfo.rose->timer      = 0;
-}
 
-#endif
+	rose_stop_timer(sk);
+}

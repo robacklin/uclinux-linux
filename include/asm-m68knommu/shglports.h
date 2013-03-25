@@ -1,6 +1,6 @@
 
 /* Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- *         1997, 1998  D. Jeff Dionne <jeff@lineo.ca>,
+ *         1997, 1998  D. Jeff Dionne <jeff@uClinux.org>,
  */
 
 #ifndef _M68K_SHGLPORTS_H

@@ -1,40 +1,9 @@
-/* $Id: isdnl1.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * $Log: isdnl1.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
+/* $Id: isdnl1.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Revision 1.4.2.7  1998/11/03 00:06:55  keil
- * certification related changes
- * fixed logging for smaller stack use
+ * Layer 1 defines
  *
- * Revision 1.4.2.6  1998/09/30 22:20:04  keil
- * Cosmetics
- *
- * Revision 1.4.2.5  1998/09/27 13:06:28  keil
- * Apply most changes from 2.1.X (HiSax 3.1)
- *
- * Revision 1.4.2.4  1998/05/27 18:05:49  keil
- * HiSax 3.0
- *
- * Revision 1.4.2.3  1997/12/01 09:09:08  keil
- * more l1 debug
- *
- * Revision 1.4.2.2  1997/11/15 18:50:40  keil
- * new common init function
- *
- * Revision 1.4.2.1  1997/10/17 22:13:58  keil
- * update to last hisax version
- *
- * Revision 2.2  1997/07/30 17:11:09  keil
- * L1deactivated exported
- *
- * Revision 2.1  1997/07/27 21:43:58  keil
- * new l1 interface
- *
- * Revision 2.0  1997/06/26 11:02:55  keil
- * New Layer and card interface
- *
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -46,6 +15,7 @@
 #define D_RX_MON1	5
 #define D_TX_MON0	6
 #define D_TX_MON1	7
+#define E_RCVBUFREADY	8
 
 #define B_RCVBUFREADY 0
 #define B_XMTBUFREADY 1

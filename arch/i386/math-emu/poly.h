@@ -3,9 +3,9 @@
  |                                                                           |
  |  Header file for the FPU-emu poly*.c source files.                        |
  |                                                                           |
- | Copyright (C) 1994                                                        |
+ | Copyright (C) 1994,1999                                                   |
  |                       W. Metzenthen, 22 Parker St, Ormond, Vic 3163,      |
- |                       Australia.  E-mail   billm@vaxc.cc.monash.edu.au    |
+ |                       Australia.  E-mail   billm@melbpc.org.au            |
  |                                                                           |
  | Declarations and definitions for functions operating on Xsig (12-byte     |
  | extended-significand) quantities.                                         |
@@ -55,26 +55,31 @@ asmlinkage void div_Xsig(Xsig *x1, const Xsig *x2, const Xsig *dest);
    actually be in-line.
    */
 
-/* Multiply two fixed-point 32 bit numbers. */
-extern inline void mul_32_32(const unsigned long arg1,
-			     const unsigned long arg2,
-			     unsigned long *out)
+/* Multiply two fixed-point 32 bit numbers, producing a 32 bit result.
+   The answer is the ms word of the product. */
+/* Some versions of gcc make it difficult to stop eax from being clobbered.
+   Merely specifying that it is used doesn't work...
+ */
+static inline unsigned long mul_32_32(const unsigned long arg1,
+				      const unsigned long arg2)
 {
-  asm volatile ("movl %1,%%eax; mull %2; movl %%edx,%0" \
-		:"=g" (*out) \
-		:"g" (arg1), "g" (arg2) \
-		:"ax","dx");
+  int retval;
+  asm volatile ("mull %2; movl %%edx,%%eax; " \
+		:"=a" (retval) \
+		:"0" (arg1), "g" (arg2) \
+		:"dx");
+  return retval;
 }
 
 
 /* Add the 12 byte Xsig x2 to Xsig dest, with no checks for overflow. */
-extern inline void add_Xsig_Xsig(Xsig *dest, const Xsig *x2)
+static inline void add_Xsig_Xsig(Xsig *dest, const Xsig *x2)
 {
-  asm volatile ("movl %1,%%edi; movl %2,%%esi;
-                 movl (%%esi),%%eax; addl %%eax,(%%edi);
-                 movl 4(%%esi),%%eax; adcl %%eax,4(%%edi);
-                 movl 8(%%esi),%%eax; adcl %%eax,8(%%edi);"
-                 :"=g" (*dest):"g" (dest), "g" (x2)
+  asm volatile ("movl %1,%%edi; movl %2,%%esi; " \
+                 "movl (%%esi),%%eax; addl %%eax,(%%edi); " \
+                 "movl 4(%%esi),%%eax; adcl %%eax,4(%%edi); " \
+                 "movl 8(%%esi),%%eax; adcl %%eax,8(%%edi); " \
+                 :"=g" (*dest):"g" (dest), "g" (x2) \
                  :"ax","si","di");
 }
 
@@ -83,34 +88,34 @@ extern inline void add_Xsig_Xsig(Xsig *dest, const Xsig *x2)
 /* Note: the constraints in the asm statement didn't always work properly
    with gcc 2.5.8.  Changing from using edi to using ecx got around the
    problem, but keep fingers crossed! */
-extern inline int add_two_Xsig(Xsig *dest, const Xsig *x2, long int *exp)
+static inline void add_two_Xsig(Xsig *dest, const Xsig *x2, long int *exp)
 {
-  asm volatile ("movl %2,%%ecx; movl %3,%%esi;
-                 movl (%%esi),%%eax; addl %%eax,(%%ecx);
-                 movl 4(%%esi),%%eax; adcl %%eax,4(%%ecx);
-                 movl 8(%%esi),%%eax; adcl %%eax,8(%%ecx);
-                 jnc 0f;
-		 rcrl 8(%%ecx); rcrl 4(%%ecx); rcrl (%%ecx)
-                 movl %4,%%ecx; incl (%%ecx)
-                 movl $1,%%eax; jmp 1f;
-                 0: xorl %%eax,%%eax;
-                 1:"
-		:"=g" (*exp), "=g" (*dest)
-		:"g" (dest), "g" (x2), "g" (exp)
-		:"cx","si","ax");
+  asm volatile ("movl %2,%%ecx; movl %3,%%esi; " \
+                 "movl (%%esi),%%eax; addl %%eax,(%%ecx); " \
+                 "movl 4(%%esi),%%eax; adcl %%eax,4(%%ecx); " \
+                 "movl 8(%%esi),%%eax; adcl %%eax,8(%%ecx); " \
+                 "jnc 0f; " \
+		 "rcrl 8(%%ecx); rcrl 4(%%ecx); rcrl (%%ecx); " \
+                 "movl %4,%%ecx; incl (%%ecx); " \
+                 "movl $1,%%eax; jmp 1f; " \
+                 "0: xorl %%eax,%%eax; " \
+                 "1: " \
+		:"=g" (*exp), "=g" (*dest) \
+		:"g" (dest), "g" (x2), "g" (exp) \
+		:"cx","si","ax"); 
 }
 
 
 /* Negate (subtract from 1.0) the 12 byte Xsig */
 /* This is faster in a loop on my 386 than using the "neg" instruction. */
-extern inline void negate_Xsig(Xsig *x)
+static inline void negate_Xsig(Xsig *x)
 {
-  asm volatile("movl %1,%%esi; "
-               "xorl %%ecx,%%ecx; "
-               "movl %%ecx,%%eax; subl (%%esi),%%eax; movl %%eax,(%%esi); "
-               "movl %%ecx,%%eax; sbbl 4(%%esi),%%eax; movl %%eax,4(%%esi); "
-               "movl %%ecx,%%eax; sbbl 8(%%esi),%%eax; movl %%eax,8(%%esi); "
+  asm volatile("movl %1,%%esi; " \
+               "xorl %%ecx,%%ecx; " \
+               "movl %%ecx,%%eax; subl (%%esi),%%eax; movl %%eax,(%%esi); " \
+               "movl %%ecx,%%eax; sbbl 4(%%esi),%%eax; movl %%eax,4(%%esi); " \
+               "movl %%ecx,%%eax; sbbl 8(%%esi),%%eax; movl %%eax,8(%%esi); " \
                :"=g" (*x):"g" (x):"si","ax","cx");
 }
 
-#endif _POLY_H
+#endif /* _POLY_H */

@@ -15,6 +15,7 @@
 
 /* Not the same as the bogus LINK_MAX in <linux/limits.h>. Oh well. */
 #define MINIX_LINK_MAX	250
+#define MINIX2_LINK_MAX	65530
 
 #define MINIX_I_MAP_SLOTS	8
 #define MINIX_Z_MAP_SLOTS	64
@@ -88,47 +89,45 @@ struct minix_dir_entry {
 
 #ifdef __KERNEL__
 
-extern int minix_lookup(struct inode * dir,const char * name, int len,
-                        struct inode ** result);
-extern int minix_create(struct inode * dir,const char * name, int len, int mode,
-	struct inode ** result);
-extern int minix_mkdir(struct inode * dir, const char * name, int len, int mode);
-extern int minix_rmdir(struct inode * dir, const char * name, int len);
-extern int minix_unlink(struct inode * dir, const char * name, int len);
-extern int minix_symlink(struct inode * inode, const char * name, int len,
-	const char * symname);
-extern int minix_link(struct inode * oldinode, struct inode * dir, const char * name, int len);
-extern int minix_mknod(struct inode * dir, const char * name, int len, int mode, int rdev);
-extern int minix_rename(struct inode * old_dir, const char * old_name, int old_len,
-	struct inode * new_dir, const char * new_name, int new_len, int must_be_dir);
-extern struct inode * minix_new_inode(const struct inode * dir);
+/*
+ * change the define below to 0 if you want names > info->s_namelen chars to be
+ * truncated. Else they will be disallowed (ENAMETOOLONG).
+ */
+#define NO_TRUNCATE 1
+
+extern struct minix_inode * minix_V1_raw_inode(struct super_block *, ino_t, struct buffer_head **);
+extern struct minix2_inode * minix_V2_raw_inode(struct super_block *, ino_t, struct buffer_head **);
+extern struct inode * minix_new_inode(const struct inode * dir, int * error);
 extern void minix_free_inode(struct inode * inode);
 extern unsigned long minix_count_free_inodes(struct super_block *sb);
-extern int minix_new_block(struct super_block * sb);
-extern void minix_free_block(struct super_block * sb, int block);
+extern int minix_new_block(struct inode * inode);
+extern void minix_free_block(struct inode * inode, int block);
 extern unsigned long minix_count_free_blocks(struct super_block *sb);
 
-extern int minix_bmap(struct inode *,int);
-
-extern struct buffer_head * minix_getblk(struct inode *, int, int);
-extern struct buffer_head * minix_bread(struct inode *, int, int);
-
+extern void V1_minix_truncate(struct inode *);
+extern void V2_minix_truncate(struct inode *);
 extern void minix_truncate(struct inode *);
-extern void minix_put_super(struct super_block *);
-extern struct super_block *minix_read_super(struct super_block *,void *,int);
-extern int init_minix_fs(void);
-extern void minix_write_super(struct super_block *);
-extern int minix_remount (struct super_block * sb, int * flags, char * data);
-extern void minix_read_inode(struct inode *);
-extern void minix_write_inode(struct inode *);
-extern void minix_put_inode(struct inode *);
-extern void minix_statfs(struct super_block *, struct statfs *, int);
 extern int minix_sync_inode(struct inode *);
-extern int minix_sync_file(struct inode *, struct file *);
+extern void minix_set_inode(struct inode *, dev_t);
+extern int V1_minix_get_block(struct inode *, long, struct buffer_head *, int);
+extern int V2_minix_get_block(struct inode *, long, struct buffer_head *, int);
+
+extern struct minix_dir_entry *minix_find_entry(struct dentry*, struct page**);
+extern int minix_add_link(struct dentry*, struct inode*);
+extern int minix_delete_entry(struct minix_dir_entry*, struct page*);
+extern int minix_make_empty(struct inode*, struct inode*);
+extern int minix_empty_dir(struct inode*);
+extern void minix_set_link(struct minix_dir_entry*, struct page*, struct inode*);
+extern struct minix_dir_entry *minix_dotdot(struct inode*, struct page**);
+extern ino_t minix_inode_by_name(struct dentry*);
+
+extern int minix_sync_file(struct file *, struct dentry *, int);
 
 extern struct inode_operations minix_file_inode_operations;
 extern struct inode_operations minix_dir_inode_operations;
-extern struct inode_operations minix_symlink_inode_operations;
+extern struct file_operations minix_file_operations;
+extern struct file_operations minix_dir_operations;
+extern struct dentry_operations minix_dentry_operations;
 
 #endif /* __KERNEL__ */
 

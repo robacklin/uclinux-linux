@@ -11,11 +11,13 @@
 #ifndef _M68K_TRAPS_H
 #define _M68K_TRAPS_H
 
-#include<linux/config.h>
+#ifndef __ASSEMBLY__
 
 typedef void (*e_vector)(void);
 
 extern e_vector vectors[];
+
+#endif
 
 #define VEC_BUSERR  (2)
 #define VEC_ADDRERR (3)
@@ -31,8 +33,14 @@ extern e_vector vectors[];
 #define VEC_COPROC  (13)
 #define VEC_FORMAT  (14)
 #define VEC_UNINT   (15)
-
-
+#define VEC_SPUR    (24)
+#define VEC_INT1    (25)
+#define VEC_INT2    (26)
+#define VEC_INT3    (27)
+#define VEC_INT4    (28)
+#define VEC_INT5    (29)
+#define VEC_INT6    (30)
+#define VEC_INT7    (31)
 #define VEC_SYS     (32)
 #define VEC_TRAP1   (33)
 #define VEC_TRAP2   (34)
@@ -59,28 +67,11 @@ extern e_vector vectors[];
 #define VEC_FPUNSUP (55)
 #define	VEC_UNIMPEA (60)
 #define	VEC_UNIMPII (61)
-
-#if defined (CONFIG_M68360) || defined (CONFIG_CPU32) || defined(CONFIG_M68000) || defined(CONFIG_M68332)
-#define VEC_SPUR    (24)
-#define VEC_INT1    (25)
-#define VEC_INT2    (26)
-#define VEC_INT3    (27)
-#define VEC_INT4    (28)
-#define VEC_INT5    (29)
-#define VEC_INT6    (30)
-#define VEC_INT7    (31)
-#else
-#define VEC_SPUR    (64)
-#define VEC_INT1    (65)
-#define VEC_INT2    (66)
-#define VEC_INT3    (67)
-#define VEC_INT4    (68)
-#define VEC_INT5    (69)
-#define VEC_INT6    (70)
-#define VEC_INT7    (71)
-#endif
+#define VEC_USER    (64)
 
 #define VECOFF(vec) ((vec)<<2)
+
+#ifndef __ASSEMBLY__
 
 /* Status register bits */
 #define PS_T  (0x8000)
@@ -143,7 +134,7 @@ extern e_vector vectors[];
 /* bus access transfer type codes */
 #define BA_TT_MOVE16    (0x08)
 
-#ifndef NO_MMU
+#ifndef NO_MM
 /* bits for 68040 MMU status register (mmusr) */
 #define MMU_B_040   (0x0800)
 #define MMU_G_040   (0x0400)
@@ -188,8 +179,7 @@ extern e_vector vectors[];
 #define MMU060_ERR_BITS	(MMU060_PBE | MMU060_SBE | MMU060_DESC_ERR | \
 						 MMU060_SP  | MMU060_WP  | MMU060_RE | \
 						 MMU060_WE)
-#endif
-
+#endif /* NO_MM */
 
 /* structure for stack frames */
 
@@ -254,15 +244,9 @@ struct frame {
 		    unsigned	   int6:12;
 		    unsigned short int7[18];
 	    } fmtb;
-	    struct {
-		    unsigned long  faddr;   /* faulted address */
-		    unsigned long  dbuf;
-		    unsigned long  pc;      /* current instruction PC */
-		    unsigned short itc;     /* internal transfer count */
-		    unsigned       code :2;
-		    unsigned       ssr :14; /* special status word */
-	    } fmtc;
     } un;
 };
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* _M68K_TRAPS_H */

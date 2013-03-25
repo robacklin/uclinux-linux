@@ -8,7 +8,7 @@
  * as this will also enable DMA across 64 KB boundaries.
  */
 
-/* $Id: dma.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $
+/* $Id: dma.h,v 1.7 1992/12/14 00:29:34 root Exp root $
  * linux/include/asm/dma.h: Defines for using and allocating dma channels.
  * Written by Hennus Bergman, 1992.
  * High DMA channel support & info by Hannu Savolainen
@@ -19,8 +19,8 @@
 #define _ASM_DMA_H
 
 #include <linux/config.h>
-
-#include <asm/io.h>		/* need byte IO */
+#include <linux/spinlock.h>
+#include <asm/io.h>
 
 #define dma_outb	outb
 #define dma_inb		inb
@@ -75,26 +75,52 @@
 
 #define MAX_DMA_CHANNELS	8
 
-#if defined(CONFIG_ALPHA_RUFFIAN)
-#define MAX_DMA_ADDRESS         (0xfffffc0001000000UL) /* yup, 16Mb :-( */
-#elif defined(CONFIG_ALPHA_XL)
-/* The maximum address that we can perform a DMA transfer to on Alpha XL,
-   due to a hardware SIO (PCI<->ISA bus bridge) chip limitation, is 64MB.
-   See <asm/apecs.h> for more info.
-*/
-/* NOTE: we must define the maximum as something less than 64Mb, to prevent 
-   virt_to_bus() from returning an address in the first window, for a
-   data area that goes beyond the 64Mb first DMA window. Sigh...
-   We MUST coordinate the maximum with <asm/apecs.h> for consistency.
-   For now, this limit is set to 48Mb...
-*/
-#define MAX_DMA_ADDRESS		(0xfffffc0003000000UL)
-#else
 /*
- * The maximum address that we can perform a DMA transfer to on
- * normal Alpha platforms
- */
-#define MAX_DMA_ADDRESS		(~0UL)
+  ISA DMA limitations on Alpha platforms,
+
+  These may be due to SIO (PCI<->ISA bridge) chipset limitation, or
+  just a wiring limit.
+*/
+
+/* The maximum address for ISA DMA transfer on Alpha XL, due to an
+   hardware SIO limitation, is 64MB.
+*/
+#define ALPHA_XL_MAX_DMA_ADDRESS	(IDENT_ADDR+0x04000000UL)
+
+/* The maximum address for ISA DMA transfer on RUFFIAN and NAUTILUS,
+   due to an hardware SIO limitation, is 16MB.
+*/
+#define ALPHA_RUFFIAN_MAX_DMA_ADDRESS	(IDENT_ADDR+0x01000000UL)
+#define ALPHA_NAUTILUS_MAX_DMA_ADDRESS	(IDENT_ADDR+0x01000000UL)
+
+/* The maximum address for ISA DMA transfer on SABLE, and some ALCORs,
+   due to an hardware SIO chip limitation, is 2GB.
+*/
+#define ALPHA_SABLE_MAX_DMA_ADDRESS	(IDENT_ADDR+0x80000000UL)
+#define ALPHA_ALCOR_MAX_DMA_ADDRESS	(IDENT_ADDR+0x80000000UL)
+
+/*
+  Maximum address for all the others is the complete 32-bit bus
+  address space.
+*/
+#define ALPHA_MAX_DMA_ADDRESS		(IDENT_ADDR+0x100000000UL)
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define MAX_DMA_ADDRESS		(alpha_mv.max_dma_address)
+#else
+# if defined(CONFIG_ALPHA_XL)
+#  define MAX_DMA_ADDRESS		ALPHA_XL_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_RUFFIAN)
+#  define MAX_DMA_ADDRESS		ALPHA_RUFFIAN_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_NAUTILUS)
+#  define MAX_DMA_ADDRESS		ALPHA_NAUTILUS_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_SABLE)
+#  define MAX_DMA_ADDRESS		ALPHA_SABLE_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_ALCOR)
+#  define MAX_DMA_ADDRESS		ALPHA_ALCOR_MAX_DMA_ADDRESS
+# else
+#  define MAX_DMA_ADDRESS		ALPHA_MAX_DMA_ADDRESS
+# endif
 #endif
 
 /* 8237 DMA controllers */
@@ -164,6 +190,22 @@
 #define DMA_MODE_READ	0x44	/* I/O to memory, no autoinit, increment, single mode */
 #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
+
+#define DMA_AUTOINIT	0x10
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
 
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
@@ -317,6 +359,16 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 /* These are in kernel/dma.c: */
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
+#define KERNEL_HAVE_CHECK_DMA
+extern int check_dma(unsigned int dmanr);
+
+/* From PCI */
+
+#ifdef CONFIG_PCI
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy 	(0)
+#endif
 
 
 #endif /* _ASM_DMA_H */

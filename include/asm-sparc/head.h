@@ -1,4 +1,4 @@
-/* $Id: head.h,v 1.1.1.1 1999-11-22 03:47:01 christ Exp $ */
+/* $Id: head.h,v 1.39 2000/05/26 22:18:45 ecd Exp $ */
 #ifndef __SPARC_HEAD_H
 #define __SPARC_HEAD_H
 
@@ -8,10 +8,7 @@
 #define SRMMU_L1_KBASE_OFFSET ((KERNBASE>>24)<<2)  /* Used in boot remapping. */
 #define INTS_ENAB        0x01           /* entry.S uses this. */
 
-#define NCPUS            4              /* Architectural limit of sun4m. */
-
-#define SUN4_PROM_VECTOR 0xFFE81000     /* To safely die on a SUN4 */
-#define SUN4_PRINTF      0x84           /* Offset into SUN4_PROM_VECTOR */
+#define SUN4_PROM_VECTOR 0xFFE81000     /* SUN4 PROM needs to be hardwired */
 
 #define WRITE_PAUSE      nop; nop; nop; /* Have to do this after %wim/%psr chg */
 #define NOP_INSN         0x01000000     /* Used to patch sparc_save_state */
@@ -31,6 +28,10 @@
 /* This is for traps we should NEVER get. */
 #define BAD_TRAP(num) \
         rd %psr, %l0; mov num, %l7; b bad_trap_handler; rd %wim, %l3;
+
+/* This is for traps when we want just skip the instruction which caused it */
+#define SKIP_TRAP(type, name) \
+	jmpl %l2, %g0; rett %l2 + 4; nop; nop;
 
 /* Notice that for the system calls we pull a trick.  We load up a
  * different pointer to the system call vector table in %l7, but call
@@ -52,12 +53,30 @@
         b linux_sparc_syscall; \
         or %l7, %lo(C_LABEL(sunos_sys_table)), %l7;
 
+#define SUNOS_NO_SYSCALL_TRAP \
+        b sunos_syscall; \
+        rd %psr, %l0; \
+        nop; \
+        nop;
+
 /* Software trap for Slowaris system calls. */
 #define SOLARIS_SYSCALL_TRAP \
-        sethi %hi(C_LABEL(sys_call_table)), %l7; \
-        or %l7, %lo(C_LABEL(sys_call_table)), %l7; \
         b solaris_syscall; \
-        rd %psr, %l0;
+        rd %psr, %l0; \
+        nop; \
+        nop;
+
+#define INDIRECT_SOLARIS_SYSCALL(x) \
+	mov x, %g1; \
+	b solaris_syscall; \
+	rd %psr, %l0; \
+	nop;
+
+#define BREAKPOINT_TRAP \
+	b breakpoint_trap; \
+	rd %psr,%l0; \
+	nop; \
+	nop;
 
 /* Software trap for Sparc-netbsd system calls. */
 #define NETBSD_SYSCALL_TRAP \
@@ -73,6 +92,10 @@
 /* The Set Condition Codes software trap for userland. */
 #define SETCC_TRAP \
         b setcc_trap_handler; mov %psr, %l0; nop; nop;
+
+/* The Get PSR software trap for userland. */
+#define GETPSR_TRAP \
+	mov %psr, %i0; jmp %l2; rett %l2 + 4; nop;
 
 /* This is for hard interrupts from level 1-14, 15 is non-maskable (nmi) and
  * gets handled with another macro.
@@ -99,4 +122,4 @@
 #define WINDOW_FILL \
         rd %psr, %l0; rd %wim, %l3; b fill_window_entry; andcc %l0, PSR_PS, %g0;
 
-#endif __SPARC_HEAD_H
+#endif /* __SPARC_HEAD_H */

@@ -5,9 +5,6 @@
  * Added /proc/sys/net directories for each protocol family. [MS]
  *
  * $Log: sysctl_net.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:04  christ
- * Importing new-wave v1.0.4
- *
  * Revision 1.2  1996/05/08  20:24:40  shaver
  * Added bits for NET_BRIDGE and the NET_IPV4_ARP stuff and
  * NET_IPV4_IP_FORWARD.
@@ -23,27 +20,26 @@
 extern ctl_table ipv4_table[];
 #endif
 
-#ifdef CONFIG_IPX
-extern ctl_table ipx_table[];
-#endif
-
-#ifdef CONFIG_ATALK
-extern ctl_table atalk_table[];
-#endif
-
-extern ctl_table core_table[], unix_table[];
+extern ctl_table core_table[];
 
 #ifdef CONFIG_NET
 extern ctl_table ether_table[], e802_table[];
 #endif
 
+#ifdef CONFIG_IPV6
+extern ctl_table ipv6_table[];
+#endif
+
+#ifdef CONFIG_TR
+extern ctl_table tr_table[];
+#endif
+
 #ifdef CONFIG_BRIDGE
-extern ctl_table bridge_table[];
+extern ctl_table br_table[];
 #endif
 
 ctl_table net_table[] = {
 	{NET_CORE,   "core",      NULL, 0, 0555, core_table},      
-        {NET_UNIX,   "unix",      NULL, 0, 0555, unix_table},
 #ifdef CONFIG_NET
 	{NET_802,    "802",       NULL, 0, 0555, e802_table},
 	{NET_ETHER,  "ethernet",  NULL, 0, 0555, ether_table},
@@ -51,14 +47,14 @@ ctl_table net_table[] = {
 #ifdef CONFIG_INET
 	{NET_IPV4,   "ipv4",      NULL, 0, 0555, ipv4_table},
 #endif
-#ifdef CONFIG_IPX
-        {NET_IPX,    "ipx",       NULL, 0, 0555, ipx_table},
+#ifdef CONFIG_IPV6
+	{NET_IPV6, "ipv6", NULL, 0, 0555, ipv6_table},
 #endif
-#ifdef CONFIG_ATALK
-        {NET_ATALK,  "appletalk", NULL, 0, 0555, atalk_table},
+#ifdef CONFIG_TR
+	{NET_TR, "token-ring", NULL, 0, 0555, tr_table},
 #endif
 #ifdef CONFIG_BRIDGE
-        {NET_BRIDGE, "bridge",    NULL, 0, 0555, bridge_table},
+	{NET_BRIDGE, "bridge", NULL, 0, 0555, br_table},
 #endif
 	{0}
 };

@@ -1,24 +1,13 @@
 /*
    The compile-time configurable defaults for the Linux SCSI tape driver.
 
-   Copyright 1995 Kai Makisara.
+   Copyright 1995-2003 Kai Makisara.
 
-   Last modified: Thu Dec 14 21:51:27 1995 by root@kai.makisara.fi
+   Last modified: Sun Apr  6 22:45:15 2003 by makisara
 */
 
 #ifndef _ST_OPTIONS_H
 #define _ST_OPTIONS_H
-
-/* The driver allocates the tape buffers when needed if ST_RUNTIME_BUFFERS
-   is nonzero. Otherwise a number of buffers are allocated at initialization.
-   The drawback of runtime allocation is that allocation may fail. In any
-   case the driver tries to allocate a new tape buffer when none is free. */
-#define ST_RUNTIME_BUFFERS 0
-
-/* The minimum limit for the number of SCSI tape devices is determined by
-   ST_MAX_TAPES. If the number of tape devices and the "slack" defined by
-   ST_EXTRA_DEVS exceeds ST_MAX_TAPES, the large number is used. */
-#define ST_MAX_TAPES 4
 
 /* The driver does not wait for some operations to finish before returning
    to the user program if ST_NOWAIT is non-zero. This helps if the SCSI
@@ -41,18 +30,26 @@
    SENSE. */
 #define ST_DEFAULT_BLOCK 0
 
-/* The tape driver buffer size in kilobytes. */
+/* The tape driver buffer size in kilobytes. Must be non-zero. */
 #define ST_BUFFER_BLOCKS 32
 
-/* The number of kilobytes of data in the buffer that triggers an
-   asynchronous write in fixed block mode. See also ST_ASYNC_WRITES
-   below. */
-#define ST_WRITE_THRESHOLD_BLOCKS 30
+/* The maximum number of tape buffers the driver tries to allocate at 
+   driver initialisation. The number is also constrained by the number
+   of drives detected. If more buffers are needed, they are allocated
+   at run time and freed after use. */
+#define ST_MAX_BUFFERS 4
 
-/* The maximum number of tape buffers the driver allocates. The number
-   is also constrained by the number of drives detected. Determines the
-   maximum number of concurrently active tape drives. */
-#define ST_MAX_BUFFERS (2 + ST_EXTRA_DEVS)
+/* Maximum number of scatter/gather segments */
+#define ST_MAX_SG      16
+
+/* The number of scatter/gather segments to allocate at first try (must be
+   smaller or equal to the maximum). */
+#define ST_FIRST_SG    8
+
+/* The size of the first scatter/gather segments (determines the maximum block
+   size for SCSI adapters not supporting scatter/gather). The default is set
+   to try to allocate the buffer as one chunk. */
+#define ST_FIRST_ORDER  5
 
 
 /* The following lines define defaults for properties that can be set
@@ -87,5 +84,22 @@
    is fast with some drives. Otherwise MTEOM is done by spacing over
    files and the file number status is retained. */
 #define ST_FAST_MTEOM 0
+
+/* If ST_SCSI2LOGICAL is nonzero, the logical block addresses are used for
+   MTIOCPOS and MTSEEK by default. Vendor addresses are used if ST_SCSI2LOGICAL
+   is zero. */
+#define ST_SCSI2LOGICAL 0
+
+/* If ST_SYSV is non-zero, the tape behaves according to the SYS V semantics.
+   The default is BSD semantics. */
+#define ST_SYSV 0
+
+/* Open without O_NONBLOCK blocks if the drive is not ready (blocking times out
+   after 2 minutes) */
+#define ST_BLOCKING_OPEN 0
+
+/* Time to wait for the drive to become ready if blocking open */
+#define ST_BLOCK_SECONDS     120
+
 
 #endif

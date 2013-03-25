@@ -1,14 +1,15 @@
 /*
  *  linux/arch/h8300/mm/memory.c
  *
+ *  Copyright (C) 2002  Yoshinori Sato <ysato@users.sourceforge.jp>,
+ *
  *  Based on:
  *
  *  linux/arch/m68knommu/mm/memory.c
  *
  *  Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- *                      The Silver Hammer Group, Ltd.
  *
- *  MAR/1999 -- hacked for the ColdFire (gerg@moreton.com.au)
+ *  MAR/1999 -- hacked for the ColdFire (gerg@snapgear.com)
  *
  *  linux/arch/m68k/mm/memory.c
  *
@@ -20,7 +21,7 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 #include <asm/setup.h>
 #include <asm/segment.h>
@@ -28,6 +29,7 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/traps.h>
+#include <asm/virtconvert.h>
 
 #ifndef NO_MM
 
@@ -305,7 +307,7 @@ unsigned long mm_vtop (unsigned long vaddr)
 	{
 		if (voff < offset + boot_info.memory[i].size) {
 #ifdef DEBUGPV
-			printk ("VTOP(%lx)=%lx\n", vaddr,
+			printk ("virt_to_phys(%lx)=%lx\n", vaddr,
 				boot_info.memory[i].addr + voff - offset);
 #endif
 			return boot_info.memory[i].addr + voff - offset;
@@ -318,27 +320,30 @@ unsigned long mm_vtop (unsigned long vaddr)
 
 	if (CPU_IS_030) {
 	    unsigned long ttreg;
-	    register unsigned long *ttregptr __asm__( "a2" ) = &ttreg;
 
-	    asm volatile( ".long 0xf0120a00;" /* pmove %/tt0,%a0@ */
-			  : "=g" (ttreg) : "a" (ttregptr) );
+	    asm volatile(   "movel %1, %%a2\n\t"
+			    ".long 0xf0120a00;" /* pmove %/tt0,%a0@ */
+			  : "=g" (ttreg) : "g" (&ttreg) : "cc", "%a2" );
 	    if (transp_transl_matches( ttreg, vaddr ))
 		return vaddr;
 
-	    asm volatile( ".long 0xf0120a00" /* pmove %/tt1,%a0@ */
-			  : "=g" (ttreg) : "a" (ttregptr) );
+	    asm volatile(   "movel %1, %%a2\n\t"
+			    ".long 0xf0120a00" /* pmove %/tt1,%a0@ */
+			  : "=g" (ttreg) : "g" (&ttreg) : "cc", "%a2" );
 	    if (transp_transl_matches( ttreg, vaddr ))
 		return vaddr;
 	}
 	else if (CPU_IS_040_OR_060) {
-	    register unsigned long ttreg __asm__( "d0" );
+	    unsigned long ttreg;
 	    
-	    asm volatile( ".long 0x4e7a0006" /* movec %dtt0,%d0 */
-			  : "=d" (ttreg) );
+	    asm volatile(   ".long 0x4e7a0006\n\t" /* movec %dtt0,%d0 */
+			    "movel %%d0, %0\n"
+			  : "=g" (ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
 		return vaddr;
-	    asm volatile( ".long 0x4e7a0007" /* movec %dtt1,%d0 */
-			  : "=d" (ttreg) );
+	    asm volatile(   ".long 0x4e7a0007" /* movec %dtt1,%d0 */
+			    "movel %%d0, %0\n"
+			  : "=g" (ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
 		return vaddr;
 	}
@@ -382,7 +387,7 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  if (mmusr & MMU_R_040)
 	    return (mmusr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
 
-	  panic ("VTOP040: bad virtual address %08lx (%lx)", vaddr, mmusr);
+	  panic ("virt_to_phys040: bad virtual address %08lx (%lx)", vaddr, mmusr);
 	} else {
 	  volatile unsigned short temp;
 	  unsigned short mmusr;
@@ -395,9 +400,9 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  mmusr = temp;
 
 	  if (mmusr & (MMU_I|MMU_B|MMU_L))
-	    panic ("VTOP030: bad virtual address %08lx (%x)", vaddr, mmusr);
+	    panic ("virt_to_phys030: bad virtual address %08lx (%x)", vaddr, mmusr);
 
-	  descaddr = (unsigned long *)PTOV(descaddr);
+	  descaddr = (unsigned long *)phys_to_virt(descaddr);
 
 	  switch (mmusr & MMU_NUM) {
 	  case 1:
@@ -407,12 +412,12 @@ unsigned long mm_vtop (unsigned long vaddr)
 	  case 3:
 	    return (*descaddr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
 	  default:
-	    panic ("VTOP: bad levels (%u) for virtual address %08lx", 
+	    panic ("virt_to_phys: bad levels (%u) for virtual address %08lx", 
 		   mmusr & MMU_NUM, vaddr);
 	  }
 	}
 
-	panic ("VTOP: bad virtual address %08lx", vaddr);
+	panic ("virt_to_phys: bad virtual address %08lx", vaddr);
 }
 
 unsigned long mm_ptov (unsigned long paddr)
@@ -426,7 +431,7 @@ unsigned long mm_ptov (unsigned long paddr)
 		    paddr < (boot_info.memory[i].addr
 			     + boot_info.memory[i].size)) {
 #ifdef DEBUGPV
-			printk ("PTOV(%lx)=%lx\n", paddr,
+			printk ("phys_to_virt(%lx)=%lx\n", paddr,
 				(paddr - boot_info.memory[i].addr) + offset);
 #endif
 			return (paddr - boot_info.memory[i].addr) + offset;
@@ -694,11 +699,6 @@ void cache_push_v (unsigned long vaddr, int len)
 #undef pushv040
 #undef pushv060
 
-unsigned long mm_phys_to_virt (unsigned long addr)
-{
-    return PTOV (addr);
-}
-
 int mm_end_of_chunk (unsigned long addr, int len)
 {
 	int i;
@@ -809,7 +809,7 @@ unsigned long kernel_map(unsigned long paddr, unsigned long size,
 				memset( ktablep, 0, sizeof(long)*PTRS_PER_PTE);
 			}
 
-			ktable = VTOP(ktablep);
+			ktable = virt_to_phys(ktablep);
 
 			/*
 			 * initialize section of the page table mapping
@@ -934,79 +934,18 @@ void kernel_set_cachemode( unsigned long address, unsigned long size,
 
 #else /* !NO_MM */
 
-/*
- * The following two routines map from a physical address to a kernel
- * virtual address and vice versa.
- */
-unsigned long mm_vtop (unsigned long vaddr)
-{
-	return vaddr;
-}
-
-unsigned long mm_ptov (unsigned long paddr)
-{
-	return paddr;
-}
-
-
-/*
- * 040: Hit every page containing an address in the range paddr..paddr+len-1.
- * (Low order bits of the ea of a CINVP/CPUSHP are "don't care"s).
- * Hit every page until there is a page or less to go. Hit the next page,
- * and the one after that if the range hits it.
- */
-/* ++roman: A little bit more care is required here: The CINVP instruction
- * invalidates cache entries WITHOUT WRITING DIRTY DATA BACK! So the beginning
- * and the end of the region must be treated differently if they are not
- * exactly at the beginning or end of a page boundary. Else, maybe too much
- * data becomes invalidated and thus lost forever. CPUSHP does what we need:
- * it invalidates the page after pushing dirty data to memory. (Thanks to Jes
- * for discovering the problem!)
- */
-/* ... but on the '060, CPUSH doesn't invalidate (for us, since we have set
- * the DPI bit in the CACR; would it cause problems with temporarily changing
- * this?). So we have to push first and then additionally to invalidate.
- */
-
-/*
- * cache_clear() semantics: Clear any cache entries for the area in question,
- * without writing back dirty entries first. This is useful if the data will
- * be overwritten anyway, e.g. by DMA to memory. The range is defined by a
- * _physical_ address.
- */
-
 void cache_clear (unsigned long paddr, int len)
 {
 }
 
-
-/*
- * cache_push() semantics: Write back any dirty cache data in the given area,
- * and invalidate the range in the instruction cache. It needs not (but may)
- * invalidate those entries also in the data cache. The range is defined by a
- * _physical_ address.
- */
 
 void cache_push (unsigned long paddr, int len)
 {
 }
 
 
-/*
- * cache_push_v() semantics: Write back any dirty cache data in the given
- * area, and invalidate those entries at least in the instruction cache. This
- * is intended to be used after data has been written that can be executed as
- * code later. The range is defined by a _user_mode_ _virtual_ address  (or,
- * more exactly, the space is defined by the %sfc/%dfc register.)
- */
-
 void cache_push_v (unsigned long vaddr, int len)
 {
-}
-
-unsigned long mm_phys_to_virt (unsigned long addr)
-{
-    return PTOV (addr);
 }
 
 /* Map some physical address range into the kernel address space. The
@@ -1020,9 +959,20 @@ unsigned long kernel_map(unsigned long paddr, unsigned long size,
 }
 
 
-void kernel_set_cachemode( unsigned long address, unsigned long size,
-						   unsigned cmode )
+#ifdef MAGIC_ROM_PTR
+
+int is_in_rom(unsigned long addr)
 {
+
+	extern unsigned long    _ramstart, _ramend;
+	
+	/* Anything not in operational RAM is returned as in rom! */
+	if (addr < _ramstart || addr >= _ramend)
+		return 1;
+	else
+		return 0;
 }
 
-#endif
+#endif /* MAGIC_ROM_PTR */
+
+#endif /* NO_MM */

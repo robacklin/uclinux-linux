@@ -14,6 +14,8 @@
  * Richard L. Sites and Richard T. Witek.
  */
 #include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 #include <sys/fcntl.h>
@@ -25,7 +27,6 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #ifdef __ELF__
-# include <asm/elf.h>
 # include <linux/elf.h>
 #endif
 
@@ -150,7 +151,7 @@ main (int argc, char *argv[])
 		    prog_name, inname);
 	    exit(1);
 	}
-	if (!elf_check_arch(elf->e_machine)) {
+	if (!elf_check_arch(elf)) {
 	    fprintf(stderr, "%s: is not for this processor (e_machine=%d)\n",
 		    prog_name, elf->e_machine);
 	    exit(1);

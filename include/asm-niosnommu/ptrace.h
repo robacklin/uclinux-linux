@@ -1,4 +1,3 @@
-/* $Id: ptrace.h,v 1.1 2003-02-26 04:13:07 gerg Exp $ */
 #ifndef _NIOS_PTRACE_H
 #define _NIOS_PTRACE_H
 
@@ -13,10 +12,9 @@
 struct pt_regs {
 	unsigned long psr;
 	unsigned long pc;
-	unsigned long spare;
-	unsigned long wvalid;
+	long orig_i0;
+	long sysc_no;
 	unsigned long u_regs[16]; /* globals and ins */
-	unsigned long globals;
 };
 
 //vic#define PT_FLAG_SUPERVISOR	0x00000001	/* Emulated supervisor privilage */
@@ -70,46 +68,19 @@ extern void show_regs(struct pt_regs *);
 #endif
 
 #else /* __ASSEMBLY__ */
-/* For assembly code. */
-//vic #define TRACEREG_SZ       0x50
-#define TRACEREG_SZ       0x54
-#define STACKFRAME_SZ     0x60
+
+/* For assembly code. REGWIN_SZ is used by CRT0 in uClibc */
 #define REGWIN_SZ         0x40
-#endif
+/* these are now defined in nios-defs.h */
 
-/* First generic task_struct offsets. sizeof(task_struct)=1576 */
-#define TASK_STATE        0x000
-#define TASK_PRIORITY     0x008
-#define TASK_SIGNAL       0x00c
-#define TASK_BLOCKED      0x010
-#define TASK_FLAGS        0x014
-#define TASK_SAVED_KSTACK 0x054
-#define TASK_KSTACK_PG    0x058
+#endif /* __ASSEMBLY__ */
 
-/* Thread stuff. */
-#define THREAD_UMASK      0x218
-#define THREAD_SADDR      0x220
-#define THREAD_SDESC      0x224
-#define THREAD_KSP        0x228
-#define THREAD_KPC        0x22c
-#define THREAD_KPSR       0x230
-#define THREAD_SPARE1     0x234
-#define THREAD_FORK_KPSR  0x238
-#define THREAD_SPARE2     0x23c
-#define THREAD_SPARE_REG_WINDOW 0x240
-#define THREAD_SPARE_STACK_PTRS 0x440
-#define THREAD_SPARE_W_SAVED    0x460
-#define THREAD_FLOAT_REGS 0x468
-#define THREAD_FSR        0x568
-#define THREAD_SIGSTK     0x5ec
-#define THREAD_MM         0x624
-#define THREAD_MM_CTX     0x008
 
 /* These are for pt_regs. */
 #define PT_PSR    0x0
 #define PT_PC     0x4
-#define PT_SPARE  0x8
-#define PT_WVALID 0xc
+#define PT_ORIG_I0  0x8
+#define PT_SYSC_NO 0xc
 #define PT_G0     0x10
 #define PT_G1     0x14
 #define PT_G2     0x18
@@ -145,48 +116,6 @@ extern void show_regs(struct pt_regs *);
 #define RW_I5     0x34
 #define RW_I6     0x38
 #define RW_I7     0x3c
-
-/* Stack_frame offsets */
-#define SF_L0     0x00
-#define SF_L1     0x04
-#define SF_L2     0x08
-#define SF_L3     0x0c
-#define SF_L4     0x10
-#define SF_L5     0x14
-#define SF_L6     0x18
-#define SF_L7     0x1c
-#define SF_I0     0x20
-#define SF_I1     0x24
-#define SF_I2     0x28
-#define SF_I3     0x2c
-#define SF_I4     0x30
-#define SF_I5     0x34
-#define SF_FP     0x38
-#define SF_PC     0x3c
-#define SF_RETP   0x40
-#define SF_XARG0  0x44
-#define SF_XARG1  0x48
-#define SF_XARG2  0x4c
-#define SF_XARG3  0x50
-#define SF_XARG4  0x54
-#define SF_XARG5  0x58
-#define SF_XXARG  0x5c
-
-/* Stuff for the ptrace system call */
-#define PTRACE_SUNATTACH	  10
-#define PTRACE_SUNDETACH	  11
-#define PTRACE_GETREGS            12
-#define PTRACE_SETREGS            13
-#define PTRACE_GETFPREGS          14
-#define PTRACE_SETFPREGS          15
-#define PTRACE_READDATA           16
-#define PTRACE_WRITEDATA          17
-#define PTRACE_READTEXT           18
-#define PTRACE_WRITETEXT          19
-#define PTRACE_GETFPAREGS         20
-#define PTRACE_SETFPAREGS         21
-
-#define PTRACE_GETUCODE           29  /* stupid bsd-ism */
 
 
 #endif /* !(_NIOS_PTRACE_H) */

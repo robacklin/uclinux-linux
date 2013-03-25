@@ -1,13 +1,10 @@
 #ifndef _PPC_TERMBITS_H
 #define _PPC_TERMBITS_H
 
-#include <linux/posix_types.h>
-
 typedef unsigned char	cc_t;
 typedef unsigned int	speed_t;
 typedef unsigned int	tcflag_t;
 
-#if 0 /* This is how it's done on Alpha - maybe later. */
 /*
  * termios type and macro definitions.  Be careful about adding stuff
  * to this file since it's used in GNU libc and there are strict rules
@@ -27,23 +24,24 @@ struct termios {
 };
 
 /* c_cc characters */
-#define VEOF 0
-#define VEOL 1
-#define VEOL2 2
-#define VERASE 3
-#define VWERASE 4
-#define VKILL 5
-#define VREPRINT 6
-#define VSWTC 7
-#define VINTR 8
-#define VQUIT 9
-#define VSUSP 10
-#define VSTART 12
-#define VSTOP 13
-#define VLNEXT 14
-#define VDISCARD 15
-#define VMIN 16
-#define VTIME 17
+#define VINTR 	0
+#define VQUIT 	1
+#define VERASE 	2
+#define VKILL	3
+#define VEOF	4
+#define VMIN	5
+#define VEOL	6
+#define VTIME	7
+#define VEOL2	8
+#define VSWTC	9
+
+#define VWERASE 	10
+#define VREPRINT	11
+#define VSUSP 		12
+#define VSTART		13
+#define VSTOP		14
+#define VLNEXT		15
+#define VDISCARD	16
 
 /* c_iflag bits */
 #define IGNBRK	0000001
@@ -57,12 +55,9 @@ struct termios {
 #define ICRNL	0000400
 #define IXON	0001000
 #define IXOFF	0002000
-#if !defined(KERNEL) || defined(__USE_BSD)
-  /* POSIX.1 doesn't want these... */
-# define IXANY		0004000
-# define IUCLC		0010000
-# define IMAXBEL	0020000
-#endif
+#define IXANY		0004000
+#define IUCLC		0010000
+#define IMAXBEL	0020000
 
 /* c_oflag bits */
 #define OPOST	0000001
@@ -102,7 +97,7 @@ struct termios {
 #define XTABS	01000000 /* Hmm.. Linux/i386 considers this part of TABDLY.. */
 
 /* c_cflag bit meaning */
-#define CBAUD	0000017
+#define CBAUD	0000377
 #define  B0	0000000		/* hang up */
 #define  B50	0000001
 #define  B75	0000002
@@ -121,10 +116,22 @@ struct termios {
 #define  B38400	0000017
 #define EXTA B19200
 #define EXTB B38400
-#define CBAUDEX 0000020
+#define CBAUDEX 0000000
 #define  B57600   00020
 #define  B115200  00021
 #define  B230400  00022
+#define  B460800  00023
+#define  B500000  00024
+#define  B576000  00025
+#define  B921600  00026
+#define B1000000  00027
+#define B1152000  00030
+#define B1500000  00031
+#define B2000000  00032
+#define B2500000  00033
+#define B3000000  00034
+#define B3500000  00035
+#define B4000000  00036
 
 #define CSIZE	00001400
 #define   CS5	00000000
@@ -173,6 +180,5 @@ struct termios {
 #define	TCSANOW		0
 #define	TCSADRAIN	1
 #define	TCSAFLUSH	2
-#endif
 
 #endif /* _PPC_TERMBITS_H */

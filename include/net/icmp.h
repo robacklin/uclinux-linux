@@ -23,21 +23,25 @@
 
 #include <net/sock.h>
 #include <net/protocol.h>
+#include <net/snmp.h>
+
+struct icmp_err {
+  int		errno;
+  unsigned	fatal:1;
+};
 
 extern struct icmp_err icmp_err_convert[];
-extern struct icmp_mib icmp_statistics;
+extern struct icmp_mib icmp_statistics[NR_CPUS*2];
+#define ICMP_INC_STATS(field)		SNMP_INC_STATS(icmp_statistics, field)
+#define ICMP_INC_STATS_BH(field)	SNMP_INC_STATS_BH(icmp_statistics, field)
+#define ICMP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(icmp_statistics, field)
 
-extern void	icmp_send(struct sk_buff *skb_in,  int type, int code,
-			  unsigned long info, struct device *dev);
-extern int	icmp_rcv(struct sk_buff *skb1, struct device *dev,
-			 struct options *opt, __u32 daddr,
-			 unsigned short len, __u32 saddr,
-			 int redo, struct inet_protocol *protocol);
-extern int	icmp_ioctl(struct sock *sk, int cmd,
-			   unsigned long arg);
-extern void	icmp_init(struct proto_ops *ops);
+extern void	icmp_send(struct sk_buff *skb_in,  int type, int code, u32 info);
+extern int	icmp_rcv(struct sk_buff *skb);
+extern int	icmp_ioctl(struct sock *sk, int cmd, unsigned long arg);
+extern void	icmp_init(struct net_proto_family *ops);
 
-/* CONFIG_IP_TRANSPARENT_PROXY */
-extern int	icmp_chkaddr(struct sk_buff *skb);
+/* Move into dst.h ? */
+extern int 	xrlim_allow(struct dst_entry *dst, int timeout);
 
 #endif	/* _ICMP_H */

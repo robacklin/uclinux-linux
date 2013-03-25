@@ -11,42 +11,42 @@
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/stat.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
+#include <linux/locks.h>
+#include <linux/smp_lock.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
+#include <linux/init.h>
+#include <linux/file.h>
+
 
 #define EM86_INTERP	"/usr/bin/em86"
 #define EM86_I_NAME	"em86"
 
-static int do_load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *interp, *i_name, *i_arg;
+	char *interp, *i_name, *i_arg;
+	struct file * file;
 	int retval;
 	struct elfhdr	elf_ex;
-	uid_t		x86_uid;
-	gid_t		x86_gid;
 
 	/* Make sure this is a Linux/Intel ELF executable... */
 	elf_ex = *((struct elfhdr *)bprm->buf);
-	
-        if (elf_ex.e_ident[0] != 0x7f ||
-            strncmp(&elf_ex.e_ident[1], "ELF",3) != 0) {
-                return  -ENOEXEC;
-        }
 
+	if (memcmp(elf_ex.e_ident, ELFMAG, SELFMAG) != 0)
+		return  -ENOEXEC;
 
-        /* First of all, some simple consistency checks */
-        if ((elf_ex.e_type != ET_EXEC &&
-            elf_ex.e_type != ET_DYN) ||
-           (!((elf_ex.e_machine == EM_386) || (elf_ex.e_machine == EM_486))) ||
-           (!bprm->inode->i_op || !bprm->inode->i_op->default_file_ops ||
-            !bprm->inode->i_op->default_file_ops->mmap)){
-                return -ENOEXEC;
-        }
+	/* First of all, some simple consistency checks */
+	if ((elf_ex.e_type != ET_EXEC && elf_ex.e_type != ET_DYN) ||
+		(!((elf_ex.e_machine == EM_386) || (elf_ex.e_machine == EM_486))) ||
+		(!bprm->file->f_op || !bprm->file->f_op->mmap)) {
+			return -ENOEXEC;
+	}
 
 	bprm->sh_bang++;	/* Well, the bang-shell is implicit... */
-	iput(bprm->inode);
-	bprm->dont_iput = 1;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
 	/* Unlike in the script case, we don't have to do any hairy
 	 * parsing to find our interpreter... it's hardcoded!
@@ -64,68 +64,50 @@ static int do_load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 	 * user environment and arguments are stored.
 	 */
 	remove_arg_zero(bprm);
-	bprm->p = copy_strings(1, &bprm->filename, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &bprm->filename, bprm);
+	if (retval < 0) return retval; 
 	bprm->argc++;
 	if (i_arg) {
-		bprm->p = copy_strings(1, &i_arg, bprm->page, bprm->p, 2);
+		retval = copy_strings_kernel(1, &i_arg, bprm);
+		if (retval < 0) return retval; 
 		bprm->argc++;
 	}
-	bprm->p = copy_strings(1, &i_name, bprm->page, bprm->p, 2);
+	retval = copy_strings_kernel(1, &i_name, bprm);
+	if (retval < 0)	return retval;
 	bprm->argc++;
-	if ((long)bprm->p < 0)
-		return (long)bprm->p;
+
 	/*
 	 * OK, now restart the process with the interpreter's inode.
-	 * Note that we use open_namei() as the name is now in kernel
+	 * Note that we use open_exec() as the name is now in kernel
 	 * space, and we don't need to copy it.
 	 */
-	retval = open_namei(interp, 0, 0, &bprm->inode, NULL);
-	if (retval)
-		return retval;
-	bprm->dont_iput=0;
+	file = open_exec(interp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-	/* Remember the uid/gid that was set by this executable */
-	x86_uid = bprm->e_uid;
-	x86_gid = bprm->e_gid;
-	retval=prepare_binprm(bprm);
-	if(retval<0)
+	bprm->file = file;
+
+	retval = prepare_binprm(bprm);
+	if (retval < 0)
 		return retval;
 
-	/* ...so that we may propagate them to em86 */
-	bprm->e_uid = x86_uid;
-	bprm->e_gid = x86_gid;
-	current->personality = PER_LINUX_EM86;
-	return search_binary_handler(bprm,regs);
-}
-
-static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
-{
-	int retval;
-	MOD_INC_USE_COUNT;
-	retval = do_load_em86(bprm,regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
+	return search_binary_handler(bprm, regs);
 }
 
 struct linux_binfmt em86_format = {
-#ifndef MODULE
-	NULL, 0, load_em86, NULL, NULL
-#else
-	NULL, &mod_use_count_, load_em86, NULL, NULL
-#endif
+	NULL, THIS_MODULE, load_em86, NULL, NULL, 0
 };
 
-int init_em86_binfmt(void) {
+static int __init init_em86_binfmt(void)
+{
 	return register_binfmt(&em86_format);
 }
 
-#ifdef MODULE
-int init_module(void)
+static void __exit exit_em86_binfmt(void)
 {
-	return init_em86_binfmt();
-}
-
-void cleanup_module( void) {
 	unregister_binfmt(&em86_format);
 }
-#endif
+
+module_init(init_em86_binfmt)
+module_exit(exit_em86_binfmt)
+MODULE_LICENSE("GPL");

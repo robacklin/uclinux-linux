@@ -1,5 +1,5 @@
 /***********************************
- * $Id: quicc_simple.h,v 1.1 2001-10-02 14:35:08 gerg Exp $
+ * $Id: quicc_simple.h,v 1.1.1.1 2001/05/18 17:10:11 hamilton Exp $
  ***********************************
  *
  ***************************************
@@ -7,8 +7,8 @@
  ***************************************
  */
 
-#ifndef __QUICC_SIMPLE_H__
-#define __QUICC_SIMPLE_H__
+#ifndef __SIMPLE_H
+#define __SIMPLE_H
 
 /* #include "quicc.h" */
 

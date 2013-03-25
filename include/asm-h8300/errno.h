@@ -1,5 +1,5 @@
-#ifndef _H8300H_ERRNO_H
-#define _H8300H_ERRNO_H
+#ifndef _H8300_ERRNO_H
+#define _H8300_ERRNO_H
 
 #define	EPERM		 1	/* Operation not permitted */
 #define	ENOENT		 2	/* No such file or directory */
@@ -129,4 +129,4 @@
 #define	ENOMEDIUM	123	/* No medium found */
 #define	EMEDIUMTYPE	124	/* Wrong medium type */
 
-#endif /* _H8300H_ERRNO_H */
+#endif /* _H8300_ERRNO_H */

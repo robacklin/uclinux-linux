@@ -287,7 +287,7 @@ int *m;                 /* maximum lookup bits, returns actual */
   register struct huft *q;      /* points to current table */
   struct huft r;                /* table entry for structure assignment */
   struct huft *u[BMAX];         /* table stack */
-  unsigned v[N_MAX];            /* values in order of bit length */
+  static unsigned v[N_MAX];     /* values in order of bit length */
   register int w;               /* bits before this table == (l * h) */
   unsigned x[BMAX+1];           /* bit offsets, then code stack */
   unsigned *xp;                 /* pointer into x */
@@ -673,12 +673,12 @@ struct s_zloc *zloc;
    either replace this with a custom decoder, or at least precompute the
    Huffman tables. */
 {
-  int i;                /* temporary variable */
-  struct huft *tl;      /* literal/length code table */
-  struct huft *td;      /* distance code table */
-  int bl;               /* lookup bits for tl */
-  int bd;               /* lookup bits for td */
-  unsigned l[288];      /* length list for huft_build */
+  int i;                  /* temporary variable */
+  struct huft *tl;        /* literal/length code table */
+  struct huft *td;        /* distance code table */
+  int bl;                 /* lookup bits for tl */
+  int bd;                 /* lookup bits for td */
+  static unsigned l[288]; /* length list for huft_build */
 
 DEBG("<fix");
 
@@ -739,9 +739,9 @@ struct s_zloc *zloc;
   unsigned nl;          /* number of literal/length codes */
   unsigned nd;          /* number of distance codes */
 #ifdef PKZIP_BUG_WORKAROUND
-  unsigned ll[288+32];  /* literal/length and distance code lengths */
+  static unsigned ll[288+32];  /* literal/length and distance code lengths */
 #else
-  unsigned ll[286+30];  /* literal/length and distance code lengths */
+  static unsigned ll[286+30];  /* literal/length and distance code lengths */
 #endif
   register ulg b;       /* bit buffer */
   register unsigned k;  /* number of bits in bit buffer */

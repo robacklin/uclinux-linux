@@ -32,6 +32,7 @@
 |	- example "Call-Out"s required by both the ISP and FPSP.
 |
 
+#include <linux/linkage.h>
 
 |################################
 | EXAMPLE CALL-OUTS 		#
@@ -64,6 +65,10 @@
 | The result is that Unix processes are allowed to sleep as a consequence
 | of a page fault during a _copyout.
 |
+| Linux/68k: The _060_[id]mem_{read,write}_{byte,word,long} functions
+| (i.e. all the known length <= 4) are implemented by single moves
+| statements instead of (more expensive) copy{in,out} calls, if
+| working in user space
 
 |
 | _060_dmem_write():
@@ -80,21 +85,20 @@
 |
 	.global		_060_dmem_write
 _060_dmem_write:
+	subq.l		#1,%d0
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	beqs		user_write
 super_write:
 	move.b		(%a0)+,(%a1)+		| copy 1 byte
-	subq.l		#0x1,%d0		| decr byte counter
-	bnes		super_write		| quit if ctr = 0
+	dbra		%d0,super_write		| quit if --ctr < 0
 	clr.l		%d1			| return success
 	rts
 user_write:
-	move.l		%d0,-(%sp)		| pass: counter
-	move.l		%a1,-(%sp)		| pass: user dst
-	move.l		%a0,-(%sp)		| pass: supervisor src
-	bsr.l		_copyout		| write byte to user mem
-	move.l		%d0,%d1			| return success
-	add.l		#0xc, %sp		| clear 3 lw params
+	move.b		(%a0)+,%d1		| copy 1 byte
+copyoutae:
+	movs.b		%d1,(%a1)+
+	dbra		%d0,user_write		| quit if --ctr < 0
+	clr.l		%d1			| return success
 	rts
 
 |
@@ -114,21 +118,20 @@ user_write:
 	.global		_060_dmem_read
 _060_imem_read:
 _060_dmem_read:
+	subq.l		#1,%d0
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	beqs		user_read
 super_read:
 	move.b		(%a0)+,(%a1)+		| copy 1 byte
-	subq.l		#0x1,%d0		| decr byte counter
-	bnes		super_read		| quit if ctr = 0
+	dbra		%d0,super_read		| quit if --ctr < 0
 	clr.l		%d1			| return success
 	rts
 user_read:
-	move.l		%d0,-(%sp)		| pass: counter
-	move.l		%a1,-(%sp)		| pass: super dst
-	move.l		%a0,-(%sp)		| pass: user src
-	bsr.l		_copyin			| read byte from user mem
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| clear 3 lw params
+copyinae:
+	movs.b		(%a0)+,%d1
+	move.b		%d1,(%a1)+		| copy 1 byte
+	dbra		%d0,user_read		| quit if --ctr < 0
+	clr.l		%d1			| return success
 	rts
 
 |
@@ -145,20 +148,13 @@ user_read:
 |
 	.global 		_060_dmem_read_byte
 _060_dmem_read_byte:
+	clr.l		%d0			| clear whole longword
+	clr.l		%d1			| assume success
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmrbs			| supervisor
-dmrbu:	clr.l		-(%sp)			| clear space on stack for result
-	move.l		#0x1,-(%sp)		| pass: # bytes to copy
-	pea		0x7(%sp)		| pass: dst addr (stack)
-	move.l		%a0,-(%sp)		| pass: src addr (user mem)
-	bsr.l		_copyin			| "copy in" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| delete params
-	move.l		(%sp)+,%d0		| put answer in d0
+dmrbuae:movs.b		(%a0),%d0		| fetch user byte
 	rts
-dmrbs:	clr.l		%d0			| clear whole longword
-	move.b		(%a0),%d0		| fetch super byte
-	clr.l		%d1			| return success
+dmrbs:	move.b		(%a0),%d0		| fetch super byte
 	rts
 
 |
@@ -173,22 +169,28 @@ dmrbs:	clr.l		%d0			| clear whole longword
 |	d0 - data word in d0
 |	d1 - 0 = success, !0 = failure
 |
+| _060_imem_read_word():
+| 
+| Read an instruction word from user memory.
+|
+| INPUTS:
+|	a0 - user source address
+| 	0x4(%a6),bit5 - 1 = supervisor mode, 0 = user mode
+| OUTPUTS:
+|	d0 - instruction word in d0
+|	d1 - 0 = success, !0 = failure
+|
 	.global 		_060_dmem_read_word
+	.global 		_060_imem_read_word
 _060_dmem_read_word:
+_060_imem_read_word:
+	clr.l		%d1			| assume success
+	clr.l		%d0			| clear whole longword
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmrws			| supervisor
-dmrwu:	clr.l		-(%sp)			| clear space on stack for result
-	move.l		#0x2,-(%sp)		| pass: # bytes to copy
-	pea		0x6(%sp)		| pass: dst addr (stack)
-	move.l		%a0,-(%sp)		| pass: src addr (user mem)
-	bsr.l		_copyin			| "copy in" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| delete params
-	move.l		(%sp)+,%d0		| put answer in d0
+dmrwuae:movs.w		(%a0), %d0		| fetch user word
 	rts
-dmrws:	clr.l		%d0			| clear whole longword
-	move.w		(%a0), %d0		| fetch super word
-	clr.l		%d1			| return success
+dmrws:	move.w		(%a0), %d0		| fetch super word
 	rts
 
 |
@@ -203,21 +205,27 @@ dmrws:	clr.l		%d0			| clear whole longword
 |	d0 - data longword in d0
 |	d1 - 0 = success, !0 = failure
 |
+| _060_imem_read_long():
+| 
+| Read an instruction longword from user memory.
+|
+| INPUTS:
+|	a0 - user source address
+| 	0x4(%a6),bit5 - 1 = supervisor mode, 0 = user mode
+| OUTPUTS:
+|	d0 - instruction longword in d0
+|	d1 - 0 = success, !0 = failure
+|
 	.global 		_060_dmem_read_long
+	.global 		_060_imem_read_long
 _060_dmem_read_long:
+_060_imem_read_long:
+	clr.l		%d1			| assume success
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmrls			| supervisor
-dmrlu:	subq.l		#0x4,%sp		| clear space on stack for result
-	move.l		#0x4,-(%sp)		| pass: # bytes to copy
-	pea		0x4(%sp)		| pass: dst addr (stack)
-	move.l		%a0,-(%sp)		| pass: src addr (user mem)
-	bsr.l		_copyin			| "copy in" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| delete params
-	move.l		(%sp)+,%d0		| put answer in d0
+dmrluae:movs.l		(%a0),%d0		| fetch user longword
 	rts
 dmrls:	move.l		(%a0),%d0		| fetch super longword
-	clr.l		%d1			| return success
 	rts
 
 |
@@ -234,18 +242,12 @@ dmrls:	move.l		(%a0),%d0		| fetch super longword
 |
 	.global 		_060_dmem_write_byte
 _060_dmem_write_byte:
+	clr.l		%d1			| assume success
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmwbs			| supervisor
-dmwbu:	move.l		%d0,-(%sp)		| put src on stack
-	move.l		#0x1,-(%sp)		| pass: # bytes to copy
-	move.l		%a0,-(%sp)		| pass: dst addr (user mem)
-	pea		0xb(%sp)		| pass: src addr (stack)
-	bsr.l		_copyout		| "copy out" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0x10,%sp		| delete params + src
+dmwbuae:movs.b		%d0,(%a0)		| store user byte
 	rts
 dmwbs:	move.b		%d0,(%a0)		| store super byte
-	clr.l		%d1			| return success
 	rts
 
 |
@@ -262,18 +264,14 @@ dmwbs:	move.b		%d0,(%a0)		| store super byte
 |
 	.global 		_060_dmem_write_word
 _060_dmem_write_word:
+	clr.l		%d1			| assume success
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmwws			| supervisor
-dmwwu:	move.l		%d0,-(%sp)		| put src on stack
-	move.l		#0x2,-(%sp)		| pass: # bytes to copy
-	move.l		%a0,-(%sp)		| pass: dst addr (user mem)
-	pea		0xa(%sp)		| pass: src addr (stack)
-	bsr.l		_copyout		| "copy out" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0x10,%sp		| delete params + src
-	rts
+dmwwu:
+dmwwuae:movs.w		%d0,(%a0)		| store user word
+	bras		dmwwr
 dmwws:	move.w		%d0,(%a0)		| store super word
-	clr.l		%d1			| return success
+dmwwr:	clr.l		%d1			| return success
 	rts
 
 |
@@ -290,78 +288,16 @@ dmwws:	move.w		%d0,(%a0)		| store super word
 |
 	.global 		_060_dmem_write_long
 _060_dmem_write_long:
+	clr.l		%d1			| assume success
 	btst		#0x5,0x4(%a6)		| check for supervisor state
 	bnes		dmwls			| supervisor
-dmwlu:	move.l		%d0,-(%sp)		| put src on stack
-	move.l		#0x4,-(%sp)		| pass: # bytes to copy
-	move.l		%a0,-(%sp)		| pass: dst addr (user mem)
-	pea		0x8(%sp)		| pass: src addr (stack)
-	bsr.l		_copyout		| "copy out" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0x10,%sp		| delete params + src
+dmwluae:movs.l		%d0,(%a0)		| store user longword
 	rts
 dmwls:	move.l		%d0,(%a0)		| store super longword
-	clr.l		%d1			| return success
 	rts
 
-|
-| _060_imem_read_word():
-| 
-| Read an instruction word from user memory.
-|
-| INPUTS:
-|	a0 - user source address
-| 	0x4(%a6),bit5 - 1 = supervisor mode, 0 = user mode
-| OUTPUTS:
-|	d0 - instruction word in d0
-|	d1 - 0 = success, !0 = failure
-|
-	.global 		_060_imem_read_word
-_060_imem_read_word:
-	btst		#0x5,0x4(%a6)		| check for supervisor state
-	bnes		imrws			| supervisor
-imrwu:	clr.l		-(%sp)			| clear space on stack for result
-	move.l		#0x2,-(%sp)		| pass: # bytes to copy
-	pea		0x6(%sp)		| pass: dst addr (stack)
-	move.l		%a0,-(%sp)		| pass: src addr (user mem)
-	bsr.l		_copyin			| "copy in" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| delete params
-	move.l		(%sp)+,%d0		| put answer in d0
-	rts
-imrws:	move.w		(%a0),%d0		| fetch super word
-	clr.l		%d1			| return success
-	rts
 
-|
-| _060_imem_read_long():
-| 
-| Read an instruction longword from user memory.
-|
-| INPUTS:
-|	a0 - user source address
-| 	0x4(%a6),bit5 - 1 = supervisor mode, 0 = user mode
-| OUTPUTS:
-|	d0 - instruction longword in d0
-|	d1 - 0 = success, !0 = failure
-|
-	.global 		_060_imem_read_long
-_060_imem_read_long:
-	btst		#0x5,0x4(%a6)		| check for supervisor state
-	bnes		imrls			| supervisor
-imrlu:	subq.l		#0x4,%sp		| clear space on stack for result
-	move.l		#0x4,-(%sp)		| pass: # bytes to copy
-	pea		0x4(%sp)		| pass: dst addr (stack)
-	move.l		%a0,-(%sp)		| pass: src addr (user mem)
-	bsr.l		_copyin			| "copy in" the data
-	move.l		%d0,%d1			| return success
-	add.l		#0xc,%sp		| delete params
-	move.l		(%sp)+,%d0		| put answer in d0
-	rts
-imrls:	move.l		(%a0),%d0		| fetch super longword
-	clr.l		%d1			| return success
-	rts
-
+#if 0
 |###############################################
 
 |
@@ -369,6 +305,10 @@ imrls:	move.l		(%a0),%d0		| fetch super longword
 | Assumes that D0/D1/A0/A1 are scratch registers. The _copyin/_copyout
 | below assume that the SFC/DFC have been set previously.
 |
+| Linux/68k: These are basically non-inlined versions of
+| memcpy_{to,from}fs, but without long-transfer optimization
+| Note: Assumed that SFC/DFC are pointing correctly to user data
+| space... Should be right, or are there any exceptions?
 
 |
 | int _copyout(supervisor_addr, user_addr, nbytes)
@@ -378,11 +318,13 @@ _copyout:
 	move.l		4(%sp),%a0		| source
 	move.l		8(%sp),%a1		| destination
 	move.l		12(%sp),%d0		| count
+	subq.l		#1,%d0
 moreout:
 	move.b		(%a0)+,%d1		| fetch supervisor byte
+copyoutae:
 	movs.b		%d1,(%a1)+		| store user byte
-	subq.l		#0x1,%d0		| are we through yet?
-	bne		moreout			| no; so, continue
+	dbra		%d0,moreout		| are we through yet?
+	moveq		#0,%d0			| return success
 	rts
 
 |
@@ -393,12 +335,15 @@ _copyin:
 	move.l		4(%sp),%a0		| source
 	move.l		8(%sp),%a1		| destination
 	move.l		12(%sp),%d0		| count
+    subq.l      #1,%d0
 morein:
+copyinae:	
 	movs.b		(%a0)+,%d1		| fetch user byte
 	move.b		%d1,(%a1)+		| write supervisor byte
-	subq.l		#0x1,%d0		| are we through yet?
-	bne		morein			| no; so, continue
+	dbra		%d0,morein		| are we through yet?
+	moveq		#0,%d0			| return success
 	rts
+#endif
 
 |###########################################################################
 
@@ -413,7 +358,7 @@ morein:
 |
 	.global		_060_real_trace
 _060_real_trace:
-	rte
+	bral	SYMBOL_NAME(trap)
 
 |
 | _060_real_access():
@@ -429,4 +374,23 @@ _060_real_trace:
 |
 	.global		_060_real_access
 _060_real_access:
-	rte
+	bral	SYMBOL_NAME(buserr)
+
+
+
+| Execption handling for movs access to illegal memory	
+	.section .fixup,#alloc,#execinstr
+	.even
+1:	moveq		#-1,%d1
+	rts
+.section __ex_table,#alloc
+	.align 4
+	.long	dmrbuae,1b
+	.long	dmrwuae,1b
+	.long	dmrluae,1b
+	.long	dmwbuae,1b
+	.long	dmwwuae,1b
+	.long	dmwluae,1b
+	.long	copyoutae,1b
+	.long	copyinae,1b
+	.text

@@ -1,4 +1,4 @@
-/* $Id: pconf.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: pconf.h,v 1.3 1996/04/25 06:13:25 davem Exp $
  * pconf.h: pathconf() and fpathconf() defines for SunOS
  *          system call compatibility.
  *
@@ -8,7 +8,6 @@
 #ifndef _SPARC_PCONF_H
 #define _SPARC_PCONF_H
 
-#include <linux/fs.h>
 #include <linux/limits.h>
 
 #define _PCONF_LINK       1 /* Max number of links to an object        */

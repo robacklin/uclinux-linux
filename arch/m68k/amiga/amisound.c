@@ -1,21 +1,22 @@
 /*
- * linux/amiga/amisound.c
+ * linux/arch/m68k/amiga/amisound.c
  *
- * amiga sound driver for 680x0 Linux
+ * amiga sound driver for Linux/m68k
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/amigahw.h>
-#include <asm/bootinfo.h>
 
-static u_short *snd_data = NULL;
+static unsigned short *snd_data = NULL;
 static const signed char sine_data[] = {
 	0,  39,  75,  103,  121,  127,  121,  103,  75,  39,
 	0, -39, -75, -103, -121, -127, -121, -103, -75, -39
@@ -27,7 +28,7 @@ static const signed char sine_data[] = {
      * device since it depends on htotal (for OCS/ECS/AGA)
      */
 
-volatile u_short amiga_audio_min_period = 124;	/* Default for pre-OCS */
+volatile unsigned short amiga_audio_min_period = 124; /* Default for pre-OCS */
 
 #define MAX_PERIOD	(65535)
 
@@ -36,13 +37,15 @@ volatile u_short amiga_audio_min_period = 124;	/* Default for pre-OCS */
      *	Current period (set by dmasound.c)
      */
 
-u_short amiga_audio_period = MAX_PERIOD;
+unsigned short amiga_audio_period = MAX_PERIOD;
 
-static u_long clock_constant;
+static unsigned long clock_constant;
 
-static void init_sound(void)
+void __init amiga_init_sound(void)
 {
-	snd_data = amiga_chip_alloc(sizeof(sine_data));
+	static struct resource beep_res = { "Beep" };
+
+	snd_data = amiga_chip_alloc_res(sizeof(sine_data), &beep_res);
 	if (!snd_data) {
 		printk (KERN_CRIT "amiga init_sound: failed to allocate chipmem\n");
 		return;
@@ -51,20 +54,19 @@ static void init_sound(void)
 
 	/* setup divisor */
 	clock_constant = (amiga_colorclock+DATA_SIZE/2)/DATA_SIZE;
+
+	/* without amifb, turn video off and enable high quality sound */
+#ifndef CONFIG_FB_AMIGA
+	amifb_video_off();
+#endif
 }
 
 static void nosound( unsigned long ignored );
-static struct timer_list sound_timer = { NULL, NULL, 0, 0, nosound };
+static struct timer_list sound_timer = { function: nosound };
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {
-	static int inited = 0;
 	unsigned long flags;
-
-	if (!inited) {
-		init_sound();
-		inited = 1;
-	}
 
 	if (!snd_data)
 		return;
@@ -74,7 +76,7 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 	del_timer( &sound_timer );
 
 	if (hz > 20 && hz < 32767) {
-		u_long period = (clock_constant / hz);
+		unsigned long period = (clock_constant / hz);
 
 		if (period < amiga_audio_min_period)
 			period = amiga_audio_min_period;
@@ -84,8 +86,8 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		/* setup pointer to data, period, length and volume */
 		custom.aud[2].audlc = snd_data;
 		custom.aud[2].audlen = sizeof(sine_data)/2;
-		custom.aud[2].audper = (u_short)period;
-		custom.aud[2].audvol = 64; /* maxvol */
+		custom.aud[2].audper = (unsigned short)period;
+		custom.aud[2].audvol = 32; /* 50% of maxvol */
 	
 		if (ticks) {
 			sound_timer.expires = jiffies + ticks;
@@ -95,13 +97,10 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		/* turn on DMA for audio channel 2 */
 		custom.dmacon = DMAF_SETCLR | DMAF_AUD2;
 
-		restore_flags(flags);
-		return;
-	} else {
+	} else
 		nosound( 0 );
-		restore_flags(flags);
-		return;
-	}
+
+	restore_flags(flags);
 }
 
 
@@ -111,4 +110,4 @@ static void nosound( unsigned long ignored )
 	custom.dmacon = DMAF_AUD2;
 	/* restore period to previous value after beeping */
 	custom.aud[2].audper = amiga_audio_period;
-}	
+}

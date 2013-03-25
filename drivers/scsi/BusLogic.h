@@ -35,10 +35,10 @@
 */
 
 typedef kdev_t KernelDevice_T;
-typedef struct proc_dir_entry PROC_DirectoryEntry_T;
 typedef unsigned long ProcessorFlags_T;
 typedef struct pt_regs Registers_T;
 typedef struct partition PartitionTable_T;
+typedef struct pci_dev PCI_Device_T;
 typedef Scsi_Host_Template SCSI_Host_Template_T;
 typedef struct Scsi_Host SCSI_Host_T;
 typedef struct scsi_device SCSI_Device_T;
@@ -51,7 +51,6 @@ typedef struct scatterlist SCSI_ScatterList_T;
   Define prototypes for the BusLogic Driver Interface Functions.
 */
 
-extern PROC_DirectoryEntry_T BusLogic_ProcDirectoryEntry;
 extern const char *BusLogic_DriverInfo(SCSI_Host_T *);
 extern int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *);
 extern int BusLogic_ReleaseHostAdapter(SCSI_Host_T *);
@@ -68,7 +67,7 @@ extern int BusLogic_ProcDirectoryInfo(char *, char **, off_t, int, int, int);
 */
 
 #define BUSLOGIC							       \
-  { proc_dir:       &BusLogic_ProcDirectoryEntry, /* ProcFS Directory Entry */ \
+  { proc_name:      "BusLogic",			  /* ProcFS Directory Entry */ \
     proc_info:      BusLogic_ProcDirectoryInfo,	  /* ProcFS Info Function   */ \
     name:           "BusLogic",			  /* Driver Name            */ \
     detect:         BusLogic_DetectHostAdapter,	  /* Detect Host Adapter    */ \
@@ -79,6 +78,7 @@ extern int BusLogic_ProcDirectoryInfo(char *, char **, off_t, int, int, int);
     reset:          BusLogic_ResetCommand,	  /* Reset Command Function */ \
     bios_param:     BusLogic_BIOSDiskParameters,  /* BIOS Disk Parameters   */ \
     unchecked_isa_dma: 1,			  /* Default Initial Value  */ \
+    max_sectors:    128,			  /* I/O queue len limit    */ \
     use_clustering: ENABLE_CLUSTERING }		  /* Enable Clustering	    */
 
 
@@ -1508,8 +1508,6 @@ static inline
 void BusLogic_AcquireHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter,
 				     ProcessorFlags_T *ProcessorFlags)
 {
-  save_flags(*ProcessorFlags);
-  cli();
 }
 
 
@@ -1521,31 +1519,32 @@ static inline
 void BusLogic_ReleaseHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter,
 				     ProcessorFlags_T *ProcessorFlags)
 {
-  restore_flags(*ProcessorFlags);
 }
 
 
 /*
   BusLogic_AcquireHostAdapterLockIH acquires exclusive access to Host Adapter,
-  but is only called from the interrupt handler when interrupts are disabled.
+  but is only called from the interrupt handler.
 */
 
 static inline
 void BusLogic_AcquireHostAdapterLockIH(BusLogic_HostAdapter_T *HostAdapter,
 				       ProcessorFlags_T *ProcessorFlags)
 {
+  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
 }
 
 
 /*
   BusLogic_ReleaseHostAdapterLockIH releases exclusive access to Host Adapter,
-  but is only called from the interrupt handler when interrupts are disabled.
+  but is only called from the interrupt handler.
 */
 
 static inline
 void BusLogic_ReleaseHostAdapterLockIH(BusLogic_HostAdapter_T *HostAdapter,
 				       ProcessorFlags_T *ProcessorFlags)
 {
+  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
 }
 
 
@@ -1769,7 +1768,42 @@ static int BusLogic_ResetHostAdapter(BusLogic_HostAdapter_T *,
 				     SCSI_Command_T *, unsigned int);
 static void BusLogic_Message(BusLogic_MessageLevel_T, char *,
 			     BusLogic_HostAdapter_T *, ...);
-static void BusLogic_ParseDriverOptions(char *);
+
+/*
+  Declare the Initialization Functions.
+*/
+
+static void BusLogic_AnnounceDriver(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_RegisterHostAdapter(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_UnregisterHostAdapter(BusLogic_HostAdapter_T *) __init;
+static boolean BusLogic_CreateInitialCCBs(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_DestroyCCBs(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_AppendProbeAddressISA(BusLogic_IO_Address_T) __init;
+static void
+BusLogic_InitializeProbeInfoListISA(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_SortProbeInfo(BusLogic_ProbeInfo_T *, int) __init;
+static int
+BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T *) __init;
+static int
+BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_InitializeProbeInfoList(BusLogic_HostAdapter_T *) __init;
+static boolean BusLogic_Failure(BusLogic_HostAdapter_T *, char *) __init;
+static boolean BusLogic_ProbeHostAdapter(BusLogic_HostAdapter_T *) __init;
+static boolean BusLogic_CheckHostAdapter(BusLogic_HostAdapter_T *) __init;
+static boolean
+BusLogic_ReadHostAdapterConfiguration(BusLogic_HostAdapter_T *) __init;
+static boolean
+BusLogic_ReportHostAdapterConfiguration(BusLogic_HostAdapter_T *) __init;
+static boolean BusLogic_AcquireResources(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_ReleaseResources(BusLogic_HostAdapter_T *) __init;
+static boolean BusLogic_TargetDeviceInquiry(BusLogic_HostAdapter_T *) __init;
+static void BusLogic_InitializeHostStructure(BusLogic_HostAdapter_T *,
+					     SCSI_Host_T *) __init;
+int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *) __init;
+int BusLogic_ReleaseHostAdapter(SCSI_Host_T *) __init;
+static boolean BusLogic_ParseKeyword(char **, char *) __init;
+static int BusLogic_ParseDriverOptions(char *) __init;
+static int BusLogic_Setup(char *) __init;
 
 
 #endif /* BusLogic_DriverVersion */

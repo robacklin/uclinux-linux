@@ -58,6 +58,7 @@ more than a few  PCI versions of the card. */
 #define SX_BOARD(line)		((line) / SX_NPORT)
 #define SX_PORT(line)		((line) & (SX_NPORT - 1))
 
+
 #define SX_DATA_REG 0     /* Base+0 : Data register */
 #define SX_ADDR_REG 1     /* base+1 : Address register. */
 
@@ -121,8 +122,8 @@ struct specialix_port {
 	int			xmit_cnt;
 	struct termios          normal_termios;
 	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
 	struct tq_struct	tqueue;
 	struct tq_struct	tqueue_hangup;
 	short			wakeup_chars;

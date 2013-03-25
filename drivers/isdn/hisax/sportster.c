@@ -1,36 +1,26 @@
-/* $Id: sportster.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * sportster.c     low level stuff for USR Sportster internal TA
+/* $Id: sportster.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * low level stuff for USR Sportster internal TA
+ *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Thanks to Christian "naddy" Weisgerber (3Com, US Robotics) for documentation
  *
- * $Log: sportster.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.4  1998/04/08 21:58:46  keil
- * New init code
- *
- * Revision 1.1.2.3  1998/01/27 22:37:31  keil
- * fast io
- *
- * Revision 1.1.2.2  1997/11/15 18:50:57  keil
- * new common init function
- *
- * Revision 1.1.2.1  1997/10/17 22:10:58  keil
- * new files on 2.0
  *
  */
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *sportster_revision = "$Revision: 1.1.1.1 $";
+const char *sportster_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -164,14 +154,12 @@ reset_sportster(struct IsdnCardState *cs)
 	byteout(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ, cs->hw.spt.res_irq);
 	save_flags(flags);
 	sti();
-	current->state = TASK_INTERRUPTIBLE;
-	current->timeout = jiffies + 1;
-	schedule();
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	schedule_timeout((10*HZ)/1000);
 	cs->hw.spt.res_irq &= ~SPORTSTER_RESET; /* Reset Off */
 	byteout(cs->hw.spt.cfg_reg + SPORTSTER_RES_IRQ, cs->hw.spt.res_irq);
-	current->state = TASK_INTERRUPTIBLE;
-	current->timeout = jiffies + 1;
-	schedule();
+	set_current_state(TASK_UNINTERRUPTIBLE);
+	schedule_timeout((10*HZ)/1000);
 	restore_flags(flags);
 }
 
@@ -185,9 +173,6 @@ Sportster_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_sportster(cs);
 			return(0);
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &sportster_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscxisac(cs, 1);
 			cs->hw.spt.res_irq |= SPORTSTER_INTE; /* IRQ On */
@@ -200,8 +185,8 @@ Sportster_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-__initfunc(int
-get_io_range(struct IsdnCardState *cs))
+static int __init
+get_io_range(struct IsdnCardState *cs)
 {
 	int i, j, adr;
 	
@@ -226,8 +211,8 @@ get_io_range(struct IsdnCardState *cs))
 	}
 }
 
-__initfunc(int
-setup_sportster(struct IsdnCard *card))
+int __init
+setup_sportster(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -278,6 +263,7 @@ setup_sportster(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &Sportster_card_msg;
+	cs->irq_func = &sportster_interrupt;
 	ISACVersion(cs, "Sportster:");
 	if (HscxVersion(cs, "Sportster:")) {
 		printk(KERN_WARNING

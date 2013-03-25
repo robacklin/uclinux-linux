@@ -25,8 +25,6 @@
 #define FALSE 0
 #endif
 
-#define min(a,b) ((a<b)?(a):(b))
-
 #define R_LIMIT 0x20000
 
 #define MAXISA	   4
@@ -99,7 +97,7 @@
 #define DELAY(x) { ulong flags, i;                \
                    save_flags(flags); sti();      \
                    i = jiffies + (x * HZ);        \
-                   while (jiffies < i);           \
+                   while (time_before(jiffies, i)) cpu_relax();           \
                    restore_flags(flags); }
 
 /***********************************************

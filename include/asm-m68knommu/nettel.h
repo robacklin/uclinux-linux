@@ -1,10 +1,11 @@
 /****************************************************************************/
 
 /*
- *	nettel.h -- Lineo (formerly Moreton Bay) NETtel support.
+ *	nettel.h -- SnapGear (formerly Moreton Bay) NETtel support.
  *
  *	(C) Copyright 1999-2000, Moreton Bay (www.moretonbay.com)
  * 	(C) Copyright 2000-2001, Lineo Inc. (www.lineo.com) 
+ * 	(C) Copyright 2001-2003, SnapGear Inc., (www.snapgear.com) 
  */
 
 /****************************************************************************/
@@ -27,39 +28,59 @@
 #if defined(CONFIG_M5307)
 /*
  *	NETtel/5307 based hardware first. DTR/DCD lines are wired to
- *	GPIO lines. Most of the LED's are driver through a latch
+ *	GPIO lines. Most of the LED's are driven through a latch
  *	connected to CS2.
  */
-#define	MCFPP_DCD1	0x0001
-#define	MCFPP_DCD0	0x0002
-#define	MCFPP_DTR1	0x0004
-#define	MCFPP_DTR0	0x0008
+#define	MCF_HAVEDCD0
+#define	MCF_HAVEDCD1
+#define	MCF_HAVEDTR0
+#define	MCF_HAVEDTR1
 
 #define	NETtel_LEDADDR	0x30400000
 
 #ifndef __ASSEMBLY__
+static __inline__ unsigned int mcf_getppdcd(unsigned int portnr)
+{
+	volatile unsigned short *pp;
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		return((*pp & (portnr ? 0x0001 : 0x0002)) ? 0 : 1);
+	}
+	return(0);
+}
 
-extern volatile unsigned short ppdata;
+static __inline__ unsigned int mcf_getppdtr(unsigned int portnr)
+{
+	volatile unsigned short *pp;
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		return((*pp & (portnr ? 0x0004 : 0x0008)) ? 0 : 1);
+	}
+	return(0);
+}
+
+static __inline__ void mcf_setppdtr(unsigned int portnr, unsigned int dtr)
+{
+	volatile unsigned short *pp;
+	unsigned short bit;
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		bit = (portnr ? 0x0004 : 0x0008);
+		*pp = (*pp & ~bit) | (dtr ? 0 : bit);
+	}
+}
 
 /*
- *	These functions defined to give quasi generic access to the
- *	PPIO bits used for DTR/DCD.
+ *	The power and heartbeat LED's are connected to PIO bits of
+ *	the 5307 based boards.
  */
-static __inline__ unsigned int mcf_getppdata(void)
+static __inline__ void mcf_setppleds(unsigned int mask, unsigned int bits)
 {
 	volatile unsigned short *pp;
 	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
-	return((unsigned int) *pp);
+	*pp = (*pp & ~mask) | bits;
 }
-
-static __inline__ void mcf_setppdata(unsigned int mask, unsigned int bits)
-{
-	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
-	ppdata = (ppdata & ~mask) | bits;
-	*pp = ppdata;
-}
-#endif
+#endif /* __ASSEMBLY__ */
 
 /*---------------------------------------------------------------------------*/
 #elif defined(CONFIG_M5206e)
@@ -73,31 +94,41 @@ static __inline__ void mcf_setppdata(unsigned int mask, unsigned int bits)
 #elif defined(CONFIG_M5272)
 /*
  *	NETtel/5272 based hardware. DTR/DCD lines are wired to GPB lines.
+ *	No DCD/DTR on port 1, only on port 0.
  */
-#define	MCFPP_DCD0	0x0080
-#define	MCFPP_DCD1	0x0000		/* Port 1 no DCD support */
-#define	MCFPP_DTR0	0x0040
-#define	MCFPP_DTR1	0x0000		/* Port 1 no DTR support */
+#define	MCF_HAVEDCD0
+#define	MCF_HAVEDTR0
 
 #ifndef __ASSEMBLY__
-/*
- *	These functions defined to give quasi generic access to the
- *	PPIO bits used for DTR/DCD.
- */
-static __inline__ unsigned int mcf_getppdata(void)
+static __inline__ unsigned int mcf_getppdcd(unsigned int portnr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
-	return((unsigned int) *pp);
+	if (portnr == 0) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		return((*pp & 0x0080) ? 0 : 1);
+	}
+	return(0);
 }
 
-static __inline__ void mcf_setppdata(unsigned int mask, unsigned int bits)
+static __inline__ unsigned int mcf_getppdtr(unsigned int portnr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
-	*pp = (*pp & ~mask) | bits;
+	if (portnr == 0) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		return((*pp & 0x0040) ? 0 : 1);
+	}
+	return(0);
 }
-#endif
+
+static __inline__ void mcf_setppdtr(unsigned int portnr, unsigned int dtr)
+{
+	volatile unsigned short *pp;
+	if (portnr == 0) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		*pp = (*pp & ~0x0040) | (dtr ? 0 : 0x0040);
+	}
+}
+#endif /* __ASSEMBLY */
 
 #endif
 /*---------------------------------------------------------------------------*/

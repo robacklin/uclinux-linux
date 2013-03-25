@@ -1,11 +1,14 @@
-/* $Id: user.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: user.h,v 1.5 1998/02/23 01:49:22 rth Exp $
  * asm-sparc/user.h: Core file definitions for the Sparc.
  *
+ * Keep in sync with reg.h.  Actually, we could get rid of this
+ * one, since we won't a.out core dump that much anyways - miguel.
  * Copyright (C) 1995 (davem@caip.rutgers.edu)
  */
 #ifndef _SPARC_USER_H
 #define _SPARC_USER_H
 
+#include <asm/a.out.h>
 struct sunos_regs {
 	unsigned long psr, pc, npc, y;
 	unsigned long regs[15];
@@ -47,11 +50,11 @@ struct user {
 	unsigned long sigcode;   /* Special sigcontext subcode, if any */
 };
 
-#define NBPG                   PAGE_SIZE
+#define NBPG                   0x2000
 #define UPAGES                 1
 #define HOST_TEXT_START_ADDR   (u.start_code)
-#define HOST_DATA_START_ADDR   (u.start_data)
-#define HOST_STACK_END_ADDR    (u.start_stack + u.u_ssize * NBPG)
+#define HOST_DATA_START_ADDR   (u.uexec.a_data)
+#define HOST_STACK_END_ADDR    (- u.u_ssize * NBPG)
 #define SUNOS_CORE_MAGIC       0x080456
 
 #endif /* !(_SPARC_USER_H) */

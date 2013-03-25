@@ -71,15 +71,20 @@ static void syntax_error( const char * msg )
     exit( 1 );
 }
 
+static void syntax_warning( const char * msg )
+{
+    fprintf( stderr, "%s: %d: %s\n", current_file, lineno, msg );
+}
+
 
 
 /*
- * Find index of a specyfic variable in the symbol table.
+ * Find index of a specific variable in the symbol table.
  * Create a new entry if it does not exist yet.
  */
-#define VARTABLE_SIZE 2048
-struct variable vartable[VARTABLE_SIZE];
+struct variable *vartable;
 int max_varnum = 0;
+static int vartable_size = 0;
 
 int get_varnum( char * name )
 {
@@ -88,8 +93,13 @@ int get_varnum( char * name )
     for ( i = 1; i <= max_varnum; i++ )
 	if ( strcmp( vartable[i].name, name ) == 0 )
 	    return i;
-    if (max_varnum > VARTABLE_SIZE-1)
-	syntax_error( "Too many variables defined." );
+    while (max_varnum+1 >= vartable_size) {
+	vartable = realloc(vartable, (vartable_size += 1000)*sizeof(*vartable));
+	if (!vartable) {
+	    fprintf(stderr, "tkparse realloc vartable failed\n");
+	    exit(1);
+	}
+    }
     vartable[++max_varnum].name = malloc( strlen( name )+1 );
     strcpy( vartable[max_varnum].name, name );
     return max_varnum;
@@ -130,7 +140,7 @@ static const char * get_string( const char * pnt, char ** label )
 static const char * get_qstring( const char * pnt, char ** label )
 {
     char quote_char;
-    char newlabel [2048];
+    char newlabel [16384];
     char * pnt1;
 
     /* advance to the open quote */
@@ -168,6 +178,28 @@ static const char * get_qstring( const char * pnt, char ** label )
     while ( *pnt == ' ' || *pnt == '\t' )
 	pnt++;
     return pnt;
+}
+
+
+
+/*
+ * Get a quoted or unquoted string. It is recognized by the first 
+ * non-white character. '"' and '"' are not allowed inside the string.
+ */
+static const char * get_qnqstring( const char * pnt, char ** label )
+{
+    char quote_char;
+
+    while ( *pnt == ' ' || *pnt == '\t' )
+	pnt++;
+
+    if ( *pnt == '\0' )
+	return pnt;
+    quote_char = *pnt;
+    if ( quote_char == '"' || quote_char == '\'' )
+	return get_qstring( pnt, label );
+    else
+	return get_string( pnt, label );
 }
 
 
@@ -304,6 +336,7 @@ static struct condition * tokenize_if( const char * pnt )
 static const char * tokenize_choices( struct kconfig * cfg_choose,
     const char * pnt )
 {
+    int default_checked = 0;
     for ( ; ; )
     {
 	struct kconfig * cfg;
@@ -327,12 +360,20 @@ static const char * tokenize_choices( struct kconfig * cfg_choose,
 	cfg->token      = token_choice_item;
 	cfg->cfg_parent = cfg_choose;
 	pnt = get_string( pnt, &cfg->label );
+	if ( ! default_checked &&
+	     ! strncmp( cfg->label, cfg_choose->value, strlen( cfg_choose->value ) ) )
+	{
+	    default_checked = 1;
+	    free( cfg_choose->value );
+	    cfg_choose->value = cfg->label;
+	}
 	while ( *pnt == ' ' || *pnt == '\t' )
 	    pnt++;
 	pnt = get_string( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
     }
-
+    if ( ! default_checked )
+	syntax_error( "bad 'choice' default value" );
     return pnt;
 }
 
@@ -493,7 +534,6 @@ static void tokenize_line( const char * pnt )
 	    pnt = get_qstring ( pnt, &cfg->label  );
 	    pnt = get_qstring ( pnt, &choice_list );
 	    pnt = get_string  ( pnt, &cfg->value  );
-
 	    cfg->nameindex = -(choose_number++);
 	    tokenize_choices( cfg, choice_list );
 	    free( choice_list );
@@ -505,6 +545,8 @@ static void tokenize_line( const char * pnt )
 	if ( last_menuoption != NULL )
 	{
 	    pnt = get_qstring(pnt, &cfg->label);
+	    if (cfg->label == NULL)
+		syntax_error( "missing comment text" );
 	    last_menuoption->label = cfg->label;
 	    last_menuoption = NULL;
 	}
@@ -546,7 +588,9 @@ static void tokenize_line( const char * pnt )
     case token_define_string:
 	pnt = get_string( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
-	pnt = get_qstring( pnt, &cfg->value );
+	pnt = get_qnqstring( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing value" );
 	break;
 
     case token_dep_bool:
@@ -598,7 +642,7 @@ static void tokenize_line( const char * pnt )
 	 * Create a conditional for this object's dependencies.
 	 */
 	{
-	    char fake_if [1024];
+	    char fake_if [8192];
 	    struct dependency * dep;
 	    struct condition ** cond_ptr;
 	    int first = 1;
@@ -659,7 +703,9 @@ static void tokenize_line( const char * pnt )
 	pnt = get_qstring ( pnt, &cfg->label );
 	pnt = get_string  ( pnt, &buffer );
 	cfg->nameindex = get_varnum( buffer );
-	pnt = get_qstring  ( pnt, &cfg->value );
+	pnt = get_qnqstring  ( pnt, &cfg->value );
+	if (cfg->value == NULL)
+	    syntax_error( "missing initial value" );
 	break;
 
     case token_if:
@@ -705,7 +751,7 @@ static void tokenize_line( const char * pnt )
  */
 static void do_source( const char * filename )
 {
-    char buffer [2048];
+    char buffer [16384];
     FILE * infile;
     const char * old_file;
     int old_lineno;
@@ -727,7 +773,8 @@ static void do_source( const char * filename )
     if ( infile == NULL )
     {
 	sprintf( buffer, "unable to open %s", filename );
-	syntax_error( buffer );
+	syntax_warning( buffer );
+        return;
     }
 
     /* push the new file name and line number */
@@ -782,5 +829,6 @@ int main( int argc, const char * argv [] )
     do_source        ( "-"         );
     fix_conditionals ( config_list );
     dump_tk_script   ( config_list );
+    free(vartable);
     return 0;
 }

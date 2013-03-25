@@ -66,7 +66,9 @@ typedef struct {
 #else
 extern serial_channel_t netarm_dummy_registers[];
 #define NETARM_SER_MODULE_BASE		(netarm_dummy_registers)
+#ifndef NETARM_XTAL_FREQ
 #define NETARM_XTAL_FREQ                18432000
+#endif
 #endif
 
 /* calculate the sysclk value from the pll setting */
@@ -149,11 +151,29 @@ extern serial_channel_t netarm_dummy_registers[];
 #define	NETARM_SER_CTLA_IE_RX_RI	(0x00000040)
 #define	NETARM_SER_CTLA_IE_RX_DSR	(0x00000020)
 
+#define NETARM_SER_CTLA_IE_RX_ALL	(NETARM_SER_CTLA_IE_RX_BRK \
+					|NETARM_SER_CTLA_IE_RX_FRMERR \
+					|NETARM_SER_CTLA_IE_RX_PARERR \
+					|NETARM_SER_CTLA_IE_RX_OVERRUN \
+					|NETARM_SER_CTLA_IE_RX_RDY \
+					|NETARM_SER_CTLA_IE_RX_HALF \
+					|NETARM_SER_CTLA_IE_RX_FULL \
+					|NETARM_SER_CTLA_IE_RX_DMAEN \
+					|NETARM_SER_CTLA_IE_RX_DCD \
+					|NETARM_SER_CTLA_IE_RX_RI \
+					|NETARM_SER_CTLA_IE_RX_DSR)
+
 #define	NETARM_SER_CTLA_IE_TX_CTS	(0x00000010)
 #define	NETARM_SER_CTLA_IE_TX_EMPTY	(0x00000008)
 #define	NETARM_SER_CTLA_IE_TX_HALF	(0x00000004)
 #define	NETARM_SER_CTLA_IE_TX_FULL	(0x00000002)
 #define	NETARM_SER_CTLA_IE_TX_DMAEN	(0x00000001)
+
+#define NETARM_SER_CTLA_IE_TX_ALL	(NETARM_SER_CTLA_IE_TX_CTS \
+					|NETARM_SER_CTLA_IE_TX_EMPTY \
+					|NETARM_SER_CTLA_IE_TX_HALF \
+					|NETARM_SER_CTLA_IE_TX_FULL \
+					|NETARM_SER_CTLA_IE_TX_DMAEN)
 
 /* Control Register B */
 
@@ -265,7 +285,7 @@ extern serial_channel_t netarm_dummy_registers[];
 /* bit rate determined from equation Fbr = Fxtal / [ 10 * ( N + 1 ) ] */
 /* from section 7.5.4 of HW Ref Guide */
 
-#if 0
+#ifdef CONFIG_NETARM_PLL_BYPASS
 #define	NETARM_SER_BR_X16(x)	( NETARM_SER_BR_EN | 			\
 				  NETARM_SER_BR_RX_CLK_INT | 		\
 				  NETARM_SER_BR_TX_CLK_INT | 		\
@@ -290,26 +310,42 @@ extern serial_channel_t netarm_dummy_registers[];
 
 /* rx gap is a function of bit rate x */
 
-#if 1
+#ifdef CONFIG_NETARM_PLL_BYPASS
 #define	NETARM_SER_RXGAP(x)	( NETARM_SER_RX_GAP_TIMER_EN |		\
 				  ( ( ( ( 10 * NETARM_XTAL_FREQ ) /	\
-				        ( x * 512 ) ) - 1 ) & 	\
+				        ( x * 5 * 512 ) ) - 1 ) & 	\
 			              NETARM_SER_RX_GAP_MASK ) )
 #else
+#define	NETARM_SER_RXGAP(x)	( NETARM_SER_RX_GAP_TIMER_EN |			\
+				  ( ( ( ( 2 * NETARM_PLLED_SYSCLK_FREQ ) /	\
+				        ( x * 512 ) ) - 1 ) & 			\
+			              NETARM_SER_RX_GAP_MASK ) )
+#endif
+
+#if 0
 #define	NETARM_SER_RXGAP(x)	( NETARM_SER_RX_GAP_TIMER_EN |		\
 				  ( ( ( ( 2 * NETARM_PLLED_SYSCLK_FREQ ) /	\
 				        ( x * 5 * 512 ) ) - 1 ) & 	\
 			              NETARM_SER_RX_GAP_MASK ) )
+#define	NETARM_SER_RXGAP(x)	( NETARM_SER_RX_GAP_TIMER_EN |		\
+				  ( ( ( ( 10 * NETARM_XTAL_FREQ ) /	\
+				        ( x * 512 ) ) - 1 ) & 	\
+			              NETARM_SER_RX_GAP_MASK ) )
 #endif
 
-#define MIN_BAUD_RATE       600
-#define MAX_BAUD_RATE     230400
+#define MIN_BAUD_RATE        600
+#define MAX_BAUD_RATE     115200
 
 /* the default BAUD rate for the BOOTLOADER, there is a separate */
 /* setting in the serial driver <arch/armnommu/drivers/char/serial-netarm.h> */
-#define DEFAULT_BAUD_RATE 115200
+#define DEFAULT_BAUD_RATE 9600
+#ifndef CONFIG_NETARM_SERIAL_CONSOLE_CH2
+#define NETARM_SER_CONSOLE_OFFSET 0x00
+#else
+#define NETARM_SER_CONSOLE_OFFSET 0x40
+#endif
 
+#define NETARM_SER_FIFO_SIZE 32
 #define MIN_GAP 0
 
 #endif
-

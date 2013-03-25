@@ -15,6 +15,14 @@
 #include <asm/auxio.h>
 #include <asm/irq.h>
 
+/* We don't need no stinkin' I/O port allocation crap. */
+#undef release_region
+#undef check_region
+#undef request_region
+#define release_region(X, Y)	do { } while(0)
+#define check_region(X, Y)	(0)
+#define request_region(X, Y, Z)	(1)
+
 /* References:
  * 1) Netbsd Sun floppy driver.
  * 2) NCR 82077 controller manual
@@ -73,10 +81,6 @@ static struct sun_floppy_ops sun_fdops;
 
 #define FLOPPY_MOTOR_MASK         0x10
 
-/* It's all the same... */
-#define virt_to_bus(x)            (x)
-#define bus_to_virt(x)            (x)
-
 /* XXX This isn't really correct. XXX */
 #define get_dma_residue(x)        (0)
 
@@ -92,8 +96,6 @@ static struct sun_floppy_ops sun_fdops;
  */
 #define FDC1                      sun_floppy_init()
 
-static int FDC2=-1;
-
 #define N_FDC    1
 #define N_DRIVE  8
 
@@ -103,6 +105,7 @@ static int FDC2=-1;
 /* Routines unique to each controller type on a Sun. */
 static unsigned char sun_82072_fd_inb(int port)
 {
+	udelay(5);
 	switch(port & 7) {
 	default:
 		printk("floppy: Asked to read unknown port %d\n", port);
@@ -112,13 +115,14 @@ static unsigned char sun_82072_fd_inb(int port)
 	case 5: /* FD_DATA */
 		return sun_fdc->data_82072;
 	case 7: /* FD_DIR */
-		return (*AUXREG & AUXIO_FLPY_DCHG)? 0x80: 0;
+		return (get_auxio() & AUXIO_FLPY_DCHG)? 0x80: 0;
 	};
 	panic("sun_82072_fd_inb: How did I get here?");
 }
 
 static void sun_82072_fd_outb(unsigned char value, int port)
 {
+	udelay(5);
 	switch(port & 7) {
 	default:
 		printk("floppy: Asked to write to unknown port %d\n", port);
@@ -154,6 +158,7 @@ static void sun_82072_fd_outb(unsigned char value, int port)
 
 static unsigned char sun_82077_fd_inb(int port)
 {
+	udelay(5);
 	switch(port & 7) {
 	default:
 		printk("floppy: Asked to read unknown port %d\n", port);
@@ -171,6 +176,7 @@ static unsigned char sun_82077_fd_inb(int port)
 
 static void sun_82077_fd_outb(unsigned char value, int port)
 {
+	udelay(5);
 	switch(port & 7) {
 	default:
 		printk("floppy: Asked to write to unknown port %d\n", port);
@@ -211,12 +217,7 @@ char *pdma_base = 0;
 unsigned long pdma_areasize;
 
 /* Common routines to all controller types on the Sparc. */
-static inline void virtual_dma_init(void)
-{
-	/* nothing... */
-}
-
-static inline void sun_fd_disable_dma(void)
+static __inline__ void sun_fd_disable_dma(void)
 {
 	doing_pdma = 0;
 	if (pdma_base) {
@@ -225,7 +226,7 @@ static inline void sun_fd_disable_dma(void)
 	}
 }
 
-static inline void sun_fd_set_dma_mode(int mode)
+static __inline__ void sun_fd_set_dma_mode(int mode)
 {
 	switch(mode) {
 	case DMA_MODE_READ:
@@ -240,17 +241,17 @@ static inline void sun_fd_set_dma_mode(int mode)
 	}
 }
 
-static inline void sun_fd_set_dma_addr(char *buffer)
+static __inline__ void sun_fd_set_dma_addr(char *buffer)
 {
 	pdma_vaddr = buffer;
 }
 
-static inline void sun_fd_set_dma_count(int length)
+static __inline__ void sun_fd_set_dma_count(int length)
 {
 	pdma_size = length;
 }
 
-static inline void sun_fd_enable_dma(void)
+static __inline__ void sun_fd_enable_dma(void)
 {
 	pdma_vaddr = mmu_lockarea(pdma_vaddr, pdma_size);
 	pdma_base = pdma_vaddr;
@@ -278,6 +279,7 @@ static int sun_floppy_init(void)
 {
 	char state[128];
 	int tnode, fd_node, num_regs;
+	struct resource r;
 
 	use_virtual_dma = 1;
 	
@@ -314,12 +316,12 @@ static int sun_floppy_init(void)
 	num_regs = prom_getproperty(fd_node, "reg", (char *) fd_regs, sizeof(fd_regs));
 	num_regs = (num_regs / sizeof(fd_regs[0]));
 	prom_apply_obio_ranges(fd_regs, num_regs);
-	sun_fdc = (struct sun_flpy_controller *) sparc_alloc_io(fd_regs[0].phys_addr,
-								0x0,
-								fd_regs[0].reg_size,
-								"floppy",
-								fd_regs[0].which_io,
-								0x0);
+	memset(&r, 0, sizeof(r));
+	r.flags = fd_regs[0].which_io;
+	r.start = fd_regs[0].phys_addr;
+	sun_fdc = (struct sun_flpy_controller *)
+	    sbus_ioremap(&r, 0, fd_regs[0].reg_size, "floppy");
+
 	/* Last minute sanity check... */
 	if(sun_fdc->status_82072 == 0xff) {
 		sun_fdc = NULL;
@@ -330,7 +332,7 @@ static int sun_floppy_init(void)
                 sun_fdops.fd_inb = sun_82072_fd_inb;
                 sun_fdops.fd_outb = sun_82072_fd_outb;
                 fdc_status = &sun_fdc->status_82072;
-                /* printk("AUXIO @0x%p\n", auxio_register); */ /* P3 */
+                /* printk("AUXIO @0x%lx\n", auxio_register); */ /* P3 */
         } else {
                 sun_fdops.fd_inb = sun_82077_fd_inb;
                 sun_fdops.fd_outb = sun_82077_fd_outb;
@@ -339,6 +341,7 @@ static int sun_floppy_init(void)
 	}
 
 	/* Success... */
+	allowed_drive_mask = 0x01;
 	return (int) sun_fdc;
 
 no_sun_fdc:
@@ -347,13 +350,15 @@ no_sun_fdc:
 
 static int sparc_eject(void)
 {
-	set_dor(0, ~0, 0x90);
+	set_dor(0x00, 0xff, 0x90);
 	udelay(500);
-	set_dor(0, ~0x90, 0);
+	set_dor(0x00, 0x6f, 0x00);
 	udelay(500);
 	return 0;
 }
 
 #define fd_eject(drive) sparc_eject()
+
+#define EXTRA_FLOPPY_PARAMS
 
 #endif /* !(__ASM_SPARC_FLOPPY_H) */

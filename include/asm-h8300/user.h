@@ -2,7 +2,7 @@
 #define _H8300_USER_H
 
 #include <asm/page.h>
-#include <linux/ptrace.h>
+
 /* Core file format: The core file is written in such a way that gdb
    can understand it and provide useful information to the user (under
    linux we use the 'trad-core' bfd).  There are quite a number of
@@ -30,17 +30,31 @@
    The minimum core file size is 3 pages, or 12288 bytes.
 */
 
+/* This is the old layout of "struct pt_regs" as of Linux 1.x, and
+   is still the layout used by user (the new pt_regs doesn't have
+   all registers). */
+struct user_regs_struct {
+	long er1,er2,er3,er4,er5,er6;
+	long er0;
+	long usp;
+	long orig_er0;
+	long ccr;
+#if defined(__H8300S__)
+	long exr;
+#endif
+	long pc;
+	
+};
+
+	
 /* When the kernel dumps core, it starts by dumping the user struct -
    this will be used by gdb to figure out where the data and stack segments
    are within the file, and what virtual addresses to use. */
 struct user{
 /* We start with the registers, to mimic the way that "memory" is returned
    from the ptrace(3,...) function.  */
-  struct pt_regs regs;		/* Where the registers are actually stored */
-  struct switch_stack regs2;	/* Backward compatibility, sort of */
+  struct user_regs_struct regs;	/* Where the registers are actually stored */
 /* ptrace does not yet supply these.  Someday.... */
-  int u_fpvalid;		/* True if math co-processor being used. */
-                                /* for this mess. Not yet used. */
 /* The rest of this junk is to help gdb figure out what goes where */
   unsigned long int u_tsize;	/* Text segment size (pages). */
   unsigned long int u_dsize;	/* Data segment size (pages). */
@@ -52,7 +66,8 @@ struct user{
 				   esp register.  */
   long int signal;     		/* Signal that caused the core dump. */
   int reserved;			/* No longer used */
-  struct pt_regs * u_ar0;	/* Used by gdb to help find the values for */
+  struct user_regs_struct *u_ar0;
+				/* Used by gdb to help find the values for */
 				/* the registers. */
   unsigned long magic;		/* To uniquely identify a core file */
   char u_comm[32];		/* User command that was responsible */

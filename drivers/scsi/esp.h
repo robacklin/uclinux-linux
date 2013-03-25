@@ -1,4 +1,5 @@
-/* esp.h:  Defines and structures for the Sparc ESP (Enhanced SCSI
+/* $Id: esp.h,v 1.28 2000/03/30 01:33:17 davem Exp $
+ * esp.h:  Defines and structures for the Sparc ESP (Enhanced SCSI
  *         Processor) driver under Linux.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -6,6 +7,8 @@
 
 #ifndef _SPARC_ESP_H
 #define _SPARC_ESP_H
+
+#include <linux/config.h>
 
 /* For dvma controller register definitions. */
 #include <asm/dma.h>
@@ -23,122 +26,166 @@
 /* All the ESP registers are one byte each and are accessed longwords
  * apart with a big-endian ordering to the bytes.
  */
-
-struct Sparc_ESP_regs {
-                                /* Access    Description              Offset */
-    volatile unchar esp_tclow;  /* rw  Low bits of the transfer count 0x00   */
-                                unchar tlpad1[3];
-    volatile unchar esp_tcmed;  /* rw  Mid bits of the transfer count 0x04   */
-                                unchar fdpad[3];
-    volatile unchar esp_fdata;  /* rw  FIFO data bits                 0x08   */
-                                unchar cbpad[3];
-    volatile unchar esp_cmd;    /* rw  SCSI command bits              0x0c   */
-                                unchar stpad[3];
-    volatile unchar esp_status; /* ro  ESP status register            0x10   */
-#define esp_busid   esp_status  /* wo  Bus ID for select/reselect     0x10   */
-                                unchar irqpd[3];
-    volatile unchar esp_intrpt; /* ro  Kind of interrupt              0x14   */
-#define esp_timeo   esp_intrpt  /* wo  Timeout value for select/resel 0x14   */
-                                unchar sspad[3];
-    volatile unchar esp_sstep;  /* ro  Sequence step register         0x18   */
-#define esp_stp     esp_sstep   /* wo  Transfer period per sync       0x18   */
-                                unchar ffpad[3];
-    volatile unchar esp_fflags; /* ro  Bits of current FIFO info      0x1c   */
-#define esp_soff    esp_fflags  /* wo  Sync offset                    0x1c   */
-                                unchar cf1pd[3];
-    volatile unchar esp_cfg1;   /* rw  First configuration register   0x20   */
-                                unchar cfpad[3];
-    volatile unchar esp_cfact;  /* wo  Clock conversion factor        0x24   */
-                                unchar ctpad[3];
-    volatile unchar esp_ctest;  /* wo  Chip test register             0x28   */
-                                unchar cf2pd[3];
-    volatile unchar esp_cfg2;   /* rw  Second configuration register  0x2c   */
-                                unchar cf3pd[3];
-
-    /* The following is only found on the 53C9X series SCSI chips */
-    volatile unchar esp_cfg3;   /* rw  Third configuration register   0x30  */
-                                unchar thpd[7];
-
-    /* The following is found on all chips except the NCR53C90 (ESP100) */
-    volatile unchar esp_tchi;   /* rw  High bits of transfer count    0x38  */
-#define esp_uid     esp_tchi    /* ro  Unique ID code                 0x38  */
-                                unchar fgpad[3];
-    volatile unchar esp_fgrnd;  /* rw  Data base for fifo             0x3c  */
-};
+					/* Access    Description              Offset */
+#define ESP_TCLOW	0x00UL		/* rw  Low bits of the transfer count 0x00   */
+#define ESP_TCMED	0x04UL		/* rw  Mid bits of the transfer count 0x04   */
+#define ESP_FDATA	0x08UL		/* rw  FIFO data bits                 0x08   */
+#define ESP_CMD		0x0cUL		/* rw  SCSI command bits              0x0c   */
+#define ESP_STATUS	0x10UL		/* ro  ESP status register            0x10   */
+#define ESP_BUSID	ESP_STATUS	/* wo  Bus ID for select/reselect     0x10   */
+#define ESP_INTRPT	0x14UL		/* ro  Kind of interrupt              0x14   */
+#define ESP_TIMEO	ESP_INTRPT	/* wo  Timeout value for select/resel 0x14   */
+#define ESP_SSTEP	0x18UL		/* ro  Sequence step register         0x18   */
+#define ESP_STP		ESP_SSTEP	/* wo  Transfer period per sync       0x18   */
+#define ESP_FFLAGS	0x1cUL		/* ro  Bits of current FIFO info      0x1c   */
+#define ESP_SOFF	ESP_FFLAGS	/* wo  Sync offset                    0x1c   */
+#define ESP_CFG1	0x20UL		/* rw  First configuration register   0x20   */
+#define ESP_CFACT	0x24UL		/* wo  Clock conversion factor        0x24   */
+#define ESP_STATUS2	ESP_CFACT	/* ro  HME status2 register           0x24   */
+#define ESP_CTEST	0x28UL		/* wo  Chip test register             0x28   */
+#define ESP_CFG2	0x2cUL		/* rw  Second configuration register  0x2c   */
+#define ESP_CFG3	0x30UL		/* rw  Third configuration register   0x30   */
+#define ESP_TCHI	0x38UL		/* rw  High bits of transfer count    0x38   */
+#define ESP_UID		ESP_TCHI	/* ro  Unique ID code                 0x38   */
+#define FAS_RLO		ESP_TCHI	/* rw  HME extended counter           0x38   */
+#define ESP_FGRND	0x3cUL		/* rw  Data base for fifo             0x3c   */
+#define FAS_RHI		ESP_FGRND	/* rw  HME extended counter           0x3c   */
+#define ESP_REG_SIZE	0x40UL
 
 /* Various revisions of the ESP board. */
 enum esp_rev {
-  esp100     = 0x00,  /* NCR53C90  */
-  esp100a    = 0x01,  /* NCR53C90A */
-  esp236     = 0x02,
-  fas236     = 0x03,
-  fas100a    = 0x04,
-  fast       = 0x05,
-  espunknown = 0x06
+	esp100     = 0x00,  /* NCR53C90 - very broken */
+	esp100a    = 0x01,  /* NCR53C90A */
+	esp236     = 0x02,
+	fas236     = 0x03,
+	fas100a    = 0x04,
+	fast       = 0x05,
+	fashme     = 0x06,
+	espunknown = 0x07
 };
 
 /* We get one of these for each ESP probed. */
-struct Sparc_ESP {
-  struct Sparc_ESP *next;           /* Next ESP on probed or NULL */
-  struct Sparc_ESP_regs *eregs;           /* All esp registers */
-  struct Linux_SBus_DMA *dma;             /* Who I do transfers with. */
-  struct sparc_dma_registers *dregs;      /* And his registers. */
-  struct Scsi_Host *ehost;                /* Backpointer to SCSI Host */
+struct esp {
+	spinlock_t		lock;
+	unsigned long		eregs;		/* ESP controller registers */
+	unsigned long		dregs;		/* DMA controller registers */
+	struct sbus_dma		*dma;		/* DMA controller sw state */
+	struct Scsi_Host	*ehost;		/* Backpointer to SCSI Host */
+	struct sbus_dev		*sdev;		/* Pointer to SBus entry */
 
-  struct linux_sbus_device *edev;         /* Pointer to SBus entry */
-  char prom_name[64];                     /* Name of ESP device from prom */
-  int prom_node;                          /* Prom node where ESP found */
-  int esp_id;                             /* Same as esphost->host_id */
+	/* ESP Configuration Registers */
+	u8			config1;	/* Copy of the 1st config register */
+	u8			config2;	/* Copy of the 2nd config register */
+	u8			config3[16];	/* Copy of the 3rd config register */
 
-  /* ESP Configuration Registers */
-  unsigned char config1;                  /* Copy of the 1st config register */
-  unsigned char config2;                  /* Copy of the 2nd config register */
-  unsigned char config3[8];               /* Copy of the 3rd config register */
+	/* The current command we are sending to the ESP chip.  This esp_command
+	 * ptr needs to be mapped in DVMA area so we can send commands and read
+	 * from the ESP fifo without burning precious CPU cycles.  Programmed I/O
+	 * sucks when we have the DVMA to do it for us.  The ESP is stupid and will
+	 * only send out 6, 10, and 12 byte SCSI commands, others we need to send
+	 * one byte at a time.  esp_slowcmd being set says that we are doing one
+	 * of the command types ESP doesn't understand, esp_scmdp keeps track of
+	 * which byte we are sending, esp_scmdleft says how many bytes to go.
+	 */
+	volatile u8		*esp_command;    /* Location of command (CPU view)  */
+	__u32			esp_command_dvma;/* Location of command (DVMA view) */
+	unsigned char		esp_clen;	 /* Length of this command */
+	unsigned char		esp_slowcmd;
+	unsigned char		*esp_scmdp;
+	unsigned char		esp_scmdleft;
 
-  /* The current command we are sending to the ESP chip.  This esp_command
-   * ptr needs to be mapped in DVMA area so we can send commands and read
-   * from the ESP fifo without burning precious CPU cycles.  Programmed I/O
-   * sucks when we have the DVMA to do it for us.
-   */
-  volatile unchar *esp_command;           /* Location of command */
-  int esp_clen;                           /* Length of this command */
+	/* The following are used to determine the cause of an IRQ. Upon every
+	 * IRQ entry we synchronize these with the hardware registers.
+	 */
+	u8			ireg;		/* Copy of ESP interrupt register */
+	u8			sreg;		/* Copy of ESP status register */
+	u8			seqreg;		/* Copy of ESP sequence step register */
+	u8			sreg2;		/* Copy of HME status2 register */
 
-  /* To hold onto the dvma buffer ptr. */
-  char *dvma_hold;
+	/* To save register writes to the ESP, which can be expensive, we
+	 * keep track of the previous value that various registers had for
+	 * the last target we connected to.  If they are the same for the
+	 * current target, we skip the register writes as they are not needed.
+	 */
+	u8			prev_soff, prev_stp;
+	u8			prev_cfg3, __cache_pad;
 
-  /* The following are used to determine the cause of an IRQ. Upon every
-   * IRQ entry we synchronize these with the hardware registers.
-   */
-  unchar ireg;                            /* Copy of ESP interrupt register */
-  unchar sreg;                            /* Same for ESP status register */
-  unchar seqreg;                          /* The ESP sequence register */
+	/* We also keep a cache of the previous FAS/HME DMA CSR register value.  */
+	u32			prev_hme_dmacsr;
 
-  /* Clock periods, frequencies, synchronization, etc. */
-  unsigned int cfreq;                    /* Clock frequency in HZ */
-  unsigned int cfact;                    /* Clock conversion factor */
-  unsigned int ccycle;                   /* One ESP clock cycle */
-  unsigned int ctick;                    /* One ESP clock time */
-  unsigned int sync_defp;                /* Default negotiation period */
+	/* The HME is the biggest piece of shit I have ever seen. */
+	u8			hme_fifo_workaround_buffer[16 * 2];
+	u8			hme_fifo_workaround_count;
 
-  /* Misc. info about this ESP */
-  enum esp_rev erev;                      /* ESP revision */
-  int irq;                                /* SBus IRQ for this ESP */
-  int scsi_id;                            /* Who am I as initiator? */
-  int scsi_id_mask;                       /* Bitmask of 'me'. */
-  int diff;                               /* Differential SCSI? */
-  int bursts;                             /* Burst sizes our DVMA supports */
+	/* For each target we keep track of save/restore data
+	 * pointer information.  This needs to be updated majorly
+	 * when we add support for tagged queueing.  -DaveM
+	 */
+	struct esp_pointers {
+		char			*saved_ptr;
+		struct scatterlist	*saved_buffer;
+		int			saved_this_residual;
+		int			saved_buffers_residual;
+	} data_pointers[16] /*XXX [MAX_TAGS_PER_TARGET]*/;
 
-  /* Our command queues, only one cmd lives in the current_SC queue. */
-  Scsi_Cmnd *issue_SC;           /* Commands to be issued */
-  Scsi_Cmnd *current_SC;         /* Who is currently working the bus */
-  Scsi_Cmnd *disconnected_SC;    /* Commands disconnected from the bus */
+	/* Clock periods, frequencies, synchronization, etc. */
+	unsigned int		cfreq;		/* Clock frequency in HZ */
+	unsigned int		cfact;		/* Clock conversion factor */
+	unsigned int		raw_cfact;	/* Raw copy from probing */
+	unsigned int		ccycle;		/* One ESP clock cycle */
+	unsigned int		ctick;		/* One ESP clock time */
+	unsigned int		radelay;	/* FAST chip req/ack delay */
+	unsigned int		neg_defp;	/* Default negotiation period */
+	unsigned int		sync_defp;	/* Default sync transfer period */
+	unsigned int		max_period;	/* longest our period can be */
+	unsigned int		min_period;	/* shortest period we can withstand */
 
-#ifdef THREADED_ESP_DRIVER
-  Scsi_Cmnd *eatme_SC;           /* Cmds waiting for esp thread to process. */
-#endif
+	struct esp		*next;		/* Next ESP we probed or NULL */
+	char			prom_name[64];	/* Name of ESP device from prom */
+	int			prom_node;	/* Prom node where ESP found */
+	int			esp_id;		/* Unique per-ESP ID number */
 
-  /* Abortion status */
-  int aborting, abortion_complete, abort_result;
+	/* For slow to medium speed input clock rates we shoot for 5mb/s,
+	 * but for high input clock rates we try to do 10mb/s although I
+	 * don't think a transfer can even run that fast with an ESP even
+	 * with DMA2 scatter gather pipelining.
+	 */
+#define SYNC_DEFP_SLOW            0x32   /* 5mb/s  */
+#define SYNC_DEFP_FAST            0x19   /* 10mb/s */
+
+	unsigned int		snip;		/* Sync. negotiation in progress */
+	unsigned int		wnip;		/* WIDE negotiation in progress */
+	unsigned int		targets_present;/* targets spoken to before */
+
+	int		current_transfer_size;	/* Set at beginning of data dma */
+
+	u8			espcmdlog[32];	/* Log of current esp cmds sent. */
+	u8			espcmdent;	/* Current entry in esp cmd log. */
+
+	/* Misc. info about this ESP */
+	enum esp_rev		erev;		/* ESP revision */
+	int			irq;		/* SBus IRQ for this ESP */
+	int			scsi_id;	/* Who am I as initiator? */
+	int			scsi_id_mask;	/* Bitmask of 'me'. */
+	int			diff;		/* Differential SCSI bus? */
+	int			bursts;		/* Burst sizes our DVMA supports */
+
+	/* Our command queues, only one cmd lives in the current_SC queue. */
+	Scsi_Cmnd		*issue_SC;	/* Commands to be issued */
+	Scsi_Cmnd		*current_SC;	/* Who is currently working the bus */
+	Scsi_Cmnd		*disconnected_SC;/* Commands disconnected from the bus */
+
+	/* Message goo */
+	u8			cur_msgout[16];
+	u8			cur_msgin[16];
+	u8			prevmsgout, prevmsgin;
+	u8			msgout_len, msgin_len;
+	u8			msgout_ctr, msgin_ctr;
+
+	/* States that we cannot keep in the per cmd structure because they
+	 * cannot be assosciated with any specific command.
+	 */
+	u8			resetting_bus;
 };
 
 /* Bitfield meanings for the above registers. */
@@ -152,30 +199,37 @@ struct Sparc_ESP {
 #define ESP_CONFIG1_SLCABLE   0x80             /* Enable slow cable mode */
 
 /* ESP config reg 2, read-write, found only on esp100a+esp200+esp236 chips */
-#define ESP_CONFIG2_DMAPARITY 0x01             /* Parity DMA err (200,236) */
-#define ESP_CONFIG2_REGPARITY 0x02             /* Parity reg err (200,236) */
+#define ESP_CONFIG2_DMAPARITY 0x01             /* enable DMA Parity (200,236) */
+#define ESP_CONFIG2_REGPARITY 0x02             /* enable reg Parity (200,236) */
 #define ESP_CONFIG2_BADPARITY 0x04             /* Bad parity target abort  */
-#define ESP_CONFIG2_SCSI2ENAB 0x08             /* Enable SCSI-2 features   */
+#define ESP_CONFIG2_SCSI2ENAB 0x08             /* Enable SCSI-2 features (tmode only) */
 #define ESP_CONFIG2_HI        0x10             /* High Impedance DREQ ???  */
+#define ESP_CONFIG2_HMEFENAB  0x10             /* HME features enable */
 #define ESP_CONFIG2_BCM       0x20             /* Enable byte-ctrl (236)   */
+#define ESP_CONFIG2_DISPINT   0x20             /* Disable pause irq (hme) */
 #define ESP_CONFIG2_FENAB     0x40             /* Enable features (fas100,esp216)      */
 #define ESP_CONFIG2_SPL       0x40             /* Enable status-phase latch (esp236)   */
+#define ESP_CONFIG2_MKDONE    0x40             /* HME magic feature */
+#define ESP_CONFIG2_HME32     0x80             /* HME 32 extended */
 #define ESP_CONFIG2_MAGIC     0xe0             /* Invalid bits... */
 
-/* ESP config register 3 read-write, found only esp236+fas236+fas100a chips */
-#define ESP_CONFIG3_FCLOCK    0x01             /* FAST SCSI clock rate (esp100a)     */
+/* ESP config register 3 read-write, found only esp236+fas236+fas100a+hme chips */
+#define ESP_CONFIG3_FCLOCK    0x01             /* FAST SCSI clock rate (esp100a/hme) */
 #define ESP_CONFIG3_TEM       0x01             /* Enable thresh-8 mode (esp/fas236)  */
-#define ESP_CONFIG3_FAST      0x02             /* Enable FAST SCSI     (esp100a)     */
+#define ESP_CONFIG3_FAST      0x02             /* Enable FAST SCSI     (esp100a/hme) */
 #define ESP_CONFIG3_ADMA      0x02             /* Enable alternate-dma (esp/fas236)  */
-#define ESP_CONFIG3_TENB      0x04             /* group2 SCSI2 support (esp100a)     */
+#define ESP_CONFIG3_TENB      0x04             /* group2 SCSI2 support (esp100a/hme) */
 #define ESP_CONFIG3_SRB       0x04             /* Save residual byte   (esp/fas236)  */
-#define ESP_CONFIG3_TMS       0x08             /* Three-byte msg's ok  (esp100a)     */
+#define ESP_CONFIG3_TMS       0x08             /* Three-byte msg's ok  (esp100a/hme) */
 #define ESP_CONFIG3_FCLK      0x08             /* Fast SCSI clock rate (esp/fas236)  */
-#define ESP_CONFIG3_IDMSG     0x10             /* ID message checking  (esp100a)     */
+#define ESP_CONFIG3_IDMSG     0x10             /* ID message checking  (esp100a/hme) */
 #define ESP_CONFIG3_FSCSI     0x10             /* Enable FAST SCSI     (esp/fas236)  */
 #define ESP_CONFIG3_GTM       0x20             /* group2 SCSI2 support (esp/fas236)  */
+#define ESP_CONFIG3_IDBIT3    0x20             /* Bit 3 of HME SCSI-ID (hme)         */
 #define ESP_CONFIG3_TBMS      0x40             /* Three-byte msg's ok  (esp/fas236)  */
+#define ESP_CONFIG3_EWIDE     0x40             /* Enable Wide-SCSI     (hme)         */
 #define ESP_CONFIG3_IMS       0x80             /* ID msg chk'ng        (esp/fas236)  */
+#define ESP_CONFIG3_OBPUSH    0x80             /* Push odd-byte to dma (hme)         */
 
 /* ESP command register read-write */
 /* Group 1 commands:  These may be sent at any point in time to the ESP
@@ -244,6 +298,16 @@ struct Sparc_ESP {
  */
 #define ESP_STAT_INTR         0x80             /* Interrupt */
 
+/* HME only: status 2 register */
+#define ESP_STAT2_SCHBIT      0x01 /* Upper bits 3-7 of sstep enabled */
+#define ESP_STAT2_FFLAGS      0x02 /* The fifo flags are now latched */
+#define ESP_STAT2_XCNT        0x04 /* The transfer counter is latched */
+#define ESP_STAT2_CREGA       0x08 /* The command reg is active now */
+#define ESP_STAT2_WIDE        0x10 /* Interface on this adapter is wide */
+#define ESP_STAT2_F1BYTE      0x20 /* There is one byte at top of fifo */
+#define ESP_STAT2_FMSB        0x40 /* Next byte in fifo is most significant */
+#define ESP_STAT2_FEMPTY      0x80 /* FIFO is empty */
+
 /* The status register can be masked with ESP_STAT_PMASK and compared
  * with the following values to determine the current phase the ESP
  * (at least thinks it) is in.  For our purposes we also add our own
@@ -283,7 +347,12 @@ struct Sparc_ESP {
 #define ESP_STEP_PPC          0x03             /* Early phase chg caused cmnd
                                                 * bytes to be lost
                                                 */
-#define ESP_STEP_FINI         0x04             /* Command was sent ok */
+#define ESP_STEP_FINI4        0x04             /* Command was sent ok */
+
+/* Ho hum, some ESP's set the step register to this as well... */
+#define ESP_STEP_FINI5        0x05
+#define ESP_STEP_FINI6        0x06
+#define ESP_STEP_FINI7        0x07
 
 /* ESP chip-test register read-write */
 #define ESP_TEST_TARG         0x01             /* Target test mode */
@@ -299,6 +368,7 @@ struct Sparc_ESP {
 /* ESP fifo flags register read-only */
 /* Note that the following implies a 16 byte FIFO on the ESP. */
 #define ESP_FF_FBYTES         0x1f             /* Num bytes in FIFO */
+#define ESP_FF_ONOTZERO       0x20             /* offset ctr not zero (esp100) */
 #define ESP_FF_SSTEP          0xe0             /* Sequence step */
 
 /* ESP clock conversion factor register write-only */
@@ -311,37 +381,67 @@ struct Sparc_ESP {
 #define ESP_CCF_F6            0x06             /* 25.01MHz - 30MHz */
 #define ESP_CCF_F7            0x07             /* 30.01MHz - 35MHz */
 
+/* HME only... */
+#define ESP_BUSID_RESELID     0x10
+#define ESP_BUSID_CTR32BIT    0x40
+
+#define ESP_BUS_TIMEOUT        275             /* In milli-seconds */
+#define ESP_TIMEO_CONST       8192
+#define ESP_NEG_DEFP(mhz, cfact) \
+        ((ESP_BUS_TIMEOUT * ((mhz) / 1000)) / (8192 * (cfact)))
+#define ESP_MHZ_TO_CYCLE(mhertz)  ((1000000000) / ((mhertz) / 1000))
+#define ESP_TICK(ccf, cycle)  ((7682 * (ccf) * (cycle) / 1000))
+
 extern int esp_detect(struct SHT *);
 extern const char *esp_info(struct Scsi_Host *);
 extern int esp_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 extern int esp_command(Scsi_Cmnd *);
 extern int esp_abort(Scsi_Cmnd *);
 extern int esp_reset(Scsi_Cmnd *, unsigned int);
+extern int esp_proc_info(char *buffer, char **start, off_t offset, int length,
+			 int hostno, int inout);
+extern int esp_revoke(Scsi_Device* SDptr);
 
-extern struct proc_dir_entry proc_scsi_esp;
-
-#define SCSI_SPARC_ESP {                                                               \
-/* struct SHT *next */                                         NULL,                   \
-/* long *usage_count */                                        NULL,                   \
-/* struct proc_dir_entry *proc_dir */                          &proc_scsi_esp,         \
-/* int (*proc_info)(char *, char **, off_t, int, int, int) */  NULL,                   \
-/* const char *name */                                         "Sun ESP 100/100a/200", \
-/* int detect(struct SHT *) */                                 esp_detect,             \
-/* int release(struct Scsi_Host *) */                          NULL,                   \
-/* const char *info(struct Scsi_Host *) */                     esp_info,               \
-/* int command(Scsi_Cmnd *) */                                 esp_command,            \
-/* int queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *)) */ esp_queue,              \
-/* int abort(Scsi_Cmnd *) */                                   esp_abort,              \
-/* int reset(Scsi_Cmnd *, int) */                              esp_reset,              \
-/* int slave_attach(int, int) */                               NULL,                   \
-/* int bios_param(Disk *, kdev_t, int[]) */                    NULL,                   \
-/* int can_queue */                                            10,                     \
-/* int this_id */                                              7,                      \
-/* short unsigned int sg_tablesize */                          SG_ALL,                 \
-/* short cmd_per_lun */                                        1,                      \
-/* unsigned char present */                                    0,                      \
-/* unsigned unchecked_isa_dma:1 */                             0,                      \
-/* unsigned use_clustering:1 */                                DISABLE_CLUSTERING, }
+#ifdef CONFIG_SPARC64
+#define SCSI_SPARC_ESP {                                        \
+		proc_name:      "esp",				\
+		proc_info:      &esp_proc_info,			\
+		name:           "Sun ESP 100/100a/200",		\
+		detect:         esp_detect,			\
+		revoke:		esp_revoke,			\
+		info:           esp_info,			\
+		command:        esp_command,			\
+		queuecommand:   esp_queue,			\
+		abort:          esp_abort,			\
+		reset:          esp_reset,			\
+		can_queue:      7,				\
+		this_id:        7,				\
+		sg_tablesize:   SG_ALL,				\
+		cmd_per_lun:    1,				\
+		use_clustering: ENABLE_CLUSTERING,		\
+		use_new_eh_code: 0,				\
+		highmem_io:	1				\
+}
+#else
+/* Sparc32's iommu code cannot handle highmem pages yet. */
+#define SCSI_SPARC_ESP {                                        \
+		proc_name:      "esp",				\
+		proc_info:      &esp_proc_info,			\
+		name:           "Sun ESP 100/100a/200",		\
+		detect:         esp_detect,			\
+		revoke:		esp_revoke,			\
+		info:           esp_info,			\
+		command:        esp_command,			\
+		queuecommand:   esp_queue,			\
+		abort:          esp_abort,			\
+		reset:          esp_reset,			\
+		can_queue:      7,				\
+		this_id:        7,				\
+		sg_tablesize:   SG_ALL,				\
+		cmd_per_lun:    1,				\
+		use_clustering: ENABLE_CLUSTERING,		\
+}
+#endif
 
 /* For our interrupt engine. */
 #define for_each_esp(esp) \

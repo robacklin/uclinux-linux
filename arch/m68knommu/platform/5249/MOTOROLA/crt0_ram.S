@@ -1,7 +1,7 @@
 /*****************************************************************************/
 
 /*
- *	crt0_ram.S -- startup code for M5249C3 ColdFire based MOTOROLA boards.
+ *	crt0_ram.S -- startup code for Motorola M5249C3 eval board.
  *
  *	(C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com).
  */
@@ -17,7 +17,6 @@
 /*
  *	Motorola M5249C3 ColdFire eval board, chip select and memory setup.
  */
-
 #define	MEM_BASE	0x00000000	/* Memory base at address 0 */
 #define	MEM_SIZE	0x00800000	/* Memory size 8MB */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
@@ -72,66 +71,66 @@ _start:
 	 *	Set RAMBAR0 and RAMBAR1, just incase they are not set.
 	 */
 	move.l	#0x20000001, %a1
-	movec	%a1, #0xc05			/* Map RAMBAR1 region */
+	movec	%a1, #0XC05			/* Map RAMBAR1 region */
 	move.l	#0x20010001, %a0
 	movec	%a0, %RAMBAR0			/* Map RAMBAR region */
 
 	/*
 	 *	Set MBAR1 and MBAR2, just incase they are not set.
 	 */
-	move.l	#0x10000001, %a0
-	movec	%a0, %MBAR			/* Map MBAR region */
-	subq.l	#1, %a0				/* Get MBAR address in a0 */
+	move.l  #0x10000001, %a0
+	movec   %a0, %MBAR			/* Map MBAR region */
+	subq.l  #1, %a0				/* Get MBAR address in a0 */
 
-	move.l	#0x80000001, %a1
-	movec	%a1, #0xc0e			/* Map MBAR2 region */
-	subq.l	#1, %a1				/* Get MBAR2 address in a1 */
+	move.l  #0x80000001, %a1
+	movec   %a1, #0xc0e			/* Map MBAR2 region */
+	subq.l  #1, %a1				/* Get MBAR2 address in a1 */
 
 	/*
-	 *	Move secondary interrupts to base at 128.
+	 *      Move secondary interrupts to base at 128.
 	 */
-	move.b	#0x80, %d0
-	move.b	%d0, 0x16b(%a1)			/* Interrupt base register */
+	move.b  #0x80, %d0
+	move.b  %d0, 0x16b(%a1)			/* Interrupt base register */
 
 #if 1
 	/*
-	 *	Work around broken CSMR0/DRAM vector problem.
+	 *      Work around broken CSMR0/DRAM vector problem.
 	 */
-	move.l	#0x001F0021, %d0		/* Disable C/I bit */
-	move.l	%d0, 0x84(%a0)			/* Set CSMR0 */
+	move.l  #0x001F0021, %d0		/* Disable C/I bit */
+	move.l  %d0, 0x84(%a0)			/* Set CSMR0 */
 #endif
 
 	/*
-	 *	Disable the PLL to start with. (Who knows what settings
-	 *	we got here with!).
+	 *	Disable the PLL firstly. (Who knows what state it is
+	 *	in here!).
 	 */
-	move.l	0x180(%a1), %d0			/* Get current PLL value */
-	and.l	#0xfffffffe, %d0		/* PLL bypass first */
-	move.l	%d0, 0x180(%a1)			/* Set PLL register */
+	move.l  0x180(%a1), %d0			/* Get current PLL value */
+	and.l   #0xfffffffe, %d0		/* PLL bypass first */
+	move.l  %d0, 0x180(%a1)			/* Set PLL register */
 	nop
 
 #if CONFIG_CLOCK_140MHz
 	/*
 	 *	Set initial clock frequency. This assumes M5249C3 board
 	 *	is fitted with 11.2896MHz crystal. It will program the
-	 *	PLL for 140. Lets go fast :-)
+	 *	PLL for 140MHz. Lets go fast :-)
 	 */
-	move.l	#0x125a40f0, %d0		/* Set for 140MHz */
-	move.l	%d0, 0x180(%a1)			/* Set PLL register */
-	or.l	#0x1, %d0
-	move.l	%d0, 0x180(%a1)			/* Set PLL register */
+	move.l  #0x125a40f0, %d0		/* Set for 140MHz */
+	move.l  %d0, 0x180(%a1)			/* Set PLL register */
+	or.l    #0x1, %d0
+	move.l  %d0, 0x180(%a1)			/* Set PLL register */
 #endif
 
 	/*
 	 *	Setup CS1 for ethernet controller.
 	 *	(Setup as per M5249C3 doco).
 	 */
-	move.l	#0xe0000000, %d0		/* CS1 mapped at 0xe0000000 */
-	move.l	%d0, 0x8c(%a0)
-	move.l	#0x001f0021, %d0		/* CS1 size of 1Mb */
-	move.l	%d0, 0x90(%a0)
-	move.w	#0x0080, %d0			/* CS1 = 16bit port, AA */
-	move.w	%d0, 0x96(%a0)
+	move.l  #0xe0000000, %d0		/* CS1 mapped at 0xe0000000 */
+	move.l  %d0, 0x8c(%a0)
+	move.l  #0x001f0021, %d0		/* CS1 size of 1Mb */
+	move.l  %d0, 0x90(%a0)
+	move.w  #0x0080, %d0			/* CS1 = 16bit port, AA */
+	move.w  %d0, 0x96(%a0)
 
 	/*
 	 *	Setup CS2 for IDE interface.
@@ -151,11 +150,11 @@ _start:
 	move.l	#0x00080000, %d0		/* GPIO19, IDE reset bit */
 	or.l	%d0, 0xc(%a1)			/* Function GPIO19 */
 	or.l	%d0, 0x8(%a1)			/* Enable GPIO19 as output */
-	or.l	%d0, 0x4(%a1)			/* De-assert IDE reset */
+        or.l	%d0, 0x4(%a1)			/* De-assert IDE reset */
 
 	/*
 	 *	Setup VBR as per eval board (really dBUG does this).
-         *	These settings must match it.
+	 *	These settings must match it.
 	 */
 	move.l	#VBR_BASE, %a0			/* Note VBR can't be read */
 	movec   %a0, %VBR
@@ -169,24 +168,27 @@ _start:
 	move.l	#MEM_SIZE, %a0
 
 	move.l	%a0, %d0			/* Mem end addr is in a0 */
-	move.l	%d0, _ramend			/* Set end ram addr */
 	move.l	%d0, %sp			/* Set up initial stack ptr */
+	move.l	%d0, _ramend			/* Set end ram addr */
+
 
 	/*
 	 *	Enable CPU internal cache.
 	 */
-	move.l	#0x01000000, %d0		/* Invalidate whole cache */
-	movec	%d0, %CACR
+	move.l  #0x01000000, %d0		/* Invalidate whole cache */
+	movec   %d0, %CACR
 	nop
 
-	move.l	#0x0000c000, %d0		/* Set SDRAM cached only */
-	movec	%d0, %ACR0
-	move.l	#0x00000000, %d0		/* No other regions cached */
-	movec	%d0, %ACR1
+	move.l  #0x0000c000, %d0		/* Set SDRAM cached only */
+	movec   %d0, %ACR0
+	move.l  #0x00000000, %d0		/* No other regions cached */
+	movec   %d0, %ACR1
 
-	move.l	#0xa0000200, %d0		/* Enable cache... */
-	movec	%d0, %CACR
+	move.l  #0xa0000200, %d0		/* Enable cache... */
+	movec   %d0, %CACR
 	nop
+
+#ifdef CONFIG_ROMFS_FS
 
 	/*
 	 *	Move ROM filesystem above bss :-)
@@ -216,6 +218,13 @@ _copy_romfs:
 	cmp.l	%a0, %a2			/* Check if at end */
 	bne	_copy_romfs
 
+#else /* !CONFIG_ROMFS_FS */
+
+	lea.l	_ebss, %a1			/* Get end of bss segment */
+	move.l	%a1, _ramstart			/* Set start of ram */
+
+#endif /* !CONFIG_ROMFS_FS */
+
 	/*
 	 *	Zero out the bss region.
 	 */
@@ -228,6 +237,7 @@ _clear_bss:
 	bne	_clear_bss
 
 #if CONFIG_BLK_DEV_INITRD
+# if CONFIG_ROMFS_FS
 	/*
 	 *	Setup up RAMdisk info if using it.
 	 *	(Must do this after clearing the bss :-)
@@ -235,7 +245,27 @@ _clear_bss:
 	move.l	%d2, initrd_start		/* Set up start of initrd */
 	add.l	%d1, %d2			/* Calculate end of initrd */
 	move.l	%d2, initrd_end
-#endif
+
+# else /* !CONFIG_ROMFS_FS */
+
+	/*
+	 * initrd support for Coldfire currently requires romfs.
+	 * Generic initrd support requires a bootloader protocol to 
+	 * tell the kernel where the image is located.
+	 */
+	moveq.l	#0, %d2
+	move.l	%d2, initrd_start
+	move.l	%d2, initrd_end
+
+# endif /* !CONFIG_ROMFS_FS */
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 *	Load the current task pointer and stack.
+	 */
+	lea	init_task_union, %a0
+	movel	%a0, _current_task
+	lea	0x2000(%a0), %sp
 
 	/*
 	 *	Assember start up done, start code proper.

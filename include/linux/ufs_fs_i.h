@@ -6,25 +6,26 @@
  * Laboratory for Computer Science Research Computing Facility
  * Rutgers, The State University of New Jersey
  *
- * $Id: ufs_fs_i.h,v 1.1.1.1 1999-11-22 03:47:00 christ Exp $
- *
+ * NeXTstep support added on February 5th 1998 by
+ * Niels Kristian Bech Jensen <nkbj@image.dk>.
  */
 
 #ifndef _LINUX_UFS_FS_I_H
 #define _LINUX_UFS_FS_I_H
 
-#include <linux/ufs_fs.h>
-
 struct ufs_inode_info {
-	__u64	ui_size;
-	__u32	ui_flags;
-	__u32	ui_gen;
-	__u32	ui_shadow;
-	__u32	ui_uid;
-	__u32	ui_gid;
-	__u32	ui_oeftflag;
-	__u32	ui_db[UFS_NDADDR];
-	__u32	ui_ib[UFS_NINDIR];
+	union {
+		__u32	i_data[15];
+		__u8	i_symlink[4*15];
+	} i_u1;
+	__u32	i_flags;
+	__u32	i_gen;
+	__u32	i_shadow;
+	__u32	i_unused1;
+	__u32	i_unused2;
+	__u32	i_oeftflag;
+	__u16	i_osync;
+	__u32	i_lastfrag;
 };
 
 #endif /* _LINUX_UFS_FS_I_H */

@@ -1,304 +1,411 @@
 /*
- *  arch/mips/mm/init.c
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  *
- *  Copyright (C) 1991, 1992, 1993, 1994  Linus Torvalds
- *  Ported to MIPS by Ralf Baechle
+ * Copyright (C) 1994 - 2000 by Ralf Baechle
+ * Copyright (C) 2000 Silicon Graphics, Inc.
+ *
+ * Kevin D. Kissell, kevink@mips.com and Carsten Langgaard, carstenl@mips.com
+ * Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
  */
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/head.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/pagemap.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/mm.h>
+#include <linux/bootmem.h>
+#include <linux/highmem.h>
+#include <linux/swap.h>
+#include <linux/swapctl.h>
+#include <linux/blk.h>
 
+#include <asm/bootinfo.h>
 #include <asm/cachectl.h>
+#include <asm/cpu.h>
+#include <asm/dma.h>
 #include <asm/jazzdma.h>
-#include <asm/vector.h>
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
+#include <asm/mmu_context.h>
+#include <asm/tlb.h>
 
-extern void deskstation_tyne_dma_init(void);
-extern void sound_mem_init(void);
-extern void die_if_kernel(char *,struct pt_regs *,long);
-extern void show_net_buffers(void);
+mmu_gather_t mmu_gathers[NR_CPUS];
+unsigned long highstart_pfn, highend_pfn;
+static unsigned long totalram_pages;
+static unsigned long totalhigh_pages;
 
-extern char empty_zero_page[PAGE_SIZE];
-
-/*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving a inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
- */
-pte_t * __bad_pagetable(void)
+void pgd_init(unsigned long page)
 {
-	extern char empty_bad_page_table[PAGE_SIZE];
-	unsigned long page;
-	unsigned long dummy1, dummy2;
+	unsigned long *p = (unsigned long *) page;
+	int i;
 
-	page = ((unsigned long)empty_bad_page_table) + (PT_OFFSET - PAGE_OFFSET);
-#if __mips__ >= 3
-        /*
-         * Use 64bit code even for Linux/MIPS 32bit on R4000
-         */
-	__asm__ __volatile__(
-		".set\tnoreorder\n"
-		".set\tnoat\n\t"
-		".set\tmips3\n\t"
-		"dsll32\t$1,%2,0\n\t"
-		"dsrl32\t%2,$1,0\n\t"
-		"or\t%2,$1\n"
-		"1:\tsd\t%2,(%0)\n\t"
-		"subu\t%1,1\n\t"
-		"bnez\t%1,1b\n\t"
-		"addiu\t%0,8\n\t"
-		".set\tmips0\n\t"
-		".set\tat\n"
-		".set\treorder"
-		:"=r" (dummy1),
-		 "=r" (dummy2)
-		:"r" (pte_val(BAD_PAGE)),
-		 "0" (page),
-		 "1" (PAGE_SIZE/8));
-#else
-	__asm__ __volatile__(
-		".set\tnoreorder\n"
-		"1:\tsw\t%2,(%0)\n\t"
-		"subu\t%1,1\n\t"
-		"bnez\t%1,1b\n\t"
-		"addiu\t%0,4\n\t"
-		".set\treorder"
-		:"=r" (dummy1),
-		 "=r" (dummy2)
-		:"r" (pte_val(BAD_PAGE)),
-		 "0" (page),
-		 "1" (PAGE_SIZE/4));
-#endif
-
-	return (pte_t *)page;
-}
-
-static inline void
-__zeropage(unsigned long page)
-{
-	unsigned long dummy1, dummy2;
-
-#ifdef __R4000__
-        /*
-         * Use 64bit code even for Linux/MIPS 32bit on R4000
-         */
-	__asm__ __volatile__(
-		".set\tnoreorder\n"
-		".set\tnoat\n\t"
-		".set\tmips3\n"
-		"1:\tsd\t$0,(%0)\n\t"
-		"subu\t%1,1\n\t"
-		"bnez\t%1,1b\n\t"
-		"addiu\t%0,8\n\t"
-		".set\tmips0\n\t"
-		".set\tat\n"
-		".set\treorder"
-		:"=r" (dummy1),
-		 "=r" (dummy2)
-		:"0" (page),
-		 "1" (PAGE_SIZE/8));
-#else
-	__asm__ __volatile__(
-		".set\tnoreorder\n"
-		"1:\tsw\t$0,(%0)\n\t"
-		"subu\t%1,1\n\t"
-		"bnez\t%1,1b\n\t"
-		"addiu\t%0,4\n\t"
-		".set\treorder"
-		:"=r" (dummy1),
-		 "=r" (dummy2)
-		:"0" (page),
-		 "1" (PAGE_SIZE/4));
-#endif
-}
-
-static inline void
-zeropage(unsigned long page)
-{
-	sys_cacheflush((void *)page, PAGE_SIZE, BCACHE);
-	sync_mem();
-	__zeropage(page + (PT_OFFSET - PAGE_OFFSET));
-}
-
-pte_t __bad_page(void)
-{
-	extern char empty_bad_page[PAGE_SIZE];
-	unsigned long page = (unsigned long)empty_bad_page;
-
-	zeropage(page);
-	return pte_mkdirty(mk_pte(page, PAGE_SHARED));
-}
-
-unsigned long __zero_page(void)
-{
-	unsigned long page = (unsigned long) empty_zero_page;
-
-	zeropage(page);
-	return page;
-}
-
-/*
- * This is horribly inefficient ...
- */
-void __copy_page(unsigned long from, unsigned long to)
-{
-	/*
-	 * Now copy page from uncached KSEG1 to KSEG0.  The copy destination
-	 * is in KSEG0 so that we keep stupid L2 caches happy.
-	 */
-	if(from == (unsigned long) empty_zero_page)
-	{
-		/*
-		 * The page copied most is the COW empty_zero_page.  Since we
-		 * know its contents we can avoid the writeback reading of
-		 * the page.  Speeds up the standard case a lot.
-		 */
-		__zeropage(to);
+	for (i = 0; i < USER_PTRS_PER_PGD; i+=8) {
+		p[i + 0] = (unsigned long) invalid_pte_table;
+		p[i + 1] = (unsigned long) invalid_pte_table;
+		p[i + 2] = (unsigned long) invalid_pte_table;
+		p[i + 3] = (unsigned long) invalid_pte_table;
+		p[i + 4] = (unsigned long) invalid_pte_table;
+		p[i + 5] = (unsigned long) invalid_pte_table;
+		p[i + 6] = (unsigned long) invalid_pte_table;
+		p[i + 7] = (unsigned long) invalid_pte_table;
 	}
+}
+
+/*
+ * We have upto 8 empty zeroed pages so we can map one of the right colour
+ * when needed.  This is necessary only on R4000 / R4400 SC and MC versions
+ * where we have to avoid VCED / VECI exceptions for good performance at
+ * any price.  Since page is never written to after the initialization we
+ * don't have to care about aliases on other CPUs.
+ */
+unsigned long empty_zero_page, zero_page_mask;
+
+static inline unsigned long setup_zero_pages(void)
+{
+	unsigned long order, size;
+	struct page *page;
+
+	if (cpu_has_vce)
+		order = 3;
 	else
-	{
-		/*
-		 * Force writeback of old page to memory.  We don't know the
-		 * virtual address, so we have to flush the entire cache ...
-		 */
-		sys_cacheflush(0, ~0, DCACHE);
-		sync_mem();
-		memcpy((void *) to,
-		       (void *) (from + (PT_OFFSET - PAGE_OFFSET)), PAGE_SIZE);
+		order = 0;
+
+	empty_zero_page = __get_free_pages(GFP_KERNEL, order);
+	if (!empty_zero_page)
+		panic("Oh boy, that early out of memory?");
+
+	page = virt_to_page(empty_zero_page);
+	while (page < virt_to_page(empty_zero_page + (PAGE_SIZE << order))) {
+		set_bit(PG_reserved, &page->flags);
+		set_page_count(page, 0);
+		page++;
 	}
-	/*
-	 * Now writeback the page again if colour has changed.
-	 * Actually this does a Hit_Writeback, but due to an artifact in
-	 * the R4xx0 implementation this should be slightly faster.
-	 * Then sweep chipset controlled secondary caches and the ICACHE.
-	 */
-	if (page_colour(from) != page_colour(to))
-		sys_cacheflush(0, ~0, DCACHE);
-	sys_cacheflush(0, ~0, ICACHE);
+
+	size = PAGE_SIZE << order;
+	zero_page_mask = (size - 1) & PAGE_MASK;
+	memset((void *)empty_zero_page, 0, size);
+
+	return 1UL << order;
 }
+
+int do_check_pgt_cache(int low, int high)
+{
+	int freed = 0;
+
+	if (pgtable_cache_size > high) {
+		do {
+			if (pgd_quicklist)
+				free_pgd_slow(get_pgd_fast()), freed++;
+			if (pmd_quicklist)
+				free_pmd_slow(get_pmd_fast()), freed++;
+			if (pte_quicklist)
+				free_pte_slow(get_pte_fast()), freed++;
+		} while (pgtable_cache_size > low);
+	}
+	return freed;
+}
+
+#if CONFIG_HIGHMEM
+pte_t *kmap_pte;
+pgprot_t kmap_prot;
+
+#define kmap_get_fixmap_pte(vaddr)					\
+	pte_offset(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
+
+static void __init kmap_init(void)
+{
+	unsigned long kmap_vstart;
+
+	/* cache the first kmap pte */
+	kmap_vstart = __fix_to_virt(FIX_KMAP_BEGIN);
+	kmap_pte = kmap_get_fixmap_pte(kmap_vstart);
+
+	kmap_prot = PAGE_KERNEL;
+}
+
+#endif /* CONFIG_HIGHMEM */
 
 void show_mem(void)
 {
 	int i, free = 0, total = 0, reserved = 0;
-	int shared = 0;
+	int shared = 0, cached = 0;
 
 	printk("Mem-info:\n");
 	show_free_areas();
 	printk("Free swap:       %6dkB\n", nr_swap_pages<<(PAGE_SHIFT-10));
-	i = (high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
+	i = max_mapnr;
 	while (i-- > 0) {
 		total++;
-		if (mem_map[i].reserved)
+		if (PageReserved(mem_map+i))
 			reserved++;
-		else if (!mem_map[i].count)
+		else if (PageSwapCache(mem_map+i))
+			cached++;
+		else if (!page_count(mem_map + i))
 			free++;
 		else
-			shared += mem_map[i].count-1;
+			shared += page_count(mem_map + i) - 1;
 	}
 	printk("%d pages of RAM\n", total);
-	printk("%d free pages\n", free);
 	printk("%d reserved pages\n", reserved);
 	printk("%d pages shared\n", shared);
+	printk("%d pages swap cached\n",cached);
+	printk("%ld pages in page table cache\n",pgtable_cache_size);
+	printk("%d free pages\n", free);
 	show_buffers();
-#ifdef CONFIG_NET
-	show_net_buffers();
+}
+
+/* References to section boundaries */
+
+extern char _ftext, _etext, _fdata, _edata;
+extern char __init_begin, __init_end;
+
+#ifdef CONFIG_HIGHMEM
+static void __init fixrange_init (unsigned long start, unsigned long end,
+	pgd_t *pgd_base)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+	int i, j;
+	unsigned long vaddr;
+
+	vaddr = start;
+	i = __pgd_offset(vaddr);
+	j = __pmd_offset(vaddr);
+	pgd = pgd_base + i;
+
+	for ( ; (i < PTRS_PER_PGD) && (vaddr != end); pgd++, i++) {
+		pmd = (pmd_t *)pgd;
+		for (; (j < PTRS_PER_PMD) && (vaddr != end); pmd++, j++) {
+			if (pmd_none(*pmd)) {
+				pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+				set_pmd(pmd, __pmd(pte));
+				if (pte != pte_offset(pmd, 0))
+					BUG();
+			}
+			vaddr += PMD_SIZE;
+		}
+		j = 0;
+	}
+}
+#endif
+
+void __init pagetable_init(void)
+{
+#ifdef CONFIG_HIGHMEM
+	unsigned long vaddr;
+	pgd_t *pgd, *pgd_base;
+	pmd_t *pmd;
+	pte_t *pte;
+#endif
+
+	/* Initialize the entire pgd.  */
+	pgd_init((unsigned long)swapper_pg_dir);
+	pgd_init((unsigned long)swapper_pg_dir +
+	         sizeof(pgd_t ) * USER_PTRS_PER_PGD);
+
+#ifdef CONFIG_HIGHMEM
+	pgd_base = swapper_pg_dir;
+
+	/*
+	 * Fixed mappings:
+	 */
+	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
+	fixrange_init(vaddr, 0, pgd_base);
+
+	/*
+	 * Permanent kmaps:
+	 */
+	vaddr = PKMAP_BASE;
+	fixrange_init(vaddr, vaddr + PAGE_SIZE*LAST_PKMAP, pgd_base);
+
+	pgd = swapper_pg_dir + __pgd_offset(vaddr);
+	pmd = pmd_offset(pgd, vaddr);
+	pte = pte_offset(pmd, vaddr);
+	pkmap_page_table = pte;
 #endif
 }
 
-extern unsigned long free_area_init(unsigned long, unsigned long);
-
-unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
+void __init paging_init(void)
 {
-	pgd_init((unsigned long)swapper_pg_dir - (PT_OFFSET - PAGE_OFFSET));
-	return free_area_init(start_mem, end_mem);
-}
+	unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+	unsigned long max_dma, high, low;
 
-void mem_init(unsigned long start_mem, unsigned long end_mem)
-{
-	int codepages = 0;
-	int datapages = 0;
-	unsigned long tmp;
-	extern int _etext;
+	pagetable_init();
 
-#ifdef CONFIG_MIPS_JAZZ
-	start_mem = vdma_init(start_mem, end_mem);
+#ifdef CONFIG_HIGHMEM
+	kmap_init();
 #endif
 
-	end_mem &= PAGE_MASK;
-	high_memory = end_mem;
+	max_dma = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
+	low = max_low_pfn;
+	high = highend_pfn;
 
-	/* mark usable pages in the mem_map[] */
-	start_mem = PAGE_ALIGN(start_mem);
+#ifdef CONFIG_ISA
+	if (low < max_dma)
+		zones_size[ZONE_DMA] = low;
+	else {
+		zones_size[ZONE_DMA] = max_dma;
+		zones_size[ZONE_NORMAL] = low - max_dma;
+	}
+#else
+	zones_size[ZONE_DMA] = low;
+#endif
+#ifdef CONFIG_HIGHMEM
+	if (cpu_has_dc_aliases) {
+		printk(KERN_WARNING "This processor doesn't support highmem.");
+		if (high - low)
+			printk(" %dk highmem ignored", high - low);
+		printk("\n");
+	} else
+		zones_size[ZONE_HIGHMEM] = high - low;
+#endif
 
-	tmp = start_mem;
-	while (tmp < high_memory) {
-		mem_map[MAP_NR(tmp)].reserved = 0;
-		tmp += PAGE_SIZE;
+	free_area_init(zones_size);
+}
+
+#define PFN_UP(x)	(((x) + PAGE_SIZE - 1) >> PAGE_SHIFT)
+#define PFN_DOWN(x)	((x) >> PAGE_SHIFT)
+
+static inline int page_is_ram(unsigned long pagenr)
+{
+	int i;
+
+	for (i = 0; i < boot_mem_map.nr_map; i++) {
+		unsigned long addr, end;
+
+		if (boot_mem_map.map[i].type != BOOT_MEM_RAM)
+			/* not usable memory */
+			continue;
+
+		addr = PFN_UP(boot_mem_map.map[i].addr);
+		end = PFN_DOWN(boot_mem_map.map[i].addr
+			       + boot_mem_map.map[i].size);
+
+		if (pagenr >= addr && pagenr < end)
+			return 1;
 	}
 
-#ifdef CONFIG_DESKSTATION_TYNE
-	deskstation_tyne_dma_init();
+	return 0;
+}
+
+void __init mem_init(void)
+{
+	unsigned long codesize, reservedpages, datasize, initsize;
+	unsigned long tmp, ram;
+
+#if defined(CONFIG_DISCONTIGMEM) && defined(CONFIG_HIGHMEM)
+#error "CONFIG_HIGHMEM and CONFIG_DISCONTIGMEM dont work together yet"
 #endif
-#ifdef CONFIG_SOUND
-	sound_mem_init();
+
+#ifdef CONFIG_HIGHMEM
+	highstart_pfn = (KSEG1 - KSEG0) >> PAGE_SHIFT;
+	highmem_start_page = mem_map + highstart_pfn;
+	max_mapnr = num_physpages = highend_pfn;
+	num_mappedpages = max_low_pfn;
+#else
+	max_mapnr = num_mappedpages = num_physpages = max_low_pfn;
 #endif
-	for (tmp = PAGE_OFFSET ; tmp < high_memory ; tmp += PAGE_SIZE) {
-		if (mem_map[MAP_NR(tmp)].reserved) {
-			if (tmp < (unsigned long) &_etext)
-				codepages++;
-			else if (tmp < start_mem)
-				datapages++;
+	high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
+
+	totalram_pages += free_all_bootmem();
+	totalram_pages -= setup_zero_pages();	/* Setup zeroed pages.  */
+
+	reservedpages = ram = 0;
+	for (tmp = 0; tmp < max_low_pfn; tmp++)
+		if (page_is_ram(tmp)) {
+			ram++;
+			if (PageReserved(mem_map+tmp))
+				reservedpages++;
+		}
+
+#ifdef CONFIG_HIGHMEM
+	for (tmp = highstart_pfn; tmp < highend_pfn; tmp++) {
+		struct page *page = mem_map + tmp;
+
+		if (!page_is_ram(tmp)) {
+			SetPageReserved(page);
 			continue;
 		}
-		mem_map[MAP_NR(tmp)].count = 1;
-		free_page(tmp);
+		ClearPageReserved(page);
+		set_bit(PG_highmem, &page->flags);
+		atomic_set(&page->count, 1);
+		__free_page(page);
+		totalhigh_pages++;
 	}
-	tmp = nr_free_pages << PAGE_SHIFT;
-	printk("Memory: %luk/%luk available (%dk kernel code, %dk data)\n",
-		tmp >> 10,
-		(high_memory - PAGE_OFFSET) >> 10,
-		codepages << (PAGE_SHIFT-10),
-		datapages << (PAGE_SHIFT-10));
+	totalram_pages += totalhigh_pages;
+#endif
 
-	return;
+	codesize =  (unsigned long) &_etext - (unsigned long) &_ftext;
+	datasize =  (unsigned long) &_edata - (unsigned long) &_fdata;
+	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
+
+	printk(KERN_INFO "Memory: %luk/%luk available (%ldk kernel code, "
+	       "%ldk reserved, %ldk data, %ldk init, %ldk highmem)\n",
+	       (unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+	       ram << (PAGE_SHIFT-10),
+	       codesize >> 10,
+	       reservedpages << (PAGE_SHIFT-10),
+	       datasize >> 10,
+	       initsize >> 10,
+	       (unsigned long) (totalhigh_pages << (PAGE_SHIFT-10)));
+}
+
+#ifdef CONFIG_BLK_DEV_INITRD
+void free_initrd_mem(unsigned long start, unsigned long end)
+{
+	if (start < end)
+		printk(KERN_INFO "Freeing initrd memory: %ldk freed\n",
+		       (end - start) >> 10);
+
+	for (; start < end; start += PAGE_SIZE) {
+		ClearPageReserved(virt_to_page(start));
+		set_page_count(virt_to_page(start), 1);
+		free_page(start);
+		totalram_pages++;
+	}
+}
+#endif
+
+extern char __init_begin, __init_end;
+extern void prom_free_prom_memory(void) __init;
+
+void free_initmem(void)
+{
+	unsigned long addr;
+
+	prom_free_prom_memory ();
+
+	addr = (unsigned long) &__init_begin;
+	while (addr < (unsigned long) &__init_end) {
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
+		free_page(addr);
+		totalram_pages++;
+		addr += PAGE_SIZE;
+	}
+	printk(KERN_INFO "Freeing unused kernel memory: %dk freed\n",
+	       (&__init_end - &__init_begin) >> 10);
 }
 
 void si_meminfo(struct sysinfo *val)
 {
-	int i;
-
-	i = high_memory >> PAGE_SHIFT;
-	val->totalram = 0;
+	val->totalram = totalram_pages;
 	val->sharedram = 0;
-	val->freeram = nr_free_pages << PAGE_SHIFT;
-	val->bufferram = buffermem;
-	while (i-- > 0)  {
-		if (mem_map[i].reserved)
-			continue;
-		val->totalram++;
-		if (!mem_map[i].count)
-			continue;
-		val->sharedram += mem_map[i].count-1;
-	}
-	val->totalram <<= PAGE_SHIFT;
-	val->sharedram <<= PAGE_SHIFT;
+	val->freeram = nr_free_pages();
+	val->bufferram = atomic_read(&buffermem_pages);
+	val->totalhigh = totalhigh_pages;
+	val->freehigh = nr_free_highpages();
+	val->mem_unit = PAGE_SIZE;
+
 	return;
 }

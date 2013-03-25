@@ -1,15 +1,13 @@
 /*
+ * DSS.1 Finite State Machine
+ * base: ITU-T Rec Q.931
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        DSS.1 Finite State Machine
- *        base: ITU-T Rec Q.931
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
@@ -17,16 +15,12 @@
  *              move state/event descriptions to a user space logger
  */
 
-#define __NO_VERSION__
-
-#include <linux/module.h>
-
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/tqueue.h>
 #include <linux/skbuff.h>

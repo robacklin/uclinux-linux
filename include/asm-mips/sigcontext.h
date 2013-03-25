@@ -1,21 +1,35 @@
-#ifndef __ASM_MIPS_SIGCONTEXT_H
-#define __ASM_MIPS_SIGCONTEXT_H
+/*
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1996, 1997, 2000 by Ralf Baechle
+ */
+#ifndef _ASM_SIGCONTEXT_H
+#define _ASM_SIGCONTEXT_H
 
 /*
- * This struct isn't in the ABI, so we continue to use the old
- * pre 1.3 definition.  Needs to be changed for 64 bit kernels,
- * but it's 4am ...
+ * Keep this struct definition in sync with the sigcontext fragment
+ * in arch/mips/tools/offset.c
  */
-struct sigcontext_struct {
-	unsigned long	       sc_at, sc_v0, sc_v1, sc_a0, sc_a1, sc_a2, sc_a3;
-	unsigned long	sc_t0, sc_t1, sc_t2, sc_t3, sc_t4, sc_t5, sc_t6, sc_t7;
-	unsigned long	sc_s0, sc_s1, sc_s2, sc_s3, sc_s4, sc_s5, sc_s6, sc_s7;
-	unsigned long	sc_t8, sc_t9,               sc_gp, sc_sp, sc_fp, sc_ra;
+struct sigcontext {
+	unsigned int       sc_regmask;		/* Unused */
+	unsigned int       sc_status;
+	unsigned long long sc_pc;
+	unsigned long long sc_regs[32];
+	unsigned long long sc_fpregs[32];
+	unsigned int       sc_ownedfp;		/* Unused */
+	unsigned int       sc_fpc_csr;
+	unsigned int       sc_fpc_eir;		/* Unused */
+	unsigned int       sc_used_math;
+	unsigned int       sc_ssflags;		/* Unused */
+	unsigned long long sc_mdhi;
+	unsigned long long sc_mdlo;
 
-	unsigned long	sc_epc;
-	unsigned long	sc_cause;
+	unsigned int       sc_cause;		/* Unused */
+	unsigned int       sc_badvaddr;		/* Unused */
 
-	unsigned long	sc_oldmask;
+	unsigned long      sc_sigset[4];	/* kernel's sigset_t */
 };
 
-#endif /* __ASM_MIPS_SIGCONTEXT_H */
+#endif /* _ASM_SIGCONTEXT_H */

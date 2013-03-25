@@ -1,5 +1,5 @@
-#ifndef __ARCH_H8300H_SOCKIOS__
-#define __ARCH_H8300H_SOCKIOS__
+#ifndef __ARCH_H8300_SOCKIOS__
+#define __ARCH_H8300_SOCKIOS__
 
 /* Socket-level I/O control calls. */
 #define FIOSETOWN 	0x8901
@@ -9,4 +9,4 @@
 #define SIOCATMARK	0x8905
 #define SIOCGSTAMP	0x8906		/* Get stamp */
 
-#endif /* __ARCH_H8300H_SOCKIOS__ */
+#endif /* __ARCH_H8300_SOCKIOS__ */

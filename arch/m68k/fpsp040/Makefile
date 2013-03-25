@@ -8,8 +8,7 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 .S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
-#	$(AS) -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 OS_TARGET := fpsp.o
 

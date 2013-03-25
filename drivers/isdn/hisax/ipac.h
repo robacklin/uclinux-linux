@@ -1,24 +1,14 @@
-/* $Id: ipac.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * ipac.h   IPAC specific defines
+/* $Id: ipac.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * IPAC specific defines
  *
- *
- * $Log: ipac.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.2  1998/04/11 18:49:48  keil
- * add IPAC_ATX
- *
- * Revision 1.1.2.1  1997/10/17 22:10:48  keil
- * new files on 2.0
- *
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-
 
 /* All Registers original Siemens Spec  */
 

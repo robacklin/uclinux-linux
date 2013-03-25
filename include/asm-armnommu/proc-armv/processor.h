@@ -1,27 +1,26 @@
 /*
- * linux/include/asm-arm/proc-armv/processor.h
+ *  linux/include/asm-arm/proc-armv/processor.h
  *
- * Copyright (c) 1996 Russell King.
+ *  Copyright (C) 1996-1999 Russell King.
  *
- * Changelog:
- *  20-09-1996	RMK	Created
- *  26-09-1996	RMK	Added 'EXTRA_THREAD_STRUCT*'
- *  28-09-1996	RMK	Moved start_thread into the processor dependencies
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   20-09-1996	RMK	Created
+ *   26-09-1996	RMK	Added 'EXTRA_THREAD_STRUCT*'
+ *   28-09-1996	RMK	Moved start_thread into the processor dependencies
+ *   09-09-1998	PJB	Delete redundant `wp_works_ok'
+ *   30-05-1999	PJB	Save sl across context switches
+ *   31-07-1999	RMK	Added 'domain' stuff
  */
 #ifndef __ASM_PROC_PROCESSOR_H
 #define __ASM_PROC_PROCESSOR_H
 
-#ifdef __KERNEL__
- 
-#define KERNEL_STACK_SIZE	PAGE_SIZE
-#define alloc_kernel_stack()	__get_free_page(GFP_KERNEL)
-#define free_kernel_stack(page)	free_page((page))
+#include <asm/proc/domain.h>
 
-/*
- * on arm2,3 wp does not work
- */
-#define wp_works_ok 0
-#define wp_works_ok__is_a_macro /* for versions in ksyms.c */
+#define KERNEL_STACK_SIZE	PAGE_SIZE
 
 struct context_save_struct {
 	unsigned long cpsr;
@@ -31,84 +30,46 @@ struct context_save_struct {
 	unsigned long r7;
 	unsigned long r8;
 	unsigned long r9;
-	unsigned long r10;
+	unsigned long sl;
 	unsigned long fp;
 	unsigned long pc;
 };
 
-#ifndef NO_MM
-#define EXTRA_THREAD_STRUCT				\
-	struct context_save_struct *save;		\
-	unsigned long memmap;
+#define INIT_CSS (struct context_save_struct){ SVC_MODE, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
 
-#define EXTRA_THREAD_STRUCT_INIT			\
-	0,						\
-	((unsigned long) swapper_pg_dir) - PAGE_OFFSET
+#define EXTRA_THREAD_STRUCT						\
+	unsigned int	domain;
 
-#else
-#define EXTRA_THREAD_STRUCT	\
-		struct context_save_struct *save;	
+#define EXTRA_THREAD_STRUCT_INIT					\
+	domain:	  domain_val(DOMAIN_USER, DOMAIN_CLIENT) |		\
+		  domain_val(DOMAIN_KERNEL, DOMAIN_MANAGER) |		\
+		  domain_val(DOMAIN_IO, DOMAIN_CLIENT)
 
-#define EXTRA_THREAD_STRUCT_INIT			\
-	0						\
-
-
-
-#endif
-DECLARE_THREAD_STRUCT;
-
-/*
- * Return saved PC of a blocked thread.
- */
-extern __inline__ unsigned long thread_saved_pc (struct thread_struct *t)
-{
-	if (t->save)
-		return t->save->pc;
-	else
-		return 0;
-}
-
-extern __inline__ unsigned long get_css_fp (struct thread_struct *t)
-{
-	if (t->save)
-		return t->save->fp;
-	else
-		return 0;
-}
-
-asmlinkage void ret_from_sys_call(void) __asm__("_ret_from_sys_call");
-
-extern __inline__ void copy_thread_css (struct context_save_struct *save)
-{
-	save->cpsr = SVC_MODE;
-	save->r4 =
-	save->r5 =
-	save->r6 =
-	save->r7 =
-	save->r8 =
-	save->r9 =
-	save->r10 =		  
-	save->fp = 0;
-	save->pc = (unsigned long) ret_from_sys_call;
-}
-
-#define start_thread(regs,pc,data, sp)					\
-({									\
-	unsigned long *stack = (unsigned long *)sp;			\
-	set_fs(USER_DS);						\
-	memzero(regs->uregs, sizeof(regs->uregs));			\
-	if (current->personality == PER_LINUX_32BIT)			\
-		regs->ARM_cpsr = USR_MODE;				\
-	else								\
-		regs->ARM_cpsr = USR26_MODE;				\
-	regs->ARM_pc = pc;		/* pc */			\
-	regs->ARM_sp = sp;		/* sp */			\
-	regs->ARM_r10 = data;   /* data segment base */ \
-	regs->ARM_r2 = stack[2];	/* r2 (envp) */			\
-	regs->ARM_r1 = stack[1];	/* r1 (argv) */			\
-	regs->ARM_r0 = stack[0];	/* r0 (argc) */			\
+#define start_thread(regs,pc,sp)					 \
+({									 \
+	unsigned long *stack = (unsigned long *)sp;			 \
+	set_fs(USER_DS);						 \
+	memzero(regs->uregs, sizeof(regs->uregs));			 \
+	if (current->personality & ADDR_LIMIT_32BIT)			 \
+		regs->ARM_cpsr = USR_MODE;				 \
+	else								 \
+		regs->ARM_cpsr = USR26_MODE;				 \
+	regs->ARM_pc = pc;		/* pc */			 \
+	regs->ARM_sp = sp;		/* sp */			 \
+	regs->ARM_r2 = stack[2];	/* r2 (envp) */			 \
+	regs->ARM_r1 = stack[1];	/* r1 (argv) */			 \
+	regs->ARM_r0 = stack[0];	/* r0 (argc) */			 \
+	regs->ARM_r10 = current->mm->start_data; /* data segment base */ \
 })
 
-#endif
+#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1021])
+#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1019])
+
+/* Allocation and freeing of basic task resources. */
+/*
+ * NOTE! The task struct and the stack go together
+ */
+#define ll_alloc_task_struct() ((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
+#define ll_free_task_struct(p) free_pages((unsigned long)(p),1)
 
 #endif

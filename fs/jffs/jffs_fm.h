@@ -10,7 +10,10 @@
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
  *
- * $Id: jffs_fm.h,v 1.2 2000-10-06 08:39:31 davidm Exp $
+ * $Id: jffs_fm.h,v 1.13 2001/01/11 12:03:25 dwmw2 Exp $
+ *
+ * Ported to Linux 2.3.x and MTD:
+ * Copyright (C) 2000  Alexander Larsson (alex@cendio.se), Cendio Systems AB
  *
  */
 
@@ -19,7 +22,8 @@
 
 #include <linux/types.h>
 #include <linux/jffs.h>
-#include <linux/flash.h>
+#include <linux/mtd/mtd.h>
+#include <linux/config.h>
 
 /* The alignment between two nodes in the flash memory.  */
 #define JFFS_ALIGN_SIZE 4
@@ -27,15 +31,41 @@
 /* Mark the on-flash space as obsolete when appropriate.  */
 #define JFFS_MARK_OBSOLETE 0
 
+#ifndef CONFIG_JFFS_FS_VERBOSE
+#define CONFIG_JFFS_FS_VERBOSE 1
+#endif
+
+#if CONFIG_JFFS_FS_VERBOSE > 0
+#define D(x) x
+#define D1(x) D(x)
+#else
+#define D(x)
+#define D1(x)
+#endif
+
+#if CONFIG_JFFS_FS_VERBOSE > 1
+#define D2(x) D(x)
+#else
+#define D2(x)
+#endif
+
+#if CONFIG_JFFS_FS_VERBOSE > 2
+#define D3(x) D(x)
+#else
+#define D3(x)
+#endif
+
+#define ASSERT(x) x
+
 /* How many padding bytes should be inserted between two chunks of data
    on the flash?  */
-#define JFFS_GET_PAD_BYTES(size) ((JFFS_ALIGN_SIZE                     \
-				  - ((__u32)(size) % JFFS_ALIGN_SIZE)) \
-				  % JFFS_ALIGN_SIZE)
+#define JFFS_GET_PAD_BYTES(size) ( (JFFS_ALIGN_SIZE-1) & -(__u32)(size) )
+#define JFFS_PAD(size) ( (size + (JFFS_ALIGN_SIZE-1)) & ~(JFFS_ALIGN_SIZE-1) )
 
-/* Is there enough space on the flash?  */
-#define JFFS_ENOUGH_SPACE(fmc) (((fmc)->flash_size - (fmc)->used_size \
-				 - (fmc)->dirty_size) >= (fmc)->min_free_size)
+
+
+void jffs_free_fm(struct jffs_fm *n);
+struct jffs_fm *jffs_alloc_fm(void);
 
 
 struct jffs_node_ref
@@ -57,21 +87,21 @@ struct jffs_fm
 
 struct jffs_fmcontrol
 {
-	__u32 flash_start;
 	__u32 flash_size;
 	__u32 used_size;
 	__u32 dirty_size;
+	__u32 free_size;
 	__u32 sector_size;
 	__u32 min_free_size;  /* The minimum free space needed to be able
 				 to perform garbage collections.  */
 	__u32 max_chunk_size; /* The maximum size of a chunk of data.  */
-	void *flash_part;
-	__u32 no_call_gc;
+	struct mtd_info *mtd;
 	struct jffs_control *c;
 	struct jffs_fm *head;
 	struct jffs_fm *tail;
 	struct jffs_fm *head_extra;
 	struct jffs_fm *tail_extra;
+	struct semaphore biglock;
 };
 
 /* Notice the two members head_extra and tail_extra in the jffs_control
@@ -89,6 +119,7 @@ struct jffs_fmcontrol
    the scan is completed, the two lists are merged together. The jffs_fm
    struct that head_extra references is the logical beginning of the
    flash memory so it will be referenced by the head member.  */
+
 
 
 struct jffs_fmcontrol *jffs_build_begin(struct jffs_control *c, kdev_t dev);
@@ -115,8 +146,5 @@ void jffs_fmfree_partly(struct jffs_fmcontrol *fmc, struct jffs_fm *fm,
 void jffs_print_fmcontrol(struct jffs_fmcontrol *fmc);
 void jffs_print_fm(struct jffs_fm *fm);
 void jffs_print_node_ref(struct jffs_node_ref *ref);
-
-extern int flash_write(unsigned char *ptr, const unsigned char *source,
-		       unsigned int size);
 
 #endif /* __LINUX_JFFS_FM_H__  */

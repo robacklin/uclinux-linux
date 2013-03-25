@@ -1,128 +1,67 @@
 /*
- * include/asm-armnommu/arch-netarm/irq.h
+ * irq.h:
+ *         netarm-specific IRQ setup.
+ * copyright:
+ *         (C) 2001 RidgeRun, Inc. (http://www.ridgerun.com)
+ * author: Gordon McNutt <gmcnutt@ridgerun.com>
  *
- * Copyright (C) 2000 NETsilicon, Inc.
- * Copyright (C) 2000 WireSpeed Communications Corporation
+ * This program is free software; you can redistribute  it and/or modify it
+ * under  the terms of  the GNU General  Public License as published by the
+ * Free Software Foundation;  either version 2 of the  License, or (at your
+ * option) any later version.
  *
- * This software is copyrighted by WireSpeed. LICENSEE agrees that
- * it will not delete this copyright notice, trademarks or protective
- * notices from any copy made by LICENSEE.
+ * THIS  SOFTWARE  IS PROVIDED   ``AS  IS'' AND   ANY  EXPRESS OR IMPLIED
+ * WARRANTIES,   INCLUDING, BUT NOT  LIMITED  TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
+ * NO  EVENT  SHALL   THE AUTHOR  BE    LIABLE FOR ANY   DIRECT, INDIRECT,
+ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+ * NOT LIMITED   TO, PROCUREMENT OF  SUBSTITUTE GOODS  OR SERVICES; LOSS OF
+ * USE, DATA,  OR PROFITS; OR  BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ * ANY THEORY OF LIABILITY, WHETHER IN  CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
- * This software is provided "AS-IS" and any express or implied 
- * warranties or conditions, including but not limited to any
- * implied warranties of merchantability and fitness for a particular
- * purpose regarding this software. In no event shall WireSpeed
- * be liable for any indirect, consequential, or incidental damages,
- * loss of profits or revenue, loss of use or data, or interruption
- * of business, whether the alleged damages are labeled in contract,
- * tort, or indemnity.
+ * You should have received a copy of the  GNU General Public License along
+ * with this program; if not, write  to the Free Software Foundation, Inc.,
+ * 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * author(s) : Joe deBlaquiere
+ * tried to merge some of Joe deBlaquiere's code in here --rp
  */
 
-#include	<asm/arch/netarm_registers.h>
+#ifndef __ASM_ARCH_IRQ_H__
+#define __ASM_ARCH_IRQ_H__
 
-#define BUILD_IRQ(s,n,m)
+#include <asm/hardware.h>
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/mach/irq.h>
+#include <asm/arch/irqs.h>
+#include <asm/arch/netarm_registers.h>
 
-extern void IRQ_interrupt(void);
-extern void timer_IRQ_interrupt(void);
-extern void fast_IRQ_interrupt(void);
-extern void bad_IRQ_interrupt(void);
-extern void probe_IRQ_interrupt(void);
+#define fixup_irq(x) (x)
 
-#define IRQ_interrupt0 IRQ_interrupt
-#define IRQ_interrupt1 IRQ_interrupt
-#define IRQ_interrupt2 IRQ_interrupt
-#define IRQ_interrupt3 IRQ_interrupt
-#define IRQ_interrupt4 timer_IRQ_interrupt
-#define IRQ_interrupt5 IRQ_interrupt
-#define IRQ_interrupt6 IRQ_interrupt
-#define IRQ_interrupt7 IRQ_interrupt
-#define IRQ_interrupt8 IRQ_interrupt
-#define IRQ_interrupt9 IRQ_interrupt
-#define IRQ_interrupt10 IRQ_interrupt
-#define IRQ_interrupt11 IRQ_interrupt
-#define IRQ_interrupt12 IRQ_interrupt
-#define IRQ_interrupt13 IRQ_interrupt
-#define IRQ_interrupt14 IRQ_interrupt
-#define IRQ_interrupt15 IRQ_interrupt
-#define IRQ_interrupt16 IRQ_interrupt
-#define IRQ_interrupt17 IRQ_interrupt
-#define IRQ_interrupt18 IRQ_interrupt
-#define IRQ_interrupt19 IRQ_interrupt
-#define IRQ_interrupt20 IRQ_interrupt
-#define IRQ_interrupt21 IRQ_interrupt
-#define IRQ_interrupt22 IRQ_interrupt
-#define IRQ_interrupt23 IRQ_interrupt
-#define IRQ_interrupt24 IRQ_interrupt
-#define IRQ_interrupt25 IRQ_interrupt
-#define IRQ_interrupt26 IRQ_interrupt
-#define IRQ_interrupt27 IRQ_interrupt
-#define IRQ_interrupt28 IRQ_interrupt
-#define IRQ_interrupt29 IRQ_interrupt
-#define IRQ_interrupt30 IRQ_interrupt
-#define IRQ_interrupt31 IRQ_interrupt
+/* defined in arch/armnommu/mach-netarm/irq.c: */
+extern void netarm_mask_irq(unsigned int irq);
+extern void netarm_unmask_irq(unsigned int irq);
+extern void netarm_mask_ack_irq(unsigned int irq);
 
-#define IRQ_INTERRUPT(n)	IRQ_interrupt##n
-#define FAST_INTERRUPT(n)	fast_IRQ_interrupt
-#define BAD_INTERRUPT(n)	bad_IRQ_interrupt
-#define PROBE_INTERRUPT(n)	probe_IRQ_interrupt
+/* Mask & Acknowledge function for Timer 1 IRQ: */
+extern void netarm_mask_ack_t1_irq(unsigned int irq);
 
-static __inline__ void mask_irq(unsigned int irq)
-{
-	volatile unsigned long int *mask = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE_CLR) ;
-	
-	if (32 > irq) *mask = ( 1 << irq );
-}
+/* Mask & Acknowledge function for Timer 2 IRQ: */
+extern void netarm_mask_ack_t2_irq(unsigned int irq);
 
-static __inline__ void unmask_irq(unsigned int irq)
-{
-	volatile unsigned long int *set = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE_SET) ;
-	
-	if (32 > irq) *set = ( 1 << irq );
-}
- 
-static __inline__ unsigned long get_enabled_irqs(void)
-{
-	volatile unsigned long int *ie = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE) ;
-	
-	return *ie ;
-}
+/* Mask & Acknowledge function for Port C Bit 0..3 IRQ */
+extern void netarm_mask_ack_portc_irq(unsigned int irq);
 
-static __inline__ void irq_init_irq(void)
-{
-	unsigned long flags;
-	volatile unsigned long int *mask = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE_CLR) ;
-	volatile unsigned long int *set = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE_SET) ;
-	volatile unsigned long int *ie = 
-		(volatile unsigned long *)(NETARM_GEN_MODULE_BASE + 
-		NETARM_GEN_INTR_ENABLE) ;
+/* Mask & Acknowledge function for DMA channel 1 IRQ */
+extern void netarm_mask_ack_dma1_irq(unsigned int irq);
 
-	save_flags_cli (flags);
-	*mask = 0xffffffff;
-	*set = 0x5aa55aa5;
-	*set = 0x00000000;
-	if (*ie != 0x5aa55aa5)
-		 _netarm_led_FAIL();
-	*mask = 0xffffffff;		/* clear all interrupt enables */
-	restore_flags (flags);
-}
+/* Mask & Acknowledge function for DMA channels 2..10 IRQ */
+extern void netarm_mask_ack_dmax_irq(unsigned int irq);
+
+/* setup IRQ descriptor array */
+extern void irq_init_irq(void);
+
+#endif /* __ASM_ARCH_IRQ_H__ */
+

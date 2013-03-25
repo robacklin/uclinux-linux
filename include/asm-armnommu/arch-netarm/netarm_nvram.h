@@ -51,5 +51,30 @@ typedef struct
   unsigned long checksum;
 } NA_dev_board_params_t;
 
+
+/* auxiliary functions, moved here from setup.c */
+static inline int
+parse_decimal(char ch)
+{
+	if ('0' >  ch) return -1;
+	if ('9' >= ch) return ch - '0' ;
+	return -1;
+}
+
+static inline unsigned int
+compute_checksum(NA_dev_board_params_t *pParams)
+{
+	int i;
+	unsigned int *pInt = (unsigned int *)pParams ;
+	unsigned int sum = 0;
+	for ( i = 0 ; i < NETARM_NVRAM_DWORD_COUNT ; i++ )
+	{
+		sum += pInt[i];
+	}
+	
+	if ( sum != 0 ) return -1 ;
+	return 0 ;
+}
+
 #endif
 

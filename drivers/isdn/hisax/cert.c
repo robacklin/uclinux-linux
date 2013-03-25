@@ -1,18 +1,13 @@
-/* $Id: cert.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * Author       Karsten Keil (keil@isdn4linux.de)
+/* $Id: cert.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- *		This file is (c) under GNU PUBLIC LICENSE
- *		For changes and modifications please read
- *		../../../Documentation/isdn/HiSax.cert
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
- * $Log: cert.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.2.2.1  1998/11/03 21:46:37  keil
- * first version
- *
+ * For changes and modifications please read
+ * ../../../Documentation/isdn/HiSax.cert
  *
  */
  
@@ -25,10 +20,10 @@ certification_check(int output) {
 #if CERTIFICATION == 0
 	if (output) {
 		printk(KERN_INFO "HiSax: Approval certification valid\n");
-		printk(KERN_INFO "HiSax: Approved with ELSA Quickstep series cards\n");
-		printk(KERN_INFO "HiSax: Approval registration numbers:\n");
-		printk(KERN_INFO "HiSax: German D133361J CETECOM ICT Services GmbH\n");
-		printk(KERN_INFO "HiSax: EU (D133362J) CETECOM ICT Services GmbH\n");
+		printk(KERN_INFO "HiSax: Approved with ELSA Microlink PCI cards\n");
+		printk(KERN_INFO "HiSax: Approved with Eicon Technology Diva 2.01 PCI cards\n");
+		printk(KERN_INFO "HiSax: Approved with Sedlbauer Speedfax + cards\n");
+		printk(KERN_INFO "HiSax: Approved with HFC-S PCI A based cards\n");
 	}
 	return(0);
 #endif

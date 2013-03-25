@@ -13,6 +13,8 @@
 #ifndef _LINUX_TQUEUE_H
 #define _LINUX_TQUEUE_H
 
+#include <linux/spinlock.h>
+#include <linux/list.h>
 #include <asm/bitops.h>
 #include <asm/system.h>
 
@@ -28,116 +30,96 @@
  *   used as a bottom half handler.  This is for example useful for bottom
  *   halfs, which want to be delayed until the next clock tick.
  *
- * Problems:
- * - The queue_task_irq() inline function is only atomic with respect to itself.
- *   Problems can occur, when queue_task_irq() is called from a normal system
- *   call, and an interrupt comes in.  No problems occur, when queue_task_irq()
- *   is called from an interrupt or bottom half, and interrupted, as run_task_queue()
- *   will not be executed/continued before the last interrupt returns.  If in
- *   doubt, use queue_task(), not queue_task_irq().
+ * Notes:
  * - Bottom halfs are called in the reverse order that they were linked into
  *   the list.
  */
 
 struct tq_struct {
-	struct tq_struct *next;		/* linked list of active bh's */
-	int sync;			/* must be initialized to zero */
+	struct list_head list;		/* linked list of active bh's */
+	unsigned long sync;		/* must be initialized to zero */
 	void (*routine)(void *);	/* function to call */
 	void *data;			/* argument to function */
 };
 
-typedef struct tq_struct * task_queue;
+/*
+ * Emit code to initialise a tq_struct's routine and data pointers
+ */
+#define PREPARE_TQUEUE(_tq, _routine, _data)			\
+	do {							\
+		(_tq)->routine = _routine;			\
+		(_tq)->data = _data;				\
+	} while (0)
 
-#define DECLARE_TASK_QUEUE(q)  task_queue q = NULL
+/*
+ * Emit code to initialise all of a tq_struct
+ */
+#define INIT_TQUEUE(_tq, _routine, _data)			\
+	do {							\
+		INIT_LIST_HEAD(&(_tq)->list);			\
+		(_tq)->sync = 0;				\
+		PREPARE_TQUEUE((_tq), (_routine), (_data));	\
+	} while (0)
 
-extern task_queue tq_timer, tq_immediate, tq_scheduler, tq_disk;
+typedef struct list_head task_queue;
+
+#define DECLARE_TASK_QUEUE(q)	LIST_HEAD(q)
+#define TQ_ACTIVE(q)		(!list_empty(&q))
+
+extern task_queue tq_timer, tq_immediate, tq_disk;
 
 /*
  * To implement your own list of active bottom halfs, use the following
  * two definitions:
  *
- * struct tq_struct *my_bh = NULL;
- * struct tq_struct run_my_bh = {
- *	0, 0, (void *)(void *) run_task_queue, &my_bh
+ * DECLARE_TASK_QUEUE(my_tqueue);
+ * struct tq_struct my_task = {
+ * 	routine: (void (*)(void *)) my_routine,
+ *	data: &my_data
  * };
  *
- * To activate a bottom half on your list, use:
+ * To activate a bottom half on a list, use:
  *
- *     queue_task(tq_pointer, &my_bh);
+ *	queue_task(&my_task, &my_tqueue);
  *
- * To run the bottom halfs on your list put them on the immediate list by:
+ * To later run the queued tasks use
  *
- *     queue_task(&run_my_bh, &tq_immediate);
+ *	run_task_queue(&my_tqueue);
  *
- * This allows you to do deferred procession.  For example, you could
- * have a bottom half list tq_timer, which is marked active by the timer
+ * This allows you to do deferred processing.  For example, you could
+ * have a task queue called tq_timer, which is executed within the timer
  * interrupt.
  */
 
-/*
- * queue_task_irq: put the bottom half handler "bh_pointer" on the list
- * "bh_list".  You may call this function only from an interrupt
- * handler or a bottom half handler.
- */
-extern __inline__ void queue_task_irq(struct tq_struct *bh_pointer,
-			       task_queue *bh_list)
-{
-	if (!set_bit(0,&bh_pointer->sync)) {
-		bh_pointer->next = *bh_list;
-		*bh_list = bh_pointer;
-	}
-}
+extern spinlock_t tqueue_lock;
 
 /*
- * queue_task_irq_off: put the bottom half handler "bh_pointer" on the list
- * "bh_list".  You may call this function only when interrupts are off.
+ * Queue a task on a tq.  Return non-zero if it was successfully
+ * added.
  */
-extern __inline__ void queue_task_irq_off(struct tq_struct *bh_pointer,
-				 task_queue *bh_list)
+static inline int queue_task(struct tq_struct *bh_pointer, task_queue *bh_list)
 {
-	if (!(bh_pointer->sync & 1)) {
-		bh_pointer->sync = 1;
-		bh_pointer->next = *bh_list;
-		*bh_list = bh_pointer;
-	}
-}
-
-
-/*
- * queue_task: as queue_task_irq, but can be called from anywhere.
- */
-extern __inline__ void queue_task(struct tq_struct *bh_pointer,
-			   task_queue *bh_list)
-{
-	if (!set_bit(0,&bh_pointer->sync)) {
+	int ret = 0;
+	if (!test_and_set_bit(0,&bh_pointer->sync)) {
 		unsigned long flags;
-		save_flags(flags);
-		cli();
-		bh_pointer->next = *bh_list;
-		*bh_list = bh_pointer;
-		restore_flags(flags);
+		spin_lock_irqsave(&tqueue_lock, flags);
+		list_add_tail(&bh_pointer->list, bh_list);
+		spin_unlock_irqrestore(&tqueue_lock, flags);
+		ret = 1;
 	}
+	return ret;
 }
 
 /*
  * Call all "bottom halfs" on a given list.
  */
-extern __inline__ void run_task_queue(task_queue *list)
-{
-	struct tq_struct *p;
 
-	p = xchg(list,NULL);
-	while (p) {
-		void *arg;
-		void (*f) (void *);
-		struct tq_struct *save_p;
-		arg    = p -> data;
-		f      = p -> routine;
-		save_p = p;
-		p      = p -> next;
-		save_p -> sync = 0;
-		(*f)(arg);
-	}
+extern void __run_task_queue(task_queue *list);
+
+static inline void run_task_queue(task_queue *list)
+{
+	if (TQ_ACTIVE(*list))
+		__run_task_queue(list);
 }
 
 #endif /* _LINUX_TQUEUE_H */

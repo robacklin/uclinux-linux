@@ -10,8 +10,8 @@
 Because so many people (myself included) seem to have obtained ARCnet cards
 without manuals, this file contains a quick introduction to ARCnet hardware,
 some cabling tips, and a listing of all jumper settings I can find. Please
-e-mail apenwarr@foxnet.net with any settings for your particular card, or
-any other information you have!
+e-mail apenwarr@worldvisions.ca with any settings for your particular card,
+or any other information you have!
 
 
 INTRODUCTION TO ARCNET
@@ -27,7 +27,7 @@ types, as far as I'm aware, are not compatible and so you cannot wire a
 100 Mbps card to a 2.5 Mbps card, and so on.  From what I hear, my driver does
 work with 100 Mbps cards, but I haven't been able to verify this myself,
 since I only have the 2.5 Mbps variety.  It is probably not going to saturate
-your 100 Mbps card.  Stop complaining :)
+your 100 Mbps card.  Stop complaining. :)
 
 You also cannot connect an ARCnet card to any kind of Ethernet card and
 expect it to work.  
@@ -52,17 +52,17 @@ a pass around the "ring" within a maximum length of time.  This makes it
 useful for realtime networks.
 
 In addition, all known ARCnet cards have an (almost) identical programming
-interface.  This means that with one "arcnet" driver you can support any
-card; whereas, with Ethernet, each manufacturer uses what is sometimes a
+interface.  This means that with one ARCnet driver you can support any
+card, whereas with Ethernet each manufacturer uses what is sometimes a
 completely different programming interface, leading to a lot of different,
 sometimes very similar, Ethernet drivers.  Of course, always using the same
 programming interface also means that when high-performance hardware
-facilities like PCI busmastering DMA appear, it's hard to take advantage of
+facilities like PCI bus mastering DMA appear, it's hard to take advantage of
 them.  Let's not go into that.
 
 One thing that makes ARCnet cards difficult to program for, however, is the
 limit on their packet sizes; standard ARCnet can only send packets that are
-up to 508 bytes in length.  This is smaller than the internet "bare minimum"
+up to 508 bytes in length.  This is smaller than the Internet "bare minimum"
 of 576 bytes, let alone the Ethernet MTU of 1500.  To compensate, an extra
 level of encapsulation is defined by RFC1201, which I call "packet
 splitting," that allows "virtual packets" to grow as large as 64K each,
@@ -78,9 +78,9 @@ CABLING ARCNET NETWORKS
 -----------------------
 
 This section was rewritten by 
-        Vojtech Pavlik     <Vojtech.Pavlik@st.mff.cuni.cz>
+        Vojtech Pavlik     <vojtech@suse.cz>
 using information from several people, including:
-        Avery Pennraun     <apenwarr@foxnet.net>
+        Avery Pennraun     <apenwarr@worldvisions.ca>
  	Stephen A. Wood    <saw@hallc1.cebaf.gov>
  	John Paul Morrison <jmorriso@bogomips.ee.ubc.ca>
  	Joachim Koenig     <jojo@repas.de>
@@ -270,7 +270,7 @@ All ARCnet cards should have a total of four or five different settings:
     that IRQ2 is the same as IRQ9, as far as Linux is concerned.  You can
     "cat /proc/interrupts" for a somewhat complete list of which ones are in
     use at any given time.  Here is a list of common usages from Vojtech
-    Pavlik <Vojtech.Pavlik@st.mff.cuni.cz>:
+    Pavlik <vojtech@suse.cz>:
     	("Not on bus" means there is no way for a card to generate this
 	interrupt)
 	IRQ  0 - Timer 0 (Not on bus)
@@ -347,8 +347,7 @@ All ARCnet cards should have a total of four or five different settings:
     network.
     
 Also, on many cards (not mine, though) there are red and green LED's. 
-Vojtech Pavlik <Vojtech.Pavlik@st.mff.cuni.cz> tells me this is what they
-mean:
+Vojtech Pavlik <vojtech@suse.cz> tells me this is what they mean:
 	GREEN           RED             Status
 	-----		---		------
 	OFF             OFF             Power off
@@ -438,8 +437,8 @@ Unclassified Stuff
 PC100, PC110, PC120, PC130 (8-bit cards)
 PC500, PC600 (16-bit cards)
 ---------------------------------
-  - mainly from Avery Pennarun <apenwarr@foxnet.net>.  Values depicted are
-    from Avery's setup.
+  - mainly from Avery Pennarun <apenwarr@worldvisions.ca>.  Values depicted
+    are from Avery's setup.
   - special thanks to Timo Hilbrink <timoh@xs4all.nl> for noting that PC120,
     130, 500, and 600 all have the same switches as Avery's PC100. 
     PC500/600 have several extra, undocumented pins though. (?)
@@ -1005,9 +1004,9 @@ LCS-8830(-T) (8 and 16-bit cards)
     only (the JP0 jumper is hardwired), and BNC only.
 	
 This is a LCS-8830-T made by SMC, I think ('SMC' only appears on one PLCC,
-nowhere else, not even on the few xeroxed sheets from the manual).
+nowhere else, not even on the few Xeroxed sheets from the manual).
 
-SMC Arcnet Board Type LCS-8830-T
+SMC ARCnet Board Type LCS-8830-T
 
    ------------------------------------
   |                                    |
@@ -1070,7 +1069,7 @@ Switches        Base
 
 DIP Switches 1-5 of SW2 encode the RAM and ROM Address Range:
 
-Switches        Ram           Rom
+Switches        RAM           ROM
 12345           Address Range  Address Range
 00000		C:0000-C:07ff	C:2000-C:3fff
 10000		C:0800-C:0fff
@@ -1170,11 +1169,11 @@ Carl de Billy <CARL@carainfo.com> explains J3 and J4:
 DIP Switches:
 
 	The DIP switches accessible on the accessible end of the card while
-        it is installed, is used to set the arcnet address.  There are 8
+        it is installed, is used to set the ARCnet address.  There are 8
         switches.  Use an address from 1 to 254.
 
 	Switch No.
-	12345678	Arcnet address
+	12345678	ARCnet address
 	-----------------------------------------
 	00000000	FF  	(Don't use this!)
 	00000001	FE
@@ -1222,7 +1221,7 @@ DIP Switches:
         from the upper memory regions, and then attempting to load ARCETHER
         using these addresses.
 
-	I recommend using an arcnet memory address of 0xD000, and putting
+	I recommend using an ARCnet memory address of 0xD000, and putting
         the EMS page frame at 0xC000 while using QEMM stealth mode.  That
         way, you get contiguous high memory from 0xD100 almost all the way
         the end of the megabyte.
@@ -1687,7 +1686,7 @@ parameters. These two jumpers are normally left open.
                 |____________________________________________| |__|
 
 
-UM9065L : Arcnet Controller
+UM9065L : ARCnet Controller
 
 SW 1    : Shared Memory Address and I/O Base
 
@@ -1735,11 +1734,11 @@ JP 6  : IRQ set (ONLY ONE jumper on 1-5 for IRQ 2-6)
 ** Acer **
 8-bit card, Model 5210-003
 --------------------------
-  - from Vojtech Pavlik <Vojtech.Pavlik@st.mff.cuni.cz> using portions of
-    the existing arcnet-hardware file.
+  - from Vojtech Pavlik <vojtech@suse.cz> using portions of the existing
+    arcnet-hardware file.
 
-This is a 90C26 based card.  Its configuration seems similar to 
-the SMC PC100, but has some additional jumpers I don't know.
+This is a 90C26 based card.  Its configuration seems similar to the SMC
+PC100, but has some additional jumpers I don't know the meaning of.
 
                __
               |  |
@@ -1800,7 +1799,7 @@ SW2 1-8     Node ID Select (ID0-ID7)
 J1-J5       IRQ Select
 J6-J21      Unknown (Probably extra timeouts & ROM enable ...)
 LED1        Activity LED 
-BNC         Coax connector (STAR arcnet)
+BNC         Coax connector (STAR ARCnet)
 RAM         2k of SRAM
 ROM         Boot ROM socket
 UFS         Unidentified Flying Sockets
@@ -1903,9 +1902,9 @@ guess the purpose.
 ** Datapoint? **
 LAN-ARC-8, an 8-bit card
 ------------------------
-  - from Vojtech Pavlik <Vojtech.Pavlik@st.mff.cuni.cz>
+  - from Vojtech Pavlik <vojtech@suse.cz>
 
-This is another SMC 90C65 based arcnet card. I couldn't identify the
+This is another SMC 90C65-based ARCnet card. I couldn't identify the
 manufacturer, but it might be DataPoint, because the card has the
 original arcNet logo in its upper right corner.
 
@@ -1942,9 +1941,9 @@ SW1 1-5:    Base Memory Address Select
 SW2 1-8:    Node ID Select
 SW3 1-5:    IRQ Select   
     6-7:    Extra Timeout
-    8  :    Rom Enable   
+    8  :    ROM Enable   
 BNC         Coax connector
-XTAL        20MHz Crystal
+XTAL        20 MHz Crystal
 
 
 Setting the Node ID
@@ -2043,7 +2042,7 @@ parameters.  These two switches are normally left in the OFF position.
 ** Topware **
 8-bit card, TA-ARC/10
 -------------------------
-  - from Vojtech Pavlik <Vojtech.Pavlik@st.mff.cuni.cz>
+  - from Vojtech Pavlik <vojtech@suse.cz>
 
 This is another very similar 90C65 card. Most of the switches and jumpers
 are the same as on other clones.
@@ -2081,11 +2080,11 @@ SW1 1-5     Base Memory Address Select
     6-8     Base I/O Address Select
 SW2 1-8     Node ID Select (ID0-ID7)
 J1          IRQ Select
-J2          Rom Enable
+J2          ROM Enable
 J3          Extra Timeout
 LED1        Activity LED 
-BNC         Coax connector (BUS arcnet)
-RJ          Twisted Pair Connector (daisychain)
+BNC         Coax connector (BUS ARCnet)
+RJ          Twisted Pair Connector (daisy chain)
 
 
 Setting the Node ID
@@ -2257,7 +2256,7 @@ function, and the 8th switch is used to select "compatible" or "enhanced".
 When I got my two cards, one of them had this switch set to "enhanced". That
 card didn't work at all, it wasn't even recognized by the driver. The other
 card had this switch set to "compatible" and it behaved absolutely normally. I
-guess that the switch on one of the cards, must have been changed accidently
+guess that the switch on one of the cards, must have been changed accidentally
 when the card was taken out of its former host. The question remains
 unanswered, what is the purpose of the "enhanced" position?
 
@@ -2419,7 +2418,7 @@ using information from the Original
 
 Legend:
 
-COM90C65:       Arcnet Probe
+COM90C65:       ARCnet Probe
 S1  1-8:    Node ID Select
 S2  1-3:    I/O Base Address Select
     4-6:    Memory Base Address Select
@@ -2560,7 +2559,7 @@ Setting the Timeouts
 --------------------
 
 The two jumpers labeled ET1 and ET2 are used to determine the timeout
-parameters (respons and reconfiguration time). Every node in a network
+parameters (response and reconfiguration time). Every node in a network
 must be set to the same timeout values.
 
    ET1 ET2 | Response Time (us) | Reconfiguration Time (ms)
@@ -2752,7 +2751,7 @@ Setting the Timeouts
 ** No Name **
 8-bit cards ("Made in Taiwan R.O.C.")
 -----------
-  - from Vojtech Pavlik <Vojtech.Pavlik@st.mff.cuni.cz>
+  - from Vojtech Pavlik <vojtech@suse.cz>
 
 I have named this ARCnet card "NONAME", since I got only the card with
 no manual at all and the only text identifying the manufacturer is 
@@ -2791,7 +2790,7 @@ SW1 1-5:    Base Memory Address Select
 SW2 1-8:    Node ID Select (ID0-ID7)
 SW3 1-5:    IRQ Select   
     6-7:    Extra Timeout
-    8  :    Rom Enable   
+    8  :    ROM Enable   
 JP1         Led connector
 BNC         Coax connector
 
@@ -3064,7 +3063,7 @@ Some Examples:
 ** Tiara **
 (model unknown)
 -------------------------
-  - from Christoph Lameter <clameter@netcom.com>
+  - from Christoph Lameter <christoph@lameter.com>
   
 
 Here is information about my card as far as I could figure it out:
@@ -3089,7 +3088,7 @@ Tiara LanCard of Tiara Computer Systems.
 0 = Jumper Installed
 1 = Open
 
-Top Jumper line Bit 7 = Rom Enable 654=Memory location 321=I/O
+Top Jumper line Bit 7 = ROM Enable 654=Memory location 321=I/O
 
 Settings for Memory Location (Top Jumper Line)
 456     Address selected
@@ -3129,6 +3128,6 @@ Other Cards
 
 I have no information on other models of ARCnet cards at the moment.  Please
 send any and all info to:
-	apenwarr@foxnet.net
+	apenwarr@worldvisions.ca
 
 Thanks.

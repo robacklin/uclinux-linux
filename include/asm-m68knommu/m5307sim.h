@@ -18,6 +18,8 @@
  *	Define the 5307 SIM register set addresses.
  */
 #define	MCFSIM_RSR		0x00		/* Reset Status reg (r/w) */
+#define MCFSIM_RSR_HRST		0x80		/* Reset was due to hard reset */
+#define MCFSIM_RSR_SWTR		0x20		/* Reset was due to software reset */
 #define	MCFSIM_SYPCR		0x01		/* System Protection reg (r/w)*/
 #define	MCFSIM_SWIVR		0x02		/* SW Watchdog intr reg (r/w) */
 #define	MCFSIM_SWSR		0x03		/* SW Watchdog service (r/w) */

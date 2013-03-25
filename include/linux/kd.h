@@ -26,8 +26,8 @@ struct consolefontdesc {
 #define KDGETLED	0x4B31	/* return current led state */
 #define KDSETLED	0x4B32	/* set led state [lights, not flags] */
 #define 	LED_SCR		0x01	/* scroll lock led */
-#define 	LED_CAP		0x04	/* caps lock led */
 #define 	LED_NUM		0x02	/* num lock led */
+#define 	LED_CAP		0x04	/* caps lock led */
 
 #define KDGKBTYPE	0x4B33	/* get keyboard type */
 #define 	KB_84		0x01
@@ -89,10 +89,10 @@ struct unimapinit {
 #define KDSKBMETA	0x4B63	/* sets meta key handling mode */
 
 #define		K_SCROLLLOCK	0x01
-#define		K_CAPSLOCK	0x02
-#define		K_NUMLOCK	0x04
+#define		K_NUMLOCK	0x02
+#define		K_CAPSLOCK	0x04
 #define	KDGKBLED	0x4B64	/* get led flags (not lights) */
-#define KDSKBLED	0x4B65	/* set led flags (not lights) */
+#define	KDSKBLED	0x4B65	/* set led flags (not lights) */
 
 struct kbentry {
 	unsigned char kb_table;
@@ -132,8 +132,36 @@ struct kbkeycode {
 
 #define KDSIGACCEPT	0x4B4E	/* accept kbd generated signals */
 
+struct kbd_repeat {
+	int delay;	/* in msec; <= 0: don't change */
+	int rate;	/* in msec; <= 0: don't change */
+};
+
+#define KDKBDREP        0x4B52  /* set keyboard delay/repeat rate;
+				 * actually used values are returned */
+
+#define KDFONTOP	0x4B72	/* font operations */
+
+struct console_font_op {
+	unsigned int op;	/* operation code KD_FONT_OP_* */
+	unsigned int flags;	/* KD_FONT_FLAG_* */
+	unsigned int width, height;	/* font size */
+	unsigned int charcount;
+	unsigned char *data;	/* font data with height fixed to 32 */
+};
+
+#define KD_FONT_OP_SET		0	/* Set font */
+#define KD_FONT_OP_GET		1	/* Get font */
+#define KD_FONT_OP_SET_DEFAULT	2	/* Set font to default, data points to name / NULL */
+#define KD_FONT_OP_COPY		3	/* Copy from another console */
+
+#define KD_FONT_FLAG_DONT_RECALC 	1	/* Don't recalculate hw charcell size [compat] */
+#ifdef __KERNEL__
+#define KD_FONT_FLAG_OLD		0x80000000	/* Invoked via old interface [compat] */
+#endif
+
 /* note: 0x4B00-0x4B4E all have had a value at some time;
    don't reuse for the time being */
-/* note: 0x4B60-0x4B6D, 0x4B70, 0x4B71 used above */
+/* note: 0x4B60-0x4B6D, 0x4B70-0x4B72 used above */
 
 #endif /* _LINUX_KD_H */

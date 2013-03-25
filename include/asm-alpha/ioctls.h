@@ -9,6 +9,7 @@
 #define FIONBIO		_IOW('f', 126, int)
 #define FIONREAD	_IOR('f', 127, int)
 #define TIOCINQ		FIONREAD
+#define FIOQSIZE	_IOR('f', 128, loff_t)
 
 #define TIOCGETP	_IOR('t', 8, struct sgttyb)
 #define TIOCSETP	_IOW('t', 9, struct sgttyb)
@@ -61,6 +62,11 @@
 # define TIOCM_DSR	0x100
 # define TIOCM_CD	TIOCM_CAR
 # define TIOCM_RI	TIOCM_RNG
+# define TIOCM_OUT1	0x2000
+# define TIOCM_OUT2	0x4000
+# define TIOCM_LOOP	0x8000
+
+#define TIOCM_MODEM_BITS       TIOCM_OUT2      /* IRDA support */
 
 #define TIOCGSOFTCAR	0x5419
 #define TIOCSSOFTCAR	0x541A
@@ -85,6 +91,9 @@
 #define TIOCTTYGSTRUCT	0x5426  /* For debugging only */
 #define TIOCSBRK	0x5427  /* BSD compatibility */
 #define TIOCCBRK	0x5428  /* BSD compatibility */
+#define TIOCGSID	0x5429  /* Return the session ID of FD */
+#define TIOCGPTN	_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
+#define TIOCSPTLCK	_IOW('T',0x31, int)  /* Lock/unlock Pty */
 
 #define TIOCSERCONFIG	0x5453
 #define TIOCSERGWILD	0x5454
@@ -100,5 +109,7 @@
 
 #define TIOCMIWAIT	0x545C	/* wait for a change on serial input line(s) */
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
+#define TIOCGHAYESESP	0x545E  /* Get Hayes ESP configuration */
+#define TIOCSHAYESESP	0x545F  /* Set Hayes ESP configuration */
 
 #endif /* _ASM_ALPHA_IOCTLS_H */

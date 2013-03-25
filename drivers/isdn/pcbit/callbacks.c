@@ -1,26 +1,26 @@
 /*
+ * Callbacks for the FSM
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
+ * the GNU General Public License, incorporated herein by reference.
  */
 
-/*        
- *        callbacks for the FSM
+/*
+ * Fix: 19981230 - Carlos Morgado <chbm@techie.com>
+ * Port of Nelson Escravana's <nelson.escravana@usa.net> fix to CalledPN 
+ * NULL pointer dereference in cb_in_1 (originally fixed in 2.0)
  */
-
-#define __NO_VERSION__
-
-#include <linux/module.h>
 
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/tqueue.h>
 #include <linux/skbuff.h>
@@ -164,14 +164,20 @@ void cb_in_1(struct pcbit_dev * dev, struct pcbit_chan* chan,
          *  ictl.num >= strlen() + strlen() + 5
          */
 
-	if (cbdata->data.setup.CallingPN == NULL)
+	if (cbdata->data.setup.CallingPN == NULL) {
+		printk(KERN_DEBUG "NULL CallingPN to phone; using 0\n");
 		strcpy(ictl.parm.setup.phone, "0");
-	else
+	}
+	else {
 		strcpy(ictl.parm.setup.phone, cbdata->data.setup.CallingPN);
-	if (cbdata->data.setup.CalledPN == NULL)
+	}
+	if (cbdata->data.setup.CalledPN == NULL) {
+		printk(KERN_DEBUG "NULL CalledPN to eazmsn; using 0\n");
 		strcpy(ictl.parm.setup.eazmsn, "0");
-	else
+	}
+	else {
 		strcpy(ictl.parm.setup.eazmsn, cbdata->data.setup.CalledPN);
+	}
 	ictl.parm.setup.si1 = 7;
 	ictl.parm.setup.si2 = 0;
 	ictl.parm.setup.plan = 0;

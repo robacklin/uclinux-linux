@@ -2,14 +2,19 @@
  *
  * Copyright (C) 1995       David S. Miller    <davem@caip.rutgers.edu>
  * Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
- * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@lineo.ca>
+ * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@uclinux.org>
  * Copyright (C) 1999       Vladimir Gurevich  <vgurevic@cisco.com>
- * Copyright (C) 2000  	    Lineo, Inc.        (www.lineo.com) 
+ * Copyright (C) 2002       David McCullough   <davidm@snapgear.com>
  *
- * FIXES For ^P and ^R debugging
- *			    Evan Stawnyczy  (evan@lineo.ca)
+ * VZ Support/Fixes             Evan Stawnyczy <e@lineo.ca>
+ * Multiple UART support        Daniel Potts <danielp@cse.unsw.edu.au>
+ * Power management support     Daniel Potts <danielp@cse.unsw.edu.au>
+ * VZ Second Serial Port enable Phil Wilshire
+ * 2.4 support                  David McCullough
  */
- 
+
+#include <asm/dbg.h>
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -23,6 +28,11 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
+#include <linux/console.h>
+#include <linux/reboot.h>
+#include <linux/keyboard.h>
+#include <linux/init.h>
+#include <linux/pm.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
@@ -30,9 +40,23 @@
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/delay.h>
+#include <asm/uaccess.h>
+
+/* (es) */
+/* note: perhaps we can murge these files, so that you can just
+ * 	 define 1 of them, and they can sort that out for themselves
+ */
+#if defined(CONFIG_M68EZ328)
+#include <asm/MC68EZ328.h>
+#else
+#if defined(CONFIG_M68VZ328)
+#include <asm/MC68VZ328.h>
+#else
+#include <asm/MC68328.h>
+#endif /* CONFIG_M68VZ328 */
+#endif /* CONFIG_M68EZ328 */
 
 #include "68328serial.h"
-
 
 /* Turn off usage of real serial interrupt code, to "support" Copilot */
 #ifdef CONFIG_XCOPILOT_BUGS
@@ -41,7 +65,13 @@
 #define USE_INTS
 #endif
 
-static struct m68k_serial m68k_soft;
+static struct m68k_serial m68k_soft[NR_PORTS];
+struct m68k_serial *IRQ_ports[NR_IRQS];
+
+static unsigned int uart_irqs[NR_PORTS] = UART_IRQ_DEFNS;
+
+/* multiple ports are contiguous in memory */
+m68328_uart *uart_addr = (m68328_uart *) USTCNT_ADDR;
 
 struct tty_struct m68k_ttys;
 struct m68k_serial *m68k_consinfo = 0;
@@ -73,13 +103,44 @@ static int serial_refcount;
 
 static void change_speed(struct m68k_serial *info);
 
-static struct tty_struct *serial_table[2];
-static struct termios *serial_termios[2];
-static struct termios *serial_termios_locked[2];
+static struct tty_struct *serial_table[NR_PORTS];
+static struct termios *serial_termios[NR_PORTS];
+static struct termios *serial_termios_locked[NR_PORTS];
 
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
 #endif
+
+/*
+ *	Setup for console. Argument comes from the boot command line.
+ */
+
+#if defined(CONFIG_M68EZ328ADS) || defined(CONFIG_ALMA_ANS) || defined(CONFIG_DRAGONIXVZ) || defined(CONFIG_CWEZ328) || defined(CONFIG_CWVZ328)
+#define	CONSOLE_BAUD_RATE	115200
+#define	DEFAULT_CBAUD		B115200
+#elif defined(CONFIG_CLIE)
+#define CONSOLE_BAUD_RATE       9600
+#define DEFAULT_CBAUD           9600
+#else
+	/* (es) */
+	/* note: this is messy, but it works, again, perhaps defined somewhere else?*/
+	#ifdef CONFIG_M68VZ328
+	#define CONSOLE_BAUD_RATE	19200
+	#define DEFAULT_CBAUD		B19200
+	#endif
+	/* (/es) */
+#endif
+
+#ifndef CONSOLE_BAUD_RATE
+#define	CONSOLE_BAUD_RATE	9600
+#define	DEFAULT_CBAUD		B9600
+#endif
+
+
+static int m68328_console_initted = 0;
+static int m68328_console_baud    = CONSOLE_BAUD_RATE;
+static int m68328_console_cbaud   = DEFAULT_CBAUD;
+
 
 /*
  * tmp_buf is used as a temporary buffer by serial_write.  We need to
@@ -91,7 +152,7 @@ static struct termios *serial_termios_locked[2];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char tmp_buf[SERIAL_XMIT_SIZE]; /* This is cheating */
-static struct semaphore tmp_buf_sem = MUTEX;
+DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct m68k_serial *info,
 					dev_t device, const char *routine)
@@ -121,6 +182,8 @@ static int baud_table[] = {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
 	9600, 19200, 38400, 57600, 115200, 0 };
 
+#define BAUD_TABLE_SIZE (sizeof(baud_table)/sizeof(baud_table[0]))
+
 /* Sets or clears DTR/RTS on the requested line */
 static inline void m68k_rtsdtr(struct m68k_serial *ss, int set)
 {
@@ -136,7 +199,7 @@ static inline void m68k_rtsdtr(struct m68k_serial *ss, int set)
 static inline int get_baud(struct m68k_serial *ss)
 {
 	unsigned long result = 115200;
-	unsigned short int baud = UBAUD;
+	unsigned short int baud = uart_addr[ss->line].ubaud;
 	if (GET_FIELD(baud, UBAUD_PRESCALER) == 0x38) result = 38400;
 	result >>= GET_FIELD(baud, UBAUD_DIVIDE);
 
@@ -154,13 +217,14 @@ static inline int get_baud(struct m68k_serial *ss)
 static void rs_stop(struct tty_struct *tty)
 {
 	struct m68k_serial *info = (struct m68k_serial *)tty->driver_data;
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "rs_stop"))
 		return;
 	
 	save_flags(flags); cli();
-	USTCNT &= ~USTCNT_TXEN;
+	uart->ustcnt &= ~USTCNT_TXEN;
 	restore_flags(flags);
 }
 
@@ -183,17 +247,18 @@ static void rs_put_char(char ch)
 static void rs_start(struct tty_struct *tty)
 {
 	struct m68k_serial *info = (struct m68k_serial *)tty->driver_data;
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 	
 	if (serial_paranoia_check(info, tty->device, "rs_start"))
 		return;
 	
 	save_flags(flags); cli();
-	if (info->xmit_cnt && info->xmit_buf && !(USTCNT & USTCNT_TXEN)) {
+	if (info->xmit_cnt && info->xmit_buf && !(uart->ustcnt & USTCNT_TXEN)) {
 #ifdef USE_INTS
-		USTCNT |= USTCNT_TXEN | USTCNT_TX_INTR_MASK;
+		uart->ustcnt |= USTCNT_TXEN | USTCNT_TX_INTR_MASK;
 #else
-		USTCNT |= USTCNT_TXEN;
+		uart->ustcnt |= USTCNT_TXEN;
 #endif
 	}
 	restore_flags(flags);
@@ -242,13 +307,16 @@ static _INLINE_ void rs_sched_event(struct m68k_serial *info,
 				    int event)
 {
 	info->event |= 1 << event;
-	queue_task_irq_off(&info->tqueue, &tq_serial);
+	queue_task(&info->tqueue, &tq_serial);
 	mark_bh(SERIAL_BH);
 }
 
 static _INLINE_ void receive_chars(struct m68k_serial *info, struct pt_regs *regs, unsigned short rx)
 {
 	struct tty_struct *tty = info->tty;
+#ifndef CONFIG_XCOPILOT_BUGS
+	m68328_uart *uart = &uart_addr[info->line];
+#endif
 	unsigned char ch;
 
 	/*
@@ -263,29 +331,18 @@ static _INLINE_ void receive_chars(struct m68k_serial *info, struct pt_regs *reg
 			if(URX_BREAK & rx) { /* whee, break received */
 				status_handle(info, rx);
 				return;
-			}
-/* (es) */
-#ifdef __KERNEL_DEBUGGING__
-/* this is to enable serial console debugging,
- * if you enable kernel debugging you can press
- * ctrl-P to get a listing or registers and memory usage
- * ctrl-R will allow a convenient method of reseting the module 
- *	  remotely from the serial console
- */
-			 else if (ch == 0x10) { /* ^P */
+#ifdef CONFIG_MAGIC_SYSRQ
+			} else if (ch == 0x10) { /* ^P */
 				show_state();
 				show_free_areas();
 				show_buffers();
-				show_net_buffers();
+/*				show_net_buffers(); */
 				return;
 			} else if (ch == 0x12) { /* ^R */
-				hard_reset_now();
+				machine_restart(NULL);
 				return;
+#endif /* CONFIG_MAGIC_SYSRQ */
 			}
-#endif
-/* (/es) */
-			/* It is a 'keyboard interrupt' ;-) */
-			wake_up(&keypress_wait);
 		}
 
 		if(!tty)
@@ -295,7 +352,7 @@ static _INLINE_ void receive_chars(struct m68k_serial *info, struct pt_regs *reg
 		 * Make sure that we do not overflow the buffer
 		 */
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
-			queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+			queue_task(&tty->flip.tqueue, &tq_timer);
 			return;
 		}
 
@@ -315,10 +372,10 @@ static _INLINE_ void receive_chars(struct m68k_serial *info, struct pt_regs *reg
 		tty->flip.count++;
 
 #ifndef CONFIG_XCOPILOT_BUGS
-	} while((rx = URX) & URX_DATA_READY);
+	} while((rx = uart->urx.w) & URX_DATA_READY);
 #endif
 
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 
 clear_and_exit:
 	return;
@@ -326,21 +383,23 @@ clear_and_exit:
 
 static _INLINE_ void transmit_chars(struct m68k_serial *info)
 {
+	m68328_uart *uart = &uart_addr[info->line];
+
 	if (info->x_char) {
 		/* Send next char */
-		UTX_TXDATA = info->x_char;
+		uart->utx.b.txdata = info->x_char;
 		info->x_char = 0;
 		goto clear_and_return;
 	}
 
 	if((info->xmit_cnt <= 0) || info->tty->stopped) {
 		/* That's peculiar... TX ints off */
-		USTCNT &= ~USTCNT_TX_INTR_MASK;
+		uart->ustcnt &= ~USTCNT_TX_INTR_MASK;
 		goto clear_and_return;
 	}
 
 	/* Send char */
-	UTX_TXDATA = info->xmit_buf[info->xmit_tail++];
+	uart->utx.b.txdata = info->xmit_buf[info->xmit_tail++];
 	info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 	info->xmit_cnt--;
 
@@ -349,7 +408,7 @@ static _INLINE_ void transmit_chars(struct m68k_serial *info)
 
 	if(info->xmit_cnt <= 0) {
 		/* All done for now... TX ints off */
-		USTCNT &= ~USTCNT_TX_INTR_MASK;
+		uart->ustcnt &= ~USTCNT_TX_INTR_MASK;
 		goto clear_and_return;
 	}
 
@@ -363,10 +422,22 @@ clear_and_return:
  */
 void rs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct m68k_serial * info = &m68k_soft;
-	unsigned short rx = URX;
+	struct m68k_serial * info;
+	m68328_uart *uart;
+	unsigned short rx;
 #ifdef USE_INTS
-	unsigned short tx = UTX;
+	unsigned short tx;
+#endif
+
+	info = IRQ_ports[irq];
+	if(!info)
+	    return;
+
+	uart = &uart_addr[info->line];
+	rx = uart->urx.w;
+
+#ifdef USE_INTS
+	tx = uart->utx.w;
 
 	if (rx & URX_DATA_READY) receive_chars(info, regs, rx);
 	if (tx & UTX_TX_AVAIL)   transmit_chars(info);
@@ -398,13 +469,14 @@ static void do_softint(void *private_)
 	tty = info->tty;
 	if (!tty)
 		return;
-
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
+#if 1
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
 		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
 	}
+#endif   
 }
 
 /*
@@ -429,20 +501,9 @@ static void do_serial_hangup(void *private_)
 }
 
 
-/*
- * This subroutine is called when the RS_TIMER goes off.  It is used
- * by the serial driver to handle ports that do not have an interrupt
- * 68328 does, we had better never get here.
- */
- 
-static void rs_timer(void)
-{
-	panic("rs_timer called\n");
-	return;
-}
-
 static int startup(struct m68k_serial * info)
 {
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 	
 	if (info->flags & S_INITIALIZED)
@@ -461,19 +522,19 @@ static int startup(struct m68k_serial * info)
 	 * (they will be reenabled in change_speed())
 	 */
 
-	USTCNT = USTCNT_UEN;
+	uart->ustcnt = USTCNT_UEN;
 	info->xmit_fifo_size = 1;
-	USTCNT = USTCNT_UEN | USTCNT_RXEN | USTCNT_TXEN;
-	(void)URX;
+	uart->ustcnt = USTCNT_UEN | USTCNT_RXEN | USTCNT_TXEN;
+	(void)uart->urx.w;
 
 	/*
 	 * Finally, enable sequencing and interrupts
 	 */
 #ifdef USE_INTS
-	USTCNT = USTCNT_UEN | USTCNT_RXEN | 
+	uart->ustcnt = USTCNT_UEN | USTCNT_RXEN | 
                  USTCNT_RX_INTR_MASK | USTCNT_TX_INTR_MASK;
 #else
-	USTCNT = USTCNT_UEN | USTCNT_RXEN | USTCNT_RX_INTR_MASK;
+	uart->ustcnt = USTCNT_UEN | USTCNT_RXEN | USTCNT_RX_INTR_MASK;
 #endif
 
 	if (info->tty)
@@ -497,9 +558,10 @@ static int startup(struct m68k_serial * info)
  */
 static void shutdown(struct m68k_serial * info)
 {
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long	flags;
 
-	USTCNT = 0; /* All off! */
+	uart->ustcnt = 0; /* All off! */
 	if (!(info->flags & S_INITIALIZED))
 		return;
 
@@ -519,7 +581,9 @@ static void shutdown(struct m68k_serial * info)
 
 struct {
 	int divisor, prescale;
-} hw_baud_table[18] = {
+}
+#ifndef CONFIG_M68VZ328
+ hw_baud_table[18] = {
 	{0,0}, /* 0 */
 	{0,0}, /* 50 */
 	{0,0}, /* 75 */
@@ -539,6 +603,28 @@ struct {
 	{1,0x38}, /* 57600 */
 	{0,0x38}, /* 115200 */
 };
+#else
+ hw_baud_table[18] = {
+                 {0,0}, /* 0 */
+                 {0,0}, /* 50 */
+                 {0,0}, /* 75 */
+                 {0,0}, /* 110 */
+                 {0,0}, /* 134 */
+                 {0,0}, /* 150 */
+                 {0,0}, /* 200 */
+                 {0,0}, /* 300 */
+                 {7,0x26}, /* 600 */
+                 {6,0x26}, /* 1200 */
+                 {0,0}, /* 1800 */
+                 {5,0x26}, /* 2400 */
+                 {4,0x26}, /* 4800 */
+                 {3,0x26}, /* 9600 */
+                 {2,0x26}, /* 19200 */
+                 {1,0x26}, /* 38400 */
+                 {2,0x38}, /* 57600 */
+                 {1,0x38}, /* 115200 */
+}; 
+#endif
 /* rate = 1036800 / ((65 - prescale) * (1<<divider)) */
 
 /*
@@ -547,6 +633,7 @@ struct {
  */
 static void change_speed(struct m68k_serial *info)
 {
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned short port;
 	unsigned short ustcnt;
 	unsigned cflag;
@@ -558,8 +645,8 @@ static void change_speed(struct m68k_serial *info)
 	if (!(port = info->port))
 		return;
 
-	ustcnt = USTCNT;
-	USTCNT = ustcnt & ~USTCNT_TXEN;
+	ustcnt = uart->ustcnt;
+	uart->ustcnt = ustcnt & ~USTCNT_TXEN;
 
 	i = cflag & CBAUD;
         if (i & CBAUDEX) {
@@ -567,7 +654,7 @@ static void change_speed(struct m68k_serial *info)
         }
 
 	info->baud = baud_table[i];
-	UBAUD = PUT_FIELD(UBAUD_DIVIDE,    hw_baud_table[i].divisor) | 
+	uart->ubaud = PUT_FIELD(UBAUD_DIVIDE,    hw_baud_table[i].divisor) | 
 		PUT_FIELD(UBAUD_PRESCALER, hw_baud_table[i].prescale);
 
 	ustcnt &= ~(USTCNT_PARITYEN | USTCNT_ODD_EVEN | USTCNT_STOP | USTCNT_8_7);
@@ -585,15 +672,15 @@ static void change_speed(struct m68k_serial *info)
 	
 #ifdef CONFIG_68328_SERIAL_RTS_CTS
 	if (cflag & CRTSCTS) {
-		UTX &= ~ UTX_NOCTS;
+		uart->utx.w &= ~ UTX_NOCTS;
 	} else {
-		UTX |= UTX_NOCTS;
+		uart->utx.w |= UTX_NOCTS;
 	}
 #endif
 
 	ustcnt |= USTCNT_TXEN;
 	
-	USTCNT = ustcnt;
+	uart->ustcnt = ustcnt;
 	return;
 }
 
@@ -604,7 +691,7 @@ static void rs_fair_output(void)
 {
 	int left;		/* Output no more than that */
 	unsigned long flags;
-	struct m68k_serial *info = &m68k_soft;
+	struct m68k_serial *info = &m68k_soft[0];
 	char c;
 
 	if (info == 0) return;
@@ -665,6 +752,7 @@ static void rs_set_ldisc(struct tty_struct *tty)
 static void rs_flush_chars(struct tty_struct *tty)
 {
 	struct m68k_serial *info = (struct m68k_serial *)tty->driver_data;
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "rs_flush_chars"))
@@ -672,32 +760,35 @@ static void rs_flush_chars(struct tty_struct *tty)
 #ifndef USE_INTS
 	for(;;) {
 #endif
-	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
-	    !info->xmit_buf)
-		return;
 
 	/* Enable transmitter */
 	save_flags(flags); cli();
 
+	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
+			!info->xmit_buf) {
+		restore_flags(flags);
+		return;
+	}
+
 #ifdef USE_INTS
-	USTCNT |= USTCNT_TXEN | USTCNT_TX_INTR_MASK;
+	uart->ustcnt |= USTCNT_TXEN | USTCNT_TX_INTR_MASK;
 #else
-	USTCNT |= USTCNT_TXEN;
+	uart->ustcnt |= USTCNT_TXEN;
 #endif
 
 #ifdef USE_INTS
-	if (UTX & UTX_TX_AVAIL) {
+	if (uart->utx.w & UTX_TX_AVAIL) {
 #else
 	if (1) {
 #endif
 		/* Send char */
-		UTX_TXDATA = info->xmit_buf[info->xmit_tail++];
+		uart->utx.b.txdata = info->xmit_buf[info->xmit_tail++];
 		info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 		info->xmit_cnt--;
 	}
 
 #ifndef USE_INTS
-	while (!(UTX & UTX_TX_AVAIL)) udelay(5);
+	while (!(uart->utx.w & UTX_TX_AVAIL)) udelay(5);
 	}
 #endif
 	restore_flags(flags);
@@ -710,6 +801,7 @@ static int rs_write(struct tty_struct * tty, int from_user,
 {
 	int	c, total = 0;
 	struct m68k_serial *info = (struct m68k_serial *)tty->driver_data;
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "rs_write"))
@@ -728,7 +820,7 @@ static int rs_write(struct tty_struct * tty, int from_user,
 
 		if (from_user) {
 			down(&tmp_buf_sem);
-			memcpy_fromfs(tmp_buf, buf, c);
+			copy_from_user(tmp_buf, buf, c);
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - info->xmit_head));
 			memcpy(info->xmit_buf + info->xmit_head, tmp_buf, c);
@@ -750,14 +842,14 @@ static int rs_write(struct tty_struct * tty, int from_user,
 		while(info->xmit_cnt) {
 #endif
 
-		USTCNT |= USTCNT_TXEN;
+		uart->ustcnt |= USTCNT_TXEN;
 #ifdef USE_INTS
-		USTCNT |= USTCNT_TX_INTR_MASK;
+		uart->ustcnt |= USTCNT_TX_INTR_MASK;
 #else
-		while (!(UTX & UTX_TX_AVAIL)) udelay(5);
+		while (!(uart->utx.w & UTX_TX_AVAIL)) udelay(5);
 #endif
-		if (UTX & UTX_TX_AVAIL) {
-			UTX_TXDATA = info->xmit_buf[info->xmit_tail++];
+		if (uart->utx.w & UTX_TX_AVAIL) {
+			uart->utx.b.txdata = info->xmit_buf[info->xmit_tail++];
 			info->xmit_tail = info->xmit_tail & (SERIAL_XMIT_SIZE-1);
 			info->xmit_cnt--;
 		}
@@ -869,7 +961,7 @@ static int get_serial_info(struct m68k_serial * info,
 	tmp.close_delay = info->close_delay;
 	tmp.closing_wait = info->closing_wait;
 	tmp.custom_divisor = info->custom_divisor;
-	memcpy_tofs(retinfo,&tmp,sizeof(*retinfo));
+	copy_to_user(retinfo,&tmp,sizeof(*retinfo));
 	return 0;
 }
 
@@ -882,7 +974,7 @@ static int set_serial_info(struct m68k_serial * info,
 
 	if (!new_info)
 		return -EFAULT;
-	memcpy_fromfs(&new_serial,new_info,sizeof(new_serial));
+	copy_from_user(&new_serial,new_info,sizeof(new_serial));
 	old_info = *info;
 
 	if (!suser()) {
@@ -930,11 +1022,14 @@ check_and_exit:
  */
 static int get_lsr_info(struct m68k_serial * info, unsigned int *value)
 {
+#ifdef CONFIG_68328_SERIAL_RTS_CTS
+	m68328_uart *uart = &uart_addr[info->line];
+#endif
 	unsigned char status;
 
 	cli();
 #ifdef CONFIG_68328_SERIAL_RTS_CTS
-	status = (UTX & UTX_CTS_STAT) ? 1 : 0;
+	status = (uart->utx.w & UTX_CTS_STAT) ? 1 : 0;
 #else
 	status = 0;
 #endif
@@ -948,17 +1043,21 @@ static int get_lsr_info(struct m68k_serial * info, unsigned int *value)
  */
 static void send_break(	struct m68k_serial * info, int duration)
 {
+#ifdef USE_INTS	
+	m68328_uart *uart = &uart_addr[info->line];
+#endif
+	unsigned long flags;
 	if (!info->port)
 		return;
 	current->state = TASK_INTERRUPTIBLE;
-	current->timeout = jiffies + duration;
+	save_flags(flags);
 	cli();
-#ifdef USE_INTS
-	UTX |= UTX_SEND_BREAK;
-	schedule();
-	UTX &= ~UTX_SEND_BREAK;
-#endif
-	sti();
+#ifdef USE_INTS	
+	uart->utx.w |= UTX_SEND_BREAK;
+	schedule_timeout(duration);
+	uart->utx.w &= ~UTX_SEND_BREAK;
+#endif		
+	restore_flags(flags);
 }
 
 static int rs_ioctl(struct tty_struct *tty, struct file * file,
@@ -998,11 +1097,11 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
 			if (error)
 				return error;
-			put_fs_long(C_CLOCAL(tty) ? 1 : 0,
+			put_user(C_CLOCAL(tty) ? 1 : 0,
 				    (unsigned long *) arg);
 			return 0;
 		case TIOCSSOFTCAR:
-			arg = get_fs_long((unsigned long *) arg);
+			get_user(arg, (unsigned long *) arg);
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
@@ -1030,7 +1129,7 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 						sizeof(struct m68k_serial));
 			if (error)
 				return error;
-			memcpy_tofs((struct m68k_serial *) arg,
+			copy_to_user((struct m68k_serial *) arg,
 				    info, sizeof(struct m68k_serial));
 			return 0;
 			
@@ -1070,6 +1169,7 @@ static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 static void rs_close(struct tty_struct *tty, struct file * filp)
 {
 	struct m68k_serial * info = (struct m68k_serial *)tty->driver_data;
+	m68328_uart *uart = &uart_addr[info->line];
 	unsigned long flags;
 
 	if (!info || serial_paranoia_check(info, tty->device, "rs_close"))
@@ -1126,8 +1226,8 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	 * line status register.
 	 */
 
-	USTCNT &= ~USTCNT_RXEN;
-	USTCNT &= ~(USTCNT_RXEN | USTCNT_RX_INTR_MASK);
+	uart->ustcnt &= ~USTCNT_RXEN;
+	uart->ustcnt &= ~(USTCNT_RXEN | USTCNT_RX_INTR_MASK);
 
 	shutdown(info);
 	if (tty->driver.flush_buffer)
@@ -1137,10 +1237,10 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
-	if (tty->ldisc.num != ldiscs[N_TTY].num) {
+	if (tty->ldisc.num != tty_ldiscs[N_TTY].num) {
 		if (tty->ldisc.close)
 			(tty->ldisc.close)(tty);
-		tty->ldisc = ldiscs[N_TTY];
+		tty->ldisc = tty_ldiscs[N_TTY];
 		tty->termios->c_line = N_TTY;
 		if (tty->ldisc.open)
 			(tty->ldisc.open)(tty);
@@ -1148,8 +1248,7 @@ static void rs_close(struct tty_struct *tty, struct file * filp)
 	if (info->blocked_open) {
 		if (info->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + info->close_delay;
-			schedule();
+			schedule_timeout(info->close_delay);
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -1186,7 +1285,7 @@ void rs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct m68k_serial *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
 
@@ -1278,7 +1377,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		if (!(info->flags & S_CALLOUT_ACTIVE) &&
 		    !(info->flags & S_CLOSING) && do_clocal)
 			break;
-		if (current->signal & ~current->blocked) {
+                if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1309,10 +1408,10 @@ int rs_open(struct tty_struct *tty, struct file * filp)
 
 	line = MINOR(tty->device) - tty->driver.minor_start;
 	
-	if (line != 0) /* we have exactly one */
+	if (line >= NR_PORTS || line < 0) /* we have exactly one */
 		return -ENODEV;
 
-	info = &m68k_soft;
+	info = &m68k_soft[line];
 
 	if (serial_paranoia_check(info, tty->device, "rs_open"))
 		return -ENODEV;
@@ -1354,21 +1453,68 @@ static void show_serial_version(void)
 	printk("MC68328 serial driver version 1.00\n");
 }
 
-extern void register_console(void (*proc)(const char *));
+#ifdef CONFIG_PM
+/* Serial Power management
+ *  The console (currently fixed at line 0) is a special case for power
+ *  management because the kernel is so chatty. The console will be 
+ *  explicitly disabled my our power manager as the last minute, so we won't
+ *  mess with it here.
+ */
+static struct pm_dev *serial_pm[NR_PORTS];
 
-volatile int test_done;
+static int serial_pm_callback(struct pm_dev *dev, pm_request_t request, void *data)
+{
+	struct m68k_serial *info = (struct m68k_serial *)dev->data;
+
+	if(info == NULL)
+		return -1;
+
+	/* special case for line 0 - pm restores it */
+	if(info->line == 0)
+		return 0; 
+
+	switch (request) {
+	case PM_SUSPEND:
+		shutdown(info);
+		break;
+
+	case PM_RESUME:
+		startup(info);
+		break;
+	}
+	return 0;
+}
+
+void shutdown_console(void)
+{
+	struct m68k_serial *info = &m68k_soft[0];
+
+	/* HACK: wait a bit for any pending printk's to be dumped */
+	{
+		int i = 10000;
+		while(i--);
+	}
+
+	shutdown(info);
+}
+
+void startup_console(void)
+{
+	struct m68k_serial *info = &m68k_soft[0];
+	startup(info);
+}
+#endif
+
 
 /* rs_init inits the driver */
-int rs68328_init(void)
+static int __init
+rs68328_init(void)
 {
-	int flags;
+	int flags, i;
 	struct m68k_serial *info;
 	
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
-
 	show_serial_version();
 
 	/* Initialize the tty_driver structure */
@@ -1379,27 +1525,12 @@ int rs68328_init(void)
 	serial_driver.name = "ttyS";
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64;
-	serial_driver.num = 1;
+	serial_driver.num = NR_PORTS;
 	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
 	serial_driver.subtype = SERIAL_TYPE_NORMAL;
 	serial_driver.init_termios = tty_std_termios;
-
-	
-        serial_driver.init_termios.c_cflag = 
-#if   defined(CONFIG_PILOT)
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-#elif defined(CONFIG_UCSIMM)
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-#elif defined(CONFIG_CWEZ328)
-		B115200 | CS8 | CREAD | HUPCL | CLOCAL;
-#elif defined(CONFIG_M68EZ328ADS)
-		B115200 | CS8 | CREAD | HUPCL | CLOCAL;
-#elif defined(CONFIG_ALMA_ANS)
-		B115200 | CS8 | CREAD | HUPCL | CLOCAL;
-#else 
-#error  Please, define the default console settings for your board
-#endif
-
+	serial_driver.init_termios.c_cflag = 
+			m68328_console_cbaud | CS8 | CREAD | HUPCL | CLOCAL;
 	serial_driver.flags = TTY_DRIVER_REAL_RAW;
 	serial_driver.refcount = &serial_refcount;
 	serial_driver.table = serial_table;
@@ -1438,41 +1569,58 @@ int rs68328_init(void)
 	
 	save_flags(flags); cli();
 
-	info = &m68k_soft;
-	info->magic = SERIAL_MAGIC;
-	info->port = 0xfffff900;
-	info->tty = 0;
-	info->irq = 0x40;
-	info->custom_divisor = 16;
-	info->close_delay = 50;
-	info->closing_wait = 3000;
-	info->x_char = 0;
-	info->event = 0;
-	info->count = 0;
-	info->blocked_open = 0;
-	info->tqueue.routine = do_softint;
-	info->tqueue.data = info;
-	info->tqueue_hangup.routine = do_serial_hangup;
-	info->tqueue_hangup.data = info;
-	info->callout_termios =callout_driver.init_termios;
-	info->normal_termios = serial_driver.init_termios;
-	info->open_wait = 0;
-	info->close_wait = 0;
-	info->line = 0;
-	info->is_cons = 1; /* Means shortcuts work */
-	
-	printk("%s%d at 0x%08x (irq = %d)", serial_driver.name, info->line, 
-	       info->port, info->irq);
-		printk(" is a builtin MC68328 UART\n");
+	for(i=0;i<NR_PORTS;i++) {
 
-        if (request_irq(IRQ_MACHSPEC | UART_IRQ_NUM,
-                        rs_interrupt,
-                        IRQ_FLG_STD,
-                        "M68328_UART", NULL))
+	    info = &m68k_soft[i];
+	    info->magic = SERIAL_MAGIC;
+	    info->port = &uart_addr[i];
+	    info->tty = 0;
+	    info->irq = uart_irqs[i];
+	    info->custom_divisor = 16;
+	    info->close_delay = 50;
+	    info->closing_wait = 3000;
+	    info->x_char = 0;
+	    info->event = 0;
+	    info->count = 0;
+	    info->blocked_open = 0;
+	    info->tqueue.routine = do_softint;
+	    info->tqueue.data = info;
+	    info->tqueue_hangup.routine = do_serial_hangup;
+	    info->tqueue_hangup.data = info;
+	    info->callout_termios =callout_driver.init_termios;
+	    info->normal_termios = serial_driver.init_termios;
+	    init_waitqueue_head(&info->open_wait);
+	    init_waitqueue_head(&info->close_wait);
+	    info->line = i;
+	    info->is_cons = 1; /* Means shortcuts work */
+	    
+	    printk("%s%d at 0x%08x (irq = %d)", serial_driver.name, info->line, 
+		   info->port, info->irq);
+	    printk(" is a builtin MC68328 UART\n");
+	    
+	    IRQ_ports[info->irq] = info;	/* waste of space */
+
+#ifdef CONFIG_M68VZ328
+		if (i > 0)
+			PJSEL &= 0xCF;  /* PSW enable second port output */
+#endif
+
+	    if (request_irq(uart_irqs[i],
+			    rs_interrupt,
+			    IRQ_FLG_STD,
+			    "M68328_UART", NULL))
                 panic("Unable to attach 68328 serial interrupt\n");
+#ifdef CONFIG_PM
+	    serial_pm[i] = pm_register(PM_SYS_DEV, PM_SYS_COM, serial_pm_callback);
+	    if (serial_pm[i])
+		    serial_pm[i]->data = info;
+#endif
+	}
 	restore_flags(flags);
 	return 0;
 }
+
+
 
 /*
  * register_serial and unregister_serial allows for serial ports to be
@@ -1488,3 +1636,103 @@ void unregister_serial(int line)
 {
 	return;
 }
+	
+module_init(rs68328_init);
+/* DAVIDM module_exit(rs68328_fini); */
+
+
+
+static void m68328_set_baud(void)
+{
+	unsigned short ustcnt;
+	int	i;
+
+	ustcnt = USTCNT;
+	USTCNT = ustcnt & ~USTCNT_TXEN;
+
+again:
+	for (i = 0; i < sizeof(baud_table) / sizeof(baud_table[0]); i++)
+		if (baud_table[i] == m68328_console_baud)
+			break;
+	if (i >= sizeof(baud_table) / sizeof(baud_table[0])) {
+		m68328_console_baud = 9600;
+		goto again;
+	}
+
+	UBAUD = PUT_FIELD(UBAUD_DIVIDE,    hw_baud_table[i].divisor) | 
+		PUT_FIELD(UBAUD_PRESCALER, hw_baud_table[i].prescale);
+	ustcnt &= ~(USTCNT_PARITYEN | USTCNT_ODD_EVEN | USTCNT_STOP | USTCNT_8_7);
+	ustcnt |= USTCNT_8_7;
+	ustcnt |= USTCNT_TXEN;
+	USTCNT = ustcnt;
+	m68328_console_initted = 1;
+	return;
+}
+
+
+int m68328_console_setup(struct console *cp, char *arg)
+{
+	int		i, n = CONSOLE_BAUD_RATE;
+
+	if (!cp)
+		return(-1);
+
+	if (arg)
+		n = simple_strtoul(arg,NULL,0);
+
+	for (i = 0; i < BAUD_TABLE_SIZE; i++)
+		if (baud_table[i] == n)
+			break;
+	if (i < BAUD_TABLE_SIZE) {
+		m68328_console_baud = n;
+		m68328_console_cbaud = 0;
+		if (i > 15) {
+			m68328_console_cbaud |= CBAUDEX;
+			i -= 15;
+		}
+		m68328_console_cbaud |= i;
+	}
+
+	m68328_set_baud(); /* make sure baud rate changes */
+	return(0);
+}
+
+
+static kdev_t m68328_console_device(struct console *c)
+{
+	return MKDEV(TTY_MAJOR, 64 + c->index);
+}
+
+
+void m68328_console_write (struct console *co, const char *str,
+			   unsigned int count)
+{
+	if (!m68328_console_initted)
+		m68328_set_baud();
+    while (count--) {
+        if (*str == '\n')
+           rs_put_char('\r');
+        rs_put_char( *str++ );
+    }
+}
+
+
+static struct console m68328_driver = {
+	name:		"ttyS",
+	write:		m68328_console_write,
+	read:		NULL,
+	device:		m68328_console_device,
+	unblank:	NULL,
+	setup:		m68328_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
+	cflag:		0,
+	next:		NULL
+};
+
+
+void m68328_console_init(void)
+{
+	register_console(&m68328_driver);
+}
+

@@ -1,6 +1,7 @@
 /* opensslconf.h */
 /* WARNING: Generated automatically from opensslconf.h.in by Configure. */
 
+#ifdef __KERNEL__
 /* OpenSSL was configured with the following options: */
 #ifdef OPENSSL_ALGORITHM_DEFINES
    /* no ciphers excluded */
@@ -174,3 +175,6 @@ YOU SHOULD NOT HAVE BOTH DES_RISC1 AND DES_RISC2 DEFINED!!!!!
 
 #endif /* DES_DEFAULT_OPTIONS */
 #endif /* HEADER_DES_LOCL_H */
+#else /* KERNEL */
+#include_next <openssl/opensslconf.h>
+#endif

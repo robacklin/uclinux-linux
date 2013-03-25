@@ -2,14 +2,15 @@
 #define _SYSV_FS_I
 
 /*
- * SystemV/Coherent FS inode data in memory
+ * SystemV/V7/Coherent FS inode data in memory
  */
 struct sysv_inode_info {
-	unsigned long i_data[10+1+1+1];	/* zone numbers: max. 10 data blocks,
-					 * then 1 indirection block,
-					 * then 1 double indirection block,
-					 * then 1 triple indirection block.
-					 */
+	u32 i_data[10+1+1+1];	/* zone numbers: max. 10 data blocks,
+				 * then 1 indirection block,
+				 * then 1 double indirection block,
+				 * then 1 triple indirection block.
+				 */
+	u32 i_dir_start_lookup;
 };
 
 #endif

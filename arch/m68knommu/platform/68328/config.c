@@ -7,8 +7,11 @@
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive
  * for more details.
+ *
+ * VZ Support/Fixes             Evan Stawnyczy <e@lineo.ca>
  */
 
+#include <asm/dbg.h>
 #include <stdarg.h>
 #include <linux/config.h>
 #include <linux/types.h>
@@ -16,14 +19,15 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <asm/current.h>
 
 #include <asm/setup.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 #include <asm/machdep.h>
+#include <asm/MC68328.h>
 
-extern void register_console(void (*proc)(const char *));
 
 void BSP_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
 {
@@ -51,7 +55,7 @@ void BSP_sched_init(void (*timer_routine)(int, void *, struct pt_regs *))
   TCMP2 = 10;
 #endif
                                                                     
-  request_irq(IRQ_MACHSPEC | TMR2_IRQ_NUM, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
+  request_irq(TMR2_IRQ_NUM, timer_routine, IRQ_FLG_LOCK, "timer", NULL);
 }
 
 void BSP_tick(void)
@@ -63,6 +67,12 @@ void BSP_tick(void)
 unsigned long BSP_gettimeoffset (void)
 {
   return 0;
+}
+
+void BSP_gettod (int *yearp, int *monp, int *dayp,
+		   int *hourp, int *minp, int *secp)
+{
+	*yearp = *monp = *dayp = *hourp = *minp = *secp = 0;
 }
 
 int BSP_hwclk(int op, struct hwclk_time *t)
@@ -102,30 +112,19 @@ void BSP_reset (void)
 
 void config_BSP(char *command, int len)
 {
-#ifdef CONFIG_68328_SERIAL
-  extern void console_print_68328(const char * b);
-  register_console(console_print_68328);
-#endif  
-
   printk("\n68328 support D. Jeff Dionne <jeff@uclinux.org>\n");
   printk("68328 support Kenneth Albanowski <kjahds@kjshds.com>\n");
   printk("68328/Pilot support Bernhard Kuhn <kuhn@lpr.e-technik.tu-muenchen.de>\n");
- 
+
   mach_sched_init      = BSP_sched_init;
   mach_tick            = BSP_tick;
   mach_gettimeoffset   = BSP_gettimeoffset;
+  mach_gettod          = BSP_gettod;
   mach_hwclk           = NULL;
-  mach_mksound         = NULL;
+  mach_set_clock_mmss  = NULL;
+//  mach_mksound         = NULL;
   mach_reset           = BSP_reset;
-  mach_debug_init      = NULL;
-#if defined(CONFIG_DS1743)
-  {
-	  extern int ds1743_set_clock_mmss(unsigned long);
-	  extern void ds1743_gettod(int *, int *, int *, int *, int *, int *);
-	  mach_set_clock_mmss = ds1743_set_clock_mmss;
-	  mach_gettod = ds1743_gettod;
-  }
-#endif
+//  mach_debug_init      = NULL;
 
   config_M68328_irq();
 }

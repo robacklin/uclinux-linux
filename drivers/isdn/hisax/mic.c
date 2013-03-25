@@ -1,35 +1,17 @@
-/* $Id: mic.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * mic.c  low level stuff for mic cards
+/* $Id: mic.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Copyright (C) 1997 
+ * low level stuff for mic cards
  *
- * Author  Stephan von Krawczynski <skraw@ithnet.com>
- *
- *
- * $Log: mic.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.5  1998/04/08 21:58:43  keil
- * New init code
- *
- * Revision 1.1.2.4  1998/02/17 15:39:20  keil
- * fix reset problem
- *
- * Revision 1.1.2.3  1998/01/27 22:37:25  keil
- * fast io
- *
- * Revision 1.1.2.2  1997/11/15 18:50:54  keil
- * new common init function
- *
- * Revision 1.1.2.1  1997/10/17 22:10:54  keil
- * new files on 2.0
- *
+ * Author       Stephan von Krawczynski
+ * Copyright    by Stephan von Krawczynski <skraw@ithnet.com>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -37,7 +19,7 @@
 
 extern const char *CardType[];
 
-const char *mic_revision = "$Revision: 1.1.1.1 $";
+const char *mic_revision = "$Revision: 1.1.4.1 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -155,7 +137,7 @@ static void
 mic_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, stat = 0;
+	u_char val;
 
 	if (!cs) {
 		printk(KERN_WARNING "mic: Spurious interrupt!\n");
@@ -163,16 +145,12 @@ mic_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
-	if (val) {
+	if (val)
 		hscx_int_main(cs, val);
-		stat |= 1;
-	}
 	val = readreg(cs->hw.mic.adr, cs->hw.mic.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val) {
+	if (val)
 		isac_interrupt(cs, val);
-		stat |= 2;
-	}
 	val = readreg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_ISTA + 0x40);
 	if (val) {
 		if (cs->debug & L1_DEB_HSCX)
@@ -185,16 +163,12 @@ mic_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ISAC IntStat after IntRoutine");
 		goto Start_ISAC;
 	}
-	if (stat & 1) {
-		writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK, 0xFF);
-		writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK + 0x40, 0xFF);
-		writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK, 0x0);
-		writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK + 0x40, 0x0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.mic.adr, cs->hw.mic.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.mic.adr, cs->hw.mic.isac, ISAC_MASK, 0x0);
-	}
+	writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK, 0xFF);
+	writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK + 0x40, 0xFF);
+	writereg(cs->hw.mic.adr, cs->hw.mic.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.mic.adr, cs->hw.mic.isac, ISAC_MASK, 0x0);
+	writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK, 0x0);
+	writereg(cs->hw.mic.adr, cs->hw.mic.hscx, HSCX_MASK + 0x40, 0x0);
 }
 
 void
@@ -215,9 +189,6 @@ mic_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_mic(cs);
 			return(0);
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &mic_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscx(cs); /* /RTSA := ISAC RST */
 			inithscxisac(cs, 3);
@@ -228,8 +199,8 @@ mic_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-__initfunc(int
-setup_mic(struct IsdnCard *card))
+int __init
+setup_mic(struct IsdnCard *card)
 {
 	int bytecnt;
 	struct IsdnCardState *cs = card->cs;
@@ -270,6 +241,7 @@ setup_mic(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &mic_card_msg;
+	cs->irq_func = &mic_interrupt;
 	ISACVersion(cs, "mic:");
 	if (HscxVersion(cs, "mic:")) {
 		printk(KERN_WARNING

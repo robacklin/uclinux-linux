@@ -2,48 +2,72 @@
  * sound/adlib_card.c
  *
  * Detection routine for the AdLib card.
- */
-
-/*
- * Copyright (C) by Hannu Savolainen 1993-1996
  *
- * USS/Lite for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * Copyright (C) by Hannu Savolainen 1993-1997
+ *
+ * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
  */
-#include <linux/config.h>
 
+#include <linux/module.h>
+#include <linux/init.h>
 
 #include "sound_config.h"
 
-#if defined(CONFIG_YM3812)
+#include "opl3.h"
 
-void
-attach_adlib_card (struct address_info *hw_config)
+static void __init attach_adlib_card(struct address_info *hw_config)
 {
-
-  opl3_init (hw_config->io_base, hw_config->osp);
-  request_region (hw_config->io_base, 4, "OPL3/OPL2");
+	hw_config->slots[0] = opl3_init(hw_config->io_base, hw_config->osp, THIS_MODULE);
 }
 
-int
-probe_adlib (struct address_info *hw_config)
+static int __init probe_adlib(struct address_info *hw_config)
 {
-
-  if (check_region (hw_config->io_base, 4))
-    {
-      printk ("\n\nopl3.c: I/O port %x already in use\n\n", hw_config->io_base);
-      return 0;
-    }
-
-  return opl3_detect (hw_config->io_base, hw_config->osp);
+	return opl3_detect(hw_config->io_base, hw_config->osp);
 }
 
-void
-unload_adlib (struct address_info *hw_config)
+static struct address_info cfg;
+
+static int __initdata io = -1;
+
+MODULE_PARM(io, "i");
+
+static int __init init_adlib(void)
 {
-  release_region (hw_config->io_base, 4);
+	cfg.io_base = io;
+
+	if (cfg.io_base == -1) {
+		printk(KERN_ERR "adlib: must specify I/O address.\n");
+		return -EINVAL;
+	}
+	if (probe_adlib(&cfg) == 0)
+		return -ENODEV;
+	attach_adlib_card(&cfg);
+
+	return 0;
 }
 
+static void __exit cleanup_adlib(void)
+{
+	sound_unload_synthdev(cfg.slots[0]);
+	
+}
 
+module_init(init_adlib);
+module_exit(cleanup_adlib);
+
+#ifndef MODULE
+static int __init setup_adlib(char *str)
+{
+        /* io */
+	int ints[2];
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+	
+	io = ints[1];
+
+	return 1;
+}
+__setup("adlib=", setup_adlib);
 #endif
+MODULE_LICENSE("GPL");

@@ -24,7 +24,7 @@
  * OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS,
  * OR MODIFICATIONS.
  *
- * $Id: ppp-comp.h,v 1.3 2000-05-25 02:44:10 christ Exp $
+ * $Id: ppp-comp.h,v 1.8 1999/07/23 06:53:40 paulus Exp $
  */
 
 /*
@@ -209,5 +209,10 @@ struct compressor {
 #define CILEN_PREDICTOR_1	2	/* length of its config option */
 #define CI_PREDICTOR_2		2	/* config option for Predictor-2 */
 #define CILEN_PREDICTOR_2	2	/* length of its config option */
+
+#ifdef __KERNEL__
+extern int ppp_register_compressor(struct compressor *);
+extern void ppp_unregister_compressor(struct compressor *);
+#endif /* __KERNEL__ */
 
 #endif /* _NET_PPP_COMP_H */

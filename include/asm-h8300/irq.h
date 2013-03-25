@@ -1,31 +1,74 @@
 #ifndef _H8300_IRQ_H_
 #define _H8300_IRQ_H_
 
-extern void disable_irq(unsigned int);
-extern void enable_irq(unsigned int);
-
-#include <linux/config.h>
-
-/*
- * # of H8/300H interrupts
- */
-
-#define SYS_IRQS 64
+#if defined(__H8300H__)
 #define NR_IRQS 64
+#define EXT_IRQ0 12
+#define EXT_IRQ1 13
+#define EXT_IRQ2 14
+#define EXT_IRQ3 15
+#define EXT_IRQ4 16
+#define EXT_IRQ5 17
+#define EXT_IRQ6 18
+#define EXT_IRQ7 19
+#define EXT_IRQS 5
+
+#include <asm/regs306x.h>
+#define h8300_clear_isr(irq)                                                \
+do {                                                                        \
+	if (irq >= EXT_IRQ0 && irq <= EXT_IRQ5)                             \
+		*(volatile unsigned char *)ISR &= ~(1 << (irq - EXT_IRQ0)); \
+} while(0)
+
+#define IER_REGS *(volatile unsigned char *)IER
+#endif
+#if defined(__H8300S__)
+#define NR_IRQS 128
+#define EXT_IRQ0 16
+#define EXT_IRQ1 17
+#define EXT_IRQ2 18
+#define EXT_IRQ3 19
+#define EXT_IRQ4 20
+#define EXT_IRQ5 21
+#define EXT_IRQ6 22
+#define EXT_IRQ7 23
+#define EXT_IRQ8 24
+#define EXT_IRQ9 25
+#define EXT_IRQ10 26
+#define EXT_IRQ11 27
+#define EXT_IRQ12 28
+#define EXT_IRQ13 29
+#define EXT_IRQ14 30
+#define EXT_IRQ15 31
+#define EXT_IRQS  15
+
+#include <asm/regs267x.h>
+#define h8300_clear_isr(irq)                                                 \
+do {                                                                         \
+	if (irq >= EXT_IRQ0 && irq <= EXT_IRQ15)                             \
+		*(volatile unsigned short *)ISR &= ~(1 << (irq - EXT_IRQ0)); \
+} while(0)
+
+#define IER_REGS *(volatile unsigned short *)IER
+#endif
 
 /*
- * various flags for request_irq()
+ * "Generic" interrupt sources
  */
-#define IRQ_FLG_LOCK	(0x0001)	/* handler is not replaceable	*/
-#define IRQ_FLG_REPLACE	(0x0002)	/* replace existing handler	*/
-#define IRQ_FLG_FAST	(0x0004)
-#define IRQ_FLG_SLOW	(0x0008)
-#define IRQ_FLG_STD	(0x8000)	/* internally used		*/
 
-/*
- * This structure is used to chain together the ISRs for a particular
- * interrupt source (if it supports chaining).
- */
+static __inline__ int irq_cannonicalize(int irq)
+{
+	return irq;
+}
+
+extern void enable_irq(unsigned int);
+extern void disable_irq(unsigned int);
+
+extern int sys_request_irq(unsigned int, 
+	void (*)(int, void *, struct pt_regs *), 
+	unsigned long, const char *, void *);
+extern void sys_free_irq(unsigned int, void *);
+
 typedef struct irq_node {
 	void		(*handler)(int, void *, struct pt_regs *);
 	unsigned long	flags;
@@ -35,21 +78,20 @@ typedef struct irq_node {
 } irq_node_t;
 
 /*
- * This function returns a new irq_node_t
- */
-extern irq_node_t *new_irq_node(void);
-
-/*
  * This structure has only 4 elements for speed reasons
  */
 typedef struct irq_handler {
-	void		(*handler)(int, void *, struct pt_regs *);
-	unsigned long	flags;
-	void		*dev_id;
-	const char	*devname;
+	void (*handler)(int, void *, struct pt_regs *);
+	int         flags;
+	int         count;
+	void	    *dev_id;
+	const char  *devname;
 } irq_handler_t;
 
-/* count of spurious interrupts */
-extern volatile unsigned int num_spurious;
+/*
+ * Some drivers want these entry points
+ */
+#define enable_irq_nosync(x)	enable_irq(x)
+#define disable_irq_nosync(x)	disable_irq(x)
 
 #endif /* _H8300_IRQ_H_ */

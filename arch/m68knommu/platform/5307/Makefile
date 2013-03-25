@@ -18,7 +18,7 @@ endif
 # set up you HW breakpoints to trigger a DBG interrupt:
 #
 # AFLAGS += -DTRAP_DBG_INTERRUPT
-# CFLAGS += -DTRAP_DBG_INTERRUPT
+# EXTRA_CFLAGS += -DTRAP_DBG_INTERRUPT
 #
 
 .S.o:
@@ -26,10 +26,18 @@ endif
 
 all: $(BOARD)/crt0_$(MODEL).o entry.o platform.o
 O_TARGET := platform.o
-O_OBJS := entry.o config.o signal.o ints.o bios32.o
+obj-y := entry.o config.o signal.o ints.o bios32.o
 
 $(BOARD)/crt0_$(MODEL).o: $(BOARD)/crt0_$(MODEL).S
 
-entry.o: entry.S
+entry.o: entry.S m68k_defs.h
+
+m68k_defs.h: ../../kernel/m68k_defs.c ../../kernel/m68k_defs.head
+	rm -f m68k_defs.d
+	$(CC) $(filter-out -MD,$(CFLAGS)) -S ../../kernel/m68k_defs.c
+	cp ../../kernel/m68k_defs.head m68k_defs.h
+	grep '^#define' m68k_defs.s >> m68k_defs.h
+	rm m68k_defs.s
+-include m68k_defs.d
 
 include $(TOPDIR)/Rules.make

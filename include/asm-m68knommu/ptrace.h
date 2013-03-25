@@ -1,8 +1,6 @@
 #ifndef _M68K_PTRACE_H
 #define _M68K_PTRACE_H
 
-#include <linux/config.h> /* get configuration macros */
-
 #define PT_D1	   0
 #define PT_D2	   1
 #define PT_D3	   2
@@ -36,6 +34,7 @@ struct pt_regs {
   long     d5;
   long     a0;
   long     a1;
+  long     a2;
   long     d0;
   long     orig_d0;
   long     stkadj;
@@ -61,13 +60,20 @@ struct pt_regs {
 struct switch_stack {
 	unsigned long  d6;
 	unsigned long  d7;
-	unsigned long  a2;
 	unsigned long  a3;
 	unsigned long  a4;
 	unsigned long  a5;
 	unsigned long  a6;
 	unsigned long  retpc;
 };
+
+/* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
+#define PTRACE_GETREGS            12
+#define PTRACE_SETREGS            13
+#ifndef NO_FPU
+#define PTRACE_GETFPREGS          14
+#define PTRACE_SETFPREGS          15
+#endif
 
 #ifdef __KERNEL__
 
@@ -78,6 +84,8 @@ struct switch_stack {
 
 #define user_mode(regs) (!((regs)->sr & PS_S))
 #define instruction_pointer(regs) ((regs)->pc)
+extern unsigned int sw_usp;
+#define user_stack(regs) (sw_usp)
 extern void show_regs(struct pt_regs *);
 #endif /* __KERNEL__ */
 #endif /* __ASSEMBLY__ */

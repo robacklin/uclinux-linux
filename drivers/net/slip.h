@@ -16,7 +16,6 @@
  *					Igor Chechik, RELCOM Corp.
  *	Craig Schlenter		:	Fixed #define bug that caused
  *					CSLIP telnets to hang in 1.3.61-6
- *	Kenneth Albanowski	:	Flags needs to be 32 bits
  *
  * Author:	Fred N. van Kempen, <waltje@uwalt.nl.mugnet.org>
  */
@@ -53,7 +52,9 @@ struct slip {
 
   /* Various fields. */
   struct tty_struct	*tty;		/* ptr to TTY structure		*/
-  struct device		*dev;		/* easy for intr handling	*/
+  struct net_device	*dev;		/* easy for intr handling	*/
+  spinlock_t		lock;
+
 #ifdef SL_INCLUDE_CSLIP
   struct slcompress	*slcomp;	/* for header compression 	*/
   unsigned char		*cbuff;		/* compression buffer		*/
@@ -69,6 +70,8 @@ struct slip {
   /* SLIP interface statistics. */
   unsigned long		rx_packets;	/* inbound frames counter	*/
   unsigned long         tx_packets;     /* outbound frames counter      */
+  unsigned long		rx_bytes;	/* inbound byte counte		*/
+  unsigned long         tx_bytes;       /* outbound byte counter	*/
   unsigned long         rx_errors;      /* Parity, etc. errors          */
   unsigned long         tx_errors;      /* Planned stuff                */
   unsigned long         rx_dropped;     /* No memory for skb            */
@@ -96,6 +99,9 @@ struct slip {
 #define SLF_OUTWAIT	4		/* is outpacket was flag	*/
 
   unsigned char		mode;		/* SLIP mode			*/
+  unsigned char		leased;
+  kdev_t		line;
+  pid_t			pid;
 #define SL_MODE_SLIP	0
 #define SL_MODE_CSLIP	1
 #define SL_MODE_SLIP6	2		/* Matt Dillon's printable slip */
@@ -114,6 +120,6 @@ struct slip {
 
 #define SLIP_MAGIC 0x5302
 
-extern int slip_init(struct device *dev);
+extern int slip_init(struct net_device *dev);
 
 #endif	/* _LINUX_SLIP.H */

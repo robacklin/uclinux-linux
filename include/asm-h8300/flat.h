@@ -1,50 +1,26 @@
-
-/* Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>
- *                     The Silver Hammer Group, Ltd.
- *
+/*
+ * include/asm-h8300/flat.h -- uClinux flat-format executables
  */
 
-#ifndef _LINUX_FLAT_H
-#define _LINUX_FLAT_H
+#ifndef __H8300_FLAT_H__
+#define __H8300_FLAT_H__
 
-struct flat_hdr {
-	char magic[4];
-	unsigned long rev;
-	unsigned long entry; /* Offset of first executable instruction with text segment from beginning of file*/
-	unsigned long data_start; /* Offset of data segment from beginning of file*/
-	
-	unsigned long data_end; /* Offset of end of data segment from beginning of file*/
-	unsigned long bss_end; /* Offset of end of bss segment from beginning of file*/
-				/* (It is assumed that data_end through bss_end forms the
-				    bss segment.) */
-	unsigned long stack_size; /* Size of stack, in bytes */
-	unsigned long reloc_start; /* Offset of relocation records from beginning of file */
-	
-	unsigned long reloc_count; /* Number of relocation records */
-	
-	unsigned long flags;       
-	
-	unsigned long filler[6]; /* Reservered, set to zero */
-};
+#define	flat_stack_align(sp)			/* nothing needed */
+#define	flat_argvp_envp_on_stack()		1
+#define	flat_old_ram_flag(flags)		1
+#define	flat_reloc_valid(reloc, size)		((reloc) <= (size))
 
-#define FLAT_RELOC_TYPE_TEXT 0
-#define FLAT_RELOC_TYPE_DATA 1
-#define FLAT_RELOC_TYPE_BSS 2
+/*
+ * on the H8 a couple of the relocations have an instruction in the
+ * top byte.  As there can only be 24bits of address space,  we just
+ * always preserve that 8bits at the top,  when it isn't an instruction
+ * is is 0 (davidm@snapgear.com)
+ */
 
-struct flat_reloc {
-#ifdef CONFIG_H8300H
-#ifdef CONFIG_COLDFIRE
-	unsigned long type : 2; 
-	signed long offset : 30;
-#else
-	signed long offset : 30;
-	unsigned long type : 2; 
-#endif
-#else
-	unsigned long offset;
-#endif
-};
+#define	flat_get_relocate_addr(rel)		(rel)
+#define flat_get_addr_from_rp(rp, relval, flags) \
+      ((flags & FLAT_FLAG_GOTPIC) ? get_unaligned(rp) : get_unaligned(rp) & 0x00ffffff)
+#define flat_put_addr_at_rp(rp, addr, rel) \
+	put_unaligned (((*(char *)(rp)) << 24) | ((addr) & 0x00ffffff), rp)
 
-#define FLAT_FLAG_RAM  0x0001    /* program should be loaded entirely into RAM */
-
-#endif /* _LINUX_FLAT_H */
+#endif /* __H8300_FLAT_H__ */

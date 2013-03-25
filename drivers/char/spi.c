@@ -1,7 +1,3 @@
-#ifndef __KERNEL__
-#  define __KERNEL__
-#endif
-
 #ifdef MODULE
 #include <linux/module.h>
 #include <linux/version.h>
@@ -10,30 +6,27 @@
 #define MOD_DEC_USE_COUNT
 #endif
 
+#include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/sched.h>
-#include <linux/spi.h> 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/ioport.h>
 #include <linux/fcntl.h>
 #include <linux/unistd.h>
+#include <linux/init.h>
 
 
 #include <asm/io.h>
 #include <asm/segment.h>
 #include <asm/system.h>
+#include <asm/spi.h> 
 
 #if !defined(SEEK_SET)
 #define SEEK_SET 0
 #endif
-
-
-inline int SPI_Transfer( int address, int data );
-inline int SPI_Recv_Byte( void );
-inline int SPI_Send_Byte( int byte );
 
 
 static unsigned int   spi_major = 60; /* a local major, can be overwritten */
@@ -44,46 +37,34 @@ static np_spi * const spi_ptr   = na_spi;
                     /* SPI data transfer routines. */
                     /*******************************/
 
-#define SPI_XMIT_READY 0x40
-#define SPI_RECV_READY 0x80
+#define SPI_XMIT_READY np_spistatus_trdy_mask
+#define SPI_RECV_READY np_spistatus_rrdy_mask
 
-// Sends an address and byte, and then waits to receive data
-inline int SPI_Transfer( int address, int data )
-{
-	int value;
-
-	value = ((address & 0xFF) << 8) | (data & 0xFF);
-	SPI_Send_Byte( value );
-
-	for ( value = SPI_Recv_Byte(); value == -1; value = SPI_Recv_Byte() )
-	    ;
-
-	return value;
-}
+#define SPI_BUSYPOLL_TIMEOUT 1000
 
 // returns -1 if there is no data present, otherwise returns
 // the value
-inline int SPI_Recv_Byte( void )
+inline int SPI_Recv_Byte(char *pdata )
 {
-        return (spi_ptr->np_spistatus & SPI_RECV_READY) ? spi_ptr->np_spirxdata : -1;
+	if (spi_ptr->np_spistatus & SPI_RECV_READY){
+		*pdata = spi_ptr->np_spirxdata & 0xff;
+		return 0;
+	}
+	return  -1;
 }
 
 
 // Sends the 16 bit address+data
-inline int SPI_Send_Byte( int byte )
+inline int SPI_Send_Byte( unsigned char address, char data )
 {
-	int counter;
+	u16 value = ((address & 0xFF) << 8) | (data & 0xFF);
 
-	for ( counter = 11; counter; counter-- )
-	  	if ( spi_ptr->np_spistatus & SPI_XMIT_READY )
-			break;
-
-	if (counter < 0)
-		return -1;
-
-	spi_ptr->np_spitxdata = byte;
-
-	return 0;
+	if ( spi_ptr->np_spistatus & SPI_XMIT_READY ) {
+		spi_ptr->np_spitxdata = value;
+		return 0;
+	}
+	
+	return -1;
 }
 
 
@@ -100,42 +81,112 @@ int spi_reset( void )
   return 0;
 }
 
-int spi_ioctl( struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg )
-{
-  // Nothing to do.
-  return 0;
-}			
-
-
 
 /***************************************************/
-/* The SPI Write routine. The first 8 bits are     */
+/* The SPI Write routine. The first 16 bits are     */
 /* the device register, and the rest of the buffer */
 /* is data.                                        */
 /***************************************************/
-int spi_write( struct inode *inode, struct file *file, const char *buf, int count )
+
+ssize_t spi_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 {
-  unsigned char *temp;                 /* Our pointer to the buffer */
   int            i;
-  int            addr;
+  unsigned char addr;
+  int timeout;
+  char temp;
   
   if ( count < 3 )
     return -EINVAL;          	       /* Address is 2 bytes: Must have _something_ to send */
 
-  temp = (char *)buf;
-  addr = (int)*((u16 *)temp);          /* chip register address.  */
-  temp += sizeof(u16);
+  addr = buf[0];          /* chip register address.  */
+  spi_ptr->np_spistatus=0;
 
-  for ( i = count - sizeof(u16); i; i--, temp++ )
-      *temp = (unsigned char)SPI_Transfer( addr, (int)*temp );
-    
-  
-  return count;                        /* we can always send all data */
+  for ( i = sizeof(u16); i<count; i++ ) 
+  {
+  	timeout=SPI_BUSYPOLL_TIMEOUT;
+  	while (SPI_Send_Byte(addr, buf[i])==-1) 
+  	{
+		if (--timeout==0) 
+		{
+		  printk("spi_write time out\n");
+		  return i; /* return the number of bytes sent */
+		}
+  	}
+  	/* read the data */
+  	timeout=SPI_BUSYPOLL_TIMEOUT;
+ 	while (SPI_Recv_Byte(&temp)==-1) 
+ 	{
+		if (--timeout==0) 
+		  break; 
+  	}
+  }
+  return i; 
+//  unsigned char *temp;                 /* Our pointer to the buffer */
+//  int            i;
+//  int            addr;
+//  
+//  if ( count < 3 )
+//    return -EINVAL;          	       /* Address is 2 bytes: Must have _something_ to send */
+//
+//  temp = (char *)buf;
+//  addr = (int)*((u16 *)temp);          /* chip register address.  */
+//  temp += sizeof(u16);
+//
+//  for ( i = count - sizeof(u16); i; i--, temp++ )
+//      *temp = (unsigned char)SPI_Transfer( addr, (int)*temp );
+//    
+//  
+//  return count;                        /* we can always send all data */
 }
 
+//int spi_read( struct inode *inode, struct file *file, char *buf, int count )
+ssize_t spi_read(struct file *filp, char *buf, size_t count, loff_t *ppos)
+{
+  int            i;
+  unsigned char addr;
+  int timeout;
+  char temp;
+  
+  if ( count < 3 )
+    return -EINVAL;          	       /* Address is 2 bytes: Must have _something_ to send */
 
+  addr = buf[0];          /* chip register address.  */
+  spi_ptr->np_spistatus=0;
+  
+  /* empty the np_spirxdata register */
+  SPI_Recv_Byte(&temp);
+  
+  for ( i = sizeof(u16); i<count; i++ ) 
+  {
+  	/* send the address */
+  	timeout=SPI_BUSYPOLL_TIMEOUT;
+  	while (SPI_Send_Byte(addr, 0)==-1) 
+  	{
+		if (--timeout==0) 
+		{
+		  printk("spi_read write address time out\n");
+		  return i; 
+		}
+  	}
+  	
+  	/* read the data */
+  	timeout=SPI_BUSYPOLL_TIMEOUT;
+ 	while (SPI_Recv_Byte(&buf[i])==-1) 
+ 	{
+		if (--timeout==0) 
+		{
+		  printk("spi_read read data time out\n");
+		  return i; 
+		}
+  	}
+#if 0
+  	printk("spi_read time left %d\n", timeout);
+#endif
+  }
+  return i;
+}
 
-int spi_lseek ( struct inode *inode, struct file *file, off_t offset, int origin )
+loff_t spi_lseek(struct file *filp, loff_t offset, int origin)
 {
 #if 0
   int     bit_count, i;
@@ -171,7 +222,7 @@ int spi_lseek ( struct inode *inode, struct file *file, off_t offset, int origin
   return 0;
 }
 
-int spi_open( struct inode *inode, struct file *file )
+int spi_open(struct inode *inode, struct file *filp)
 {
   if ( openflag )
     return -EBUSY;
@@ -182,32 +233,22 @@ int spi_open( struct inode *inode, struct file *file )
   return 0;
 }
 
-void spi_release(struct inode * inode, struct file * file)
+int spi_release(struct inode *inode, struct file *filp)
 {
   openflag = 0;
   MOD_DEC_USE_COUNT;
+	return 0;
 }
 
 
 /* static struct file_operations spi_fops  */
 
 static struct file_operations spi_fops = {
-  spi_lseek,     /* Set chip-select line. The offset is used as an address. */
-  spi_write,     /* spi_read and spi_write are the same */
-  spi_write,
-  NULL,          /* spi_readdir */
-  NULL,          /* spi_select */
-  spi_ioctl,	
-  NULL,          /* spi_mmap */
-  spi_open, 
-  spi_release,
-  NULL,
-  NULL,
-  NULL,
-  NULL
-#ifdef MAGIC_ROM_PTR
-  , NULL
-#endif
+	llseek:		spi_lseek,     /* Set chip-select line. The offset is used as an address. */
+	read:		spi_read,
+	write:		spi_write,
+	open:		spi_open, 
+	release:	spi_release,
 };
 
 
@@ -257,3 +298,14 @@ int init_module( void )
   return register_NIOS_SPI();
 }
 #endif
+
+
+static int __init nios_spi_init(void)
+{
+	printk("SPI: Nios SPI bus device version 0.1\n");
+	return register_NIOS_SPI();
+//	if ( register_NIOS_SPI() )
+//		printk("*** Cannot initialize SPI device.\n");
+}
+
+__initcall(nios_spi_init);

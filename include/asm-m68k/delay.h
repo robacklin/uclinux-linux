@@ -1,20 +1,22 @@
 #ifndef _M68K_DELAY_H
 #define _M68K_DELAY_H
 
+#include <asm/param.h>
+
 /*
  * Copyright (C) 1994 Hamish Macdonald
  *
- * Delay routines, using a pre-computed "loops_per_second" value.
+ * Delay routines, using a pre-computed "loops_per_jiffy" value.
  */
 
-extern __inline__ void __delay(int loops)
+static inline void __delay(unsigned long loops)
 {
-	__asm__ __volatile__ ("\n\tmovel %0,%/d0\n1:\tsubql #1,%/d0\n\t"
-			      "bpls 1b\n"
-		: /* no outputs */
-		: "g" (loops)
-		: "d0");
+	__asm__ __volatile__ ("1: subql #1,%0; jcc 1b"
+		: "=d" (loops) : "0" (loops));
 }
+
+extern void __bad_udelay(void);
+extern void __bad_ndelay(void);
 
 /*
  * Use only for very small delays ( < 1 msec).  Should probably use a
@@ -23,25 +25,42 @@ extern __inline__ void __delay(int loops)
  * first constant multiplications gets optimized away if the delay is
  * a constant)  
  */
-extern __inline__ void udelay(unsigned long usecs)
+static inline void __const_udelay(unsigned long xloops)
 {
-	usecs *= 0x000010c6;		/* 2**32 / 1000000 */
+	unsigned long tmp;
 
-	__asm__ __volatile__ ("mulul %1,%0:%2"
-	     : "=d" (usecs)
-	     : "d" (usecs),
-	       "d" (loops_per_sec));
-	__delay(usecs);
+	__asm__ ("mulul %2,%0:%1"
+		: "=d" (xloops), "=d" (tmp)
+		: "d" (xloops), "1" (loops_per_jiffy));
+	__delay(xloops * HZ);
 }
 
-extern __inline__ unsigned long muldiv(unsigned long a, unsigned long b, unsigned long c)
+static inline void __udelay(unsigned long usecs)
 {
-	__asm__ ("mulul %1,%/d0:%0\n\tdivul %2,%/d0:%0"
-		 :"=d" (a)
-		 :"d" (b),
-		 "d" (c),
-		 "0" (a)
-		 :"d0");
+	__const_udelay(usecs * 4295);	/* 2**32 / 1000000 */
+}
+
+static inline void __ndelay(unsigned long nsecs)
+{
+	__const_udelay(nsecs * 5);	/* 2**32 / 1000000000 */
+}
+
+#define udelay(n) (__builtin_constant_p(n) ? \
+	((n) > 20000 ? __bad_udelay() : __const_udelay((n) * 4295)) : \
+	__udelay(n))
+
+#define ndelay(n) (__builtin_constant_p(n) ? \
+	((n) > 20000 ? __bad_ndelay() : __const_udelay((n) * 5)) : \
+	__ndelay(n))
+
+static inline unsigned long muldiv(unsigned long a, unsigned long b,
+				   unsigned long c)
+{
+	unsigned long tmp;
+
+	__asm__ ("mulul %2,%0:%1; divul %3,%0:%1"
+		: "=d" (tmp), "=d" (a)
+		: "d" (b), "d" (c), "1" (a));
 	return a;
 }
 

@@ -1,14 +1,12 @@
 /*
+ * CAPI encode/decode prototypes and defines
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        CAPI encode/decode prototypes and defines
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 #ifndef CAPI_H
@@ -65,8 +63,7 @@ extern int capi_disc_resp(struct pcbit_chan *chan, struct sk_buff **skb);
 extern int capi_decode_debug_188(u_char *hdr, ushort hdrlen);
 #endif
 
-extern __inline__ 
-struct pcbit_chan * 
+static inline struct pcbit_chan * 
 capi_channel(struct pcbit_dev *dev, struct sk_buff *skb)
 {
 	ushort callref;

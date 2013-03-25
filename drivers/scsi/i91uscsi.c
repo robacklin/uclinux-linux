@@ -34,7 +34,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -218,8 +218,8 @@ extern int tul_num_ch;
 
 
 static void tul_do_pause(unsigned amount)
-{				/* Pause for amount*10 milliseconds */
-	unsigned long the_time = jiffies + amount;	/* 0.01 seconds per jiffy */
+{				/* Pause for amount jiffies */
+	unsigned long the_time = jiffies + amount;
 
 #if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	while (time_before_eq(jiffies, the_time));
@@ -579,7 +579,7 @@ int tul_reset_scsi(HCS * pCurHcb, int seconds)
 
 	/* Stall for a while, wait for target's firmware ready,make it 2 sec ! */
 	/* SONY 5200 tape drive won't work if only stall for 1 sec */
-	tul_do_pause(seconds * 100);
+	tul_do_pause(seconds * HZ);
 
 	TUL_RD(pCurHcb->HCS_Base, TUL_SInt);
 
@@ -590,7 +590,7 @@ int tul_reset_scsi(HCS * pCurHcb, int seconds)
 int init_tulip(HCS * pCurHcb, SCB * scbp, int tul_num_scb, BYTE * pbBiosAdr, int seconds)
 {
 	int i;
-	WORD *pwFlags;
+	BYTE *pwFlags;
 	BYTE *pbHeads;
 	SCB *pTmpScb, *pPrevScb = NULL;
 
@@ -674,7 +674,7 @@ int init_tulip(HCS * pCurHcb, SCB * scbp, int tul_num_scb, BYTE * pbBiosAdr, int
 	       ((pCurHcb->HCS_Config & HCC_AUTO_TERM) >> 4) | (TUL_RD(pCurHcb->HCS_Base, TUL_GCTRL1) & 0xFE));
 
 	for (i = 0,
-	     pwFlags = (WORD *) & (i91unvramp->NVM_SCSIInfo[0].NVM_Targ0Config),
+	     pwFlags = & (i91unvramp->NVM_SCSIInfo[0].NVM_Targ0Config),
 	     pbHeads = pbBiosAdr + 0x180;
 	     i < pCurHcb->HCS_MaxTar;
 	     i++, pwFlags++) {

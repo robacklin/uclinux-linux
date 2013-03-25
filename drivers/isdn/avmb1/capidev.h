@@ -1,32 +1,27 @@
-/*
- * $Id: capidev.h,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
+/* $Id: capidev.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  *
  * CAPI 2.0 Interface for Linux
  *
- * (c) Copyright 1996 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Copyright 1996 by Carsten Paeth <calle@calle.de>
  *
- * $Log: capidev.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1  1997/03/04 21:50:30  calle
- * Frirst version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 struct capidev {
-	int is_open;
-	int is_registered;
-	__u16 applid;
-	struct sk_buff_head recv_queue;
-	struct wait_queue *recv_wait;
-	__u16 errcode;
-};
+	struct capidev *next;
+	struct file    *file;
+	__u16		applid;
+	__u16		errcode;
+	unsigned int    minor;
 
-#define CAPI_MAXMINOR	CAPI_MAXAPPL
+	struct sk_buff_head recv_queue;
+	wait_queue_head_t recv_wait;
+
+	/* Statistic */
+	unsigned long	nrecvctlpkt;
+	unsigned long	nrecvdatapkt;
+	unsigned long	nsentctlpkt;
+	unsigned long	nsentdatapkt;
+};

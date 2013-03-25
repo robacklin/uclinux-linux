@@ -1,6 +1,7 @@
 /*
  * include/asm-armnommu/arch-netarm/netarm_gen_module.h
  *
+ * Copyright (C) 2003 Videon Central, Inc.
  * Copyright (C) 2000, 2001 NETsilicon, Inc.
  * Copyright (C) 2000, 2001 Red Hat, Inc.
  *
@@ -27,6 +28,8 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  * author(s) : Joe deBlaquiere
+ *
+ * Modified to support NS7520 by Art Shipkowski <art@videon-central.com>
  */
 
 #ifndef __NETARM_GEN_MODULE_REGISTERS_H
@@ -49,7 +52,9 @@
 #define	NETARM_GEN_TIMER2_STATUS	(0x1c)
 
 #define	NETARM_GEN_PORTA		(0x20)
+#ifndef CONFIG_NETARM_NS7520
 #define	NETARM_GEN_PORTB		(0x24)
+#endif
 #define	NETARM_GEN_PORTC		(0x28)
 
 #define	NETARM_GEN_INTR_ENABLE		(0x30)
@@ -61,7 +66,7 @@
 #define	NETARM_GEN_CACHE_CONTROL1	(0x40)
 #define	NETARM_GEN_CACHE_CONTROL2	(0x44)
 
-/* select bitfield defintions */
+/* select bitfield definitions */
 
 /* System Control Register ( 0xFFB0_0000 ) */
 
@@ -121,8 +126,14 @@
 
 /* PORT C Register ( 0xFFB0_0028 ) */
 
+#ifndef CONFIG_NETARM_NS7520
 #define	NETARM_GEN_PORT_MODE(x)		(((x)<<24) + (0xFF00))
 #define	NETARM_GEN_PORT_DIR(x)		(((x)<<16) + (0xFF00))
+#else
+#define	NETARM_GEN_PORT_MODE(x)		((x)<<24)
+#define	NETARM_GEN_PORT_DIR(x)		((x)<<16)
+#define NETARM_GEN_PORT_CSF(x)    ((x)<<8)
+#endif
 
 /* Timer Registers ( 0xFFB0_0010 0xFFB0_0018 ) */
 
@@ -139,6 +150,18 @@
 #define	NETARM_GEN_TSTAT_CTC_MASK	(0x000001FF)
 
 /* prescale to msecs conversion */
+
+#define	NETARM_GEN_TIMER_MSEC_P(x)	( ( ( 20480 ) * ( 0x1FF - ( (x) &	    \
+                                            NETARM_GEN_TSTAT_CTC_MASK ) +   \
+					    1 ) ) / (NETARM_XTAL_FREQ/1000) )
+
+#define	NETARM_GEN_TIMER_SET_HZ(x)	( ( ((NETARM_XTAL_FREQ/(20480*(x)))-1) & \
+					  NETARM_GEN_TSTAT_CTC_MASK ) | \
+					  NETARM_GEN_TCTL_USE_PRESCALE )
+
+#if 0
+/* ifdef CONFIG_NETARM_PLL_BYPASS else */
+#error test
 #define	NETARM_GEN_TIMER_MSEC_P(x)	( ( ( 4096 ) * ( 0x1FF - ( (x) &    \
                                             NETARM_GEN_TSTAT_CTC_MASK ) +   \
 					    1 ) ) / (NETARM_XTAL_FREQ/1000) )
@@ -146,6 +169,7 @@
 #define	NETARM_GEN_TIMER_SET_HZ(x)	( ( ((NETARM_XTAL_FREQ/(4096*(x)))-1) & \
 					  NETARM_GEN_TSTAT_CTC_MASK ) | \
 					  NETARM_GEN_TCTL_USE_PRESCALE )
+#endif
 
 #endif
 

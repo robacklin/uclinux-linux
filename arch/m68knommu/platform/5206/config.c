@@ -3,9 +3,8 @@
 /*
  *	linux/arch/m68knommu/platform/5206/config.c
  *
- *	Copyright (C) 1999-2001, Greg Ungerer (gerg@snapgear.com)
- * 	Copyright (C) 2000, Lineo Inc. (www.lineo.com) 
- * 	Copyright (C) 2001, SnapGear (www.snapgear.com) 
+ *	Copyright (C) 1999-2002, Greg Ungerer (gerg@snapgear.com)
+ * 	Copyright (C) 2000-2001, Lineo Inc. (www.lineo.com) 
  */
 
 /***************************************************************************/
@@ -14,6 +13,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/param.h>
+#include <linux/init.h>
 #include <asm/irq.h>
 #include <asm/dma.h>
 #include <asm/traps.h>
@@ -22,8 +22,6 @@
 #include <asm/mcftimer.h>
 #include <asm/mcfsim.h>
 #include <asm/mcfdma.h>
-
-#include <asm/mcfwdebug.h>
 
 /***************************************************************************/
 
@@ -59,15 +57,36 @@ void coldfire_timer_init(void (*handler)(int, void *, struct pt_regs *))
 	timerp = (volatile unsigned short *) (MCF_MBAR + MCFTIMER_BASE1);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_DISABLE;
 
-	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_BUSCLK / 16) / HZ);
+	timerp[MCFTIMER_TRR] = (unsigned short) ((MCF_CLK / 16) / HZ);
 	timerp[MCFTIMER_TMR] = MCFTIMER_TMR_ENORI | MCFTIMER_TMR_CLK16 |
 		MCFTIMER_TMR_RESTART | MCFTIMER_TMR_ENABLE;
 
 	icrp = (volatile unsigned char *) (MCF_MBAR + MCFSIM_TIMER1ICR);
 
 	*icrp = MCFSIM_ICR_AUTOVEC | MCFSIM_ICR_LEVEL5 | MCFSIM_ICR_PRI3;
-	request_irq(29, handler, SA_INTERRUPT, "ColdFire Timer", NULL);
+	request_irq(29, handler, SA_INTERRUPT, "ColdFire Timer", timerp);
 	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_TIMER1);
+}
+
+/***************************************************************************/
+
+unsigned long coldfire_timer_offset(void)
+{
+	volatile unsigned short *timerp;
+	unsigned long		trr, tcn, offset;
+
+	timerp = (volatile unsigned short *) (MCF_MBAR + MCFTIMER_BASE1);
+	tcn = timerp[MCFTIMER_TCN];
+	trr = timerp[MCFTIMER_TRR];
+
+	/*
+	 * If we are still in the first half of the upcount and a
+	 * timer interupt is pending, then add on a ticks worth of time.
+	 */
+	offset = ((tcn * (1000000 / HZ)) / trr);
+	if (((offset * 2) < (1000000 / HZ)) && (mcf_getipr() & MCFSIM_IMR_TIMER1))
+		offset += 1000000 / HZ;
+	return offset;	
 }
 
 /***************************************************************************/
@@ -107,15 +126,11 @@ void set_evector(int vecnum, void (*handler)(void))
 asmlinkage void buserr(void);
 asmlinkage void trap(void);
 asmlinkage void system_call(void);
-asmlinkage void intrhandler(void);
+asmlinkage void inthandler(void);
 
 void coldfire_trap_init(void)
 {
 	int i;
-#ifdef MCF_MEMORY_PROTECT
-	extern unsigned long _end;
-	extern unsigned long memory_end;
-#endif
 
 #ifndef ENABLE_dBUG
 	mcf_setimr(MCFSIM_IMR_MASKALL);
@@ -135,38 +150,23 @@ void coldfire_trap_init(void)
 #endif
 
 	for (i = 24; (i <= 30); i++)
-		_ramvec[i] = intrhandler;
+		_ramvec[i] = inthandler;
 #ifndef ENABLE_dBUG
-	_ramvec[31] = intrhandler;  // Disables the IRQ7 button
+	_ramvec[31] = inthandler;  // Disables the IRQ7 button
 #endif
 
 	for (i = 64; (i < 255); i++)
-		_ramvec[i] = intrhandler;
+		_ramvec[i] = inthandler;
 	_ramvec[255] = 0;
 
 	_ramvec[2] = buserr;
 	_ramvec[32] = system_call;
-	
-#ifdef MCF_MEMORY_PROTECT
-	/* In order to protect memory, we set up an address range breakpoint
-	 * that starts from address 0 and go until the end of the kernel image
-	 * plus data.  This doens't protect the kernel stack, hardware devices
-	 * or user processes from each other but it is better than nothing.
-	 */
-	wdebug(MCFDEBUG_ABLR, &_end);		/* Start of range */
-	wdebug(MCFDEBUG_ABHR, memory_end);	/* End of range */
-	
-	/* Now set the trigger register:
-	 * Ignore RW bit, ignore size field, only user mode accesses
-	 */
-	wdebug(MCFDEBUG_AATR, 0xe300);
-	
-	/* Activate the break point as a level one trigger outside address range */
-	wdebug(MCFDEBUG_TDR,
-			MCFDEBUG_TDR_TRC_INTR | MCFDEBUG_TDR_LXT1 |
-			MCFDEBUG_TDR_EBL1 | MCFDEBUG_TDR_EAI1);
-	printk("Protected memory outside %#x to %#x\n", (int)&_end, (int)memory_end);
-#endif
+}
+/***************************************************************************/
+
+void coldfire_reset(void)
+{
+	HARD_RESET_NOW();
 }
 
 /***************************************************************************/
@@ -184,16 +184,19 @@ void dump(struct pt_regs *fp)
 
 	printk("\nCURRENT PROCESS:\n\n");
 	printk("COMM=%s PID=%d\n", current->comm, current->pid);
-	printk("TEXT=%08x-%08x DATA=%08x-%08x BSS=%08x-%08x\n",
-		(int) current->mm->start_code,
-		(int) current->mm->end_code,
-		(int) current->mm->start_data,
-		(int) current->mm->end_data,
-		(int) current->mm->end_data,
-		(int) current->mm->brk);
-	printk("USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
-		(int) current->mm->start_stack,
-		(int) current->kernel_stack_page);
+
+	if (current->mm) {
+		printk("TEXT=%08x-%08x DATA=%08x-%08x BSS=%08x-%08x\n",
+			(int) current->mm->start_code,
+			(int) current->mm->end_code,
+			(int) current->mm->start_data,
+			(int) current->mm->end_data,
+			(int) current->mm->end_data,
+			(int) current->mm->brk);
+		printk("USER-STACK=%08x  KERNEL-STACK=%08x\n\n",
+			(int) current->mm->start_stack,
+			(int) (((unsigned long) current) + 2 * PAGE_SIZE));
+	}
 
 	printk("PC: %08lx\n", fp->pc);
 	printk("SR: %08lx    SP: %08lx\n", (long) fp->sr, (long) fp);
@@ -221,10 +224,8 @@ void dump(struct pt_regs *fp)
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n");
-	if (STACK_MAGIC != *(unsigned long *)current->kernel_stack_page)
-                printk("(Possibly corrupted stack page??)\n");
-	printk("\n");
 
+#if 1
 	printk("\nUSER STACK:");
 	tp = (unsigned char *) sw_usp;
 	for (sp = (unsigned long *) tp, i = 0; (i < 0x80); i += 4) {
@@ -233,16 +234,24 @@ void dump(struct pt_regs *fp)
 		printk("%08x ", (int) *sp++);
 	}
 	printk("\n\n");
+#endif
 }
 
 /***************************************************************************/
 
 void config_BSP(char *commandp, int size)
 {
+#ifdef CONFIG_BOOTPARAM
+	strncpy(commandp, CONFIG_BOOTPARAM_STRING, size);
+	commandp[size-1] = 0;
+#else
 	memset(commandp, 0, size);
+#endif
 	mach_sched_init = coldfire_timer_init;
 	mach_tick = coldfire_tick;
 	mach_trap_init = coldfire_trap_init;
+	mach_reset = coldfire_reset;
+	mach_gettimeoffset = coldfire_timer_offset;
 }
 
 /***************************************************************************/

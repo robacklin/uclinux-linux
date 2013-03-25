@@ -3,15 +3,15 @@
  *		operating system.  NET  is implemented using the  BSD Socket
  *		interface as the means of communication with the user level.
  *
- *		Definitions for the Ethernet handlers.
+ *		Definitions for the Token-ring handlers.
  *
  * Version:	@(#)eth.h	1.0.4	05/13/93
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
- *		Relocated to include/linux where it belongs by Alan Cox
- *						<alan@lxorguk.ukuu.org.uk>
+ *		Relocated to include/linux where it belongs by Alan Cox 
+ *							<gw4pts@gw4pts.ampr.org>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -28,12 +28,18 @@
 #include <linux/if_tr.h>
 
 #ifdef __KERNEL__
-extern int		tr_header(struct sk_buff *skb, struct device *dev,
+extern int		tr_header(struct sk_buff *skb, struct net_device *dev,
 				   unsigned short type, void *daddr,
 				   void *saddr, unsigned len);
-extern int		tr_rebuild_header(void *buff, struct device *dev,
-			unsigned long raddr, struct sk_buff *skb);
-extern unsigned short	tr_type_trans(struct sk_buff *skb, struct device *dev);
+extern void		tr_source_route(struct sk_buff *skb,
+					struct trh_hdr *trh,
+					struct net_device *dev);
+extern int		tr_rebuild_header(struct sk_buff *skb);
+extern unsigned short	tr_type_trans(struct sk_buff *skb, struct net_device *dev);
+extern struct net_device *init_trdev(struct net_device *dev, int sizeof_priv);
+extern struct net_device *alloc_trdev(int sizeof_priv);
+extern int register_trdev(struct net_device *dev);
+extern void unregister_trdev(struct net_device *dev);
 
 #endif
 

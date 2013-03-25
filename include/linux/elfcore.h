@@ -20,6 +20,7 @@ struct elf_siginfo
 typedef elf_greg_t greg_t;
 typedef elf_gregset_t gregset_t;
 typedef elf_fpregset_t fpregset_t;
+typedef elf_fpxregset_t fpxregset_t;
 #define NGREG ELF_NGREG
 #endif
 
@@ -41,8 +42,8 @@ struct elf_prstatus
 #endif
 	struct elf_siginfo pr_info;	/* Info associated with signal */
 	short	pr_cursig;		/* Current signal */
-	sigset_t pr_sigpend;		/* Set of pending signals */
-	sigset_t pr_sighold;		/* Set of held signals */
+	unsigned long pr_sigpend;	/* Set of pending signals */
+	unsigned long pr_sighold;	/* Set of held signals */
 #if 0
 	struct sigaltstack pr_altstack;	/* Alternate stack info */
 	struct sigaction pr_action;	/* Signal action for current sig */
@@ -71,8 +72,8 @@ struct elf_prpsinfo
 	char	pr_zomb;	/* zombie */
 	char	pr_nice;	/* nice val */
 	unsigned long pr_flag;	/* flags */
-	uid_t	pr_uid;
-	gid_t	pr_gid;
+	__kernel_uid_t	pr_uid;
+	__kernel_gid_t	pr_gid;
 	pid_t	pr_pid, pr_ppid, pr_pgrp, pr_sid;
 	/* Lots missing */
 	char	pr_fname[16];	/* filename of executable */

@@ -16,50 +16,103 @@
  *      adjtime interface update and CMOS clock write code
  * 1995-08-13    Torsten Duwe
  *      kernel PLL updated to 1994-12-13 specs (rfc-1589)
- * 1996-10-22, 1997-09-13    Ulrich Windl
- *	support for external PPS signal, error checking in adjtimex()
+ * 1999-01-16    Ulrich Windl
+ *	Introduced error checking for many cases in adjtimex().
  *	Updated NTP code according to technical memorandum Jan '96
  *	"A Kernel Model for Precision Timekeeping" by Dave Mills
- * 1998-03-05	Ulrich Windl
- *	Allow time_constant larger than MAXTC(6) for NTP v4
- *	(debated with and blessed by Dave Mills, despite of earlier work
- *	and words)
+ *	Allow time_constant larger than MAXTC(6) for NTP v4 (MAXTC == 10)
+ *	(Even though the technical memorandum forbids it)
  */
 
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/param.h>
-#include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/timex.h>
+#include <linux/smp_lock.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 /* 
  * The timezone where the local system is located.  Used as a default by some
  * programs who obtain this value by using gettimeofday.
  */
-struct timezone sys_tz = { 0, 0};
+struct timezone sys_tz;
 
-#ifndef __alpha__
+/* The xtime_lock is not only serializing the xtime read/writes but it's also
+   serializing all accesses to the global NTP variables now. */
+extern rwlock_t xtime_lock;
+
+static void print_time_change(const char *msg, struct timeval new_tv)
+{
+	long s, j, d, m, y;
+
+	j = new_tv.tv_sec / 86400L + 719469;
+	s = new_tv.tv_sec % 86400L;
+
+	if( s < 0 ) { s += 86400L; j--; }
+
+	y = (4L * j - 1L) / 146097L;
+	j = 4L * j - 1L - 146097L * y;
+	d = j / 4L;
+	j = (4L * d + 3L) / 1461L;
+	d = 4L * d + 3L - 1461L * j;
+	d = (d + 4L) / 4L;
+	m = (5L * d - 3L) / 153L;
+	d = 5L * d - 3 - 153L * m;
+	d = (d + 5L) / 5L;
+	y = 100L * y + j;
+	if (m < 10)
+		m += 2;
+	else
+	{
+		m -= 10;
+		++y;
+	}
+	printk(KERN_NOTICE "Clock: %s time %04d/%02d/%02d - %02d:%02d:%02d GMT\n",
+		msg, (int) y, (int) m + 1, (int) d, (int) (s / 3600 ), (int) (s / 60) % 60, (int) s % 60);
+}
+
+#ifndef ABS
+#define ABS(X) ((X) < 0 ? -(X) : (X))
+#endif
+
+static void check_print_time_change(const struct timeval old_tv, const struct timeval new_tv)
+{
+	static long accumulated_usecs;
+
+	if (ABS(new_tv.tv_sec - old_tv.tv_sec) <= 2) {
+		/* No more than 2 seconds of change */
+		accumulated_usecs += (new_tv.tv_sec - old_tv.tv_sec) * 1000000L + (new_tv.tv_usec - old_tv.tv_usec);
+		if (ABS(accumulated_usecs) < 1000000L) {
+			/* Less than 1 second of accumulated change */
+			return;
+		}
+	}
+
+	accumulated_usecs = 0;
+
+	print_time_change("old", old_tv);
+	print_time_change("new", new_tv);
+}
+
+#if !defined(__alpha__) && !defined(__ia64__)
 
 /*
  * sys_time() can be implemented in user-level using
  * sys_gettimeofday().  Is this for backwards compatibility?  If so,
  * why not move it into the appropriate arch directory (for those
  * architectures that need it).
+ *
+ * XXX This function is NOT 64-bit clean!
  */
-asmlinkage int sys_time(int * tloc)
+asmlinkage long sys_time(int * tloc)
 {
-	int i;
+	struct timeval now; 
+	int i; 
 
-	i = CURRENT_TIME;
+	do_gettimeofday(&now);
+	i = now.tv_sec;
 	if (tloc) {
-		int error = verify_area(VERIFY_WRITE, tloc, sizeof(*tloc));
-		if (error)
-			return error;
-		put_user(i,tloc);
+		if (put_user(i,tloc))
+			i = -EFAULT;
 	}
 	return i;
 }
@@ -70,47 +123,46 @@ asmlinkage int sys_time(int * tloc)
  * why not move it into the appropriate arch directory (for those
  * architectures that need it).
  */
-asmlinkage int sys_stime(int * tptr)
+ 
+asmlinkage long sys_stime(int * tptr)
 {
-	int error, value;
+	int value;
+	struct timeval old_tv, new_tv;
 
-	if (!suser())
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
-	error = verify_area(VERIFY_READ, tptr, sizeof(*tptr));
-	if (error)
-		return error;
-	value = get_user(tptr);
-	cli();
+	if (get_user(value, tptr))
+		return -EFAULT;
+
+	do_gettimeofday(&old_tv);
+	write_lock_irq(&xtime_lock);
+	vxtime_lock();
 	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
+	vxtime_unlock();
 	time_adjust = 0;	/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
-	time_state = TIME_ERROR;	/* p. 24, (a) */
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+	write_unlock_irq(&xtime_lock);
+	do_gettimeofday(&new_tv);
+	check_print_time_change(old_tv, new_tv);
 	return 0;
 }
 
 #endif
 
-asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
 {
-	int error;
-
 	if (tv) {
 		struct timeval ktv;
-		error = verify_area(VERIFY_WRITE, tv, sizeof *tv);
-		if (error)
-			return error;
 		do_gettimeofday(&ktv);
-		memcpy_tofs(tv, &ktv, sizeof(ktv));
+		if (copy_to_user(tv, &ktv, sizeof(ktv)))
+			return -EFAULT;
 	}
 	if (tz) {
-		error = verify_area(VERIFY_WRITE, tz, sizeof *tz);
-		if (error)
-			return error;
-		memcpy_tofs(tz, &sys_tz, sizeof(sys_tz));
+		if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
+			return -EFAULT;
 	}
 	return 0;
 }
@@ -133,9 +185,11 @@ asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 inline static void warp_clock(void)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
+	vxtime_lock();
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	sti();
+	vxtime_unlock();
+	write_unlock_irq(&xtime_lock);
 }
 
 /*
@@ -148,28 +202,17 @@ inline static void warp_clock(void)
  * as soon as possible, so that the clock can be set right. Otherwise,
  * various programs will get confused when the clock gets warped.
  */
-asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
-{
-	static int	firsttime = 1;
-	struct timeval	new_tv;
-	struct timezone new_tz;
 
-	if (!suser())
+int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
+{
+	static int firsttime = 1;
+
+	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
-	if (tv) {
-		int error = verify_area(VERIFY_READ, tv, sizeof(*tv));
-		if (error)
-			return error;
-		memcpy_fromfs(&new_tv, tv, sizeof(*tv));
-	}
+		
 	if (tz) {
-		int error = verify_area(VERIFY_READ, tz, sizeof(*tz));
-		if (error)
-			return error;
-		memcpy_fromfs(&new_tz, tz, sizeof(*tz));
-	}
-	if (tz) {
-		sys_tz = new_tz;
+		/* SMP safe, global irq locking makes it work. */
+		sys_tz = *tz;
 		if (firsttime) {
 			firsttime = 0;
 			if (!tv)
@@ -177,119 +220,147 @@ asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
 		}
 	}
 	if (tv)
-		do_settimeofday(&new_tv);
+	{
+		/* SMP safe, again the code in arch/foo/time.c should
+		 * globally block out interrupts when it runs.
+		 */
+		do_settimeofday(tv);
+	}
 	return 0;
 }
 
-long pps_offset = 0;		/* pps time offset (us) */
+asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
+{
+	struct timeval	new_tv;
+	struct timezone new_tz;
+	int ret;
+
+	struct timeval	old_tv;
+
+	if (tv) {
+		if (copy_from_user(&new_tv, tv, sizeof(*tv)))
+			return -EFAULT;
+	}
+	if (tz) {
+		if (copy_from_user(&new_tz, tz, sizeof(*tz)))
+			return -EFAULT;
+	}
+
+	if (tv) {
+		do_gettimeofday(&old_tv);
+	}
+	ret = do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
+	if (tv) {
+		check_print_time_change(old_tv, new_tv);
+	}
+
+	return ret;
+}
+
+long pps_offset;		/* pps time offset (us) */
 long pps_jitter = MAXTIME;	/* time dispersion (jitter) (us) */
 
-long pps_freq = 0;		/* frequency offset (scaled ppm) */
+long pps_freq;			/* frequency offset (scaled ppm) */
 long pps_stabil = MAXFREQ;	/* frequency dispersion (scaled ppm) */
 
 long pps_valid = PPS_VALID;	/* pps signal watchdog counter */
 
 int pps_shift = PPS_SHIFT;	/* interval duration (s) (shift) */
 
-long pps_jitcnt = 0;		/* jitter limit exceeded */
-long pps_calcnt = 0;		/* calibration intervals */
-long pps_errcnt = 0;		/* calibration errors */
-long pps_stbcnt = 0;		/* stability limit exceeded */
+long pps_jitcnt;		/* jitter limit exceeded */
+long pps_calcnt;		/* calibration intervals */
+long pps_errcnt;		/* calibration errors */
+long pps_stbcnt;		/* stability limit exceeded */
 
 /* hook for a loadable hardpps kernel module */
-void (*hardpps_ptr)(struct timeval *) = (void (*)(struct timeval *))0;
+void (*hardpps_ptr)(struct timeval *);
 
 /* adjtimex mainly allows reading (and writing, if superuser) of
  * kernel time-keeping variables. used by xntpd.
  */
-asmlinkage int sys_adjtimex(struct timex *txc_p)
+int do_adjtimex(struct timex *txc)
 {
         long ltemp, mtemp, save_adjust;
-	int error = 0;
-
-	/* Local copy of parameter */
-	struct timex txc;
-
-	error = verify_area(VERIFY_WRITE, txc_p, sizeof(struct timex));
-	if (error)
-		return error;	/* do not write results */
-
-	/* Copy the user data space into the kernel copy
-	 * structure. But bear in mind that the structures
-	 * may change
-	 */
-	memcpy_fromfs(&txc, txc_p, sizeof(struct timex));
+	int result;
 
 	/* In order to modify anything, you gotta be super-user! */
-	if (txc.modes && !suser())
+	if (txc->modes && !capable(CAP_SYS_TIME))
 		return -EPERM;
+		
+	/* Now we validate the data before disabling interrupts */
 
-	/* Now we validate the data before disabling interrupts
-	 */
-	if (txc.modes != ADJ_OFFSET_SINGLESHOT && (txc.modes & ADJ_OFFSET))
-		/* adjustment Offset limited to +- .512 seconds */
-		if (txc.offset <= - MAXPHASE || txc.offset >= MAXPHASE )
+	if ((txc->modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
+	  /* singleshot must not be used with any other mode bits */
+		if (txc->modes != ADJ_OFFSET_SINGLESHOT)
 			return -EINVAL;
 
-	cli();
+	if (txc->modes != ADJ_OFFSET_SINGLESHOT && (txc->modes & ADJ_OFFSET))
+	  /* adjustment Offset limited to +- .512 seconds */
+		if (txc->offset <= - MAXPHASE || txc->offset >= MAXPHASE )
+			return -EINVAL;	
 
-	/* Save for later - semantics of adjtime() is to return old value */
+	/* if the quartz is off by more than 10% something is VERY wrong ! */
+	if (txc->modes & ADJ_TICK)
+		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
+			return -EINVAL;
+
+	write_lock_irq(&xtime_lock);
+	result = time_state;	/* mostly `TIME_OK' */
+
+	/* Save for later - semantics of adjtime is to return old value */
 	save_adjust = time_adjust;
 
-	/* If there are input parameters, then process them */
 #if 0	/* STA_CLOCKERR is never set yet */
 	time_status &= ~STA_CLOCKERR;		/* reset STA_CLOCKERR */
 #endif
-	if (txc.modes)
+	/* If there are input parameters, then process them */
+	if (txc->modes)
 	{
-	    if (time_state == TIME_ERROR)
-		time_state = TIME_OK;		/* reset error -- why? */
-
-	    if (txc.modes & ADJ_STATUS)	/* only set allowed bits */
-		time_status = (txc.status & ~STA_RONLY) |
+	    if (txc->modes & ADJ_STATUS)	/* only set allowed bits */
+		time_status =  (txc->status & ~STA_RONLY) |
 			      (time_status & STA_RONLY);
 
-	    if (txc.modes & ADJ_FREQUENCY) {	/* p. 22 */
-		if (txc.freq > MAXFREQ || txc.freq < -MAXFREQ) {
-		    error = -EINVAL;
+	    if (txc->modes & ADJ_FREQUENCY) {	/* p. 22 */
+		if (txc->freq > MAXFREQ || txc->freq < -MAXFREQ) {
+		    result = -EINVAL;
 		    goto leave;
 		}
-		time_freq = txc.freq - pps_freq;
+		time_freq = txc->freq - pps_freq;
 	    }
 
-	    if (txc.modes & ADJ_MAXERROR) {
-		if (txc.maxerror < 0 || txc.maxerror >= NTP_PHASE_LIMIT) {
-		    error = -EINVAL;
+	    if (txc->modes & ADJ_MAXERROR) {
+		if (txc->maxerror < 0 || txc->maxerror >= NTP_PHASE_LIMIT) {
+		    result = -EINVAL;
 		    goto leave;
 		}
-		time_maxerror = txc.maxerror;
+		time_maxerror = txc->maxerror;
 	    }
 
-	    if (txc.modes & ADJ_ESTERROR) {
-		if (txc.esterror < 0 || txc.esterror >= NTP_PHASE_LIMIT) {
-		    error = -EINVAL;
+	    if (txc->modes & ADJ_ESTERROR) {
+		if (txc->esterror < 0 || txc->esterror >= NTP_PHASE_LIMIT) {
+		    result = -EINVAL;
 		    goto leave;
 		}
-		time_esterror = txc.esterror;
+		time_esterror = txc->esterror;
 	    }
 
-	    if (txc.modes & ADJ_TIMECONST) {	/* p. 24 */
-		if (txc.constant < 0) {		/* NTP v4 uses values > 6 */
-		    error = -EINVAL;
+	    if (txc->modes & ADJ_TIMECONST) {	/* p. 24 */
+		if (txc->constant < 0) {	/* NTP v4 uses values > 6 */
+		    result = -EINVAL;
 		    goto leave;
 		}
-		time_constant = txc.constant;
+		time_constant = txc->constant;
 	    }
 
-	    if (txc.modes & ADJ_OFFSET) {	/* values checked earlier */
-		if (txc.modes == ADJ_OFFSET_SINGLESHOT) {
+	    if (txc->modes & ADJ_OFFSET) {	/* values checked earlier */
+		if (txc->modes == ADJ_OFFSET_SINGLESHOT) {
 		    /* adjtime() is independent from ntp_adjtime() */
-		    time_adjust = txc.offset;
+		    time_adjust = txc->offset;
 		}
 		else if ( time_status & (STA_PLL | STA_PPSTIME) ) {
 		    ltemp = (time_status & (STA_PPSTIME | STA_PPSSIGNAL)) ==
 		            (STA_PPSTIME | STA_PPSSIGNAL) ?
-		            pps_offset : txc.offset;
+		            pps_offset : txc->offset;
 
 		    /*
 		     * Scale the phase adjustment and
@@ -321,7 +392,7 @@ asmlinkage int sys_adjtimex(struct timex *txc_p)
 			    else
 			        time_freq += ltemp >> SHIFT_KH;
 			} else /* calibration interval too short (p. 12) */
-				time_state = TIME_ERROR;
+				result = TIME_ERROR;
 		    } else {	/* PLL mode */
 		        if (mtemp < MAXSEC) {
 			    ltemp *= mtemp;
@@ -334,24 +405,24 @@ asmlinkage int sys_adjtimex(struct timex *txc_p)
 						       time_constant +
 						       SHIFT_KF - SHIFT_USEC);
 			} else /* calibration interval too long (p. 12) */
-				time_state = TIME_ERROR;
+				result = TIME_ERROR;
 		    }
 		    if (time_freq > time_tolerance)
 		        time_freq = time_tolerance;
 		    else if (time_freq < -time_tolerance)
 		        time_freq = -time_tolerance;
 		} /* STA_PLL || STA_PPSTIME */
-	    } /* txc.modes & ADJ_OFFSET */
-	    if (txc.modes & ADJ_TICK) {
+	    } /* txc->modes & ADJ_OFFSET */
+	    if (txc->modes & ADJ_TICK) {
 		/* if the quartz is off by more than 10% something is
 		   VERY wrong ! */
-		if (txc.tick < 900000/HZ || txc.tick > 1100000/HZ) {
-		    error = -EINVAL;
+		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ) {
+		    result = -EINVAL;
 		    goto leave;
 		}
-		tick = txc.tick;
+		tick = txc->tick;
 	    }
-	} /* txc.modes */
+	} /* txc->modes */
 leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	    || ((time_status & (STA_PPSFREQ|STA_PPSTIME)) != 0
 		&& (time_status & STA_PPSSIGNAL) == 0)
@@ -362,36 +433,48 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	    || ((time_status & STA_PPSFREQ) != 0
 		&& (time_status & (STA_PPSWANDER|STA_PPSERROR)) != 0))
 	    /* p. 24, (d) */
-		time_state = TIME_ERROR;
+		result = TIME_ERROR;
 	
-	if ((txc.modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
-	    txc.offset	   = save_adjust;
+	if ((txc->modes & ADJ_OFFSET_SINGLESHOT) == ADJ_OFFSET_SINGLESHOT)
+	    txc->offset	   = save_adjust;
 	else {
 	    if (time_offset < 0)
-		txc.offset = -(-time_offset >> SHIFT_UPDATE);
+		txc->offset = -(-time_offset >> SHIFT_UPDATE);
 	    else
-		txc.offset = time_offset >> SHIFT_UPDATE;
+		txc->offset = time_offset >> SHIFT_UPDATE;
 	}
-	txc.freq	   = time_freq + pps_freq;
-	txc.maxerror	   = time_maxerror;
-	txc.esterror	   = time_esterror;
-	txc.status	   = time_status;
-	txc.constant	   = time_constant;
-	txc.precision	   = time_precision;
-	txc.tolerance	   = time_tolerance;
-	do_gettimeofday(&txc.time);
-	txc.tick	   = tick;
-	txc.ppsfreq	   = pps_freq;
-	txc.jitter	   = pps_jitter >> PPS_AVG;
-	txc.shift	   = pps_shift;
-	txc.stabil	   = pps_stabil;
-	txc.jitcnt	   = pps_jitcnt;
-	txc.calcnt	   = pps_calcnt;
-	txc.errcnt	   = pps_errcnt;
-	txc.stbcnt	   = pps_stbcnt;
+	txc->freq	   = time_freq + pps_freq;
+	txc->maxerror	   = time_maxerror;
+	txc->esterror	   = time_esterror;
+	txc->status	   = time_status;
+	txc->constant	   = time_constant;
+	txc->precision	   = time_precision;
+	txc->tolerance	   = time_tolerance;
+	txc->tick	   = tick;
+	txc->ppsfreq	   = pps_freq;
+	txc->jitter	   = pps_jitter >> PPS_AVG;
+	txc->shift	   = pps_shift;
+	txc->stabil	   = pps_stabil;
+	txc->jitcnt	   = pps_jitcnt;
+	txc->calcnt	   = pps_calcnt;
+	txc->errcnt	   = pps_errcnt;
+	txc->stbcnt	   = pps_stbcnt;
+	write_unlock_irq(&xtime_lock);
+	do_gettimeofday(&txc->time);
+	return(result);
+}
 
-	sti();
+asmlinkage long sys_adjtimex(struct timex *txc_p)
+{
+	struct timex txc;		/* Local copy of parameter */
+	int ret;
 
-	memcpy_tofs(txc_p, &txc, sizeof(struct timex));
-	return(error < 0 ? error : time_state);
+	/* Copy the user data space into the kernel copy
+	 * structure. But bear in mind that the structures
+	 * may change
+	 */
+	if(copy_from_user(&txc, txc_p, sizeof(struct timex)))
+		return -EFAULT;
+	ret = do_adjtimex(&txc);
+	return copy_to_user(txc_p, &txc, sizeof(struct timex)) ? -EFAULT : ret;
 }

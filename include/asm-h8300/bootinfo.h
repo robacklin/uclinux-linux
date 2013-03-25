@@ -1,2 +1,2 @@
 
-/* Nothing for H8300H */
+/* Nothing for h8300 */

@@ -9,7 +9,7 @@
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
- *		Donald Becker, <becker@cesdis.gsfc.nasa.gov>
+ *		Donald Becker, <becker@scyld.com>
  *
  *		Alan Cox	:	Fixed oddments for NET3.014
  *		Alan Cox	:	Rejig for NET3.029 snap #3
@@ -28,7 +28,6 @@
  *		as published by the Free Software Foundation; either version
  *		2 of the License, or (at your option) any later version.
  */
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -39,9 +38,10 @@
 #include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/in.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/io.h>
 
 #include <linux/inet.h>
@@ -52,105 +52,80 @@
 #include <linux/if_ether.h>	/* For the statistics structure. */
 #include <linux/if_arp.h>	/* For ARPHRD_ETHER */
 
-#define LOOPBACK_MTU (PAGE_SIZE*7/8)
+#define LOOPBACK_OVERHEAD (128 + MAX_HEADER + 16 + 16)
 
 /*
  * The higher levels take care of making this non-reentrant (it's
  * called with bh's disabled).
  */
-static int loopback_xmit(struct sk_buff *skb, struct device *dev)
+static int loopback_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct enet_statistics *stats = (struct enet_statistics *)dev->priv;
-	int unlock=1;
-  
-	if (skb == NULL || dev == NULL) 
-		return(0);
+	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
 
 	/*
 	 *	Optimise so buffers with skb->free=1 are not copied but
 	 *	instead are lobbed from tx queue to rx queue 
 	 */
 
-	if(skb->free==0)
+	if(atomic_read(&skb->users) != 1)
 	{
 	  	struct sk_buff *skb2=skb;
 	  	skb=skb_clone(skb, GFP_ATOMIC);		/* Clone the buffer */
-	  	dev_kfree_skb(skb2, FREE_WRITE);
-	  	if(skb==NULL)
-	  		return 0;
-  		unlock=0;
+	  	if(skb==NULL) {
+			kfree_skb(skb2);
+			return 0;
+		}
+	  	kfree_skb(skb2);
 	}
-	else if(skb->sk)
-	{
-	  	/*
-	  	 *	Packet sent but looped back around. Cease to charge
-	  	 *	the socket for the frame.
-	  	 */
-		atomic_sub(skb->truesize, &skb->sk->wmem_alloc);
-	  	skb->sk->write_space(skb->sk);
-	}
+	else
+		skb_orphan(skb);
 
 	skb->protocol=eth_type_trans(skb,dev);
 	skb->dev=dev;
 #ifndef LOOPBACK_MUST_CHECKSUM
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
 #endif
-	netif_rx(skb);
-	if(unlock)
-	  	skb_device_unlock(skb);
-  
+
+	dev->last_rx = jiffies;
+	stats->rx_bytes+=skb->len;
+	stats->tx_bytes+=skb->len;
 	stats->rx_packets++;
 	stats->tx_packets++;
+
+	netif_rx(skb);
 
 	return(0);
 }
 
-static struct enet_statistics *get_stats(struct device *dev)
+static struct net_device_stats *get_stats(struct net_device *dev)
 {
-	return (struct enet_statistics *)dev->priv;
-}
-
-static int loopback_open(struct device *dev)
-{
-	dev->flags|=IFF_LOOPBACK;
-	return 0;
+	return (struct net_device_stats *)dev->priv;
 }
 
 /* Initialize the rest of the LOOPBACK device. */
-int loopback_init(struct device *dev)
+int __init loopback_init(struct net_device *dev)
 {
-	int i;
-
-	dev->mtu		= LOOPBACK_MTU;
-	dev->tbusy		= 0;
+	dev->mtu		= (16 * 1024) + 20 + 20 + 12;
 	dev->hard_start_xmit	= loopback_xmit;
 	dev->hard_header	= eth_header;
+	dev->hard_header_cache	= eth_header_cache;
+	dev->header_cache_update= eth_header_cache_update;
 	dev->hard_header_len	= ETH_HLEN;		/* 14			*/
 	dev->addr_len		= ETH_ALEN;		/* 6			*/
-	dev->tx_queue_len	= 50000;		/* No limit on loopback */
+	dev->tx_queue_len	= 0;
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001		*/
 	dev->rebuild_header	= eth_rebuild_header;
-	dev->open		= loopback_open;
-	dev->flags		= IFF_LOOPBACK|IFF_BROADCAST;
-	dev->family		= AF_INET;
-#ifdef CONFIG_INET    
-	dev->pa_addr		= in_aton("127.0.0.1");
-	dev->pa_brdaddr		= in_aton("127.255.255.255");
-	dev->pa_mask		= in_aton("255.0.0.0");
-	dev->pa_alen		= 4;
-#endif  
-	dev->priv = kmalloc(sizeof(struct enet_statistics), GFP_KERNEL);
+	dev->flags		= IFF_LOOPBACK;
+	dev->features		= NETIF_F_SG|NETIF_F_FRAGLIST|NETIF_F_NO_CSUM|NETIF_F_HIGHDMA;
+	dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL);
 	if (dev->priv == NULL)
 			return -ENOMEM;
-	memset(dev->priv, 0, sizeof(struct enet_statistics));
+	memset(dev->priv, 0, sizeof(struct net_device_stats));
 	dev->get_stats = get_stats;
 
 	/*
 	 *	Fill in the generic fields of the device structure. 
 	 */
    
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		skb_queue_head_init(&dev->buffs[i]);
-  
 	return(0);
 };

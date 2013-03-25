@@ -7,10 +7,8 @@
  * the kernel global pointer and jump to the kernel entry-point.
  */
 
-#define __ASSEMBLY__
+#include <linux/config.h>
 #include <asm/system.h>
-
-#define halt call_pal PAL_halt
 
 .globl swapper_pg_dir
 .globl _stext
@@ -21,104 +19,56 @@ swapper_pg_dir=SWAPPER_PGD
 	.ent	__start
 _stext:
 __start:
+	.prologue 0
 	br	$27,1f
 1:	ldgp	$29,0($27)
-	lda	$27,start_kernel
-	jsr	$26,($27),start_kernel
-	halt
+	/* We need to get current loaded up with our first task...  */
+	lda	$8,init_task_union
+	/* ... and find our stack ... */
+	lda	$30,0x4000($8)
+	/* ... and then we can start the kernel.  */
+	jsr	$26,start_kernel
+	call_pal PAL_halt
 	.end __start
 
+#ifdef CONFIG_SMP
 	.align 3
-	.globl	wrent
-	.ent	wrent
-wrent:
-	call_pal PAL_wrent
-	ret	($26)
-	.end wrent
+	.globl	__smp_callin
+	.ent	__smp_callin
+	/* On entry here from SRM console, the HWPCB of the per-cpu
+	   slot for this processor has been loaded.  We've arranged
+	   for the UNIQUE value for this process to contain the PCBB
+	   of the target idle task.  */
+__smp_callin:
+	.prologue 1
+	ldgp	$29,0($27)	# First order of business, load the GP.
 
-	.align 3
-	.globl	wrkgp
-	.ent	wrkgp
-wrkgp:
-	call_pal PAL_wrkgp
-	ret	($26)
-	.end wrkgp
+	call_pal PAL_rduniq	# Grab the target PCBB.
+	mov	$0,$16		# Install it.
+	call_pal PAL_swpctx
 
-	.align 3
-	.globl	wrusp
-	.ent	wrusp
-wrusp:
-	call_pal PAL_wrusp
-	ret	($26)
-	.end wrusp
+	lda	$8,0x3fff	# Find "current".
+	bic	$30,$8,$8
+	
+	jsr	$26,smp_callin
+	call_pal PAL_halt
+	.end __smp_callin
+#endif /* CONFIG_SMP */
 
-	.align 3
-	.globl	rdusp
-	.ent	rdusp
-rdusp:
-	call_pal PAL_rdusp
-	ret	($26)
-	.end rdusp
-
-	.align 3
-	.globl	tbi
-	.ent	tbi
-tbi:
-	call_pal PAL_tbi
-	ret	($26)
-	.end tbi
-
-	.align 3
-	.globl	imb
-	.ent	imb
-imb:
-	call_pal PAL_imb
-	ret	($26)
-	.end imb
-
-	.align 3
-	.globl	rdmces
-	.ent	rdmces
-rdmces:
-	call_pal PAL_rdmces
-	ret	($26)
-	.end rdmces
-
-	.align 3
-	.globl	wrmces
-	.ent	wrmces
-wrmces:
-	call_pal PAL_wrmces
-	ret	($26)
-	.end wrmces
-
-	.align 3
-	.globl  whami
-	.ent    whami
-whami:
-	call_pal PAL_whami
-	ret     ($26)
-	.end whami
- 
-	.align 3
-	.globl  wripir
-	.ent    wripir
-wripir:
-	call_pal PAL_wripir
-	ret     ($26)
-	.end wripir
+	#
+	# The following two functions are needed for supporting SRM PALcode
+	# on the PC164 (at least), since that PALcode manages the interrupt
+	# masking, and we cannot duplicate the effort without causing problems
+	#
 
 	.align 3
 	.globl	cserve_ena
 	.ent	cserve_ena
 cserve_ena:
-	lda	$30,-0x08($30)
-	stq	$17,0($30)
+	.prologue 0
 	bis	$16,$16,$17
 	lda	$16,52($31)
 	call_pal PAL_cserve
-	ldq	$17,0($30)
-	lda	$30,0x08($30)
 	ret	($26)
 	.end	cserve_ena
 
@@ -126,46 +76,23 @@ cserve_ena:
 	.globl	cserve_dis
 	.ent	cserve_dis
 cserve_dis:
-	lda	$30,-0x08($30)
-	stq	$17,0($30)
+	.prologue 0
 	bis	$16,$16,$17
 	lda	$16,53($31)
 	call_pal PAL_cserve
-	ldq	$17,0($30)
-	lda	$30,0x08($30)
 	ret	($26)
 	.end	cserve_dis
 
 	#
-	# The following two functions don't need trapb/excb instructions
-	# around the mf_fpcr/mt_fpcr instructions because (a) the kernel
-	# never generates arithmetic faults and (b) call_pal instructions
-	# are implied trap barriers.
+	# It is handy, on occasion, to make halt actually just loop. 
+	# Putting it here means we dont have to recompile the whole
+	# kernel.
 	#
-	.align 3
-	.globl	rdfpcr
-	.ent	rdfpcr
-rdfpcr:
-	lda	$30,-0x10($30)
-	stt	$f0,0($30)
-	mf_fpcr	$f0
-	stt	$f0,8($30)
-	ldt	$f0,0($30)
-	ldq	$0,8($30)
-	lda	$30,0x10($30)
-	ret	($26)
-	.end	rdfpcr
 
 	.align 3
-	.globl	wrfpcr
-	.ent	wrfpcr
-wrfpcr:
-	lda	$30,-0x10($30)
-	stt	$f0,0($30)
-	stq	$16,8($30)
-	ldt	$f0,8($30)
-	mt_fpcr	$f0
-	ldt	$f0,0($30)
-	lda	$30,0x10($30)
-	ret	($26)
-	.end	wrfpcr
+	.globl	halt
+	.ent	halt
+halt:
+	.prologue 0
+	call_pal PAL_halt
+	.end	halt

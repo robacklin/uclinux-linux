@@ -103,4 +103,6 @@ typedef struct irq_handler {
 /* count of spurious interrupts */
 extern volatile unsigned int num_spurious;
 
+#define disable_irq_nosync(i) disable_irq(i)
+
 #endif /* _NIOSNOMMU_IRQ_H_ */

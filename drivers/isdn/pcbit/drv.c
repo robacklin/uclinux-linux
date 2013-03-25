@@ -1,14 +1,12 @@
 /*
+ * PCBIT-D interface with isdn4linux
+ *
  * Copyright (C) 1996 Universidade de Lisboa
  * 
- * Written by Pedro Roque Marques (roque@di.fc.ul.pt)
+ * Written by Pedro Roque Marques (pedro_m@yahoo.com)
  *
  * This software may be used and distributed according to the terms of 
- * the GNU Public License, incorporated herein by reference.
- */
-
-/*        
- *        PCBIT-D interface with isdn4linux
+ * the GNU General Public License, incorporated herein by reference.
  */
 
 /*
@@ -28,7 +26,7 @@
 #include <linux/kernel.h>
 
 #include <linux/types.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/string.h>
@@ -37,6 +35,7 @@
 #include <linux/isdnif.h>
 #include <asm/string.h>
 #include <asm/io.h>
+#include <linux/ioport.h>
 
 #include "pcbit.h"
 #include "edss1.h"
@@ -61,7 +60,7 @@ static char* pcbit_devname[MAX_PCBIT_CARDS] = {
 
 int pcbit_command(isdn_ctrl* ctl);
 int pcbit_stat(u_char* buf, int len, int user, int, int);
-int pcbit_xmit(int driver, int chan, struct sk_buff *skb);
+int pcbit_xmit(int driver, int chan, int ack, struct sk_buff *skb);
 int pcbit_writecmd(const u_char*, int, int, int, int);
 
 static int set_protocol_running(struct pcbit_dev * dev);
@@ -86,10 +85,23 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 
 	dev_pcbit[board] = dev;
 	memset(dev, 0, sizeof(struct pcbit_dev));
+	init_waitqueue_head(&dev->set_running_wq);
 
-	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF )
-		dev->sh_mem = (unsigned char*) mem_base;
-	else
+	if (mem_base >= 0xA0000 && mem_base <= 0xFFFFF ) {
+		dev->ph_mem = mem_base;
+		if (check_mem_region(dev->ph_mem, 4096)) {
+			printk(KERN_WARNING
+				"PCBIT: memory region %lx-%lx already in use\n",
+				dev->ph_mem, dev->ph_mem + 4096);
+			kfree(dev);
+			dev_pcbit[board] = NULL;
+			return -EACCES;
+		} else {
+			request_mem_region(dev->ph_mem, 4096, "PCBIT mem");
+		}
+		dev->sh_mem = (unsigned char*)ioremap(dev->ph_mem, 4096);
+	}
+	else 
 	{
 		printk("memory address invalid");
 		kfree(dev);
@@ -100,6 +112,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev->b1 = kmalloc(sizeof(struct pcbit_chan), GFP_KERNEL);
 	if (!dev->b1) {
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		return -ENOMEM;
 	}
@@ -108,6 +122,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	if (!dev->b2) {
 		printk("pcbit_init: couldn't malloc pcbit_chan struct\n");
 		kfree(dev->b1);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		return -ENOMEM;
 	}
@@ -116,8 +132,6 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	memset(dev->b2, 0, sizeof(struct pcbit_chan));
 	dev->b2->id = 1;
 
-
-	dev->qdelivery.next = NULL;
 	dev->qdelivery.sync = 0;
 	dev->qdelivery.routine = pcbit_deliver;
 	dev->qdelivery.data = dev;
@@ -130,6 +144,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	{
 		kfree(dev->b1);
 		kfree(dev->b2);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
 		return -EIO;
@@ -142,7 +158,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	dev->send_seq = 0;
 	dev->unack_seq = 0;
 
-	dev->hl_hdrlen = 10;
+	dev->hl_hdrlen = 16;
 
 	dev_if = kmalloc(sizeof(isdn_if), GFP_KERNEL);
 
@@ -150,6 +166,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		free_irq(irq, dev);
 		kfree(dev->b1);
 		kfree(dev->b2);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
 		return -EIO;
@@ -164,8 +182,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 			    ISDN_FEATURE_L2_HDLC | ISDN_FEATURE_L2_TRANS );
 
 	dev_if->writebuf_skb = pcbit_xmit;
-	dev_if->writebuf  = NULL;
-	dev_if->hl_hdrlen = 10;
+	dev_if->hl_hdrlen = 16;
 
 	dev_if->maxbufsize = MAXBUFSIZE;
 	dev_if->command  = pcbit_command;
@@ -180,6 +197,8 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 		free_irq(irq, dev);
 		kfree(dev->b1);
 		kfree(dev->b2);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 		dev_pcbit[board] = NULL;
 		return -EIO;
@@ -216,6 +235,8 @@ void pcbit_terminate(int board)
 			del_timer(&dev->b2->fsm_timer);
 		kfree(dev->b1);
 		kfree(dev->b2);
+		iounmap((unsigned char*)dev->sh_mem);
+		release_mem_region(dev->ph_mem, 4096);
 		kfree(dev);
 	}
 }
@@ -330,7 +351,7 @@ static void pcbit_block_timer(unsigned long data)
 }
 #endif
 
-int pcbit_xmit(int driver, int chnum, struct sk_buff *skb)
+int pcbit_xmit(int driver, int chnum, int ack, struct sk_buff *skb)
 {
 	ushort hdrlen;
 	int refnum, len;
@@ -389,7 +410,6 @@ int pcbit_xmit(int driver, int chnum, struct sk_buff *skb)
 	return len;
 }
 
-
 int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel)
 {
 	struct pcbit_dev * dev;
@@ -410,35 +430,39 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 	switch(dev->l2_state) {
 	case L2_LWMODE:
 		/* check (size <= rdp_size); write buf into board */
-		if (len > BANK4 + 1)
+		if (len < 0 || len > BANK4 + 1)
 		{
 			printk("pcbit_writecmd: invalid length %d\n", len);
-			return -EFAULT;
+			return -EINVAL;
 		}
 
 		if (user)
 		{
-			u_char cbuf[1024];
+			u_char *cbuf = kmalloc(len, GFP_KERNEL);
+			if (!cbuf)
+				return -ENOMEM;
 
-			copy_from_user(cbuf, buf, len);
-			for (i=0; i<len; i++)
-				writeb(cbuf[i], dev->sh_mem + i);
+			if (copy_from_user(cbuf, buf, len)) {
+				kfree(cbuf);
+				return -EFAULT;
+			}
+			memcpy_toio(dev->sh_mem, cbuf, len);
+			kfree(cbuf);
 		}
 		else
 			memcpy_toio(dev->sh_mem, buf, len);
 		return len;
-		break;
 	case L2_FWMODE:
 		/* this is the hard part */
 		/* dumb board */
-		if (len < 0)
-			return -EINVAL;
-
 		if (user) {		
 			/* get it into kernel space */
 			if ((ptr = kmalloc(len, GFP_KERNEL))==NULL)
 				return -ENOMEM;
-			copy_from_user(ptr, buf, len);
+			if (copy_from_user(ptr, buf, len)) {
+				kfree(ptr);
+				return -EFAULT;
+			}
 			loadbuf = ptr;
 		}
 		else
@@ -470,12 +494,9 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 			kfree(ptr);
 
 		return errstat ? errstat : len;
-
-		break;
 	default:
 		return -EBUSY;
 	}
-	return 0;
 }
 
 /*
@@ -493,9 +514,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 	struct callb_data cbdata;
 	int complete, err;
 	isdn_ctrl ictl;
-#ifdef DEBUG
-	struct msg_fmt * fmsg;
-#endif
 
 	switch(msg) {
 
@@ -591,20 +609,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 		       dev->b1->s_refnum, 
 		       dev->b2->s_refnum);
 #endif
-#if 0	
-		if (dev->b1->s_refnum == refnum)
-			chan = dev->b1;
-		else { 
-		   
-			if (dev->b2->s_refnum == refnum)
-				chan = dev->b2;
-			else {
-				chan = NULL;
-				printk(KERN_WARNING "Connection Confirm - refnum doesn't match chan\n");
-				break;
-			}
-		}
-#else
 		/* We just try to find a channel in the right state */
 
 		if (dev->b1->fsm_state == ST_CALL_INIT)
@@ -618,7 +622,6 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 				break;
 			}
 		}
-#endif
 		if (capi_decode_conn_conf(chan, skb, &complete)) {
 			printk(KERN_DEBUG "conn_conf indicates error\n");
 			pcbit_fsm_event(dev, chan, EV_ERROR, NULL);
@@ -724,16 +727,11 @@ void pcbit_l3_receive(struct pcbit_dev * dev, ulong msg,
 	default:
 		printk(KERN_DEBUG "pcbit_l3_receive: unknown message %08lx\n",
 		       msg);
-		fmsg = (struct msg_fmt *) &msg;
-		printk(KERN_DEBUG "cmd=%02x sub=%02x\n", 
-		       fmsg->cmd, fmsg->scmd);
 		break;
 #endif
 	}
 
-	SET_SKB_FREE(skb);
-
-	kfree_skb(skb, FREE_READ);
+	kfree_skb(skb);
 
 }
 

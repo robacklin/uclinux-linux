@@ -8,39 +8,30 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@rt-control.com>
+# Copyright (c) 2000,2001  Lineo, Inc. <jeff@uClinux.org> 
+# Copyright (c) 1998,1999  D. Jeff Dionne <jeff@uclinux.org>
 # Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
 # Copyright (C) 1994 by Hamish Macdonald
 #
 
-ifndef CROSS_COMPILE
-CROSS_COMPILE = m68k-coff-
-endif
+GCC_DIR = $(shell $(CC) -print-search-dirs | grep install: | sed 's/install://')
 
-LIBGCC = `$(CC) -v 2>&1 | grep specs | sed -e "s/Reading specs from //" | sed -e s/specs/m68000\\\/libgcc.a/`
+INCGCC = $(GCC_DIR)/include
+LIBGCC = $(GCC_DIR)/m68000/libgcc.a
 
-CFLAGS := $(CFLAGS) -pipe -DNO_MM -DNO_FPU -m68000 -DMAGIC_ROM_PTR -DNO_FORGET -DUTS_SYSNAME='"uClinux"'
-AFLAGS := $(AFLAGS) -pipe -DNO_MM -DNO_FPU -m68000 -DMAGIC_ROM_PTR -DUTS_SYSNAME='"uClinux"'  -Wa,--bitwise-or
-
-ifeq ($(CONFIG_KERNEL_ELF),y)
-  CFLAGS += -D__ELF__ 
-  AFLAGS += -D__ELF__ 
-else
-  CFLAGS += -D__COFF__ 
-  AFLAGS += -D__COFF__ 
-endif
+CFLAGS := -fno-builtin -DNO_CACHE $(CFLAGS) -pipe -DNO_MM -DNO_FPU -DNO_CACHE -m68000 -D__ELF__ -DMAGIC_ROM_PTR -DNO_FORGET -DUTS_SYSNAME=\"uClinux\" -D__linux__
+AFLAGS := $(AFLAGS) -pipe -DNO_MM -DNO_FPU -DNO_CACHE -m68000 -D__ELF__ -DMAGIC_ROM_PTR -DUTS_SYSNAME=\"uClinux\" -Wa,--bitwise-or
 
 LINKFLAGS = -T arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/$(MODEL).ld
 
 HEAD := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/crt0_$(MODEL).o
 
-INIT_B := arch/$(ARCH)/platform/$(PLATFORM)/$(BOARD)/init_$(MODEL).b
-STOB   := arch/$(ARCH)/platform/$(PLATFORM)/tools/stob
-
 SUBDIRS := arch/$(ARCH)/kernel arch/$(ARCH)/mm arch/$(ARCH)/lib \
            arch/$(ARCH)/platform/$(PLATFORM) $(SUBDIRS)
-ARCHIVES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o \
-            arch/$(ARCH)/platform/$(PLATFORM)/platform.o $(ARCHIVES)
+
+CORE_FILES := arch/$(ARCH)/kernel/kernel.o arch/$(ARCH)/mm/mm.o \
+              arch/$(ARCH)/platform/$(PLATFORM)/platform.o $(CORE_FILES)
+
 LIBS += arch/$(ARCH)/lib/lib.a $(LIBGCC)
 
 ifdef CONFIG_FRAMEBUFFER
@@ -51,11 +42,8 @@ endif
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
 romfs.s19: romfs.img arch/$(ARCH)/empty.o
-	$(CROSS_COMPILE)objcopy -v -R .text -R .data -R .bss --add-section=.fs=romfs.img --adjust-section-vma=.fs=$(ROMFS_LOAD_ADDR) arch/$(ARCH)/empty.o romfs.s19
+	$(CROSS_COMPILE)objcopy -v -R .text -R .data -R .bss --add-section=.fs=romfs.img --adjust-section-vma=.fs=0xa0000 arch/$(ARCH)/empty.o romfs.s19
 	$(CROSS_COMPILE)objcopy -O srec romfs.s19
-
-romfs.b: romfs.s19
-	$(STOB) romfs.s19 > romfs.b
 
 linux.data: linux
 	$(CROSS_COMPILE)objcopy -O binary --remove-section=.romvec --remove-section=.text --remove-section=.ramvec --remove-section=.bss --remove-section=.eram linux linux.data
@@ -73,30 +61,12 @@ linux.bin: linux.text linux.data romfs.img
 		cat linux.text linux.data > linux.bin;\
 	fi
 
-flash.s19: linux.bin arch/$(ARCH)/empty.o
-	$(CROSS_COMPILE)objcopy -v -R .text -R .data -R .bss --add-section=.fs=linux.bin --adjust-section-vma=.fs=$(FLASH_LOAD_ADDR) arch/$(ARCH)/empty.o flash.s19
-	$(CROSS_COMPILE)objcopy -O srec flash.s19
-
-flash.b: flash.s19
-	$(STOB) flash.s19 > flash.b
-
 linux.trg linux.rom: linux.bin
 	perl arch/$(ARCH)/platform/$(PLATFORM)/tools/fixup.pl
 
-linux.s19: linux
-	$(CROSS_COMPILE)objcopy -O srec --adjust-section-vma=.data=0x`$(CROSS_COMPILE)nm linux | awk '/__data_rom_start/ {printf $$1}'` linux linux.s19
-
-	$(CROSS_COMPILE)objcopy -O srec linux.s19
-	
-linux.b: linux.s19
-	if [ -f $(INIT_B) ]; then\
-		cp $(INIT_B) linux.b;\
-	fi
-	$(STOB) linux.s19 >> linux.b
-
 archclean:
 	@$(MAKEBOOT) clean
+	rm -f arch/$(ARCH)/platform/$(PLATFORM)/m68k_defs.h
 	rm -f linux.text linux.data linux.bin linux.rom linux.trg
-	rm -f linux.s19 romfs.s19 flash.s19
+	rm -f linux.s19 romfs.s19
 	rm -f linux.img romdisk.img
-	rm -f linux.b romfs.b flash.b

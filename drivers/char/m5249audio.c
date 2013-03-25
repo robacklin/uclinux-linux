@@ -10,15 +10,18 @@
 
 #include <linux/module.h>
 #include <linux/config.h>
+#include <linux/version.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/major.h>
 #include <linux/delay.h>
 #include <linux/soundcard.h>
+#include <asm/uaccess.h>
 #include <asm/param.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
@@ -88,17 +91,6 @@ volatile unsigned int	m5249audio_append;
  *	Quick and easy access to the SIM registers.
  */
 #define	simp(r)	((volatile unsigned char *) (MCF_MBAR + (r)))
-
-/****************************************************************************/
-
-/*
- *	Some handly macros (actually make forward porting easy).
- */
-#define GET_USER(x,y)		((x) = get_fs_long(y))
-#define PUT_USER(x,y)		put_fs_long(x, y)
-#define set_current_state(x)	(current->state = (x))
-#define signal_pending(x)	((x)->signal & ~(x)->blocked)
-#define schedule_timeout(x)	({current->timeout = jiffies+(x); schedule();})
 
 /****************************************************************************/
 
@@ -185,44 +177,44 @@ extern void m5249audio_isr(int irq, void *dev_id, struct pt_regs *regs);
 
 void m5249audio_irqwrapper(void)
 {
-	__asm__("
-		.global	m5249audio_isr
-		m5249audio_isr:
-			sub.l	#20, %sp
-			movem.l	%d0-%d2/%a0-%a1, %sp@	/* Save registers */
-
-			move.l	m5249audio_buf, %a0	/* Loop setup */
-			move.l	m5249audio_dmastart, %d0
-			move.l	#0x80000074, %a1
-			moveq	#5, %d2
-
-		m5249audio_isr_writefifo:
-			move.l	%a0@(%d0), %d1		/* Get next word */
-			move.l	%d1, %a1@		/* Write word to FIFO */
-			add.l	#4, %d0			/* Update buffer */
-			cmp.l	#(256*1024-4), %d0
-			blt	m5249audio_isr_nowrap
-			clr.l	%d0			/* Wrap buffer */
-		m5249audio_isr_nowrap:
-			cmp.l	m5249audio_append, %d0
-			beq	m5249audio_isr_txdisable
-			sub.l	#1, %d2			/* Loop counter */
-			bne	m5249audio_isr_writefifo
-
-		m5249audio_isr_done:
-			move.l	%d0, m5249audio_dmastart
-			movem.l	%sp@, %d0-%d2/%a0-%a1	/* Restore registers */
-			add.l	#20, %sp
-			rte
-
-		m5249audio_isr_txdisable:
-			move.l	#0x80000094, %a0	/* Disable interrupt */
-			move.l	%a0@, %d1
-			and.l	#0xfffffff7, %d1
-			move.l	%d1, %a0@
-			clr.l	m5249audio_txbusy
-			bra	m5249audio_isr_done
-	");
+	__asm__(
+"		.global	m5249audio_isr\n"
+"		m5249audio_isr:\n"
+"			sub.l	#20, %sp\n"
+"			movem.l	%d0-%d2/%a0-%a1, %sp@	/* Save registers */\n"
+"\n"
+"			move.l	m5249audio_buf, %a0	/* Loop setup */\n"
+"			move.l	m5249audio_dmastart, %d0\n"
+"			move.l	#0x80000074, %a1\n"
+"			moveq	#5, %d2\n"
+"\n"
+"		m5249audio_isr_writefifo:\n"
+"			move.l	%a0@(%d0), %d1		/* Get next word */\n"
+"			move.l	%d1, %a1@		/* Write word to FIFO */\n"
+"			add.l	#4, %d0			/* Update buffer */\n"
+"			cmp.l	#(256*1024-4), %d0\n"
+"			blt	m5249audio_isr_nowrap\n"
+"			clr.l	%d0			/* Wrap buffer */\n"
+"		m5249audio_isr_nowrap:\n"
+"			cmp.l	m5249audio_append, %d0\n"
+"			beq	m5249audio_isr_txdisable\n"
+"			sub.l	#1, %d2			/* Loop counter */\n"
+"			bne	m5249audio_isr_writefifo\n"
+"\n"
+"		m5249audio_isr_done:\n"
+"			move.l	%d0, m5249audio_dmastart\n"
+"			movem.l	%sp@, %d0-%d2/%a0-%a1	/* Restore registers */\n"
+"			add.l	#20, %sp\n"
+"			rte\n"
+"\n"
+"		m5249audio_isr_txdisable:\n"
+"			move.l	#0x80000094, %a0	/* Disable interrupt */\n"
+"			move.l	%a0@, %d1\n"
+"			and.l	#0xfffffff7, %d1\n"
+"			move.l	%d1, %a0@\n"
+"			clr.l	m5249audio_txbusy\n"
+"			bra	m5249audio_isr_done\n"
+	);
 }
 
 #else
@@ -370,7 +362,7 @@ int m5249audio_open(struct inode *inode, struct file *filp)
 
 /****************************************************************************/
 
-void m5249audio_close(struct inode *inode, struct file *filp)
+int m5249audio_close(struct inode *inode, struct file *filp)
 {
 #if DEBUG
 	printk("m5249audio_close()\n");
@@ -393,11 +385,12 @@ void m5249audio_close(struct inode *inode, struct file *filp)
 	m5249audio_appstart = 0;
 	m5249audio_append = 0;
 	m5249audio_isopen = 0;
+	return(0);
 }
 
 /****************************************************************************/
 
-int m5249audio_write(struct inode *inode, struct file *filp, const char *buf, int count)
+ssize_t m5249audio_write(struct file *filp, const char *buf, size_t count, loff_t *ppos)
 {
 	unsigned long	*dp, *buflp;
 	unsigned short	*bufwp;
@@ -510,7 +503,7 @@ int m5249audio_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, u
 	case SNDCTL_DSP_SPEED:
 		rc = verify_area(VERIFY_READ, (void *) arg, sizeof(val));
 		if (rc == 0) {
-			GET_USER(val, (unsigned long *) arg);
+			get_user(val, (unsigned long *) arg);
 			m5249audio_txdrain();
 			m5249audio_speed = val;
 			/* FIXME: adjust replay speed?? */
@@ -520,25 +513,16 @@ int m5249audio_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, u
 	case SNDCTL_DSP_SAMPLESIZE:
 		rc = verify_area(VERIFY_READ, (void *) arg, sizeof(val));
 		if (rc == 0) {
-			GET_USER(val, (unsigned long *) arg);
+			get_user(val, (unsigned long *) arg);
 			m5249audio_txdrain();
 			m5249audio_setsamplesize(val);
-		}
-		break;
-
-	case SNDCTL_DSP_CHANNELS:
-		rc = verify_area(VERIFY_READ, (void *) arg, sizeof(val));
-		if (rc == 0) {
-			GET_USER(val, (unsigned long *) arg);
-			m5249audio_txdrain();
-			m5249audio_stereo = ((val == 1) ? 0 : 1);
 		}
 		break;
 
 	case SNDCTL_DSP_STEREO:
 		rc = verify_area(VERIFY_READ, (void *) arg, sizeof(val));
 		if (rc == 0) {
-			GET_USER(val, (unsigned long *) arg);
+			get_user(val, (unsigned long *) arg);
 			m5249audio_txdrain();
 			m5249audio_stereo = val;
 		}
@@ -547,7 +531,7 @@ int m5249audio_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, u
 	case SNDCTL_DSP_GETBLKSIZE:
 		rc = verify_area(VERIFY_WRITE, (void *) arg, sizeof(long));
 		if (rc == 0)
-			PUT_USER(DMASIZE, (long *) arg);
+			put_user(DMASIZE, (long *) arg);
 		break;
 
 	case SNDCTL_DSP_SYNC:
@@ -596,7 +580,7 @@ void m5249audio_getallintrs(void)
 
 /****************************************************************************/
 
-void m5249audio_init(void)
+static int __init m5249audio_init(void)
 {
 	printk("M5249AUDIO: (C) Copyright 2002, "
 		"Greg Ungerer (gerg@snapgear.com)\n");
@@ -604,7 +588,7 @@ void m5249audio_init(void)
 	if (register_chrdev(SOUND_MAJOR, "sound", &m5249audio_fops) < 0) {
 		printk(KERN_WARNING "SOUND: failed to register major %d\n",
 			SOUND_MAJOR);
-		return;
+		return(0);
 	}
 
 	m5249audio_buf = kmalloc(BUFSIZE, GFP_KERNEL);
@@ -684,6 +668,10 @@ void m5249audio_init(void)
 
 	/* Dummy write to start outputing */
 	*reg32p(MCFA_PDOR3) = 0;
+
+	return(0);
 }
+
+module_init(m5249audio_init);
 
 /****************************************************************************/

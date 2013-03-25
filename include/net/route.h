@@ -13,15 +13,8 @@
  *		Alan Cox	:	Reformatted. Added ip_rt_local()
  *		Alan Cox	:	Support for TCP parameters.
  *		Alexey Kuznetsov:	Major changes for new routing code.
- *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
- *		Wolfgang Walter,
- *		Daniel Ryde,
- *		Ingo Molinar	:	fixed bug in ip_rt_put introduced
- *					by SO_BINDTODEVICE support causing
- *					a memory leak
- *
- *	FIXME:
- *		Make atomic ops more generic and hide them in asm/...
+ *		Mike McLagan    :	Routing by source
+ *		Robert Olsson   :	Added rt_cache statistics
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -32,158 +25,166 @@
 #define _ROUTE_H
 
 #include <linux/config.h>
-
-/*
- * 0 - no debugging messages
- * 1 - rare events and bugs situations (default)
- * 2 - trace mode.
- */
-#define RT_CACHE_DEBUG		0
-
-#define RT_HASH_DIVISOR	    	256
-#define RT_CACHE_SIZE_MAX    	256
-
-#define RTZ_HASH_DIVISOR	256
-
-#if RT_CACHE_DEBUG >= 2
-#define RTZ_HASHING_LIMIT 0
-#else
-#define RTZ_HASHING_LIMIT 16
-#endif
-
-/*
- * Maximal time to live for unused entry.
- */
-#define RT_CACHE_TIMEOUT		(HZ*300)
-
-/*
- * Prevents LRU trashing, entries considered equivalent,
- * if the difference between last use times is less then this number.
- */
-#define RT_CACHE_BUBBLE_THRESHOLD	(HZ*5)
-
+#include <net/dst.h>
+#include <net/inetpeer.h>
+#include <linux/in_route.h>
+#include <linux/rtnetlink.h>
 #include <linux/route.h>
+#include <linux/ip.h>
+#include <linux/cache.h>
 
-#ifdef __KERNEL__
-#define RTF_LOCAL 0x8000
+#ifndef __KERNEL__
+#warning This file is not supposed to be used outside of kernel.
 #endif
 
-struct rtable 
+#define RTO_ONLINK	0x01
+
+#define RTO_CONN	0
+/* RTO_CONN is not used (being alias for 0), but preserved not to break
+ * some modules referring to it. */
+
+#define RT_CONN_FLAGS(sk)   (RT_TOS(sk->protinfo.af_inet.tos) | sk->localroute)
+
+struct rt_key
 {
-	struct rtable		*rt_next;
-	__u32			rt_dst;
-	__u32			rt_src;
-	__u32			rt_gateway;
-	atomic_t		rt_refcnt;
-	atomic_t		rt_use;
-	unsigned long		rt_window;
-	atomic_t		rt_lastuse;
-	struct hh_cache		*rt_hh;
-	struct device		*rt_dev;
-	unsigned short		rt_flags;
-	unsigned short		rt_mtu;
-	unsigned short		rt_irtt;
-	unsigned char		rt_tos;
+	__u32			dst;
+	__u32			src;
+	int			iif;
+	int			oif;
+#ifdef CONFIG_IP_ROUTE_FWMARK
+	__u32			fwmark;
+#endif
+	__u8			tos;
+	__u8			scope;
 };
 
-extern void		ip_rt_flush(struct device *dev);
-extern void		ip_rt_update(int event, struct device *dev);
-extern void		ip_rt_redirect(__u32 src, __u32 dst, __u32 gw, struct device *dev);
-extern struct rtable	*ip_rt_slow_route(__u32 daddr, int local, struct device *dev);
-extern struct device	*ip_rt_dev(__u32 addr);
-extern int		rt_get_info(char * buffer, char **start, off_t offset, int length, int dummy);
-extern int		rt_cache_get_info(char *buffer, char **start, off_t offset, int length, int dummy);
-extern int		ip_rt_ioctl(unsigned int cmd, void *arg);
-extern int		ip_rt_new(struct rtentry *rt);
-extern int		ip_rt_kill(struct rtentry *rt);
-extern void		ip_rt_check_expire(void);
+struct inet_peer;
+struct rtable
+{
+	union
+	{
+		struct dst_entry	dst;
+		struct rtable		*rt_next;
+	} u;
+
+	unsigned		rt_flags;
+	unsigned		rt_type;
+
+	__u32			rt_dst;	/* Path destination	*/
+	__u32			rt_src;	/* Path source		*/
+	int			rt_iif;
+
+	/* Info on neighbour */
+	__u32			rt_gateway;
+
+	/* Cache lookup keys */
+	struct rt_key		key;
+
+	/* Miscellaneous cached information */
+	__u32			rt_spec_dst; /* RFC1122 specific destination */
+	struct inet_peer	*peer; /* long-living peer info */
+
+#ifdef CONFIG_IP_ROUTE_NAT
+	__u32			rt_src_map;
+	__u32			rt_dst_map;
+#endif
+};
+
+struct ip_rt_acct
+{
+	__u32 	o_bytes;
+	__u32 	o_packets;
+	__u32 	i_bytes;
+	__u32 	i_packets;
+};
+
+struct rt_cache_stat 
+{
+        unsigned int in_hit;
+        unsigned int in_slow_tot;
+        unsigned int in_slow_mc;
+        unsigned int in_no_route;
+        unsigned int in_brd;
+        unsigned int in_martian_dst;
+        unsigned int in_martian_src;
+        unsigned int out_hit;
+        unsigned int out_slow_tot;
+        unsigned int out_slow_mc;
+        unsigned int gc_total;
+        unsigned int gc_ignored;
+        unsigned int gc_goal_miss;
+        unsigned int gc_dst_overflow;
+	unsigned int in_hlist_search;
+	unsigned int out_hlist_search;
+} ____cacheline_aligned_in_smp;
+
+extern struct ip_rt_acct *ip_rt_acct;
+
+struct in_device;
+extern void		ip_rt_init(void);
+extern void		ip_rt_redirect(u32 old_gw, u32 dst, u32 new_gw,
+				       u32 src, u8 tos, struct net_device *dev);
 extern void		ip_rt_advice(struct rtable **rp, int advice);
+extern void		rt_cache_flush(int how);
+extern int		ip_route_output_key(struct rtable **, const struct rt_key *key);
+extern int		ip_route_input(struct sk_buff*, u32 dst, u32 src, u8 tos, struct net_device *devin);
+extern unsigned short	ip_rt_frag_needed(struct iphdr *iph, unsigned short new_mtu);
+extern void		ip_rt_update_pmtu(struct dst_entry *dst, unsigned mtu);
+extern void		ip_rt_send_redirect(struct sk_buff *skb);
 
-extern void		ip_rt_run_bh(void);
-extern atomic_t	    	ip_rt_lock;
-extern unsigned		ip_rt_bh_mask;
-extern struct rtable 	*ip_rt_hash_table[RT_HASH_DIVISOR];
-extern void	 	rt_free(struct rtable * rt);
+extern unsigned		inet_addr_type(u32 addr);
+extern void		ip_rt_multicast_event(struct in_device *);
+extern int		ip_rt_ioctl(unsigned int cmd, void *arg);
+extern void		ip_rt_get_source(u8 *src, struct rtable *rt);
+extern int		ip_rt_dump(struct sk_buff *skb,  struct netlink_callback *cb);
 
-extern __inline__ void ip_rt_fast_lock(void)
+/* Deprecated: use ip_route_output_key directly */
+static inline int ip_route_output(struct rtable **rp,
+				      u32 daddr, u32 saddr, u32 tos, int oif)
 {
-	atomic_inc(&ip_rt_lock);
-}
+	struct rt_key key = { dst:daddr, src:saddr, oif:oif, tos:tos };
 
-extern __inline__ void ip_rt_fast_unlock(void)
-{
-	atomic_dec(&ip_rt_lock);
-}
-
-extern __inline__ void ip_rt_unlock(void)
-{
-	if (atomic_dec_and_test(&ip_rt_lock) && ip_rt_bh_mask)
-		ip_rt_run_bh();
-}
-
-extern __inline__ unsigned ip_rt_hash_code(__u32 addr)
-{
-	unsigned tmp = addr + (addr>>16);
-	return (tmp + (tmp>>8)) & 0xFF;
+	return ip_route_output_key(rp, &key);
 }
 
 
-extern __inline__ void ip_rt_put(struct rtable * rt)
-#ifndef MODULE
+static inline void ip_rt_put(struct rtable * rt)
 {
-	/* If this rtable entry is not in the cache, we'd better free
-	 * it once the refcnt goes to zero, because nobody else will.
-	 */
-	if (rt&&atomic_dec_and_test(&rt->rt_refcnt)&&(rt->rt_flags&RTF_NOTCACHED))
-		rt_free(rt);
+	if (rt)
+		dst_release(&rt->u.dst);
 }
-#else
-;
-#endif
 
-#ifdef CONFIG_KERNELD
-extern struct rtable * ip_rt_route(__u32 daddr, int local, struct device *dev);
-#else
-extern __inline__ struct rtable * ip_rt_route(__u32 daddr, int local, struct device *dev)
-#ifndef MODULE
+#define IPTOS_RT_MASK	(IPTOS_TOS_MASK & ~3)
+
+extern __u8 ip_tos2prio[16];
+
+static inline char rt_tos2priority(u8 tos)
 {
-	struct rtable * rth;
-
-	ip_rt_fast_lock();
-
-	for (rth=ip_rt_hash_table[ip_rt_hash_code(daddr)^local]; rth; rth=rth->rt_next)
-	{
-		/* If an interface is specified, make sure this route points to it. */
-		if ( (rth->rt_dst == daddr) && ((dev==NULL) || (dev==rth->rt_dev)) )
-		{
-			rth->rt_lastuse = jiffies;
-			atomic_inc(&rth->rt_use);
-			atomic_inc(&rth->rt_refcnt);
-			ip_rt_unlock();
-			return rth;
-		}
-	}
-	return ip_rt_slow_route (daddr, local, dev);
+	return ip_tos2prio[IPTOS_TOS(tos)>>1];
 }
-#else
-;
-#endif
-#endif
 
-extern __inline__ struct rtable * ip_check_route(struct rtable ** rp, __u32 daddr, 
-						 int local, struct device *dev)
+static inline int ip_route_connect(struct rtable **rp, u32 dst, u32 src, u32 tos, int oif)
 {
-	struct rtable * rt = *rp;
+	int err;
+	err = ip_route_output(rp, dst, src, tos, oif);
+	if (err || (dst && src))
+		return err;
+	dst = (*rp)->rt_dst;
+	src = (*rp)->rt_src;
+	ip_rt_put(*rp);
+	*rp = NULL;
+	return ip_route_output(rp, dst, src, tos, oif);
+}
 
-	if (!rt || rt->rt_dst != daddr || !(rt->rt_flags&RTF_UP) || (dev!=NULL)
-	    || ((local==1)^((rt->rt_flags&RTF_LOCAL) != 0)))
-	{
-		ip_rt_put(rt);
-		rt = ip_rt_route(daddr, local, dev);
-		*rp = rt;
-	}
-	return rt;
-}	
+extern void rt_bind_peer(struct rtable *rt, int create);
 
+static inline struct inet_peer *rt_get_peer(struct rtable *rt)
+{
+	if (rt->peer)
+		return rt->peer;
+
+	rt_bind_peer(rt, 0);
+	return rt->peer;
+}
 
 #endif	/* _ROUTE_H */

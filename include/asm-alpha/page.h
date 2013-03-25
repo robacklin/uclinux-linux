@@ -1,6 +1,8 @@
 #ifndef _ALPHA_PAGE_H
 #define _ALPHA_PAGE_H
 
+#include <asm/pal.h>
+
 /* PAGE_SHIFT determines the page size */
 #define PAGE_SHIFT	13
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
@@ -8,7 +10,15 @@
 
 #ifdef __KERNEL__
 
+#ifndef __ASSEMBLY__
+
 #define STRICT_MM_TYPECHECKS
+
+extern void clear_page(void *page);
+#define clear_user_page(page, vaddr)	clear_page(page)
+
+extern void copy_page(void * _to, void * _from);
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -25,6 +35,7 @@ typedef struct { unsigned long pgprot; } pgprot_t;
 #define pgprot_val(x)	((x).pgprot)
 
 #define __pte(x)	((pte_t) { (x) } )
+#define __pmd(x)	((pmd_t) { (x) } )
 #define __pgd(x)	((pgd_t) { (x) } )
 #define __pgprot(x)	((pgprot_t) { (x) } )
 
@@ -46,13 +57,49 @@ typedef unsigned long pgprot_t;
 #define __pgd(x)	(x)
 #define __pgprot(x)	(x)
 
-#endif
+#endif /* STRICT_MM_TYPECHECKS */
+
+#define BUG()									\
+do {										\
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__);			\
+	__asm__ __volatile__("call_pal %0  # bugchk" : : "i" (PAL_bugchk));	\
+} while (0)
+#define PAGE_BUG(page)	BUG()
+
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
+
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
+
+#endif /* !__ASSEMBLY__ */
 
 /* to align the pointer to the (next) page boundary */
-#define PAGE_ALIGN(addr)		(((addr)+PAGE_SIZE-1)&PAGE_MASK)
+#define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-#define PAGE_OFFSET		0xFFFFFC0000000000UL
-#define MAP_NR(addr)		((((unsigned long) (addr)) - PAGE_OFFSET) >> PAGE_SHIFT)
+#ifdef USE_48_BIT_KSEG
+#define PAGE_OFFSET		0xffff800000000000
+#else
+#define PAGE_OFFSET		0xfffffc0000000000
+#endif
+
+#define __pa(x)			((unsigned long) (x) - PAGE_OFFSET)
+#define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
+#ifndef CONFIG_DISCONTIGMEM
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	(((page) - mem_map) < max_mapnr)
+#endif /* CONFIG_DISCONTIGMEM */
+
+#define VM_DATA_DEFAULT_FLAGS		(VM_READ | VM_WRITE | VM_EXEC | \
+					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

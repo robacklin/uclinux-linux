@@ -6,7 +6,7 @@
  *   Copyright Digital Equipment Corporation 1996.
  *
  *   This software may be used and distributed according to the terms of
- *   the GNU Public License, incorporated herein by reference.
+ *   the GNU General Public License, incorporated herein by reference.
  *
  * Abstract:
  *   A Linux device driver supporting the Digital Equipment Corporation
@@ -22,6 +22,8 @@
  *	 The author may be reached at:
  *
  *		Inet: stefani@lkg.dec.com
+ *		(NOTE! this address no longer works -jgarzik)
+ *
  *		Mail: Digital Equipment Corporation
  *			  550 King Street
  *			  M/S: LKG1-3/M07
@@ -44,12 +46,7 @@
  *   Adapter Probe -
  *		The driver scans for supported EISA adapters by reading the
  *		SLOT ID register for each EISA slot and making a match
- *		against the expected value.  The supported PCI adapters are
- *		discovered using successive calls to pcibios_find_device.
- *		The first time the probe routine is called, all supported
- *		devices are discovered and initialized.  The adapters aren't
- *		brought up to an operational state until the open routine is
- *		called.
+ *		against the expected value.
  *
  *   Bus-Specific Initialization -
  *		This driver currently supports both EISA and PCI controller
@@ -194,11 +191,13 @@
  *		12-Sep-96	LVS		Reset current address to factory address during
  *							device open.  Updated transmit path to post a
  *							single fragment which includes PRH->end of data.
+ *		Mar 2000	AC		Did various cleanups for 2.3.x
+ *		Jun 2000	jgarzik		PCI and resource alloc cleanups
+ *		Jul 2000	tjeerd		Much cleanup and some bug fixes
+ *		Sep 2000	tjeerd		Fix leak on unload, cosmetic code cleanup
+ *		Feb 2001			Skb allocation fixes
+ *		Feb 2001	davej		PCI enable cleanups.
  */
-
-/* Version information string - should be updated prior to each new release!!! */
-
-static const char *version = "defxx.c:v1.04 09/16/96  Lawrence V. Stefani (stefani@lkg.dec.com)\n";
 
 /* Include files */
 
@@ -210,46 +209,54 @@ static const char *version = "defxx.c:v1.04 09/16/96  Lawrence V. Stefani (stefa
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <linux/bios32.h>
 #include <linux/delay.h>
+#include <linux/init.h>
+#include <linux/netdevice.h>
 #include <asm/byteorder.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 
-#include <linux/netdevice.h>
 #include <linux/fddidevice.h>
 #include <linux/skbuff.h>
 
 #include "defxx.h"
 
-/* Define global routines */
+/* Version information string - should be updated prior to each new release!!! */
 
-int	dfx_probe(struct device *dev);
+static char version[] __devinitdata =
+	"defxx.c:v1.05e 2001/02/03  Lawrence V. Stefani and others\n";
+
+#define DYNAMIC_BUFFERS 1
+
+#define SKBUFF_RX_COPYBREAK 200
+/*
+ * NEW_SKB_SIZE = PI_RCV_DATA_K_SIZE_MAX+128 to allow 128 byte
+ * alignment for compatibility with old EISA boards.
+ */
+#define NEW_SKB_SIZE (PI_RCV_DATA_K_SIZE_MAX+128)
 
 /* Define module-wide (static) routines */
 
-static struct	device *dfx_alloc_device(struct device *dev, u16 iobase);
-
-static void		dfx_bus_init(struct device *dev);
+static void		dfx_bus_init(struct net_device *dev);
 static void		dfx_bus_config_check(DFX_board_t *bp);
 
-static int		dfx_driver_init(struct device *dev);
-static int		dfx_adap_init(DFX_board_t *bp);
+static int		dfx_driver_init(struct net_device *dev);
+static int		dfx_adap_init(DFX_board_t *bp, int get_buffers);
 
-static int		dfx_open(struct device *dev);
-static int		dfx_close(struct device *dev);
+static int		dfx_open(struct net_device *dev);
+static int		dfx_close(struct net_device *dev);
 
 static void		dfx_int_pr_halt_id(DFX_board_t *bp);
 static void		dfx_int_type_0_process(DFX_board_t *bp);
-static void		dfx_int_common(DFX_board_t *bp);
+static void		dfx_int_common(struct net_device *dev);
 static void		dfx_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
-static struct	enet_statistics *dfx_ctl_get_stats(struct device *dev);
-static void		dfx_ctl_set_multicast_list(struct device *dev);
-static int		dfx_ctl_set_mac_address(struct device *dev, void *addr);
+static struct		net_device_stats *dfx_ctl_get_stats(struct net_device *dev);
+static void		dfx_ctl_set_multicast_list(struct net_device *dev);
+static int		dfx_ctl_set_mac_address(struct net_device *dev, void *addr);
 static int		dfx_ctl_update_cam(DFX_board_t *bp);
 static int		dfx_ctl_update_filters(DFX_board_t *bp);
 
@@ -259,17 +266,17 @@ static void		dfx_hw_adap_reset(DFX_board_t *bp, PI_UINT32 type);
 static int		dfx_hw_adap_state_rd(DFX_board_t *bp);
 static int		dfx_hw_dma_uninit(DFX_board_t *bp, PI_UINT32 type);
 
-static void		dfx_rcv_init(DFX_board_t *bp);
+static int		dfx_rcv_init(DFX_board_t *bp, int get_buffers);
 static void		dfx_rcv_queue_process(DFX_board_t *bp);
+static void		dfx_rcv_flush(DFX_board_t *bp);
 
-static int		dfx_xmt_queue_pkt(struct sk_buff *skb, struct device *dev);
-static void		dfx_xmt_done(DFX_board_t *bp);
+static int		dfx_xmt_queue_pkt(struct sk_buff *skb, struct net_device *dev);
+static int		dfx_xmt_done(DFX_board_t *bp);
 static void		dfx_xmt_flush(DFX_board_t *bp);
 
 /* Define module-wide (static) variables */
 
-static int		num_boards = 0;			/* total number of adapters configured */
-static int		already_probed = 0;		/* have we already entered dfx_probe? */
+static struct net_device *root_dfx_eisa_dev;
 
 
 /*
@@ -335,7 +342,6 @@ static inline void dfx_port_write_byte(
 	u16 port = bp->base_addr + offset;
 
 	outb(data, port);
-	return;
 	}
 
 static inline void dfx_port_read_byte(
@@ -348,7 +354,6 @@ static inline void dfx_port_read_byte(
 	u16 port = bp->base_addr + offset;
 
 	*data = inb(port);
-	return;
 	}
 
 static inline void dfx_port_write_long(
@@ -361,7 +366,6 @@ static inline void dfx_port_write_long(
 	u16 port = bp->base_addr + offset;
 
 	outl(data, port);
-	return;
 	}
 
 static inline void dfx_port_read_long(
@@ -374,331 +378,150 @@ static inline void dfx_port_read_long(
 	u16 port = bp->base_addr + offset;
 
 	*data = inl(port);
-	return;
 	}
 
 
 /*
  * =============
- * = dfx_probe =
+ * = dfx_init_one_pci_or_eisa =
  * =============
  *   
  * Overview:
- *   Probes for supported FDDI EISA and PCI controllers
+ *   Initializes a supported FDDI EISA or PCI controller
  *  
  * Returns:
  *   Condition code
  *       
  * Arguments:
- *   dev - pointer to device information
+ *   pdev - pointer to pci device information (NULL for EISA)
+ *   ioaddr - pointer to port (NULL for PCI)
  *
  * Functional Description:
- *   This routine is called by the OS for each FDDI device name (fddi0,
- *   fddi1,...,fddi6, fddi7) specified in drivers/net/Space.c.  Since
- *   the DEFXX.C driver currently does not support being loaded as a
- *   module, dfx_probe() will initialize all devices the first time
- *   it is called.
  *
- *   Let's say that dfx_probe() is getting called to initialize fddi0.
- *   Furthermore, let's say there are three supported controllers in the
- *   system.  Before dfx_probe() leaves, devices fddi0, fddi1, and fddi2
- *   will be initialized and a global flag will be set to indicate that
- *   dfx_probe() has already been called.
- *
- *   However...the OS doesn't know that we've already initialized
- *   devices fddi1 and fddi2 so dfx_probe() gets called again and again
- *   until it reaches the end of the device list for FDDI (presently,
- *   fddi7).  It's important that the driver "pretend" to probe for
- *   devices fddi1 and fddi2 and return success.  Devices fddi3
- *   through fddi7 will return failure since they weren't initialized.
- *
- *   This algorithm seems to work for the time being.  As other FDDI
- *   drivers are written for Linux, a more generic approach (perhaps
- *   similar to the Ethernet card approach) may need to be implemented.
- *   
  * Return Codes:
  *   0		 - This device (fddi0, fddi1, etc) configured successfully
- *   -ENODEV - No devices present, or no Digital FDDI EISA or PCI device
- *			   present for this device name
+ *   -EBUSY      - Failed to get resources, or dfx_driver_init failed.
  *
  * Assumptions:
- *   For the time being, DEFXX.C is the only FDDI driver under Linux.
- *   As this assumption changes, this routine will likely be impacted.
- *   Also, it is assumed that no more than eight (8) FDDI controllers
- *   will be configured in the system (fddi0 through fddi7).  This
- *   routine will not allocate new device structures.  If more than
- *   eight FDDI controllers need to be configured, drivers/net/Space.c
- *   should be updated as well as the DFX_MAX_NUM_BOARDS constant in
- *   DEFXX.H.
+ *   It compiles so it should work :-( (PCI cards do :-)
  *
  * Side Effects:
  *   Device structures for FDDI adapters (fddi0, fddi1, etc) are
  *   initialized and the board resources are read and stored in
  *   the device structure.
  */
+static int __devinit dfx_init_one_pci_or_eisa(struct pci_dev *pdev, long ioaddr)
+{
+	struct net_device *dev;
+	DFX_board_t	  *bp;			/* board pointer */
+	int err;
 
-int dfx_probe(
-	struct device *dev
-	)
+#ifndef MODULE
+	static int version_disp;
 
+	if (!version_disp)	/* display version info if adapter is found */
 	{
-	int				i;				/* used in for loops */
-	int				version_disp;	/* was version info string already displayed? */
-	int				port_len;		/* length of port address range (in bytes) */
-	u8				pci_bus;		/* PCI bus number (0-255) */
-	u8				pci_dev_fun;	/* PCI device and function numbers (0-255) */
-	u16				port;			/* temporary I/O (port) address */
-	u16				command;		/* PCI Configuration space Command register val */
-	u32				slot_id;		/* EISA hardware (slot) ID read from adapter */
-	DFX_board_t		*bp;			/* board pointer */
-
-	DBG_printk("In dfx_probe...\n");
+		version_disp = 1;	/* set display flag to TRUE so that */
+		printk(version);	/* we only display this string ONCE */
+	}
+#endif
 
 	/*
-	 * Verify whether we're going through dfx_probe() again
-	 *
-	 * If so, see if we're going through for a subsequent fddi device that
-	 * we've already initialized.  If we are, return success (0).  If not,
-	 * return failure (-ENODEV).
+	 * init_fddidev() allocates a device structure with private data, clears the device structure and private data,
+	 * and  calls fddi_setup() and register_netdev(). Not much left to do for us here.
 	 */
+	dev = init_fddidev(NULL, sizeof(*bp));
+	if (!dev) {
+		printk (KERN_ERR "defxx: unable to allocate fddidev, aborting\n");
+		return -ENOMEM;
+	}
 
-	version_disp = 0;				/* default to version string not displayed */
-	if (already_probed)
-		{
-		DBG_printk("Already entered dfx_probe\n");
-		if (dev != NULL)
-			if ((strncmp(dev->name, "fddi", 4) == 0) && (dev->base_addr != 0))
-				{
-				DBG_printk("In dfx_probe for fddi adapter (%s) we've already initialized it, so return success\n", dev->name);
-				return(0);
-				}
-		return(-ENODEV);
-		}
-	already_probed = 1;			/* set global flag */
+	/* Enable PCI device. */
+	if (pdev != NULL) {
+		err = pci_enable_device (pdev);
+		if (err) goto err_out;
+		ioaddr = pci_resource_start (pdev, 1);
+	}
+
+	SET_MODULE_OWNER(dev);
+
+	bp = dev->priv;
+
+	if (!request_region (ioaddr, pdev ? PFI_K_CSR_IO_LEN : PI_ESIC_K_CSR_IO_LEN, dev->name)) {
+		printk (KERN_ERR "%s: Cannot reserve I/O resource 0x%x @ 0x%lx, aborting\n",
+			dev->name, PFI_K_CSR_IO_LEN, ioaddr);
+		err = -EBUSY;
+		goto err_out;
+	}
+
+	/* Initialize new device structure */
+
+	dev->base_addr			= ioaddr; /* save port (I/O) base address */
+
+	dev->get_stats			= dfx_ctl_get_stats;
+	dev->open			= dfx_open;
+	dev->stop			= dfx_close;
+	dev->hard_start_xmit		= dfx_xmt_queue_pkt;
+	dev->set_multicast_list		= dfx_ctl_set_multicast_list;
+	dev->set_mac_address		= dfx_ctl_set_mac_address;
+
+	if (pdev == NULL) {
+		/* EISA board */
+		bp->bus_type = DFX_BUS_TYPE_EISA;
+		bp->next = root_dfx_eisa_dev;
+		root_dfx_eisa_dev = dev;
+	} else {
+		/* PCI board */
+		bp->bus_type = DFX_BUS_TYPE_PCI;
+		bp->pci_dev = pdev;
+		pci_set_drvdata (pdev, dev);
+		pci_set_master (pdev);
+	}
+
+	if (dfx_driver_init(dev) != DFX_K_SUCCESS) {
+		err = -ENODEV;
+		goto err_out_region;
+	}
+
+	return 0;
+
+err_out_region:
+	release_region(ioaddr, pdev ? PFI_K_CSR_IO_LEN : PI_ESIC_K_CSR_IO_LEN);
+err_out:
+	unregister_netdev(dev);
+	kfree(dev);
+	return err;
+}
+
+static int __devinit dfx_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
+{
+	return dfx_init_one_pci_or_eisa(pdev, 0);
+}
+
+static int __init dfx_eisa_init(void)
+{
+	int rc = -ENODEV;
+	int i;			/* used in for loops */
+	u16 port;		/* temporary I/O (port) address */
+	u32 slot_id;		/* EISA hardware (slot) ID read from adapter */
+
+	DBG_printk("In dfx_eisa_init...\n");
 
 	/* Scan for FDDI EISA controllers */
 
 	for (i=0; i < DFX_MAX_EISA_SLOTS; i++)		/* only scan for up to 16 EISA slots */
-		{
+	{
 		port = (i << 12) + PI_ESIC_K_SLOT_ID;	/* port = I/O address for reading slot ID */
 		slot_id = inl(port);					/* read EISA HW (slot) ID */
 		if ((slot_id & 0xF0FFFFFF) == DEFEA_PRODUCT_ID)
-			{
-			if (!version_disp)					/* display version info if adapter is found */
-				{
-				version_disp = 1;				/* set display flag to TRUE so that */
-				printk(version);				/* we only display this string ONCE */
-				}
-				
+		{
 			port = (i << 12);					/* recalc base addr */
 
-			/* Verify port address range is not already being used */
-
-			port_len = PI_ESIC_K_CSR_IO_LEN;
-			if (check_region(port, port_len) == 0)
-				{
-				/* Allocate a new device structure for this adapter */
-
-				dev = dfx_alloc_device(dev, port);
-				if (dev != NULL)
-					{
-					/* Initialize board structure with bus-specific info */
-
-					bp = (DFX_board_t *) dev->priv;
-					bp->dev = dev;
-					bp->bus_type = DFX_BUS_TYPE_EISA;
-					if (dfx_driver_init(dev) == DFX_K_SUCCESS)
-						num_boards++;		/* only increment global board count on success */
-					else
-						dev->base_addr = 0;	/* clear port address field in device structure on failure */
-					}
-				}
-			else
-				printk("I/O range allocated to adapter (0x%X-0x%X) is already being used!\n", port, (port + port_len-1));
-			}
+			if (dfx_init_one_pci_or_eisa(NULL, port) == 0) rc = 0;
 		}
-
-	/* Scan for FDDI PCI controllers */
-
-	if (pcibios_present())						/* is PCI BIOS even present? */
-		for (i=0; i < DFX_MAX_NUM_BOARDS; i++)	/* scan for up to 8 PCI cards */
-			if (pcibios_find_device(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_FDDI, i, &pci_bus, &pci_dev_fun) == 0)
-				{
-				if (!version_disp)					/* display version info if adapter is found */
-					{
-					version_disp = 1;				/* set display flag to TRUE so that */
-					printk(version);				/* we only display this string ONCE */
-					}
-
-				/* Verify that I/O enable bit is set (PCI slot is enabled) */
-
-				pcibios_read_config_word(pci_bus, pci_dev_fun, PCI_COMMAND, &command);
-				if ((command & PCI_COMMAND_IO) == 0)
-					printk("I/O enable bit not set!  Verify that slot is enabled\n");
-				else
-					{
-					/* Turn off memory mapped space and enable mastering */
-
-					command |= PCI_COMMAND_MASTER;
-					command &= ~PCI_COMMAND_MEMORY;
-					pcibios_write_config_word(pci_bus, pci_dev_fun, PCI_COMMAND, command);
-
-					/* Read I/O base address from PCI Configuration Space */
-				
-					pcibios_read_config_word(pci_bus, pci_dev_fun, PCI_BASE_ADDRESS_1, &port);
-					port &= PCI_BASE_ADDRESS_IO_MASK;		/* clear I/O bit (bit 0) */
-
-					/* Verify port address range is not already being used */
-
-					port_len = PFI_K_CSR_IO_LEN;
-					if (check_region(port, port_len) == 0)
-						{
-						/* Allocate a new device structure for this adapter */
-
-						dev = dfx_alloc_device(dev, port);
-						if (dev != NULL)
-							{
-							/* Initialize board structure with bus-specific info */
-
-							bp = (DFX_board_t *) dev->priv;
-							bp->dev = dev;
-							bp->bus_type = DFX_BUS_TYPE_PCI;
-							bp->pci_bus = pci_bus;
-							bp->pci_dev_fun = pci_dev_fun;
-							if (dfx_driver_init(dev) == DFX_K_SUCCESS)
-								num_boards++;		/* only increment global board count on success */
-							else
-								dev->base_addr = 0;	/* clear port address field in device structure on failure */
-							}
-						}
-					else
-						printk("I/O range allocated to adapter (0x%X-0x%X) is already being used!\n", port, (port + port_len-1));
-					}
-				}
-
-	/*
-	 * If we're at this point we're going through dfx_probe() for the first
-	 * time.  Return success (0) if we've initialized 1 or more boards.
-	 * Otherwise, return failure (-ENODEV).
-	 */
-
-	if (num_boards > 0)
-		return(0);
-	else
-		return(-ENODEV);
 	}
-
-
-/*
- * ====================
- * = dfx_alloc_device =
- * ====================
- *   
- * Overview:
- *   Allocate new device structure for adapter
- *  
- * Returns:
- *   Pointer to device structure for this adapter or NULL if
- *   none are available or could not allocate memory for
- *   private board structure.
- *       
- * Arguments:
- *   dev    - pointer to device information for last device
- *   iobase - base I/O address of new adapter
- *
- * Functional Description:
- *   The algorithm for allocating a new device structure is
- *   fairly simple.  Since we're presently the only FDDI driver
- *   under Linux, we'll find the first device structure with an
- *   "fddi*" device name that's free.  If we run out of devices,
- *   we'll fail on error.  This is simpler than trying to
- *   allocate the memory for a new device structure, determine
- *   the next free number (beyond 7) and link it into the chain
- *   of devices.  A user can always modify drivers/net/Space.c
- *   to add new FDDI device structures if necessary.
- *
- *   Beyond finding a free FDDI device structure, this routine
- *   initializes most of the fields, resource tags, and dispatch
- *   pointers in the device structure and calls the common
- *   fddi_setup() routine to perform the rest of the device
- *   structure initialization.
- *
- * Return Codes:
- *   None
- *
- * Assumptions:
- *   If additional FDDI drivers are integrated into Linux,
- *   we'll likely need to use a different approach to
- *   allocate a device structure.  Perhaps one that is
- *   similar to what the Ethernet drivers use.
- *
- * Side Effects:
- *   None
- */
-
-struct device *dfx_alloc_device(
-	struct device	*dev,
-	u16				iobase
-	)
-
-	{
-	struct device *tmp_dev;		/* pointer to a device structure */
-
-	DBG_printk("In dfx_alloc_device...\n");
-
-	/* Find next free fddi entry */
-
-	for (tmp_dev = dev; tmp_dev != NULL; tmp_dev = tmp_dev->next)
-		if ((strncmp(tmp_dev->name, "fddi", 4) == 0) && (tmp_dev->base_addr == 0))
-			break;
-	if (tmp_dev == NULL)
-		{
-		printk("Could not find free FDDI device structure for this adapter!\n");
-		return(NULL);
-		}
-	DBG_printk("Device entry free, device name = %s\n", tmp_dev->name);
-
-	/* Allocate space for private board structure */
-
-	tmp_dev->priv = (void *) kmalloc(sizeof(DFX_board_t), GFP_KERNEL);
-	if (tmp_dev->priv == NULL)
-		{
-		printk("Could not allocate memory for private board structure!\n");
-		return(NULL);
-		}
-	memset(tmp_dev->priv, 0, sizeof(DFX_board_t));	/* clear structure */
-
-	/* Initialize new device structure */
-
-	tmp_dev->rmem_end	= 0;		/* shared memory isn't used */
-	tmp_dev->rmem_start	= 0;		/* shared memory isn't used */
-	tmp_dev->mem_end	= 0;		/* shared memory isn't used */
-	tmp_dev->mem_start	= 0;		/* shared memory isn't used */
-	tmp_dev->base_addr	= iobase;	/* save port (I/O) base address */
-	tmp_dev->irq		= 0;		/* set in dfx_bus_init() */
-	tmp_dev->if_port	= 0;		/* not applicable to FDDI adapters */
-	tmp_dev->dma		= 0;		/* Bus Master DMA doesn't require channel */
-
-	tmp_dev->get_stats				= &dfx_ctl_get_stats;
-	tmp_dev->open					= &dfx_open;
-	tmp_dev->stop					= &dfx_close;
-	tmp_dev->hard_start_xmit		= &dfx_xmt_queue_pkt;
-	tmp_dev->hard_header			= NULL;		/* set in fddi_setup() */
-	tmp_dev->rebuild_header			= NULL;		/* set in fddi_setup() */
-	tmp_dev->set_multicast_list		= &dfx_ctl_set_multicast_list;
-	tmp_dev->set_mac_address		= &dfx_ctl_set_mac_address;
-	tmp_dev->do_ioctl				= NULL;		/* not supported for now &&& */
-	tmp_dev->set_config				= NULL;		/* not supported for now &&& */
-	tmp_dev->header_cache_bind		= NULL;		/* not supported */
-	tmp_dev->header_cache_update	= NULL;		/* not supported */
-	tmp_dev->change_mtu				= NULL;		/* set in fddi_setup() */
-
-	/* Initialize remaining device structure information */
-
-	fddi_setup(tmp_dev);
-	return(tmp_dev);
-	}
-
+	return rc;
+}
 
 /*
  * ================
@@ -731,12 +554,9 @@ struct device *dfx_alloc_device(
  *   enabled yet.
  */
 
-void dfx_bus_init(
-	struct device *dev
-	)
-
-	{
-	DFX_board_t *bp = (DFX_board_t *)dev->priv;
+static void __devinit dfx_bus_init(struct net_device *dev)
+{
+	DFX_board_t *bp = dev->priv;
 	u8			val;	/* used for I/O read/writes */
 
 	DBG_printk("In dfx_bus_init...\n");
@@ -757,6 +577,9 @@ void dfx_bus_init(
 	 */
 
 	bp->base_addr = dev->base_addr;
+
+	/* And a pointer back to the net_device struct */
+	bp->dev = dev;
 
 	/* Initialize adapter based on bus type */
 
@@ -813,25 +636,25 @@ void dfx_bus_init(
 		}
 	else
 		{
+		struct pci_dev *pdev = bp->pci_dev;
+
 		/* Get the interrupt level from the PCI Configuration Table */
 
-		pcibios_read_config_byte(bp->pci_bus, bp->pci_dev_fun, PCI_INTERRUPT_LINE, &val);
-		dev->irq = val;					/* save IRQ value in device table */
+		dev->irq = pdev->irq;
 
 		/* Check Latency Timer and set if less than minimal */
 
-		pcibios_read_config_byte(bp->pci_bus, bp->pci_dev_fun, PCI_LATENCY_TIMER, &val);
+		pci_read_config_byte(pdev, PCI_LATENCY_TIMER, &val);
 		if (val < PFI_K_LAT_TIMER_MIN)	/* if less than min, override with default */
 			{
 			val = PFI_K_LAT_TIMER_DEF;
-			pcibios_write_config_byte(bp->pci_bus, bp->pci_dev_fun, PCI_LATENCY_TIMER, val);
+			pci_write_config_byte(pdev, PCI_LATENCY_TIMER, val);
 			}
 
 		/* Enable interrupts at PCI bus interface chip (PFI) */
 
 		dfx_port_write_long(bp, PFI_K_REG_MODE_CTRL, (PFI_MODE_M_PDQ_INT_ENB | PFI_MODE_M_DMA_ENB));
 		}
-	return;
 	}
 
 
@@ -865,11 +688,8 @@ void dfx_bus_init(
  *   None
  */
 
-void dfx_bus_config_check(
-	DFX_board_t *bp
-	)
-
-	{
+static void __devinit dfx_bus_config_check(DFX_board_t *bp)
+{
 	int	status;				/* return code from adapter port control call */
 	u32	slot_id;			/* EISA-bus hardware id (DEC3001, DEC3002,...) */
 	u32	host_data;			/* LW data returned from port control call */
@@ -929,7 +749,6 @@ void dfx_bus_config_check(
 				}
 			}
 		}
-	return;
 	}
 
 
@@ -969,12 +788,9 @@ void dfx_bus_config_check(
  *   returning from this routine.
  */
 
-int dfx_driver_init(
-	struct device *dev
-	)
-
-	{
-	DFX_board_t *bp = (DFX_board_t *)dev->priv;
+static int __devinit dfx_driver_init(struct net_device *dev)
+{
+	DFX_board_t *bp = dev->priv;
 	int			alloc_size;			/* total buffer size needed */
 	char		*top_v, *curr_v;	/* virtual addrs into memory block */
 	u32			top_p, curr_p;		/* physical addrs into memory block */
@@ -1082,10 +898,12 @@ int dfx_driver_init(
 	alloc_size = sizeof(PI_DESCR_BLOCK) +
 					PI_CMD_REQ_K_SIZE_MAX +
 					PI_CMD_RSP_K_SIZE_MAX +
+#ifndef DYNAMIC_BUFFERS
 					(bp->rcv_bufs_to_post * PI_RCV_DATA_K_SIZE_MAX) +
+#endif
 					sizeof(PI_CONSUMER_BLOCK) +
 					(PI_ALIGN_K_DESC_BLK - 1);
-	top_v = (char *) kmalloc(alloc_size, GFP_KERNEL);
+	bp->kmalloced = top_v = (char *) kmalloc(alloc_size, GFP_KERNEL);
 	if (top_v == NULL)
 		{
 		printk("%s: Could not allocate memory for host buffers and structures!\n", dev->name);
@@ -1134,8 +952,11 @@ int dfx_driver_init(
 
 	bp->rcv_block_virt = curr_v;
 	bp->rcv_block_phys = curr_p;
+
+#ifndef DYNAMIC_BUFFERS
 	curr_v += (bp->rcv_bufs_to_post * PI_RCV_DATA_K_SIZE_MAX);
 	curr_p += (bp->rcv_bufs_to_post * PI_RCV_DATA_K_SIZE_MAX);
+#endif
 
 	/* Reserve space for the consumer block */
 
@@ -1148,7 +969,7 @@ int dfx_driver_init(
 	DBG_printk("%s: Command Request buffer virt = %0lX, phys = %0X\n",			dev->name, (long)bp->cmd_req_virt,		bp->cmd_req_phys);
 	DBG_printk("%s: Command Response buffer virt = %0lX, phys = %0X\n",			dev->name, (long)bp->cmd_rsp_virt,		bp->cmd_rsp_phys);
 	DBG_printk("%s: Receive buffer block virt = %0lX, phys = %0X\n",			dev->name, (long)bp->rcv_block_virt,	bp->rcv_block_phys);
-	DBG_printk("%s: Consumer block virt = %0lX, phys = %0X\n",					dev->name, (long)bp->cons_block_virt,	bp->cons_block_phys);
+	DBG_printk("%s: Consumer block virt = %0lX, phys = %0X\n",				dev->name, (long)bp->cons_block_virt,	bp->cons_block_phys);
 
 	return(DFX_K_SUCCESS);
 	}
@@ -1167,6 +988,7 @@ int dfx_driver_init(
  *       
  * Arguments:
  *   bp - pointer to board information
+ *   get_buffers - non-zero if buffers to be allocated
  *
  * Functional Description:
  *   Issues the low-level firmware/hardware calls necessary to bring
@@ -1186,10 +1008,7 @@ int dfx_driver_init(
  *   upon a successful return of this routine.
  */
 
-int dfx_adap_init(
-	DFX_board_t *bp
-	)
-
+static int dfx_adap_init(DFX_board_t *bp, int get_buffers)
 	{
 	DBG_printk("In dfx_adap_init...\n");
 
@@ -1324,9 +1143,23 @@ int dfx_adap_init(
 		return(DFX_K_FAILURE);
 		}
 
+	/*
+	 * Remove any existing dynamic buffers (i.e. if the adapter is being
+	 * reinitialized)
+	 */
+
+	if (get_buffers)
+		dfx_rcv_flush(bp);
+
 	/* Initialize receive descriptor block and produce buffers */
 
-	dfx_rcv_init(bp);
+	if (dfx_rcv_init(bp, get_buffers))
+	        {
+		printk("%s: Receive buffer allocation failed\n", bp->dev->name);
+		if (get_buffers)
+			dfx_rcv_flush(bp);
+		return(DFX_K_FAILURE);
+		}
 
 	/* Issue START command and bring adapter to LINK_(UN)AVAILABLE state */
 
@@ -1334,6 +1167,8 @@ int dfx_adap_init(
 	if (dfx_hw_dma_cmd_req(bp) != DFX_K_SUCCESS)
 		{
 		printk("%s: Start command failed\n", bp->dev->name);
+		if (get_buffers)
+			dfx_rcv_flush(bp);
 		return(DFX_K_FAILURE);
 		}
 
@@ -1367,29 +1202,27 @@ int dfx_adap_init(
  *
  * Assumptions:
  *   This routine should only be called for a device that was
- *   initialized successfully during the dfx_probe process.
+ *   initialized successfully.
  *
  * Side Effects:
  *   Adapter should be in LINK_AVAILABLE or LINK_UNAVAILABLE state
  *   if the open is successful.
  */
 
-int dfx_open(
-	struct device *dev
-	)
-
-	{
-	DFX_board_t	*bp = (DFX_board_t *)dev->priv;
+static int dfx_open(struct net_device *dev)
+{
+	int ret;
+	DFX_board_t	*bp = dev->priv;
 
 	DBG_printk("In dfx_open...\n");
-
+	
 	/* Register IRQ - support shared interrupts by passing device ptr */
 
-	if (request_irq(dev->irq, (void *)dfx_interrupt, SA_SHIRQ, dev->name, dev))
-		{
-		printk("%s: Requested IRQ %d is busy\n", dev->name, dev->irq);
-		return(-EAGAIN);
-		}
+	ret = request_irq(dev->irq, (void *)dfx_interrupt, SA_SHIRQ, dev->name, dev);
+	if (ret) {
+		printk(KERN_ERR "%s: Requested IRQ %d is busy\n", dev->name, dev->irq);
+		return ret;
+	}
 
 	/*
 	 * Set current address to factory MAC address
@@ -1416,22 +1249,22 @@ int dfx_open(
 	bp->ind_group_prom	= PI_FSTATE_K_BLOCK;
 	bp->group_prom		= PI_FSTATE_K_BLOCK;
 
+	spin_lock_init(&bp->lock);
+
 	/* Reset and initialize adapter */
 
 	bp->reset_type = PI_PDATA_A_RESET_M_SKIP_ST;	/* skip self-test */
-	if (dfx_adap_init(bp) != DFX_K_SUCCESS)
-		{
-		printk("%s: Adapter open failed!\n", dev->name);
-		return(-EAGAIN);
-		}
+	if (dfx_adap_init(bp, 1) != DFX_K_SUCCESS)
+	{
+		printk(KERN_ERR "%s: Adapter open failed!\n", dev->name);
+		free_irq(dev->irq, dev);
+		return -EAGAIN;
+	}
 
 	/* Set device structure info */
-
-	dev->tbusy			= 0;
-	dev->interrupt		= DFX_UNMASK_INTERRUPTS;
-	dev->start			= 1;
+	netif_start_queue(dev);
 	return(0);
-	}
+}
 
 
 /*
@@ -1466,12 +1299,9 @@ int dfx_open(
  *   routine.
  */
 
-int dfx_close(
-	struct device *dev
-	)
-
-	{
-	DFX_board_t	*bp = (DFX_board_t *)dev->priv;
+static int dfx_close(struct net_device *dev)
+{
+	DFX_board_t	*bp = dev->priv;
 
 	DBG_printk("In dfx_close...\n");
 
@@ -1513,16 +1343,20 @@ int dfx_close(
 
 	memset(bp->cons_block_virt, 0, sizeof(PI_CONSUMER_BLOCK));
 
+	/* Release all dynamically allocate skb in the receive ring. */
+
+	dfx_rcv_flush(bp);
+
 	/* Clear device structure flags */
 
-	dev->start = 0;
-	dev->tbusy = 1;
-
+	netif_stop_queue(dev);
+	
 	/* Deregister (free) IRQ */
 
 	free_irq(dev->irq, dev);
+	
 	return(0);
-	}
+}
 
 
 /*
@@ -1552,10 +1386,7 @@ int dfx_close(
  *   None
  */
 
-void dfx_int_pr_halt_id(
-	DFX_board_t	*bp
-	)
-
+static void dfx_int_pr_halt_id(DFX_board_t	*bp)
 	{
 	PI_UINT32	port_status;			/* PDQ port status register value */
 	PI_UINT32	halt_id;				/* PDQ port status halt ID */
@@ -1609,7 +1440,6 @@ void dfx_int_pr_halt_id(
 			printk("%s: Halt ID: Unknown (code = %X)\n", bp->dev->name, halt_id);
 			break;
 		}
-	return;
 	}
 
 
@@ -1660,9 +1490,7 @@ void dfx_int_pr_halt_id(
  *   contents and adapter filter settings.
  */
 
-void dfx_int_type_0_process(
-	DFX_board_t	*bp
-	)
+static void dfx_int_type_0_process(DFX_board_t	*bp)
 
 	{
 	PI_UINT32	type_0_status;		/* Host Interrupt Type 0 register */
@@ -1703,7 +1531,7 @@ void dfx_int_type_0_process(
 		bp->link_available = PI_K_FALSE;	/* link is no longer available */
 		bp->reset_type = 0;					/* rerun on-board diagnostics */
 		printk("%s: Resetting adapter...\n", bp->dev->name);
-		if (dfx_adap_init(bp) != DFX_K_SUCCESS)
+		if (dfx_adap_init(bp, 0) != DFX_K_SUCCESS)
 			{
 			printk("%s: Adapter reset failed!  Disabling adapter interrupts.\n", bp->dev->name);
 			dfx_port_write_long(bp, PI_PDQ_K_REG_HOST_INT_ENB, PI_HOST_INT_K_DISABLE_ALL_INTS);
@@ -1751,7 +1579,7 @@ void dfx_int_type_0_process(
 			bp->link_available = PI_K_FALSE;	/* link is no longer available */
 			bp->reset_type = 0;					/* rerun on-board diagnostics */
 			printk("%s: Resetting adapter...\n", bp->dev->name);
-			if (dfx_adap_init(bp) != DFX_K_SUCCESS)
+			if (dfx_adap_init(bp, 0) != DFX_K_SUCCESS)
 				{
 				printk("%s: Adapter reset failed!  Disabling adapter interrupts.\n", bp->dev->name);
 				dfx_port_write_long(bp, PI_PDQ_K_REG_HOST_INT_ENB, PI_HOST_INT_K_DISABLE_ALL_INTS);
@@ -1764,7 +1592,6 @@ void dfx_int_type_0_process(
 			bp->link_available = PI_K_TRUE;		/* set link available flag */
 			}
 		}
-	return;
 	}
 
 
@@ -1808,16 +1635,15 @@ void dfx_int_type_0_process(
  *   or updating completion indices.
  */
 
-void dfx_int_common(
-	DFX_board_t	*bp
-	)
-
-	{
+static void dfx_int_common(struct net_device *dev)
+{
+	DFX_board_t 	*bp = dev->priv;
 	PI_UINT32	port_status;		/* Port Status register */
 
 	/* Process xmt interrupts - frequent case, so always call this routine */
 
-	dfx_xmt_done(bp);				/* free consumed xmt packets */
+	if(dfx_xmt_done(bp))				/* free consumed xmt packets */
+		netif_wake_queue(dev);
 
 	/* Process rcv interrupts - frequent case, so always call this routine */
 
@@ -1840,7 +1666,6 @@ void dfx_int_common(
 
 	if (port_status & PI_PSTATUS_M_TYPE_0_PENDING)
 		dfx_int_type_0_process(bp);	/* process Type 0 interrupts */
-	return;
 	}
 
 
@@ -1880,31 +1705,19 @@ void dfx_int_common(
  *   Interrupts are disabled, then reenabled at the adapter.
  */
 
-void dfx_interrupt(
-	int				irq,
-	void			*dev_id,
-	struct pt_regs	*regs
-	)
-
+static void dfx_interrupt(int irq, void *dev_id, struct pt_regs	*regs)
 	{
-	struct device	*dev = (struct device *) dev_id;
+	struct net_device	*dev = dev_id;
 	DFX_board_t		*bp;	/* private board structure pointer */
 	u8				tmp;	/* used for disabling/enabling ints */
 
 	/* Get board pointer only if device structure is valid */
 
-	if (dev == NULL)
-		{
-		printk("dfx_interrupt(): irq %d for unknown device!\n", irq);
-		return;
-		}
-	bp = (DFX_board_t *) dev->priv;
+	bp = dev->priv;
 
+	spin_lock(&bp->lock);
+	
 	/* See if we're already servicing an interrupt */
-
-	if (dev->interrupt)
-		printk("%s: Re-entering the interrupt handler!\n", dev->name);
-	dev->interrupt = DFX_MASK_INTERRUPTS;	/* ensure non reentrancy */
 
 	/* Service adapter interrupts */
 
@@ -1916,7 +1729,7 @@ void dfx_interrupt(
 
 		/* Call interrupt service routine for this adapter */
 
-		dfx_int_common(bp);
+		dfx_int_common(dev);
 
 		/* Clear PDQ interrupt status bit and reenable interrupts */
 
@@ -1934,7 +1747,7 @@ void dfx_interrupt(
 
 		/* Call interrupt service routine for this adapter */
 
-		dfx_int_common(bp);
+		dfx_int_common(dev);
 
 		/* Reenable interrupts at the ESIC */
 
@@ -1943,8 +1756,7 @@ void dfx_interrupt(
 		dfx_port_write_byte(bp, PI_ESIC_K_IO_CONFIG_STAT_0, tmp);
 		}
 
-	dev->interrupt = DFX_UNMASK_INTERRUPTS;
-	return;
+	spin_unlock(&bp->lock);
 	}
 
 
@@ -1991,29 +1803,30 @@ void dfx_interrupt(
  *   None
  */
 
-struct enet_statistics *dfx_ctl_get_stats(
-	struct device *dev
-	)
-
+static struct net_device_stats *dfx_ctl_get_stats(struct net_device *dev)
 	{
-	DFX_board_t	*bp = (DFX_board_t *)dev->priv;
+	DFX_board_t	*bp = dev->priv;
 
 	/* Fill the bp->stats structure with driver-maintained counters */
 
-	bp->stats.rx_packets			= bp->rcv_total_frames;
-	bp->stats.tx_packets			= bp->xmt_total_frames;
-	bp->stats.rx_errors				= (u32)(bp->rcv_crc_errors + bp->rcv_frame_status_errors + bp->rcv_length_errors);
-	bp->stats.tx_errors				= bp->xmt_length_errors;
-	bp->stats.rx_dropped			= bp->rcv_discards;
-	bp->stats.tx_dropped			= bp->xmt_discards;
-	bp->stats.multicast				= bp->rcv_multicast_frames;
-	bp->stats.transmit_collision	= 0;	/* always zero (0) for FDDI */
+	bp->stats.gen.rx_packets = bp->rcv_total_frames;
+	bp->stats.gen.tx_packets = bp->xmt_total_frames;
+	bp->stats.gen.rx_bytes   = bp->rcv_total_bytes;
+	bp->stats.gen.tx_bytes   = bp->xmt_total_bytes;
+	bp->stats.gen.rx_errors  = bp->rcv_crc_errors +
+				   bp->rcv_frame_status_errors +
+				   bp->rcv_length_errors;
+	bp->stats.gen.tx_errors  = bp->xmt_length_errors;
+	bp->stats.gen.rx_dropped = bp->rcv_discards;
+	bp->stats.gen.tx_dropped = bp->xmt_discards;
+	bp->stats.gen.multicast  = bp->rcv_multicast_frames;
+	bp->stats.gen.collisions = 0;		/* always zero (0) for FDDI */
 
 	/* Get FDDI SMT MIB objects */
 
 	bp->cmd_req_virt->cmd_type = PI_CMD_K_SMT_MIB_GET;
 	if (dfx_hw_dma_cmd_req(bp) != DFX_K_SUCCESS)
-		return((struct enet_statistics *) &bp->stats);
+		return((struct net_device_stats *) &bp->stats);
 
 	/* Fill the bp->stats structure with the SMT MIB object values */
 
@@ -2114,7 +1927,7 @@ struct enet_statistics *dfx_ctl_get_stats(
 
 	bp->cmd_req_virt->cmd_type = PI_CMD_K_CNTRS_GET;
 	if (dfx_hw_dma_cmd_req(bp) != DFX_K_SUCCESS)
-		return((struct enet_statistics *) &bp->stats);
+		return((struct net_device_stats *) &bp->stats);
 
 	/* Fill the bp->stats structure with the FDDI counter values */
 
@@ -2130,7 +1943,7 @@ struct enet_statistics *dfx_ctl_get_stats(
 	bp->stats.port_lem_cts[0]			= bp->cmd_rsp_virt->cntrs_get.cntrs.link_errors[0].ls;
 	bp->stats.port_lem_cts[1]			= bp->cmd_rsp_virt->cntrs_get.cntrs.link_errors[1].ls;
 
-	return((struct enet_statistics *) &bp->stats);
+	return((struct net_device_stats *) &bp->stats);
 	}
 
 
@@ -2177,12 +1990,9 @@ struct enet_statistics *dfx_ctl_get_stats(
  *   On-board adapter CAM and filters are updated.
  */
 
-void dfx_ctl_set_multicast_list(
-	struct device *dev
-	)
-
+static void dfx_ctl_set_multicast_list(struct net_device *dev)
 	{
-	DFX_board_t			*bp = (DFX_board_t *)dev->priv;
+	DFX_board_t			*bp = dev->priv;
 	int					i;			/* used as index in for loop */
 	struct dev_mc_list	*dmi;		/* ptr to multicast addr entry */
 
@@ -2255,7 +2065,6 @@ void dfx_ctl_set_multicast_list(
 		{
 		DBG_printk("%s: Adapter filters updated!\n", dev->name);
 		}
-	return;
 	}
 
 
@@ -2295,13 +2104,9 @@ void dfx_ctl_set_multicast_list(
  *   may be updated.
  */
 
-int dfx_ctl_set_mac_address(
-	struct device	*dev,
-	void			*addr
-	)
-
+static int dfx_ctl_set_mac_address(struct net_device *dev, void *addr)
 	{
-	DFX_board_t		*bp = (DFX_board_t *)dev->priv;
+	DFX_board_t		*bp = dev->priv;
 	struct sockaddr	*p_sockaddr = (struct sockaddr *)addr;
 
 	/* Copy unicast address to driver-maintained structs and update count */
@@ -2386,10 +2191,7 @@ int dfx_ctl_set_mac_address(
  *   On-board adapter CAM is updated.
  */
 
-int dfx_ctl_update_cam(
-	DFX_board_t *bp
-	)
-
+static int dfx_ctl_update_cam(DFX_board_t *bp)
 	{
 	int			i;				/* used as index */
 	PI_LAN_ADDR	*p_addr;		/* pointer to CAM entry */
@@ -2472,10 +2274,7 @@ int dfx_ctl_update_cam(
  *   On-board adapter filters are updated.
  */
 
-int dfx_ctl_update_filters(
-	DFX_board_t *bp
-	)
-
+static int dfx_ctl_update_filters(DFX_board_t *bp)
 	{
 	int	i = 0;					/* used as index */
 
@@ -2550,10 +2349,7 @@ int dfx_ctl_update_filters(
  *   None
  */
 
-int dfx_hw_dma_cmd_req(
-	DFX_board_t *bp
-	)
-
+static int dfx_hw_dma_cmd_req(DFX_board_t *bp)
 	{
 	int status;			/* adapter status */
 	int timeout_cnt;	/* used in for loops */
@@ -2667,7 +2463,7 @@ int dfx_hw_dma_cmd_req(
  *   None
  */
 
-int dfx_hw_port_ctrl_req(
+static int dfx_hw_port_ctrl_req(
 	DFX_board_t	*bp,
 	PI_UINT32	command,
 	PI_UINT32	data_a,
@@ -2751,7 +2547,7 @@ int dfx_hw_port_ctrl_req(
  *   Internal adapter registers are cleared.
  */
 
-void dfx_hw_adap_reset(
+static void dfx_hw_adap_reset(
 	DFX_board_t	*bp,
 	PI_UINT32	type
 	)
@@ -2769,7 +2565,6 @@ void dfx_hw_adap_reset(
 	/* Deassert reset */
 
 	dfx_port_write_long(bp, PI_PDQ_K_REG_PORT_RESET, 0);
-	return;
 	}
 
 
@@ -2800,10 +2595,7 @@ void dfx_hw_adap_reset(
  *   None
  */
 
-int dfx_hw_adap_state_rd(
-	DFX_board_t *bp
-	)
-
+static int dfx_hw_adap_state_rd(DFX_board_t *bp)
 	{
 	PI_UINT32 port_status;		/* Port Status register value */
 
@@ -2843,11 +2635,7 @@ int dfx_hw_adap_state_rd(
  *   Internal adapter registers are cleared.
  */
 
-int dfx_hw_dma_uninit(
-	DFX_board_t	*bp,
-	PI_UINT32	type
-	)
-
+static int dfx_hw_dma_uninit(DFX_board_t *bp, PI_UINT32 type)
 	{
 	int timeout_cnt;	/* used in for loops */
 
@@ -2867,6 +2655,21 @@ int dfx_hw_dma_uninit(
 		return(DFX_K_HW_TIMEOUT);
 	return(DFX_K_SUCCESS);
 	}
+
+/*
+ *	Align an sk_buff to a boundary power of 2
+ *
+ */
+ 
+static void my_skb_align(struct sk_buff *skb, int n)
+{
+	u32 x=(u32)skb->data;	/* We only want the low bits .. */
+	u32 v;
+	
+	v=(x+n-1)&~(n-1);	/* Where we want to be */
+	
+	skb_reserve(skb, v-x);
+}
 
 
 /*
@@ -2882,6 +2685,7 @@ int dfx_hw_dma_uninit(
  *       
  * Arguments:
  *   bp - pointer to board information
+ *   get_buffers - non-zero if buffers to be allocated
  *
  * Functional Description:
  *   This routine can be called during dfx_adap_init() or during an adapter
@@ -2889,7 +2693,10 @@ int dfx_hw_dma_uninit(
  *   LLC Host queue receive buffers.
  *
  * Return Codes:
- *   None
+ *   Return 0 on success or -ENOMEM if buffer allocation failed (when using
+ *   dynamic buffer allocation). If the buffer allocation failed, the
+ *   already allocated buffers will not be released and the caller should do
+ *   this.
  *
  * Assumptions:
  *   The PDQ has been reset and the adapter and driver maintained Type 2
@@ -2900,10 +2707,7 @@ int dfx_hw_dma_uninit(
  *   is notified.
  */
 
-void dfx_rcv_init(
-	DFX_board_t *bp
-	)
-
+static int dfx_rcv_init(DFX_board_t *bp, int get_buffers)
 	{
 	int	i, j;					/* used in for loop */
 
@@ -2925,6 +2729,30 @@ void dfx_rcv_init(
 	 *		driver initialization when we allocated memory for the receive buffers.
 	 */
 
+	if (get_buffers) {
+#ifdef DYNAMIC_BUFFERS
+	for (i = 0; i < (int)(bp->rcv_bufs_to_post); i++)
+		for (j = 0; (i + j) < (int)PI_RCV_DATA_K_NUM_ENTRIES; j += bp->rcv_bufs_to_post)
+		{
+			struct sk_buff *newskb = __dev_alloc_skb(NEW_SKB_SIZE, GFP_NOIO);
+			if (!newskb)
+				return -ENOMEM;
+			bp->descr_block_virt->rcv_data[i+j].long_0 = (u32) (PI_RCV_DESCR_M_SOP |
+				((PI_RCV_DATA_K_SIZE_MAX / PI_ALIGN_K_RCV_DATA_BUFF) << PI_RCV_DESCR_V_SEG_LEN));
+			/*
+			 * align to 128 bytes for compatibility with
+			 * the old EISA boards.
+			 */
+			 
+			my_skb_align(newskb, 128);
+			bp->descr_block_virt->rcv_data[i+j].long_1 = virt_to_bus(newskb->data);
+			/*
+			 * p_rcv_buff_va is only used inside the
+			 * kernel so we put the skb pointer here.
+			 */
+			bp->p_rcv_buff_va[i+j] = (char *) newskb;
+		}
+#else
 	for (i=0; i < (int)(bp->rcv_bufs_to_post); i++)
 		for (j=0; (i + j) < (int)PI_RCV_DATA_K_NUM_ENTRIES; j += bp->rcv_bufs_to_post)
 			{
@@ -2933,12 +2761,14 @@ void dfx_rcv_init(
 			bp->descr_block_virt->rcv_data[i+j].long_1 = (u32) (bp->rcv_block_phys + (i * PI_RCV_DATA_K_SIZE_MAX));
 			bp->p_rcv_buff_va[i+j] = (char *) (bp->rcv_block_virt + (i * PI_RCV_DATA_K_SIZE_MAX));
 			}
+#endif
+	}
 
 	/* Update receive producer and Type 2 register */
 
 	bp->rcv_xmt_reg.index.rcv_prod = bp->rcv_bufs_to_post;
 	dfx_port_write_long(bp, PI_PDQ_K_REG_TYPE_2_PROD, bp->rcv_xmt_reg.lword);
-	return;
+	return 0;
 	}
 
 
@@ -2974,7 +2804,7 @@ void dfx_rcv_init(
  *   None
  */
 
-void dfx_rcv_queue_process(
+static void dfx_rcv_queue_process(
 	DFX_board_t *bp
 	)
 
@@ -2991,7 +2821,14 @@ void dfx_rcv_queue_process(
 		{
 		/* Process any errors */
 
-		p_buff = (char *) bp->p_rcv_buff_va[bp->rcv_xmt_reg.index.rcv_comp];
+		int entry;
+
+		entry = bp->rcv_xmt_reg.index.rcv_comp;
+#ifdef DYNAMIC_BUFFERS
+		p_buff = (char *) (((struct sk_buff *)bp->p_rcv_buff_va[entry])->data);
+#else
+		p_buff = (char *) bp->p_rcv_buff_va[entry];
+#endif
 		memcpy(&descr, p_buff + RCV_BUFF_K_DESCR, sizeof(u32));
 
 		if (descr & PI_FMC_DESCR_M_RCC_FLUSH)
@@ -3002,39 +2839,65 @@ void dfx_rcv_queue_process(
 				bp->rcv_frame_status_errors++;
 			}
 		else
-			{
+		{
+			int rx_in_place = 0;
+
 			/* The frame was received without errors - verify packet length */
 
 			pkt_len = (u32)((descr & PI_FMC_DESCR_M_LEN) >> PI_FMC_DESCR_V_LEN);
 			pkt_len -= 4;				/* subtract 4 byte CRC */
 			if (!IN_RANGE(pkt_len, FDDI_K_LLC_ZLEN, FDDI_K_LLC_LEN))
 				bp->rcv_length_errors++;
-			else
-				{
-				skb = dev_alloc_skb(pkt_len+3);	/* alloc new buffer to pass up, add room for PRH */
+			else{
+#ifdef DYNAMIC_BUFFERS
+				if (pkt_len > SKBUFF_RX_COPYBREAK) {
+					struct sk_buff *newskb;
+
+					newskb = dev_alloc_skb(NEW_SKB_SIZE);
+					if (newskb){
+						rx_in_place = 1;
+						
+						my_skb_align(newskb, 128);
+						skb = (struct sk_buff *)bp->p_rcv_buff_va[entry];
+						skb_reserve(skb, RCV_BUFF_K_PADDING);
+						bp->p_rcv_buff_va[entry] = (char *)newskb;
+						bp->descr_block_virt->rcv_data[entry].long_1 = virt_to_bus(newskb->data);
+					} else
+						skb = NULL;
+				} else
+#endif
+					skb = dev_alloc_skb(pkt_len+3);	/* alloc new buffer to pass up, add room for PRH */
 				if (skb == NULL)
 					{
 					printk("%s: Could not allocate receive buffer.  Dropping packet.\n", bp->dev->name);
 					bp->rcv_discards++;
+					break;
 					}
-				else
+				else {
+#ifndef DYNAMIC_BUFFERS
+					if (! rx_in_place)
+#endif
 					{
-					/* Receive buffer allocated, pass receive packet up */
+						/* Receive buffer allocated, pass receive packet up */
 
-					memcpy(skb->data, p_buff + RCV_BUFF_K_PADDING, pkt_len+3);
-					skb->data += 3;			/* adjust data field so that it points to FC byte */
-					skb->len = pkt_len;		/* pass up packet length, NOT including CRC */
+						memcpy(skb->data, p_buff + RCV_BUFF_K_PADDING, pkt_len+3);
+					}
+					
+					skb_reserve(skb,3);		/* adjust data field so that it points to FC byte */
+					skb_put(skb, pkt_len);		/* pass up packet length, NOT including CRC */
 					skb->dev = bp->dev;		/* pass up device pointer */
+
 					skb->protocol = fddi_type_trans(skb, bp->dev);
+					bp->rcv_total_bytes += skb->len;
 					netif_rx(skb);
 
 					/* Update the rcv counters */
-
+					bp->dev->last_rx = jiffies;
 					bp->rcv_total_frames++;
 					if (*(p_buff + RCV_BUFF_K_DA) & 0x01)
 						bp->rcv_multicast_frames++;
-					}
 				}
+			}
 			}
 
 		/*
@@ -3048,7 +2911,6 @@ void dfx_rcv_queue_process(
 		bp->rcv_xmt_reg.index.rcv_prod += 1;
 		bp->rcv_xmt_reg.index.rcv_comp += 1;
 		}
-	return;
 	}
 
 
@@ -3113,17 +2975,20 @@ void dfx_rcv_queue_process(
  *   None
  */
 
-int dfx_xmt_queue_pkt(
+static int dfx_xmt_queue_pkt(
 	struct sk_buff	*skb,
-	struct device	*dev
+	struct net_device	*dev
 	)
 
 	{
-	DFX_board_t			*bp = (DFX_board_t *) dev->priv;
-	u8					prod;				/* local transmit producer index */
+	DFX_board_t		*bp = dev->priv;
+	u8			prod;				/* local transmit producer index */
 	PI_XMT_DESCR		*p_xmt_descr;		/* ptr to transmit descriptor block entry */
 	XMT_DRIVER_DESCR	*p_xmt_drv_descr;	/* ptr to transmit driver descriptor */
+	unsigned long		flags;
 
+	netif_stop_queue(dev);
+	
 	/*
 	 * Verify that incoming transmit request is OK
 	 *
@@ -3134,14 +2999,14 @@ int dfx_xmt_queue_pkt(
 	 */
 
 	if (!IN_RANGE(skb->len, FDDI_K_LLC_ZLEN, FDDI_K_LLC_LEN))
-		{
-		printk("%s: Invalid packet length - %lu bytes\n", dev->name, skb->len);
-		bp->xmt_length_errors++;	/* bump error counter */
-		dev_tint(dev);				/* dequeue packets from xmt queue and send them */
-		dev_kfree_skb(skb, FREE_WRITE);
-		return(0);					/* return "success" */
-		}
-
+	{
+		printk("%s: Invalid packet length - %u bytes\n", 
+			dev->name, skb->len);
+		bp->xmt_length_errors++;		/* bump error counter */
+		netif_wake_queue(dev);
+		dev_kfree_skb(skb);
+		return(0);				/* return "success" */
+	}
 	/*
 	 * See if adapter link is available, if not, free buffer
 	 *
@@ -3161,32 +3026,38 @@ int dfx_xmt_queue_pkt(
 		else
 			{
 			bp->xmt_discards++;					/* bump error counter */
-			dev_kfree_skb(skb, FREE_WRITE);		/* free sk_buff now */
+			dev_kfree_skb(skb);		/* free sk_buff now */
+			netif_wake_queue(dev);
 			return(0);							/* return "success" */
 			}
 		}
 
+	spin_lock_irqsave(&bp->lock, flags);
+	
 	/* Get the current producer and the next free xmt data descriptor */
 
 	prod		= bp->rcv_xmt_reg.index.xmt_prod;
 	p_xmt_descr = &(bp->descr_block_virt->xmt_data[prod]);
 
 	/*
-	 * Get pointer to auxiliary queue entry to contain information for this packet.
+	 * Get pointer to auxiliary queue entry to contain information
+	 * for this packet.
 	 *
-	 * Note: The current xmt producer index will become the current xmt completion
-	 *       index when we complete this packet later on.  So, we'll get the
-	 *       pointer to the next auxiliary queue entry now before we bump the
-	 *		 producer index.
+	 * Note: The current xmt producer index will become the
+	 *	 current xmt completion index when we complete this
+	 *	 packet later on.  So, we'll get the pointer to the
+	 *	 next auxiliary queue entry now before we bump the
+	 *	 producer index.
 	 */
 
 	p_xmt_drv_descr = &(bp->xmt_drv_descr_blk[prod++]);	/* also bump producer index */
 
 	/* Write the three PRH bytes immediately before the FC byte */
 
-	*((char *)skb->data - 3) = DFX_PRH0_BYTE;	/* these byte values are defined */
-	*((char *)skb->data - 2) = DFX_PRH1_BYTE;	/* in the Motorola FDDI MAC chip */
-	*((char *)skb->data - 1) = DFX_PRH2_BYTE;	/* specification */
+	skb_push(skb,3);
+	skb->data[0] = DFX_PRH0_BYTE;	/* these byte values are defined */
+	skb->data[1] = DFX_PRH1_BYTE;	/* in the Motorola FDDI MAC chip */
+	skb->data[2] = DFX_PRH2_BYTE;	/* specification */
 
 	/*
 	 * Write the descriptor with buffer info and bump producer
@@ -3215,22 +3086,26 @@ int dfx_xmt_queue_pkt(
 	 *			wide.
 	 */
 
-	p_xmt_descr->long_0	= (u32) (PI_XMT_DESCR_M_SOP | PI_XMT_DESCR_M_EOP | ((skb->len + 3) << PI_XMT_DESCR_V_SEG_LEN));
-	p_xmt_descr->long_1 = (u32) virt_to_bus(skb->data - 3);
+	p_xmt_descr->long_0	= (u32) (PI_XMT_DESCR_M_SOP | PI_XMT_DESCR_M_EOP | ((skb->len) << PI_XMT_DESCR_V_SEG_LEN));
+	p_xmt_descr->long_1 = (u32) virt_to_bus(skb->data);
 
 	/*
 	 * Verify that descriptor is actually available
 	 *
 	 * Note: If descriptor isn't available, return 1 which tells
-	 *		 the upper layer to requeue the packet for later
-	 *		 transmission.
+	 *	 the upper layer to requeue the packet for later
+	 *	 transmission.
 	 *
 	 *       We need to ensure that the producer never reaches the
-	 *		 completion, except to indicate that the queue is empty.
+	 *	 completion, except to indicate that the queue is empty.
 	 */
 
 	if (prod == bp->rcv_xmt_reg.index.xmt_comp)
-		return(1);						/* requeue packet for later */
+	{
+		skb_pull(skb,3);
+		spin_unlock_irqrestore(&bp->lock, flags);
+		return(1);			/* requeue packet for later */
+	}
 
 	/*
 	 * Save info for this packet for xmt done indication routine
@@ -3243,9 +3118,9 @@ int dfx_xmt_queue_pkt(
 	 * one (1) for each completed packet.
 	 *
 	 * Note: If this assumption changes and we're presented with
-	 *		 an inconsistent number of transmit fragments for packet
-	 *		 data, we'll need to modify this code to save the current
-	 *		 transmit producer index.
+	 *	 an inconsistent number of transmit fragments for packet
+	 *	 data, we'll need to modify this code to save the current
+	 *	 transmit producer index.
 	 */
 
 	p_xmt_drv_descr->p_skb = skb;
@@ -3254,6 +3129,8 @@ int dfx_xmt_queue_pkt(
 
 	bp->rcv_xmt_reg.index.xmt_prod = prod;
 	dfx_port_write_long(bp, PI_PDQ_K_REG_TYPE_2_PROD, bp->rcv_xmt_reg.lword);
+	spin_unlock_irqrestore(&bp->lock, flags);
+	netif_wake_queue(dev);
 	return(0);							/* packet queued to adapter */
 	}
 
@@ -3290,13 +3167,11 @@ int dfx_xmt_queue_pkt(
  *   None
  */
 
-void dfx_xmt_done(
-	DFX_board_t *bp
-	)
-
+static int dfx_xmt_done(DFX_board_t *bp)
 	{
 	XMT_DRIVER_DESCR	*p_xmt_drv_descr;	/* ptr to transmit driver descriptor */
 	PI_TYPE_2_CONSUMER	*p_type_2_cons;		/* ptr to rcv/xmt consumer block register */
+	int 			freed = 0;		/* buffers freed */
 
 	/* Service all consumed transmit frames */
 
@@ -3307,13 +3182,14 @@ void dfx_xmt_done(
 
 		p_xmt_drv_descr = &(bp->xmt_drv_descr_blk[bp->rcv_xmt_reg.index.xmt_comp]);
 
-		/* Return skb to operating system */
-
-		dev_kfree_skb(p_xmt_drv_descr->p_skb, FREE_WRITE);
-
 		/* Increment transmit counters */
 
 		bp->xmt_total_frames++;
+		bp->xmt_total_bytes += p_xmt_drv_descr->p_skb->len;
+
+		/* Return skb to operating system */
+
+		dev_kfree_skb_irq(p_xmt_drv_descr->p_skb);
 
 		/*
 		 * Move to start of next packet by updating completion index
@@ -3327,11 +3203,60 @@ void dfx_xmt_done(
 		 */
 
 		bp->rcv_xmt_reg.index.xmt_comp += 1;
+		freed++;
 		}
-	return;
+	return freed;
 	}
 
 
+/*
+ * =================
+ * = dfx_rcv_flush =
+ * =================
+ *   
+ * Overview:
+ *   Remove all skb's in the receive ring.
+ *  
+ * Returns:
+ *   None
+ *       
+ * Arguments:
+ *   bp - pointer to board information
+ *
+ * Functional Description:
+ *   Free's all the dynamically allocated skb's that are
+ *   currently attached to the device receive ring. This
+ *   function is typically only used when the device is
+ *   initialized or reinitialized.
+ *
+ * Return Codes:
+ *   None
+ *
+ * Side Effects:
+ *   None
+ */
+#ifdef DYNAMIC_BUFFERS
+static void dfx_rcv_flush( DFX_board_t *bp )
+	{
+	int i, j;
+
+	for (i = 0; i < (int)(bp->rcv_bufs_to_post); i++)
+		for (j = 0; (i + j) < (int)PI_RCV_DATA_K_NUM_ENTRIES; j += bp->rcv_bufs_to_post)
+		{
+			struct sk_buff *skb;
+			skb = (struct sk_buff *)bp->p_rcv_buff_va[i+j];
+			if (skb)
+				dev_kfree_skb(skb);
+			bp->p_rcv_buff_va[i+j] = NULL;
+		}
+
+	}
+#else
+static inline void dfx_rcv_flush( DFX_board_t *bp )
+{
+}
+#endif /* DYNAMIC_BUFFERS */
+
 /*
  * =================
  * = dfx_xmt_flush =
@@ -3368,12 +3293,9 @@ void dfx_xmt_done(
  *   None
  */
 
-void dfx_xmt_flush(
-	DFX_board_t *bp
-	)
-
+static void dfx_xmt_flush( DFX_board_t *bp )
 	{
-	u32					prod_cons;			/* rcv/xmt consumer block longword */
+	u32			prod_cons;		/* rcv/xmt consumer block longword */
 	XMT_DRIVER_DESCR	*p_xmt_drv_descr;	/* ptr to transmit driver descriptor */
 
 	/* Flush all outstanding transmit frames */
@@ -3386,7 +3308,7 @@ void dfx_xmt_flush(
 
 		/* Return skb to operating system */
 
-		dev_kfree_skb(p_xmt_drv_descr->p_skb, FREE_WRITE);
+		dev_kfree_skb(p_xmt_drv_descr->p_skb);
 
 		/* Increment transmit error counter */
 
@@ -3411,12 +3333,93 @@ void dfx_xmt_flush(
 	prod_cons = (u32)(bp->cons_block_virt->xmt_rcv_data & ~PI_CONS_M_XMT_INDEX);
 	prod_cons |= (u32)(bp->rcv_xmt_reg.index.xmt_prod << PI_CONS_V_XMT_INDEX);
 	bp->cons_block_virt->xmt_rcv_data = prod_cons;
-	return;
 	}
+
+static void __devexit dfx_remove_one_pci_or_eisa(struct pci_dev *pdev, struct net_device *dev)
+{
+	DFX_board_t	  *bp = dev->priv;
+
+	unregister_netdev(dev);
+	release_region(dev->base_addr,  pdev ? PFI_K_CSR_IO_LEN : PI_ESIC_K_CSR_IO_LEN );
+	if (bp->kmalloced) kfree(bp->kmalloced);
+	kfree(dev);
+}
+
+static void __devexit dfx_remove_one (struct pci_dev *pdev)
+{
+	struct net_device *dev = pci_get_drvdata(pdev);
+
+	dfx_remove_one_pci_or_eisa(pdev, dev);
+	pci_set_drvdata(pdev, NULL);
+}
+
+static struct pci_device_id dfx_pci_tbl[] __devinitdata = {
+	{ PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_FDDI, PCI_ANY_ID, PCI_ANY_ID, },
+	{ 0, }
+};
+MODULE_DEVICE_TABLE(pci, dfx_pci_tbl);
+
+static struct pci_driver dfx_driver = {
+	name:		"defxx",
+	probe:		dfx_init_one,
+	remove:		__devexit_p(dfx_remove_one),
+	id_table:	dfx_pci_tbl,
+};
+
+static int dfx_have_pci;
+static int dfx_have_eisa;
+
+
+static void __exit dfx_eisa_cleanup(void)
+{
+	struct net_device *dev = root_dfx_eisa_dev;
+
+	while (dev)
+	{
+		struct net_device *tmp;
+		DFX_board_t *bp;
+
+		bp = (DFX_board_t*)dev->priv;
+		tmp = bp->next;
+		dfx_remove_one_pci_or_eisa(NULL, dev);
+		dev = tmp;
+	}
+}
+
+static int __init dfx_init(void)
+{
+	int rc_pci, rc_eisa;
+
+/* when a module, this is printed whether or not devices are found in probe */
+#ifdef MODULE
+	printk(version);
+#endif
+
+	rc_pci = pci_module_init(&dfx_driver);
+	if (rc_pci >= 0) dfx_have_pci = 1;
+	
+	rc_eisa = dfx_eisa_init();
+	if (rc_eisa >= 0) dfx_have_eisa = 1;
+
+	return ((rc_eisa < 0) ? 0 : rc_eisa)  + ((rc_pci < 0) ? 0 : rc_pci); 
+}
+
+static void __exit dfx_cleanup(void)
+{
+	if (dfx_have_pci)
+		pci_unregister_driver(&dfx_driver);
+	if (dfx_have_eisa)
+		dfx_eisa_cleanup();
+		
+}	
+
+module_init(dfx_init);
+module_exit(dfx_cleanup);
+MODULE_LICENSE("GPL");
 
 
 /*
  * Local variables:
- * kernel-compile-command: "gcc -D__KERNEL__ -I/root/linux/include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=586 -c defxx.c"
+ * kernel-compile-command: "gcc -D__KERNEL__ -I/root/linux/include -Wall -Wstrict-prototypes -O2 -pipe -fomit-frame-pointer -fno-strength-reduce -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -c defxx.c"
  * End:
  */

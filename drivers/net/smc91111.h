@@ -27,17 +27,13 @@
  . manual from SMC.  To get a copy, if you really want one, you can find 
  . information under www.smsc.com.
  . 
- . macros to provide 2.2 functions in a 2.0 enviroment 
- . These macros are taken from "Linux Device Drivers" by Alessandro Rubini 
- . and Jonathan Corbet, published by O'Reilly & Associates 
- .
  . Authors
  . 	Erik Stahlman				( erik@vt.edu )
  .	Daris A Nevil				( dnevil@snmc.com )
- .  David Armstrong     ( armstrong@sedsystems.ca )
+ .
  . History
  . 03/16/01		Daris A Nevil	Modified for use with LAN91C111 device
- . 09.04/01   David Armstrong Modified for use with 2.0 kernels
+ .
  ---------------------------------------------------------------------------*/
 #ifndef _SMC91111_H_
 #define _SMC91111_H_
@@ -155,13 +151,7 @@ typedef unsigned long int 		dword;
 #define RPC_LED_100	(0x05)	// LED = 100Mbps link dectect
 #define RPC_LED_TX	(0x06)	// LED = TX packet occurred
 #define RPC_LED_RX	(0x07)	// LED = RX packet occurred
-/* The default led functions:
-   LEDA - LINK
-   LEDB - ACTIVITY
-   */
-#define RPC_DEFAULT \
-        ((RPC_ANEG) | (RPC_LED_100_10 << RPC_LSXA_SHFT) | \
-         (RPC_LED_TX_RX << RPC_LSXB_SHFT) | RPC_SPEED | RPC_DPLX)
+#define RPC_DEFAULT (RPC_ANEG | (RPC_LED_100_10 << RPC_LSXA_SHFT) | (RPC_LED_TX_RX << RPC_LSXB_SHFT) | RPC_SPEED | RPC_DPLX)
 
 /* Bank 0 0x000C is reserved */
 
@@ -263,14 +253,13 @@ typedef unsigned long int 		dword;
 
 
 // Interrupt Status/Acknowledge Register
-// BANK 2
+/* BANK 2 */
 #define	INT_REG		0x000C
 
 
 // Interrupt Mask Register
-// BANK 2
+/* BANK 2 */
 #define IM_REG		0x000D
-
 #define	IM_MDINT	0x80 // PHY MI Register 18 Interrupt
 #define	IM_ERCV_INT	0x40 // Early Receive Interrupt
 #define	IM_EPH_INT	0x20 // Set by Etheret Protocol Handler section
@@ -392,7 +381,6 @@ enum {
 #define PHY_STAT_LINK		0x0004	// 1=valid link
 #define PHY_STAT_JAB		0x0002	// 1=10Mbps jabber condition
 #define PHY_STAT_EXREG		0x0001	// 1=extended registers implemented
-#define PHY_STAT_RESERVED   0x0780  // Reserved bits mask.
 
 // PHY Identifier Registers
 #define PHY_ID1_REG		0x02	// PHY Identifier 1
@@ -460,23 +448,8 @@ enum {
  . or slightly complicated, repeated tasks. 
  --------------------------------------------------------------------------*/
 
-/* macros to provide 2.2 functions in a 2.0 enviroment */
-/* These macros are taken from "Linux Device Drivers" by Alessandro Rubini */
-/* and Jonathan Corbet, published by O'Reilly & Associates */
-extern inline void schedule_timeout(int timeout)
-{
-        current->timeout = jiffies + timeout;
-        current->state =TASK_INTERRUPTIBLE;
-        schedule();
-        current->timeout = 0;
-}
-#define test_and_set_bit(nr,addr) test_bit((nr),(addr))
-#define mdelay(x) udelay(x*1000)
-#define signal_pending(current) ((current)->signal & ~(current)->blocked)
-#define in_interrupt() (intr_count !=0)
-
-
 /* select a register bank, 0 to 3  */
+
 #define SMC_SELECT_BANK(x)  { outw( x, ioaddr + BANK_SELECT ); } 
 
 
@@ -517,6 +490,7 @@ extern inline void schedule_timeout(int timeout)
 }
 
 /* this disables an interrupt from the interrupt mask register */
+
 #define SMC_DISABLE_INT(x) {\
 		unsigned char mask;\
 		SMC_SELECT_BANK(2);\
@@ -526,6 +500,7 @@ extern inline void schedule_timeout(int timeout)
 }
 
 #endif	/* CONFIG_SMC16BITONLY */
+
 
 /*----------------------------------------------------------------------
  . Define the interrupts that I want to receive from the card

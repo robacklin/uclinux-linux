@@ -10,9 +10,14 @@
 # License.  See the file "COPYING" in the main directory of this archive
 # for more details.
 #
-# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@ryeham.ee.ryerson.ca>,
+# Copyright (c) 2002 Yoshinori Sato <ysato@users.sourceforge.jp>
+#
+# Based on arch/m68knommu/Makefile
+# Copyright (c) 1999,2001  D. Jeff Dionne <jeff@uClinux.org>,
+#	                   Rt-Control Inc. / Lineo, Inc.
+#
+# Copyright (C) 1998,1999  D. Jeff Dionne <jeff@uclinux.org>,
 #                          Kenneth Albanowski <kjahds@kjahds.com>,
-#                          The Silver Hammer Group, Ltd.
 #
 # Based on arch/m68k/Makefile:
 # Copyright (C) 1994 by Hamish Macdonald
@@ -21,24 +26,36 @@
 # test for cross compiling
 COMPILE_ARCH = $(shell uname -m)
 
+#
+# If you want the kernel build to build modules outside of the tree
+# then define this and pass it to the main linux makefile
+#
+ifdef EXTRA_MODULE_DIRS
+SUBDIRS += $(EXTRA_MODULE_DIRS)
+endif
+
+UTS_SYSNAME = -DUTS_SYSNAME=\"uClinux\"
+
 # Find out which board we are compiling for
 include arch/$(ARCH)/Boards.mk
 
 # Set up the memory model.  RAM or ROM.
 ifdef CONFIG_RAMKERNEL
 MODEL = ram
-else
+endif
+ifdef CONFIG_ROMKERNEL
 MODEL = rom
 endif
+export MODEL
 
 # get the compiler, flags and targets from the platform
-include arch/$(ARCH)/Rules.make
-
-#arch/$(ARCH)/empty.o:
-#	$(CROSS_COMPILE)gcc -o arch/$(ARCH)/empty.o -c arch/$(ARCH)/empty.c
+ifdef PLATFORM
+include arch/$(ARCH)/platform/$(PLATFORM)/Rules.make
+endif
 
 bootstrap:
 	@$(MAKEBOOT) bootstrap
 
-archdep:
+archmrproper:
 
+archdep:

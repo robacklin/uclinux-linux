@@ -18,9 +18,6 @@
  *
  *    Questions/Comments/Bugfixes to arrays@compaq.com
  *
- *    If you want to make changes, improve or add functionality to this
- *    driver, you'll probably need the Compaq Array Controller Interface
- *    Specificiation (Document number ECG086/1198)
  */
 #ifndef ARRAYCMD_H
 #define ARRAYCMD_H
@@ -30,6 +27,14 @@
 #include <linux/blkdev.h>
 #endif
 
+/* for the Smart Array 42XX cards */
+#define S42XX_REQUEST_PORT_OFFSET	0x40
+#define S42XX_REPLY_INTR_MASK_OFFSET	0x34
+#define S42XX_REPLY_PORT_OFFSET		0x44
+#define S42XX_INTR_STATUS		0x30
+
+#define S42XX_INTR_OFF		0x08
+#define S42XX_INTR_PENDING	0x08
 
 #define COMMAND_FIFO		0x04
 #define COMMAND_COMPLETE_FIFO	0x08
@@ -77,7 +82,6 @@ typedef struct {
 
 #define CMD_RWREQ	0x00
 #define CMD_IOCTL_PEND	0x01
-#define CMD_IOCTL_DONE	0x02
 
 typedef struct cmdlist {
 	chdr_t	hdr;
@@ -88,7 +92,8 @@ typedef struct cmdlist {
 	int	ctlr;
 	struct cmdlist *prev;
 	struct cmdlist *next;
-	struct buffer_head *bh;
+	struct request *rq;
+	struct completion *waiting;
 	int type;
 } cmdlist_t;
 	
@@ -183,7 +188,7 @@ typedef struct {
 	__u8	expn_fail;
 	__u8	unit_flags;
 	__u16	big_fail_map[8];
-	__u16	big_remap_map[8];
+	__u16	big_remap_map[128];
 	__u16	big_repl_map[8];
 	__u16	big_act_spare_map[8];
 	__u8	big_spar_repl_map[128];
@@ -313,6 +318,8 @@ typedef struct {
 	__u8	reserved[510];
 } mp_delay_t;
 
+#define SENSE_SURF_STATUS	0x70
+
 #define PASSTHRU_A	0x91
 typedef struct {
 	__u8	target;
@@ -328,11 +335,17 @@ typedef struct {
 	__u32	sense_info;
 	__u8	sense_code;
 	__u8	sense_qual;
-	__u8	residual;
+	__u32	residual;
 	__u8	reserved[4];
 	__u8	cdb[12];	
 } scsi_param_t;
 
+#define RESUME_BACKGROUND_ACTIVITY	0x99
+#define SENSE_CONTROLLER_PERFORMANCE	0xa8
+#define FLUSH_CACHE			0xc2
+#define COLLECT_BUFFER			0xd2
+#define READ_FLASH_ROM			0xf6
+#define WRITE_FLASH_ROM			0xf7
 #pragma pack()	
 
 #endif /* ARRAYCMD_H */

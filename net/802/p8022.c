@@ -1,9 +1,28 @@
+/*
+ *	NET3:	Support for 802.2 demultiplexing off Ethernet (Token ring
+ *		is kept separate see p8022tr.c)
+ *		This program is free software; you can redistribute it and/or
+ *		modify it under the terms of the GNU General Public License
+ *		as published by the Free Software Foundation; either version
+ *		2 of the License, or (at your option) any later version.
+ *
+ *		Demultiplex 802.2 encoded protocols. We match the entry by the
+ *		SSAP/DSAP pair and then deliver to the registered datalink that
+ *		matches. The control byte is ignored and handling of such items
+ *		is up to the routine passed the frame.
+ *
+ *		Unlike the 802.3 datalink we have a list of 802.2 entries as there
+ *		are multiple protocols to demux. The list is currently short (3 or
+ *		4 entries at most). The current demux assumes this.
+ */
+
 #include <linux/module.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/datalink.h>
 #include <linux/mm.h>
 #include <linux/in.h>
+#include <linux/init.h>
 #include <net/p8022.h>
 
 static struct datalink_proto *p8022_list = NULL;
@@ -12,11 +31,11 @@ static struct datalink_proto *p8022_list = NULL;
  *	We don't handle the loopback SAP stuff, the extended
  *	802.2 command set, multicast SAP identifiers and non UI
  *	frames. We have the absolute minimum needed for IPX,
- *	IP and Appletalk phase 2.
+ *	IP and Appletalk phase 2. See the llc_* routines for
+ *	support libraries if your protocol needs these.
  */
- 
-static struct datalink_proto *
-find_8022_client(unsigned char type)
+
+static struct datalink_proto *find_8022_client(unsigned char type)
 {
 	struct datalink_proto	*proto;
 
@@ -28,28 +47,28 @@ find_8022_client(unsigned char type)
 	return proto;
 }
 
-int
-p8022_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+int p8022_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 {
 	struct datalink_proto	*proto;
 
 	proto = find_8022_client(*(skb->h.raw));
-	if (proto != NULL) {
+	if (proto != NULL) 
+	{
 		skb->h.raw += 3;
+		skb->nh.raw += 3;
 		skb_pull(skb,3);
 		return proto->rcvfunc(skb, dev, pt);
 	}
 
 	skb->sk = NULL;
-	kfree_skb(skb, FREE_READ);
+	kfree_skb(skb);
 	return 0;
 }
 
-static void
-p8022_datalink_header(struct datalink_proto *dl, 
+static void p8022_datalink_header(struct datalink_proto *dl,
 		struct sk_buff *skb, unsigned char *dest_node)
 {
-	struct device	*dev = skb->dev;
+	struct net_device	*dev = skb->dev;
 	unsigned char	*rawp;
 
 	rawp = skb_push(skb,3);
@@ -59,7 +78,7 @@ p8022_datalink_header(struct datalink_proto *dl,
 	dev->hard_header(skb, dev, ETH_P_802_3, dest_node, NULL, skb->len);
 }
 
-static struct packet_type p8022_packet_type = 
+static struct packet_type p8022_packet_type =
 {
 	0,	/* MUTTER ntohs(ETH_P_8022),*/
 	NULL,		/* All devices */
@@ -68,23 +87,26 @@ static struct packet_type p8022_packet_type =
 	NULL,
 };
 
-static struct symbol_table p8022_proto_syms = {
-#include <linux/symtab_begin.h>
-	X(register_8022_client),
-	X(unregister_8022_client),
-#include <linux/symtab_end.h>
-};
- 
+EXPORT_SYMBOL(register_8022_client);
+EXPORT_SYMBOL(unregister_8022_client);
 
-void p8022_proto_init(struct net_proto *pro)
+static int __init p8022_init(void)
 {
 	p8022_packet_type.type=htons(ETH_P_802_2);
 	dev_add_pack(&p8022_packet_type);
-	register_symtab(&p8022_proto_syms);
+	return 0;
 }
-	
-struct datalink_proto *
-register_8022_client(unsigned char type, int (*rcvfunc)(struct sk_buff *, struct device *, struct packet_type *))
+
+static void __exit p8022_exit(void)
+{
+	dev_remove_pack(&p8022_packet_type);
+	return;
+}
+
+module_init(p8022_init);
+module_exit(p8022_exit);
+
+struct datalink_proto *register_8022_client(unsigned char type, int (*rcvfunc)(struct sk_buff *, struct net_device *, struct packet_type *))
 {
 	struct datalink_proto	*proto;
 
@@ -118,7 +140,7 @@ void unregister_8022_client(unsigned char type)
 	{
 		if (tmp->type[0] == type) {
 			*clients = tmp->next;
-			kfree_s(tmp, sizeof(struct datalink_proto));
+			kfree(tmp);
 			break;
 		} else {
 			clients = &tmp->next;
@@ -127,3 +149,5 @@ void unregister_8022_client(unsigned char type)
 
 	restore_flags(flags);
 }
+
+MODULE_LICENSE("GPL");

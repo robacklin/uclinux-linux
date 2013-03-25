@@ -34,7 +34,7 @@ int atari_scsi_release (struct Scsi_Host *);
  * values should work, too; try it! (but cmd_per_lun costs memory!) */
 
 /* But there seems to be a bug somewhere that requires CAN_QUEUE to be
- * 2*CMD_OER_LUN. At least on a TT, no spurious timeouts seen since
+ * 2*CMD_PER_LUN. At least on a TT, no spurious timeouts seen since
  * changed CMD_PER_LUN... */
 
 /* Note: The Falcon currently uses 8/1 setting due to unsolved problems with
@@ -51,31 +51,19 @@ int atari_scsi_release (struct Scsi_Host *);
 #define	DEFAULT_USE_TAGGED_QUEUING	0
 
 
-#if defined (HOSTS_C) || defined (MODULE)
-
-#define ATARI_SCSI { NULL, NULL, NULL,				\
-  atari_scsi_proc_info,						\
-  "Atari native SCSI",						\
-  atari_scsi_detect,						\
-  atari_scsi_release,						\
-  atari_scsi_info,						\
-  /* command */ NULL,						\
-  atari_scsi_queue_command,					\
-  atari_scsi_abort,						\
-  atari_scsi_reset,						\
-  /* slave_attach */	NULL,					\
-  /* bios_param */	NULL,					\
-  /* can queue */	0, /* initialized at run-time */	\
-  /* host_id */		0, /* initialized at run-time */	\
-  /* scatter gather */	0, /* initialized at run-time */	\
-  /* cmd per lun */	0, /* initialized at run-time */	\
-  /* present */		0,					\
-  /* unchecked ISA DMA */ 0,					\
-  /* use_clustering */	DISABLE_CLUSTERING }
-
-#endif
-
-#ifndef HOSTS_C
+#define ATARI_SCSI {    proc_info:         atari_scsi_proc_info,	\
+			name:              "Atari native SCSI",		\
+			detect:            atari_scsi_detect,		\
+			release:           atari_scsi_release,		\
+			info:              atari_scsi_info,		\
+			queuecommand:      atari_scsi_queue_command,	\
+			abort:             atari_scsi_abort,		\
+			reset:             atari_scsi_reset,		\
+			can_queue:         0, /* initialized at run-time */	\
+			this_id:           0, /* initialized at run-time */	\
+			sg_tablesize:      0, /* initialized at run-time */	\
+			cmd_per_lun:       0, /* initialized at run-time */	\
+			use_clustering:	   DISABLE_CLUSTERING }
 
 #define	NCR5380_implementation_fields	/* none */
 
@@ -93,8 +81,6 @@ int atari_scsi_release (struct Scsi_Host *);
 	atari_dma_xfer_len(cmd->SCp.this_residual,cmd,((phase) & SR_IO) ? 0 : 1)
 
 /* Debugging printk definitions:
- * DPRINTK() is the generic one, takes an NDEBUG_* mask as argument;
- * all others are hardcoded to one NDEBUG_* code:
  *
  *  ARB  -> arbitration
  *  ASEN -> auto-sense
@@ -122,58 +108,144 @@ int atari_scsi_release (struct Scsi_Host *);
  *
  */
 
-#define DPRINTK(mask, format, args...)				\
-	do {							\
-		if (NDEBUG & (mask))				\
-			printk(KERN_DEBUG format , ## args);	\
-	} while(0)
-
+#if NDEBUG & NDEBUG_ARBITRATION
 #define ARB_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_ARBITRATION, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define ARB_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_AUTOSENSE
 #define ASEN_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_AUTOSENSE, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define ASEN_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_DMA
 #define DMA_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_DMA, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define DMA_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_HANDSHAKE
 #define HSH_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_HANDSHAKE, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define HSH_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_INFORMATION
 #define INF_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_INFORMATION, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define INF_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_INIT
 #define INI_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_INIT, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define INI_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_INTR
 #define INT_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_INTR, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define INT_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_LINKED
 #define LNK_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_LINKED, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define LNK_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_MAIN
 #define MAIN_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_MAIN, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define MAIN_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_NO_DATAOUT
 #define NDAT_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_NO_DATAOUT, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define NDAT_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_NO_WRITE
 #define NWR_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_NO_WRITE, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define NWR_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_PIO
 #define PIO_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_PIO, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define PIO_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_PSEUDO_DMA
 #define PDMA_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_PSEUDO_DMA, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define PDMA_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_QUEUES
 #define QU_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_QUEUES, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define QU_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_RESELECTION
 #define RSL_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_RESELECTION, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define RSL_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_SELECTION
 #define SEL_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_SELECTION, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define SEL_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_USLEEP
 #define USL_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_USLEEP, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define USL_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_LAST_BYTE_SENT
 #define LBS_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_LAST_BYTE_SENT, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define LBS_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_RESTART_SELECT
 #define RSS_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_RESTART_SELECT, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define RSS_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_EXTENDED
 #define EXT_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_EXTENDED, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define EXT_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_ABORT
 #define ABRT_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_ABORT, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define ABRT_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_TAGS
 #define TAG_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_TAGS, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define TAG_PRINTK(format, args...)
+#endif
+#if NDEBUG & NDEBUG_MERGING
 #define MER_PRINTK(format, args...) \
-	DPRINTK(NDEBUG_MERGING, format , ##args)
+	printk(KERN_DEBUG format , ## args)
+#else
+#define MER_PRINTK(format, args...)
+#endif
 
 /* conditional macros for NCR5380_print_{,phase,status} */
 
@@ -189,7 +261,6 @@ int atari_scsi_release (struct Scsi_Host *);
 #define NDEBUG_ANY	0xffffffff
 
 
-#endif /* else def HOSTS_C */
 #endif /* ndef ASM */
 #endif /* ATARI_SCSI_H */
 

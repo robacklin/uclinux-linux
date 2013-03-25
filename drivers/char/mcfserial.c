@@ -1,19 +1,23 @@
 /*
  * mcfserial.c -- serial driver for ColdFire internal UARTS.
  *
- * (C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com)
- * (C) Copyright 2000, Lineo Inc. (www.lineo.com) 
+ * Copyright (c) 1999-2004 Greg Ungerer <gerg@snapgear.com>
+ * Copyright (C) 2001-2003 SnapGear Inc. <www.snapgear.com> 
+ * Copyright (c) 2000-2001 Lineo, Inc. <www.lineo.com> 
  *
  * Based on code from 68332serial.c which was:
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1998 TSHG
+ * Copyright (c) 1999 Rt-Control Inc. <jeff@uclinux.org>
  */
  
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/wait.h>
 #include <linux/interrupt.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
@@ -23,38 +27,86 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
+#include <linux/serial.h>
+#include <linux/serialP.h>
 #ifdef CONFIG_LEDMAN
 #include <linux/ledman.h>
 #endif
+#include <linux/console.h>
+#include <linux/version.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/system.h>
 #include <asm/segment.h>
+#include <asm/semaphore.h>
 #include <asm/bitops.h>
 #include <asm/delay.h>
 #include <asm/coldfire.h>
 #include <asm/mcfsim.h>
 #include <asm/mcfuart.h>
 #include <asm/nettel.h>
-#include <asm/semp3.h>
 #include <asm/nap.h>
+#include <asm/se1100.h>
+
+#if LINUX_VERSION_CODE < 0x020100
+#define queue_task_irq_off queue_task
+#define copy_from_user(a,b,c) memcpy_fromfs(a,b,c)
+#define copy_to_user(a,b,c) memcpy_tofs(a,b,c)
+#else
+#include <asm/uaccess.h>
+#endif
+
 #include "mcfserial.h"
 
 /*
- *	Default console port and baud rate...
+ *	the only event we use
  */
-#ifndef CONSOLE_PORT
-#define	CONSOLE_PORT		0
+#undef RS_EVENT_WRITE_WAKEUP
+#define RS_EVENT_WRITE_WAKEUP 0
+#undef RS_EVENT_READ_WAKEUP
+#define RS_EVENT_READ_WAKEUP 1
+
+#if LINUX_VERSION_CODE >= 0x020100
+struct timer_list mcfrs_timer_struct;
 #endif
+
+/*
+ *	Default console baud rate,  we use this as the default
+ *	for all ports so init can just open /dev/console and
+ *	keep going.  Perhaps one day the cflag settings for the
+ *	console can be used instead.
+ */
+#if defined(CONFIG_ARNEWSH) || defined(CONFIG_MOTOROLA) || \
+    defined(CONFIG_COBRA5272) || defined(CONFIG_AVNET) || \
+    defined(CONFIG_COBRA5282) || defined(CONFIG_SNEHA) || \
+    defined(CONFIG_SERRA)
+#define	CONSOLE_BAUD_RATE	19200
+#define	DEFAULT_CBAUD		B19200
+#endif
+
+#if defined(CONFIG_GILBARCONAP) || defined(CONFIG_DNP5280) || \
+    defined(CONFIG_SIGNAL_MCP751) || defined(CONFIG_M5208EVB) || \
+    defined(CONFIG_BOARD_MOD5272)
+#define	CONSOLE_BAUD_RATE	115200
+#define	DEFAULT_CBAUD		B115200
+#endif
+
+#if defined(CONFIG_HW_FEITH)
+#define	CONSOLE_BAUD_RATE	38400
+#define	DEFAULT_CBAUD		B38400
+#endif
+
 #ifndef CONSOLE_BAUD_RATE
 #define	CONSOLE_BAUD_RATE	9600
+#define	DEFAULT_CBAUD		B9600
 #endif
 
 int mcfrs_console_inited = 0;
-int mcfrs_console_port = CONSOLE_PORT;
+int mcfrs_console_port = -1;
 int mcfrs_console_baud = CONSOLE_BAUD_RATE;
-
+int mcfrs_console_cbaud = DEFAULT_CBAUD;
 
 DECLARE_TASK_QUEUE(mcf_tq_serial);
 
@@ -69,7 +121,7 @@ static int		mcfrs_serial_refcount;
 #define SERIAL_TYPE_CALLOUT	2
   
 /* number of characters left in xmit buffer before we ask for more */
-#define WAKEUP_CHARS 256
+#define WAKEUP_CHARS 128 
 
 /* Debugging...
  */
@@ -78,15 +130,36 @@ static int		mcfrs_serial_refcount;
 
 #define _INLINE_ inline
 
-#define	IRQBASE	73
+#if defined(CONFIG_M5235) || defined(CONFIG_M527x) || \
+    defined(CONFIG_M5282) || defined(CONFIG_M5280)
+#define	MCFRS_IRQ0	77
+#define	MCFRS_IRQ1	78
+#define	MCFRS_IRQ2	79
+#elif defined(CONFIG_M5208)
+#define MCFRS_IRQ0	90
+#define MCFRS_IRQ1	91
+#define MCFRS_IRQ2	92
+#elif defined(CONFIG_M547x)
+#define	MCFRS_IRQ0	99
+#define	MCFRS_IRQ1	98
+#define	MCFRS_IRQ2	97
+#define	MCFRS_IRQ3	96
+#else
+#define	MCFRS_IRQ0	73
+#define	MCFRS_IRQ1	74
+#endif
 
 /*
  *	Configuration table, UARTs to look for at startup.
  */
 static struct mcf_serial mcfrs_table[] = {
-  { 0, (MCF_MBAR+MCFUART_BASE1), IRQBASE,   ASYNC_BOOT_AUTOCONF },  /* ttyS0 */
-#ifndef CONFIG_LIRC_SERIAL
-  { 0, (MCF_MBAR+MCFUART_BASE2), IRQBASE+1, ASYNC_BOOT_AUTOCONF },  /* ttyS1 */
+  { 0, (MCF_MBAR+MCFUART_BASE1), MCFRS_IRQ0, ASYNC_BOOT_AUTOCONF },  /* ttyS0 */
+  { 0, (MCF_MBAR+MCFUART_BASE2), MCFRS_IRQ1, ASYNC_BOOT_AUTOCONF },  /* ttyS1 */
+#ifdef MCFUART_BASE3
+  { 0, (MCF_MBAR+MCFUART_BASE3), MCFRS_IRQ2, ASYNC_BOOT_AUTOCONF },  /* ttyS2 */
+#endif
+#ifdef MCFUART_BASE4
+  { 0, (MCF_MBAR+MCFUART_BASE4), MCFRS_IRQ3, ASYNC_BOOT_AUTOCONF },  /* ttyS3 */
 #endif
 };
 
@@ -102,8 +175,12 @@ static struct termios		*mcfrs_serial_termios_locked[NR_PORTS];
  */
 static int mcfrs_baud_table[] = {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
-	9600, 19200, 38400, 57600, 115200, 230400, 460800, 0
+	9600, 19200, 38400, 57600, 115200, 230400, 460800, 500000, 576000,
+	921600, 1000000, 1152000, 1500000, 2000000, 2500000, 3000000,
+	3500000, 4000000, 0
 };
+#define MCFRS_BAUD_TABLE_SIZE \
+			(sizeof(mcfrs_baud_table)/sizeof(mcfrs_baud_table[0]))
 
 
 #ifndef MIN
@@ -120,7 +197,7 @@ extern int	magic_sysrq_key(int ch);
 
 /*
  * tmp_buf is used as a temporary buffer by serial_write.  We need to
- * lock it in case the memcpy_fromfs blocks while swapping in a page,
+ * lock it in case the copy_from_user blocks while swapping in a page,
  * and some other program tries to do a serial write at the same time.
  * Since the lock will only come under contention when the system is
  * swapping and available memory is low, it makes sense to share one
@@ -128,12 +205,17 @@ extern int	magic_sysrq_key(int ch);
  * memory if large numbers of serial ports are open.
  */
 static unsigned char mcfrs_tmp_buf[4096]; /* This is cheating */
+#if LINUX_VERSION_CODE < 0x020100
 static struct semaphore mcfrs_tmp_buf_sem = MUTEX;
+#else
+static DECLARE_MUTEX(mcfrs_tmp_buf_sem);
+#endif
 
 /*
- *	Forware declarations...
+ *	Forward declarations...
  */
 static void	mcfrs_change_speed(struct mcf_serial *info);
+static void	mcfrs_wait_until_sent(struct tty_struct *tty, int timeout);
 
 
 static inline int serial_paranoia_check(struct mcf_serial *info,
@@ -158,6 +240,26 @@ static inline int serial_paranoia_check(struct mcf_serial *info,
 }
 
 /*
+ *	Function stubs for boards that do not implement DCD and DTR.
+ */
+#if !defined(MCF_HAVEDCD0) && !defined(MCF_HAVEDCD1)
+static __inline__ unsigned int mcf_getppdcd(unsigned int portnr)
+{
+	return(0);
+}
+#endif
+
+#if !defined(MCF_HAVEDTR0) && !defined(MCF_HAVEDTR1)
+static __inline__ unsigned int mcf_getppdtr(unsigned int portnr)
+{
+	return(0);
+}
+static __inline__ void mcf_setppdtr(unsigned int portnr, unsigned int dtr)
+{
+}
+#endif
+
+/*
  *	Sets or clears DTR and RTS on the requested line.
  */
 static void mcfrs_setsignals(struct mcf_serial *info, int dtr, int rts)
@@ -167,18 +269,12 @@ static void mcfrs_setsignals(struct mcf_serial *info, int dtr, int rts)
 	
 #if 0
 	printk("%s(%d): mcfrs_setsignals(info=%x,dtr=%d,rts=%d)\n",
-		__FILE__, __LINE__, info, dtr, rts);
+		__FILE__, __LINE__, (int) info, dtr, rts);
 #endif
 
 	save_flags(flags); cli();
-	if (dtr >= 0) {
-#ifdef MCFPP_DTR0
-		if (info->line)
-			mcf_setppdata(MCFPP_DTR1, (dtr ? 0 : MCFPP_DTR1));
-		else
-			mcf_setppdata(MCFPP_DTR0, (dtr ? 0 : MCFPP_DTR0));
-#endif
-	}
+	if (dtr >= 0)
+		mcf_setppdtr(info->line, dtr);
 	if (rts >= 0) {
 		uartp = (volatile unsigned char *) info->addr;
 		if (rts) {
@@ -206,25 +302,12 @@ static int mcfrs_getsignals(struct mcf_serial *info)
 	printk("%s(%d): mcfrs_getsignals(info=%x)\n", __FILE__, __LINE__);
 #endif
 
-	save_flags(flags); cli();
 	uartp = (volatile unsigned char *) info->addr;
+	save_flags(flags); cli();
 	sigs = (uartp[MCFUART_UIPR] & MCFUART_UIPR_CTS) ? 0 : TIOCM_CTS;
 	sigs |= (info->sigs & TIOCM_RTS);
-
-#ifdef MCFPP_DCD0
-{
-	unsigned int ppdata;
-	ppdata = mcf_getppdata();
-	if (info->line == 0) {
-		sigs |= (ppdata & MCFPP_DCD0) ? 0 : TIOCM_CD;
-		sigs |= (ppdata & MCFPP_DTR0) ? 0 : TIOCM_DTR;
-	} else if (info->line == 1) {
-		sigs |= (ppdata & MCFPP_DCD1) ? 0 : TIOCM_CD;
-		sigs |= (ppdata & MCFPP_DTR1) ? 0 : TIOCM_DTR;
-	}
-}
-#endif
-
+	sigs |= (mcf_getppdcd(info->line) ? TIOCM_CD : 0);
+	sigs |= (mcf_getppdtr(info->line) ? TIOCM_DTR : 0);
 	restore_flags(flags);
 	return(sigs);
 }
@@ -246,8 +329,8 @@ static void mcfrs_stop(struct tty_struct *tty)
 	if (serial_paranoia_check(info, tty->device, "mcfrs_stop"))
 		return;
 	
-	save_flags(flags); cli();
 	uartp = (volatile unsigned char *) info->addr;
+	save_flags(flags); cli();
 	info->imr &= ~MCFUART_UIR_TXREADY;
 	uartp[MCFUART_UIMR] = info->imr;
 	restore_flags(flags);
@@ -262,9 +345,9 @@ static void mcfrs_start(struct tty_struct *tty)
 	if (serial_paranoia_check(info, tty->device, "mcfrs_start"))
 		return;
 
+	uartp = (volatile unsigned char *) info->addr;
 	save_flags(flags); cli();
 	if (info->xmit_cnt && info->xmit_buf) {
-		uartp = (volatile unsigned char *) info->addr;
 		info->imr |= MCFUART_UIR_TXREADY;
 		uartp[MCFUART_UIMR] = info->imr;
 	}
@@ -299,13 +382,13 @@ static void mcfrs_start(struct tty_struct *tty)
 static _INLINE_ void mcfrs_sched_event(struct mcf_serial *info, int event)
 {
 	info->event |= 1 << event;
-	queue_task_irq_off(&info->tqueue, &mcf_tq_serial);
+	queue_task(&info->tqueue, &mcf_tq_serial);
 	mark_bh(CM206_BH);
 }
 
-static _INLINE_ void receive_chars(struct mcf_serial *info, struct pt_regs *regs, unsigned short rx)
+static _INLINE_ void receive_chars(struct mcf_serial *info, 
+		volatile unsigned char *uartp)
 {
-	volatile unsigned char	*uartp;
 	struct tty_struct	*tty = info->tty;
 	unsigned char		status, ch;
 
@@ -316,12 +399,20 @@ static _INLINE_ void receive_chars(struct mcf_serial *info, struct pt_regs *regs
 	ledman_cmd(LEDMAN_CMD_SET, info->line ? LEDMAN_COM2_RX : LEDMAN_COM1_RX);
 #endif
 
-	uartp = (volatile unsigned char *) info->addr;
-
 	while ((status = uartp[MCFUART_USR]) & MCFUART_USR_RXREADY) {
 
-		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
+		if (tty->flip.count >= TTY_FLIPBUF_SIZE) {
+			/*
+			 * can't take any more data.  Turn off receiver
+			 * so that the interrupt doesn't continually
+			 * occur.  We have to make sure we turn it
+			 * back on at some point though.
+			 */
+			info->imr &= ~MCFUART_UIR_RXREADY;
+			uartp[MCFUART_UIMR] = info->imr;
+			mcfrs_sched_event(info, RS_EVENT_READ_WAKEUP);
 			break;
+		}
 
 		ch = uartp[MCFUART_URB];
 		info->stats.rx++;
@@ -334,39 +425,37 @@ static _INLINE_ void receive_chars(struct mcf_serial *info, struct pt_regs *regs
 #endif
 
 		tty->flip.count++;
-		if (status & MCFUART_USR_RXERR)
+		if (status & MCFUART_USR_RXERR) {
 			uartp[MCFUART_UCR] = MCFUART_UCR_CMDRESETERR;
-		if (status & MCFUART_USR_RXBREAK) {
-			info->stats.rxbreak++;
-			*tty->flip.flag_buf_ptr++ = TTY_BREAK;
-		} else if (status & MCFUART_USR_RXPARITY) {
-			info->stats.rxparity++;
-			*tty->flip.flag_buf_ptr++ = TTY_PARITY;
-		} else if (status & MCFUART_USR_RXOVERRUN) {
-			info->stats.rxoverrun++;
-			*tty->flip.flag_buf_ptr++ = TTY_OVERRUN;
-		} else if (status & MCFUART_USR_RXFRAMING) {
-			info->stats.rxframing++;
-			*tty->flip.flag_buf_ptr++ = TTY_FRAME;
+			if (status & MCFUART_USR_RXBREAK) {
+				info->stats.rxbreak++;
+				*tty->flip.flag_buf_ptr++ = TTY_BREAK;
+			} else if (status & MCFUART_USR_RXPARITY) {
+				info->stats.rxparity++;
+				*tty->flip.flag_buf_ptr++ = TTY_PARITY;
+			} else if (status & MCFUART_USR_RXOVERRUN) {
+				info->stats.rxoverrun++;
+				*tty->flip.flag_buf_ptr++ = TTY_OVERRUN;
+			} else if (status & MCFUART_USR_RXFRAMING) {
+				info->stats.rxframing++;
+				*tty->flip.flag_buf_ptr++ = TTY_FRAME;
+			}
 		} else {
 			*tty->flip.flag_buf_ptr++ = 0;
 		}
 		*tty->flip.char_buf_ptr++ = ch;
 	}
 
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 	return;
 }
 
-static _INLINE_ void transmit_chars(struct mcf_serial *info)
+static _INLINE_ void transmit_chars(struct mcf_serial *info,
+		volatile unsigned char *uartp)
 {
-	volatile unsigned char	*uartp;
-
 #if defined(CONFIG_LEDMAN)
 	ledman_cmd(LEDMAN_CMD_SET, info->line ? LEDMAN_COM2_TX : LEDMAN_COM1_TX);
 #endif
-
-	uartp = (volatile unsigned char *) info->addr;
 
 	if (info->x_char) {
 		/* Send special char - probably flow control */
@@ -401,14 +490,17 @@ void mcfrs_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct mcf_serial	*info;
 	unsigned char		isr;
+	volatile unsigned char  *uartp;
 
-	info = &mcfrs_table[(irq - IRQBASE)];
-	isr = (((volatile unsigned char *)info->addr)[MCFUART_UISR]) & info->imr;
+ 	info = (struct mcf_serial *)dev_id;
+	uartp = (volatile unsigned char *) info->addr;
+
+	isr = uartp[MCFUART_UISR] & info->imr;
 
 	if (isr & MCFUART_UIR_RXREADY)
-		receive_chars(info, regs, isr);
+		receive_chars(info, uartp);
 	if (isr & MCFUART_UIR_TXREADY)
-		transmit_chars(info);
+		transmit_chars(info, uartp);
 #if 0
 	if (isr & MCFUART_UIR_DELTABREAK) {
 		printk("%s(%d): delta break!\n", __FILE__, __LINE__);
@@ -448,11 +540,18 @@ static void do_softint(void *private_)
 	if (!tty)
 		return;
 
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &info->event)) {
 		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
+	}
+
+	if (test_and_clear_bit(RS_EVENT_READ_WAKEUP, &info->event)) {
+		if ((info->imr & MCFUART_UIR_RXREADY) == 0) {
+			info->imr |= MCFUART_UIR_RXREADY;
+			((volatile unsigned char *) info->addr)[MCFUART_UIMR] = info->imr;
+		}
 	}
 }
 
@@ -470,44 +569,51 @@ void mcfrs_modem_change(struct mcf_serial *info, int dcd)
 			wake_up_interruptible(&info->open_wait);
 		} else if (!((info->flags & ASYNC_CALLOUT_ACTIVE) &&
 		    (info->flags & ASYNC_CALLOUT_NOHUP))) {
-			queue_task_irq_off(&info->tqueue_hangup, &tq_scheduler);
+			schedule_task(&info->tqueue_hangup);
 		}
 	}
 }
 
 
-#ifdef MCFPP_DCD0
+#if defined(MCF_HAVEDCD0) || defined(MCF_HAVEDCD1)
 
-unsigned short	mcfrs_ppstatus;
+unsigned int	mcfrs_olddcd0;
+unsigned int	mcfrs_olddcd1;
 
 /*
  * This subroutine is called when the RS_TIMER goes off. It is used
  * to monitor the state of the DCD lines - since they have no edge
  * sensors and interrupt generators.
  */
+#if LINUX_VERSION_CODE < 0x020100
 static void mcfrs_timer(void)
+#else
+static void mcfrs_timer(unsigned long arg)
+#endif
 {
-	unsigned int	ppstatus, dcdval, i;
+	unsigned int dcd;
 
-	ppstatus = mcf_getppdata() & (MCFPP_DCD0 | MCFPP_DCD1);
+	dcd = mcf_getppdcd(0);
+	if (dcd != mcfrs_olddcd0)
+		mcfrs_modem_change(&mcfrs_table[0], dcd);
+	mcfrs_olddcd0 = dcd;
 
-	if (ppstatus != mcfrs_ppstatus) {
-		for (i = 0; (i < 2); i++) {
-			dcdval = (i ? MCFPP_DCD1 : MCFPP_DCD0);
-			if ((ppstatus & dcdval) != (mcfrs_ppstatus & dcdval)) {
-				mcfrs_modem_change(&mcfrs_table[i],
-					((ppstatus & dcdval) ? 0 : 1));
-			}
-		}
-	}
-	mcfrs_ppstatus = ppstatus;
+	dcd = mcf_getppdcd(1);
+	if (dcd != mcfrs_olddcd1)
+		mcfrs_modem_change(&mcfrs_table[1], dcd);
+	mcfrs_olddcd1 = dcd;
 
 	/* Re-arm timer */
+#if LINUX_VERSION_CODE < 0x020100
 	timer_table[RS_TIMER].expires = jiffies + HZ/25;
 	timer_active |= 1 << RS_TIMER;
+#else
+	mcfrs_timer_struct.expires = jiffies + HZ/25;
+	add_timer(&mcfrs_timer_struct);
+#endif
 }
 
-#endif	/* MCFPP_DCD0 */
+#endif	/* MCF_HAVEDCD0 || MCF_HAVEDCD1 */
 
 
 /*
@@ -547,7 +653,8 @@ static int startup(struct mcf_serial * info)
 
 	save_flags(flags); cli();
 
-#ifdef MCFPP_DCD0
+#if defined(MCF_HAVEDCD0) || defined(MCF_HAVEDCD1)
+#if LINUX_VERSION_CODE < 0x020100
 	/*
 	 * Set up poll timer. It is used to check DCD status.
 	 */
@@ -555,7 +662,8 @@ static int startup(struct mcf_serial * info)
 		timer_table[RS_TIMER].expires = jiffies + HZ/25;
 		timer_active |= 1 << RS_TIMER;
 	}
-#endif
+#endif /* LINUX_VERSION_CODE < 0x020100 */
+#endif /* MCF_HAVEDCD0 || MCF_HAVEDCD1 */
 
 #ifdef SERIAL_DEBUG_OPEN
 	printk("starting up ttyS%d (irq %d)...\n", info->line, info->irq);
@@ -608,9 +716,9 @@ static void shutdown(struct mcf_serial * info)
 	       info->irq);
 #endif
 	
+	uartp = (volatile unsigned char *) info->addr;
 	save_flags(flags); cli(); /* Disable interrupts */
 
-	uartp = (volatile unsigned char *) info->addr;
 	uartp[MCFUART_UIMR] = 0;  /* mask all interrupts */
 	uartp[MCFUART_UCR] = MCFUART_UCR_CMDRESETRX;  /* reset RX */
 	uartp[MCFUART_UCR] = MCFUART_UCR_CMDRESETTX;  /* reset TX */
@@ -642,6 +750,9 @@ static void mcfrs_change_speed(struct mcf_serial *info)
 	unsigned long		flags;
 	unsigned char		mr1, mr2;
 	int			i;
+#ifdef	CONFIG_M5272
+	unsigned int		fraction;
+#endif
 
 	if (!info->tty || !info->tty->termios)
 		return;
@@ -656,7 +767,7 @@ static void mcfrs_change_speed(struct mcf_serial *info)
 	i = cflag & CBAUD;
 	if (i & CBAUDEX) {
 		i &= ~CBAUDEX;
-		if (i < 1 || i > 4)
+		if (i < 1)
 			info->tty->termios->c_cflag &= ~CBAUDEX;
 		else
 			i += 15;
@@ -665,7 +776,20 @@ static void mcfrs_change_speed(struct mcf_serial *info)
 		mcfrs_setsignals(info, 0, -1);
 		return;
 	}
+
+	/* compute the baudrate clock */
+#ifdef	CONFIG_M5272
+	/*
+	 * For the MCF5272, also compute the baudrate fraction.
+	 */
+	baudclk = (MCF_BUSCLK / mcfrs_baud_table[i]) / 32;
+	fraction = MCF_BUSCLK - (baudclk * 32 * mcfrs_baud_table[i]);
+	fraction *= 16;
+	fraction /= (32 * mcfrs_baud_table[i]);
+#else
 	baudclk = ((MCF_BUSCLK / mcfrs_baud_table[i]) + 16) / 32;
+#endif
+
 	info->baud = mcfrs_baud_table[i];
 
 	mr1 = MCFUART_MR1_RXIRQRDY | MCFUART_MR1_RXERRCHAR;
@@ -680,10 +804,17 @@ static void mcfrs_change_speed(struct mcf_serial *info)
 	}
 
 	if (cflag & PARENB) {
-		if (cflag & PARODD)
-			mr1 |= MCFUART_MR1_PARITYODD;
-		else
-			mr1 |= MCFUART_MR1_PARITYEVEN;
+		if (cflag & CMSPAR) {
+			if (cflag & PARODD)
+				mr1 |= MCFUART_MR1_PARITYMARK;
+			else
+				mr1 |= MCFUART_MR1_PARITYSPACE;
+		} else {
+			if (cflag & PARODD)
+				mr1 |= MCFUART_MR1_PARITYODD;
+			else
+				mr1 |= MCFUART_MR1_PARITYEVEN;
+		}
 	} else {
 		mr1 |= MCFUART_MR1_PARITYNONE;
 	}
@@ -722,6 +853,9 @@ static void mcfrs_change_speed(struct mcf_serial *info)
 	uartp[MCFUART_UMR] = mr2;
 	uartp[MCFUART_UBG1] = (baudclk & 0xff00) >> 8;	/* set msb byte */
 	uartp[MCFUART_UBG2] = (baudclk & 0xff);		/* set lsb byte */
+#ifdef	CONFIG_M5272
+	uartp[MCFUART_UFPD] = (fraction & 0xf);		/* set fraction */
+#endif
 	uartp[MCFUART_UCSR] = MCFUART_UCSR_RXCLKTIMER | MCFUART_UCSR_TXCLKTIMER;
 	uartp[MCFUART_UCR] = MCFUART_UCR_RXENABLE | MCFUART_UCR_TXENABLE;
 	mcfrs_setsignals(info, 1, -1);
@@ -737,14 +871,25 @@ static void mcfrs_flush_chars(struct tty_struct *tty)
 
 	if (serial_paranoia_check(info, tty->device, "mcfrs_flush_chars"))
 		return;
-
+	/*
+	 * re-enable receiver interrupt
+	 */
+	uartp = (volatile unsigned char *) info->addr;
+	save_flags(flags); cli();
+	if ( (!(info->imr & MCFUART_UIR_RXREADY)) &&
+			(info->flags & ASYNC_INITIALIZED) ) {
+		info->imr |= MCFUART_UIR_RXREADY;
+		uartp[MCFUART_UIMR] = info->imr;
+	}
+	restore_flags(flags);
+	
 	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
 	    !info->xmit_buf)
 		return;
 
 	/* Enable transmitter */
-	save_flags(flags); cli();
 	uartp = (volatile unsigned char *) info->addr;
+	save_flags(flags); cli();
 	info->imr |= MCFUART_UIR_TXREADY;
 	uartp[MCFUART_UIMR] = info->imr;
 	restore_flags(flags);
@@ -782,7 +927,7 @@ static int mcfrs_write(struct tty_struct * tty, int from_user,
 
 		if (from_user) {
 			down(&mcfrs_tmp_buf_sem);
-			memcpy_fromfs(mcfrs_tmp_buf, buf, c);
+			copy_from_user(mcfrs_tmp_buf, buf, c);
 			restore_flags(flags);
 			cli();		
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - info->xmit_cnt - 1,
@@ -801,11 +946,13 @@ static int mcfrs_write(struct tty_struct * tty, int from_user,
 		total += c;
 	}
 
-	cli();
-	uartp = (volatile unsigned char *) info->addr;
-	info->imr |= MCFUART_UIR_TXREADY;
-	uartp[MCFUART_UIMR] = info->imr;
-	restore_flags(flags);
+	if (!tty->stopped) {
+		uartp = (volatile unsigned char *) info->addr;
+		cli();
+		info->imr |= MCFUART_UIR_TXREADY;
+		uartp[MCFUART_UIMR] = info->imr;
+		restore_flags(flags);
+	}
 
 	return total;
 }
@@ -826,10 +973,11 @@ static int mcfrs_write_room(struct tty_struct *tty)
 static int mcfrs_chars_in_buffer(struct tty_struct *tty)
 {
 	struct mcf_serial *info = (struct mcf_serial *)tty->driver_data;
-				
+					
 	if (serial_paranoia_check(info, tty->device, "mcfrs_chars_in_buffer"))
 		return 0;
-	return info->xmit_cnt;
+
+	return (info->xmit_cnt);
 }
 
 static void mcfrs_flush_buffer(struct tty_struct *tty)
@@ -862,28 +1010,35 @@ static void mcfrs_throttle(struct tty_struct * tty)
 {
 	struct mcf_serial *info = (struct mcf_serial *)tty->driver_data;
 #ifdef SERIAL_DEBUG_THROTTLE
-	char	buf[64];
-	
-	printk("throttle %s: %d....\n", _tty_name(tty, buf),
+	printk("mcfrs_throttle line=%d chars=%d\n", info->line,
 	       tty->ldisc.chars_in_buffer(tty));
 #endif
 
 	if (serial_paranoia_check(info, tty->device, "mcfrs_throttle"))
 		return;
 	
-	if (I_IXOFF(tty))
+	if (I_IXOFF(tty)) {
+		/* Force STOP_CHAR (xoff) out */
+		volatile unsigned char	*uartp;
+		unsigned long		flags;
 		info->x_char = STOP_CHAR(tty);
+		uartp = (volatile unsigned char *) info->addr;
+		save_flags(flags); cli();
+		info->imr |= MCFUART_UIR_TXREADY;
+		uartp[MCFUART_UIMR] = info->imr;
+		restore_flags(flags);
+	}
 
-	/* Turn off RTS line (do this atomic) */
+	/* Turn off RTS line */
+	if (tty->termios->c_cflag & CRTSCTS)
+		mcfrs_setsignals(info, -1, 0);
 }
 
 static void mcfrs_unthrottle(struct tty_struct * tty)
 {
 	struct mcf_serial *info = (struct mcf_serial *)tty->driver_data;
 #ifdef SERIAL_DEBUG_THROTTLE
-	char	buf[64];
-	
-	printk("unthrottle %s: %d....\n", _tty_name(tty, buf),
+	printk("mcfrs_unthrottle line=%d chars=%d\n", info->line,
 	       tty->ldisc.chars_in_buffer(tty));
 #endif
 
@@ -893,11 +1048,22 @@ static void mcfrs_unthrottle(struct tty_struct * tty)
 	if (I_IXOFF(tty)) {
 		if (info->x_char)
 			info->x_char = 0;
-		else
+		else {
+			/* Force START_CHAR (xon) out */
+			volatile unsigned char	*uartp;
+			unsigned long		flags;
 			info->x_char = START_CHAR(tty);
+			uartp = (volatile unsigned char *) info->addr;
+			save_flags(flags); cli();
+			info->imr |= MCFUART_UIR_TXREADY;
+			uartp[MCFUART_UIMR] = info->imr;
+			restore_flags(flags);
+		}
 	}
 
-	/* Assert RTS line (do this atomic) */
+	/* Assert RTS line */
+	if (tty->termios->c_cflag & CRTSCTS)
+		mcfrs_setsignals(info, -1, 1);
 }
 
 /*
@@ -923,7 +1089,7 @@ static int get_serial_info(struct mcf_serial * info,
 	tmp.close_delay = info->close_delay;
 	tmp.closing_wait = info->closing_wait;
 	tmp.custom_divisor = info->custom_divisor;
-	memcpy_tofs(retinfo,&tmp,sizeof(*retinfo));
+	copy_to_user(retinfo,&tmp,sizeof(*retinfo));
 	return 0;
 }
 
@@ -936,7 +1102,7 @@ static int set_serial_info(struct mcf_serial * info,
 
 	if (!new_info)
 		return -EFAULT;
-	memcpy_fromfs(&new_serial,new_info,sizeof(new_serial));
+	copy_from_user(&new_serial,new_info,sizeof(new_serial));
 	old_info = *info;
 
 	if (!suser()) {
@@ -988,12 +1154,12 @@ static int get_lsr_info(struct mcf_serial * info, unsigned int *value)
 	unsigned long		flags;
 	unsigned char		status;
 
-	save_flags(flags); cli();
 	uartp = (volatile unsigned char *) info->addr;
+	save_flags(flags); cli();
 	status = (uartp[MCFUART_USR] & MCFUART_USR_TXEMPTY) ? TIOCSER_TEMT : 0;
 	restore_flags(flags);
 
-	put_user(status, value);
+	put_user(status,value);
 	return 0;
 }
 
@@ -1008,12 +1174,18 @@ static void send_break(	struct mcf_serial * info, int duration)
 	if (!info->addr)
 		return;
 	current->state = TASK_INTERRUPTIBLE;
+#if LINUX_VERSION_CODE < 0x020100
 	current->timeout = jiffies + duration;
+#endif
 	uartp = (volatile unsigned char *) info->addr;
 
 	save_flags(flags); cli();
 	uartp[MCFUART_UCR] = MCFUART_UCR_CMDBREAKSTART;
+#if LINUX_VERSION_CODE < 0x020100
 	schedule();
+#else
+	schedule_timeout(duration);
+#endif
 	uartp[MCFUART_UCR] = MCFUART_UCR_CMDBREAKSTOP;
 	restore_flags(flags);
 }
@@ -1056,11 +1228,11 @@ static int mcfrs_ioctl(struct tty_struct *tty, struct file * file,
 			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
 			if (error)
 				return error;
-			put_fs_long(C_CLOCAL(tty) ? 1 : 0,
+			put_user(C_CLOCAL(tty) ? 1 : 0,
 				    (unsigned long *) arg);
 			return 0;
 		case TIOCSSOFTCAR:
-			arg = get_fs_long((unsigned long *) arg);
+			get_user(arg, (unsigned long *) arg);
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
@@ -1088,7 +1260,7 @@ static int mcfrs_ioctl(struct tty_struct *tty, struct file * file,
 						sizeof(struct mcf_serial));
 			if (error)
 				return error;
-			memcpy_tofs((struct mcf_serial *) arg,
+			copy_to_user((struct mcf_serial *) arg,
 				    info, sizeof(struct mcf_serial));
 			return 0;
 			
@@ -1104,7 +1276,12 @@ static int mcfrs_ioctl(struct tty_struct *tty, struct file * file,
 			if ((error = verify_area(VERIFY_WRITE, (void *) arg,
                             sizeof(unsigned int))))
 				return(error);
+
+#if LINUX_VERSION_CODE < 0x020100
 			val = get_user((unsigned int *) arg);
+#else
+			get_user(val, (unsigned int *) arg);
+#endif
 			rts = (val & TIOCM_RTS) ? 1 : -1;
 			dtr = (val & TIOCM_DTR) ? 1 : -1;
 			mcfrs_setsignals(info, dtr, rts);
@@ -1114,7 +1291,11 @@ static int mcfrs_ioctl(struct tty_struct *tty, struct file * file,
 			if ((error = verify_area(VERIFY_WRITE, (void *) arg,
                             sizeof(unsigned int))))
 				return(error);
+#if LINUX_VERSION_CODE < 0x020100
 			val = get_user((unsigned int *) arg);
+#else
+			get_user(val, (unsigned int *) arg);
+#endif
 			rts = (val & TIOCM_RTS) ? 0 : -1;
 			dtr = (val & TIOCM_DTR) ? 0 : -1;
 			mcfrs_setsignals(info, dtr, rts);
@@ -1124,14 +1305,23 @@ static int mcfrs_ioctl(struct tty_struct *tty, struct file * file,
 			if ((error = verify_area(VERIFY_WRITE, (void *) arg,
                             sizeof(unsigned int))))
 				return(error);
+#if LINUX_VERSION_CODE < 0x020100
 			val = get_user((unsigned int *) arg);
+#else
+			get_user(val, (unsigned int *) arg);
+#endif
 			rts = (val & TIOCM_RTS) ? 1 : 0;
 			dtr = (val & TIOCM_DTR) ? 1 : 0;
 			mcfrs_setsignals(info, dtr, rts);
 			break;
+
 #ifdef TIOCSET422
 		case TIOCSET422:
+#if LINUX_VERSION_CODE < 0x020100
 			val = get_user((unsigned int *) arg);
+#else
+			get_user(val, (unsigned int *) arg);
+#endif
 			mcf_setpa(MCFPP_PA11, (val ? 0 : MCFPP_PA11));
 			break;
 		case TIOCGET422:
@@ -1159,7 +1349,9 @@ static void mcfrs_set_termios(struct tty_struct *tty, struct termios *old_termio
 	    !(tty->termios->c_cflag & CRTSCTS)) {
 		tty->hw_stopped = 0;
 		mcfrs_setsignals(info, -1, 1);
+#if 0
 		mcfrs_start(tty);
+#endif
 	}
 }
 
@@ -1256,10 +1448,11 @@ static void mcfrs_close(struct tty_struct *tty, struct file * filp)
 	tty->closing = 0;
 	info->event = 0;
 	info->tty = 0;
-	if (tty->ldisc.num != ldiscs[N_TTY].num) {
+	info->imr = 0;
+	if (tty->ldisc.num != tty_ldiscs[N_TTY].num) {
 		if (tty->ldisc.close)
 			(tty->ldisc.close)(tty);
-		tty->ldisc = ldiscs[N_TTY];
+		tty->ldisc = tty_ldiscs[N_TTY];
 		tty->termios->c_line = N_TTY;
 		if (tty->ldisc.open)
 			(tty->ldisc.open)(tty);
@@ -1267,8 +1460,12 @@ static void mcfrs_close(struct tty_struct *tty, struct file * filp)
 	if (info->blocked_open) {
 		if (info->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
+#if LINUX_VERSION_CODE < 0x020100
 			current->timeout = jiffies + info->close_delay;
 			schedule();
+#else
+			schedule_timeout(info->close_delay);
+#endif
 		}
 		wake_up_interruptible(&info->open_wait);
 	}
@@ -1278,6 +1475,76 @@ static void mcfrs_close(struct tty_struct *tty, struct file * filp)
 	restore_flags(flags);
 }
 
+/*
+ * mcfrs_wait_until_sent() --- wait until the transmitter is empty
+ */
+static void
+mcfrs_wait_until_sent(struct tty_struct *tty, int timeout)
+{
+#ifdef	CONFIG_M5272
+#define	MCF5272_FIFO_SIZE	25		/* fifo size + shift reg */
+
+	struct mcf_serial * info = (struct mcf_serial *)tty->driver_data;
+	volatile unsigned char *uartp;
+	unsigned long orig_jiffies, fifo_time, char_time, fifo_cnt;
+	
+	if (serial_paranoia_check(info, tty->device, "mcfrs_wait_until_sent"))
+		return;
+	
+	orig_jiffies = jiffies;
+
+	/*
+	 * Set the check interval to be 1/5 of the approximate time
+	 * to send the entire fifo, and make it at least 1.  The check
+	 * interval should also be less than the timeout.
+	 *
+	 * Note: we have to use pretty tight timings here to satisfy
+	 * the NIST-PCTS.
+	 */
+	fifo_time = (MCF5272_FIFO_SIZE * HZ * 10) / info->baud;
+	char_time = fifo_time / 5;
+	if (char_time == 0)
+		char_time = 1;
+	if (timeout && timeout < char_time)
+		char_time = timeout;
+
+	/*
+	 * Clamp the timeout period at 2 * the time to empty the
+	 * fifo.  Just to be safe, set the minimum at .5 seconds.
+	 */
+	fifo_time *= 2;
+	if (fifo_time < (HZ/2))
+		fifo_time = HZ/2;
+	if (!timeout || timeout > fifo_time)
+		timeout = fifo_time;
+
+	/*
+	 * Account for the number of bytes in the UART
+	 * transmitter FIFO plus any byte being shifted out.
+	 */
+	uartp = (volatile unsigned char *) info->addr;
+	for (;;) {
+		fifo_cnt = (uartp[MCFUART_UTF] & MCFUART_UTF_TXB);
+		if ((uartp[MCFUART_USR] & (MCFUART_USR_TXREADY|
+				MCFUART_USR_TXEMPTY)) ==
+			MCFUART_USR_TXREADY)
+			fifo_cnt++;
+		if (fifo_cnt == 0)
+			break;
+		set_current_state(TASK_INTERRUPTIBLE);
+		schedule_timeout(char_time);
+		if (signal_pending(current))
+			break;
+		if (timeout && time_after(jiffies, orig_jiffies + timeout))
+			break;
+	}
+#else
+	/*
+	 * For the other coldfire models, assume all data has been sent
+	 */
+#endif
+}
+		
 /*
  * mcfrs_hangup() --- called by tty_hangup() when a hangup is signaled.
  */
@@ -1305,7 +1572,11 @@ void mcfrs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct mcf_serial *info)
 {
+#if LINUX_VERSION_CODE < 0x020100
 	struct wait_queue wait = { current, NULL };
+#else
+	DECLARE_WAITQUEUE(wait, current);
+#endif
 	int		retval;
 	int		do_clocal = 0;
 
@@ -1314,6 +1585,8 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	 * until it's done, and then try again.
 	 */
 	if (info->flags & ASYNC_CLOSING) {
+		if (filp->f_flags & O_NONBLOCK)
+			return -EAGAIN;
 		interruptible_sleep_on(&info->close_wait);
 #ifdef SERIAL_DO_RESTART
 		if (info->flags & ASYNC_HUP_NOTIFY)
@@ -1401,7 +1674,11 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		    !(info->flags & ASYNC_CLOSING) &&
 		    (do_clocal || (mcfrs_getsignals(info) & TIOCM_CD)))
 			break;
+#if LINUX_VERSION_CODE < 0x020100
 		if (current->signal & ~current->blocked) {
+#else
+		if (signal_pending(current)) {
+#endif
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1500,9 +1777,15 @@ static void mcfrs_irqinit(struct mcf_serial *info)
 	switch (info->line) {
 	case 0:
 		*icrp = 0xe0000000;
+		/* Enable the output lines for the serial port 0 */
+		portp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_PBCNT);
+		*portp = (*portp & ~0x000000ff) | 0x00000055;
 		break;
 	case 1:
 		*icrp = 0x0e000000;
+		/* Enable the output lines for the serial port 1 */
+		portp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_PDCNT);
+		*portp = (*portp & ~0x000003fc) | 0x000002a8;
 		break;
 	default:
 		printk("SERIAL: don't know how to handle UART %d interrupt?\n",
@@ -1510,11 +1793,100 @@ static void mcfrs_irqinit(struct mcf_serial *info)
 		return;
 	}
 
-	/* Enable the output lines for the serial ports */
-	portp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_PBCNT);
-	*portp = (*portp & ~0x000000ff) | 0x00000055;
-	portp = (volatile unsigned long *) (MCF_MBAR + MCFSIM_PDCNT);
-	*portp = (*portp & ~0x000003fc) | 0x000002a8;
+#ifdef MCF_HAVEDTR0
+	{
+	volatile unsigned short *sportp;
+	/* Set direction bits if we have GPIO based DTR/DCD */
+	sportp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDDR);
+	*sportp = (*sportp & ~0x00f0) | 0x0050;
+	}
+#endif
+
+#elif defined(CONFIG_M5235) || defined(CONFIG_M527x) || \
+      defined(CONFIG_M5282) || defined(CONFIG_M5280) || \
+      defined(CONFIG_M5208)
+	volatile unsigned char *icrp, *uartp;
+	volatile unsigned long *imrp;
+	volatile unsigned char *portp;
+
+	uartp = (volatile unsigned char *) info->addr;
+
+	icrp = (volatile unsigned char *) (MCF_MBAR + MCFICM_INTC0 +
+		MCFINTC_ICR0 + MCFINT_UART0 + info->line);
+ 	/* UART interrupt level and priority */
+#if defined(CONFIG_M5208)
+	*icrp = 0x03;
+#else
+	*icrp = 0x30 + (info->line ? 3 : 2);
+#endif
+
+	imrp = (volatile unsigned long *) (MCF_MBAR + MCFICM_INTC0 +
+		MCFINTC_IMRL);
+	*imrp &= ~((1 << (info->irq - 64)) | 1);
+
+#if defined(CONFIG_M527x)
+	{
+	/*
+	 * External Pin Mask Setting & Enable External Pin for Interface i 
+	 * mrcbis@aliceposta.it
+         */
+	unsigned short *serpin_enable_mask;
+	serpin_enable_mask = (MCF_IPSBAR + MCF_GPIO_PAR_UART);
+	if (info->line == 0)
+		*serpin_enable_mask |= UART0_ENABLE_MASK;
+	else if (info->line == 1)
+		*serpin_enable_mask |= UART1_ENABLE_MASK;
+	else if (info->line == 2)
+		*serpin_enable_mask |= UART2_ENABLE_MASK;
+	}
+#endif
+
+#if defined(CONFIG_M5280) || defined(CONFIG_M5282)
+	/* Enable the output lines for the serial port */
+	if (info->line < 2) {
+		portp = (volatile unsigned char *) (MCF_MBAR + MCF5282_GPIO_PUAPAR);
+		*portp |= (0x03 << (info->line*2));
+	} else {
+		printk("SERIAL: don't know how to enable outputs "
+			"for UART %d?\n", info->line);
+	}
+#endif
+
+#if defined(CONFIG_M5208)
+{
+	if (info->line < 2) {
+		unsigned short *uart_par;
+		uart_par = (unsigned short *)(MCF_IPSBAR + MCF_GPIO_PAR_UART);
+		if (info->line == 0)
+			*uart_par |=  MCF_GPIO_PAR_UART_PAR_UTXD0 
+				| MCF_GPIO_PAR_UART_PAR_URXD0;
+		else if (info->line == 1)
+			*uart_par |=  MCF_GPIO_PAR_UART_PAR_UTXD1 
+				| MCF_GPIO_PAR_UART_PAR_URXD1;
+	} else if (info->line == 2) {
+		unsigned char *feci2c_par;
+		feci2c_par = (unsigned char *)(MCF_IPSBAR +  MCF_GPIO_PAR_FECI2C);
+		*feci2c_par &= ~0x0F;
+		*feci2c_par |=  MCF_GPIO_PAR_FECI2C_PAR_SCL_UTXD2
+			| MCF_GPIO_PAR_FECI2C_PAR_SDA_URXD2;
+	}                     
+}
+#endif
+
+#elif defined(CONFIG_M547x)
+	volatile unsigned char *icrp, *uartp;
+	volatile unsigned int *imrp;
+	volatile unsigned char *portp;
+
+	uartp = (volatile unsigned char *) info->addr;
+
+	icrp = (volatile unsigned char *) (MCF_MBAR + MCFSIM_ICR0 +
+		35 - info->line);
+ 	/* UART interrupt level and priority */
+	*icrp = MCFSIM_ICR_LEVEL6 + (info->line & 0x3);
+
+	imrp = (volatile unsigned int *) (MCF_MBAR + MCFSIM_IMRH);
+	*imrp &= ~(1 << (info->irq - (64+32)));
 #else
 	volatile unsigned char	*icrp, *uartp;
 
@@ -1545,7 +1917,7 @@ static void mcfrs_irqinit(struct mcf_serial *info)
 	uartp[MCFUART_UIMR] = 0;
 
 	if (request_irq(info->irq, mcfrs_interrupt, SA_INTERRUPT,
-	    "ColdFire UART", NULL)) {
+	    "ColdFire UART", info)) {
 		printk("SERIAL: Unable to attach ColdFire UART %d interrupt "
 			"vector=%d\n", info->line, info->irq);
 	}
@@ -1560,31 +1932,32 @@ char *mcfrs_drivername = "ColdFire internal UART serial driver version 1.00\n";
 /*
  * Serial stats reporting...
  */
-int mcfrs_readproc(char *buffer)
+int mcfrs_readproc(char *page, char **start, off_t off, int count,
+		         int *eof, void *data)
 {
 	struct mcf_serial	*info;
 	char			str[20];
 	int			len, sigs, i;
 
-	len = sprintf(buffer, mcfrs_drivername);
+	len = sprintf(page, mcfrs_drivername);
 	for (i = 0; (i < NR_PORTS); i++) {
 		info = &mcfrs_table[i];
-		len += sprintf((buffer + len), "%d: port:%x irq=%d baud:%d ",
+		len += sprintf((page + len), "%d: port:%x irq=%d baud:%d ",
 			i, info->addr, info->irq, info->baud);
 		if (info->stats.rx || info->stats.tx)
-			len += sprintf((buffer + len), "tx:%d rx:%d ",
+			len += sprintf((page + len), "tx:%d rx:%d ",
 			info->stats.tx, info->stats.rx);
 		if (info->stats.rxframing)
-			len += sprintf((buffer + len), "fe:%d ",
+			len += sprintf((page + len), "fe:%d ",
 			info->stats.rxframing);
 		if (info->stats.rxparity)
-			len += sprintf((buffer + len), "pe:%d ",
+			len += sprintf((page + len), "pe:%d ",
 			info->stats.rxparity);
 		if (info->stats.rxbreak)
-			len += sprintf((buffer + len), "brk:%d ",
+			len += sprintf((page + len), "brk:%d ",
 			info->stats.rxbreak);
 		if (info->stats.rxoverrun)
-			len += sprintf((buffer + len), "oe:%d ",
+			len += sprintf((page + len), "oe:%d ",
 			info->stats.rxoverrun);
 
 		str[0] = str[1] = 0;
@@ -1599,7 +1972,7 @@ int mcfrs_readproc(char *buffer)
 				strcat(str, "|CD");
 		}
 
-		len += sprintf((buffer + len), "%s\n", &str[1]);
+		len += sprintf((page + len), "%s\n", &str[1]);
 	}
 
 	return(len);
@@ -1614,26 +1987,41 @@ static void show_serial_version(void)
 }
 
 /* mcfrs_init inits the driver */
-int mcfrs_init(void)
+static int __init
+mcfrs_init(void)
 {
 	struct mcf_serial	*info;
 	unsigned long		flags;
 	int			i;
 
-	/* Setup base handler, and timer table. */
 	init_bh(CM206_BH, do_serial_bh);
-#ifdef MCFPP_DCD0
+
+	/* Setup base handler, and timer table. */
+#if defined(MCF_HAVEDCD0) || defined(MCF_HAVEDCD1)
+#if LINUX_VERSION_CODE < 0x020100
 	timer_table[RS_TIMER].fn = mcfrs_timer;
 	timer_table[RS_TIMER].expires = 0;
-	mcfrs_ppstatus = mcf_getppdata() & (MCFPP_DCD0 | MCFPP_DCD1);
+#else
+	init_timer(&mcfrs_timer_struct);
+	mcfrs_timer_struct.function = mcfrs_timer;
+	mcfrs_timer_struct.data = 0;
+	mcfrs_timer_struct.expires = jiffies + HZ/25;
+	add_timer(&mcfrs_timer_struct);
 #endif
+	mcfrs_olddcd0 = mcf_getppdcd(0);
+	mcfrs_olddcd1 = mcf_getppdcd(1);
+#endif /* MCF_HAVEDCD0 || MCF_HAVEDCD1 */
 
 	show_serial_version();
 
 	/* Initialize the tty_driver structure */
 	memset(&mcfrs_serial_driver, 0, sizeof(struct tty_driver));
 	mcfrs_serial_driver.magic = TTY_DRIVER_MAGIC;
+#if defined(CONFIG_DEVFS_FS)
+	mcfrs_serial_driver.name = "tts/%d";
+#else
 	mcfrs_serial_driver.name = "ttyS";
+#endif  /* defined(CONFIG_DEVFS_FS) */
 	mcfrs_serial_driver.major = TTY_MAJOR;
 	mcfrs_serial_driver.minor_start = 64;
 	mcfrs_serial_driver.num = NR_PORTS;
@@ -1642,7 +2030,7 @@ int mcfrs_init(void)
 	mcfrs_serial_driver.init_termios = tty_std_termios;
 
 	mcfrs_serial_driver.init_termios.c_cflag =
-		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
+		mcfrs_console_cbaud | CS8 | CREAD | HUPCL | CLOCAL;
 	mcfrs_serial_driver.flags = TTY_DRIVER_REAL_RAW;
 	mcfrs_serial_driver.refcount = &mcfrs_serial_refcount;
 	mcfrs_serial_driver.table = mcfrs_serial_table;
@@ -1663,20 +2051,33 @@ int mcfrs_init(void)
 	mcfrs_serial_driver.stop = mcfrs_stop;
 	mcfrs_serial_driver.start = mcfrs_start;
 	mcfrs_serial_driver.hangup = mcfrs_hangup;
+	mcfrs_serial_driver.read_proc = mcfrs_readproc;
+	mcfrs_serial_driver.wait_until_sent = mcfrs_wait_until_sent;
+	mcfrs_serial_driver.driver_name = "mcfserial";
 
 	/*
 	 * The callout device is just like normal device except for
 	 * major number and the subtype code.
 	 */
 	mcfrs_callout_driver = mcfrs_serial_driver;
+#if defined(CONFIG_DEVFS_FS)
+	mcfrs_callout_driver.name = "cua/%d";
+#else
 	mcfrs_callout_driver.name = "cua";
+#endif  /* defined(CONFIG_DEVFS_FS) */
 	mcfrs_callout_driver.major = TTYAUX_MAJOR;
 	mcfrs_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
+	mcfrs_callout_driver.read_proc = 0;
+	mcfrs_callout_driver.proc_entry = 0;
 
-	if (tty_register_driver(&mcfrs_serial_driver))
-		panic("Couldn't register serial driver\n");
-	if (tty_register_driver(&mcfrs_callout_driver))
-		panic("Couldn't register callout driver\n");
+	if (tty_register_driver(&mcfrs_serial_driver)) {
+		printk("%s: Couldn't register serial driver\n", __FUNCTION__);
+		return(-EBUSY);
+	}
+	if (tty_register_driver(&mcfrs_callout_driver)) {
+		printk("%s: Couldn't register callout driver\n", __FUNCTION__);
+		return(-EBUSY);
+	}
 	
 	save_flags(flags); cli();
 
@@ -1700,21 +2101,34 @@ int mcfrs_init(void)
 		info->tqueue_hangup.data = info;
 		info->callout_termios = mcfrs_callout_driver.init_termios;
 		info->normal_termios = mcfrs_serial_driver.init_termios;
+#if LINUX_VERSION_CODE < 0x020100
 		info->open_wait = 0;
 		info->close_wait = 0;
+#else
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
+#endif
 
 		info->imr = 0;
 		mcfrs_setsignals(info, 0, 0);
 		mcfrs_irqinit(info);
 
+#if defined(CONFIG_DEVFS_FS)
+		printk("%.4s%d at 0x%04x (irq = %d)", mcfrs_serial_driver.name,
+			info->line, info->addr, info->irq);
+#else
 		printk("%s%d at 0x%04x (irq = %d)", mcfrs_serial_driver.name,
 			info->line, info->addr, info->irq);
+#endif  /* defined(CONFIG_DEVFS_FS) */
 		printk(" is a builtin ColdFire UART\n");
 	}
 
 	restore_flags(flags);
 	return 0;
 }
+
+module_init(mcfrs_init);
+/* module_exit(mcfrs_fini); */
 
 /****************************************************************************/
 /*                          Serial Console                                  */
@@ -1724,10 +2138,13 @@ int mcfrs_init(void)
  *	Quick and dirty UART initialization, for console output.
  */
 
-void rs_console_init(void)
+void mcfrs_init_console(void)
 {
 	volatile unsigned char	*uartp;
 	unsigned int		clk;
+#ifdef	CONFIG_M5272
+	unsigned int		fraction;
+#endif
 
 	/*
 	 *	Reset UART, get it into known state...
@@ -1745,10 +2162,24 @@ void rs_console_init(void)
 	uartp[MCFUART_UMR] = MCFUART_MR1_PARITYNONE | MCFUART_MR1_CS8;
 	uartp[MCFUART_UMR] = MCFUART_MR2_STOP1;
 
+	/* compute the baudrate clock */
+#ifdef	CONFIG_M5272
+	/*
+	 * For the MCF5272, also compute the baudrate fraction.
+	 */
+	clk = (MCF_BUSCLK / mcfrs_console_baud) / 32;
+	fraction = MCF_BUSCLK - (clk * 32 * mcfrs_console_baud);
+	fraction *= 16;
+	fraction /= (32 * mcfrs_console_baud);
+#else
 	clk = ((MCF_BUSCLK / mcfrs_console_baud) + 16) / 32; /* set baud */
-	uartp[MCFUART_UBG1] = (clk & 0xff00) >> 8;  /* set msb baud */
-	uartp[MCFUART_UBG2] = (clk & 0xff);  /* set lsb baud */
+#endif
 
+	uartp[MCFUART_UBG1] = (clk & 0xff00) >> 8;	/* set msb baud */
+	uartp[MCFUART_UBG2] = (clk & 0xff);		/* set lsb baud */
+#ifdef	CONFIG_M5272
+	uartp[MCFUART_UFPD] = (fraction & 0xf);		/* set fraction */
+#endif	
 	uartp[MCFUART_UCSR] = MCFUART_UCSR_RXCLKTIMER | MCFUART_UCSR_TXCLKTIMER;
 	uartp[MCFUART_UCR] = MCFUART_UCR_RXENABLE | MCFUART_UCR_TXENABLE;
 
@@ -1761,22 +2192,42 @@ void rs_console_init(void)
  *	Setup for console. Argument comes from the boot command line.
  */
 
-int rs_console_setup(char *arg)
+int mcfrs_console_setup(struct console *cp, char *arg)
 {
-	int	rc = 0;
+	int		i, n = CONSOLE_BAUD_RATE;
 
-	if (!strncmp(arg, "/dev/ttyS", 9)) {
-		mcfrs_console_port = arg[9] - '0';
-		arg += 10;
-		rc = 1;
-	} else if (!strncmp(arg, "/dev/cua", 8)) {
-		mcfrs_console_port = arg[8] - '0';
-		arg += 9;
-		rc = 1;
+	if (!cp)
+		return(-1);
+
+	if (!strncmp(cp->name, "ttyS", 4))
+		mcfrs_console_port = cp->index;
+	else if (!strncmp(cp->name, "cua", 3))
+		mcfrs_console_port = cp->index;
+	else
+		return(-1);
+
+	if (arg)
+		n = simple_strtoul(arg,NULL,0);
+	for (i = 0; i < MCFRS_BAUD_TABLE_SIZE; i++)
+		if (mcfrs_baud_table[i] == n)
+			break;
+	if (i < MCFRS_BAUD_TABLE_SIZE) {
+		mcfrs_console_baud = n;
+		mcfrs_console_cbaud = 0;
+		if (i > 15) {
+			mcfrs_console_cbaud |= CBAUDEX;
+			i -= 15;
+		}
+		mcfrs_console_cbaud |= i;
 	}
-	if (*arg == ',')
-		mcfrs_console_baud = simple_strtoul(arg+1,NULL,0);
-	return(rc);
+	mcfrs_init_console(); /* make sure baud rate changes */
+	return(0);
+}
+
+
+static kdev_t mcfrs_console_device(struct console *c)
+{
+	return MKDEV(TTY_MAJOR, 64 + c->index);
 }
 
 
@@ -1785,7 +2236,7 @@ int rs_console_setup(char *arg)
  *	This is used for console output.
  */
 
-void rs_put_char(char ch)
+void mcfrs_put_char(char ch)
 {
 	volatile unsigned char	*uartp;
 	unsigned long		flags;
@@ -1799,31 +2250,55 @@ void rs_put_char(char ch)
 		if (uartp[MCFUART_USR] & MCFUART_USR_TXREADY)
 			break;
 	}
-	uartp[MCFUART_UTB] = ch;
-	for (i = 0; (i < 0x10000); i++) {
-		if (uartp[MCFUART_USR] & MCFUART_USR_TXEMPTY)
-			break;
+	if (i < 0x10000) {
+		uartp[MCFUART_UTB] = ch;
+		for (i = 0; (i < 0x10000); i++)
+			if (uartp[MCFUART_USR] & MCFUART_USR_TXEMPTY)
+				break;
 	}
-        restore_flags(flags);
+	if (i >= 0x10000)
+		mcfrs_init_console(); /* try and get it back */
+	restore_flags(flags);
 
 	return;
 }
 
 
 /*
- * rs_console_print is registered for printk output.
+ * rs_console_write is registered for printk output.
  */
 
-void rs_console_print(const char *p)
+void mcfrs_console_write(struct console *cp, const char *p, unsigned len)
 {
-	char c;
-	
-	while ((c = *(p++)) != 0) {
-		if(c == '\n')
-			rs_put_char('\r');
-		rs_put_char(c);
+	if (!mcfrs_console_inited)
+		mcfrs_init_console();
+	while (len-- > 0) {
+		if (*p == '\n')
+			mcfrs_put_char('\r');
+		mcfrs_put_char(*p++);
 	}
-	return;
+}
+
+/*
+ * declare our consoles
+ */
+
+struct console mcfrs_console = {
+	name:		"ttyS",
+	write:		mcfrs_console_write,
+	read:		NULL,
+	device:		mcfrs_console_device,
+	unblank:	NULL,
+	setup:		mcfrs_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
+	cflag:		0,
+	next:		NULL
+};
+
+void __init mcfrs_console_init(void)
+{
+	register_console(&mcfrs_console);
 }
 
 /****************************************************************************/

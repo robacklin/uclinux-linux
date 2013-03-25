@@ -8,20 +8,29 @@
  */
 
 typedef unsigned int	__kernel_dev_t;
-typedef unsigned int	__kernel_ino_t;
+typedef unsigned long	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
 typedef unsigned short	__kernel_nlink_t;
 typedef long		__kernel_off_t;
 typedef int		__kernel_pid_t;
 typedef unsigned int	__kernel_uid_t;
 typedef unsigned int	__kernel_gid_t;
-typedef unsigned long	__kernel_size_t;
-typedef long		__kernel_ssize_t;
+typedef unsigned int	__kernel_size_t;
+typedef int		__kernel_ssize_t;
 typedef long		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
+typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
+typedef short             __kernel_ipc_pid_t;
+typedef unsigned short	__kernel_uid16_t;
+typedef unsigned short	__kernel_gid16_t;
+typedef unsigned int	__kernel_uid32_t;
+typedef unsigned int	__kernel_gid32_t;
+
+typedef unsigned int	__kernel_old_uid_t;
+typedef unsigned int	__kernel_old_gid_t;
 
 #ifdef __GNUC__
 typedef long long	__kernel_loff_t;
@@ -41,6 +50,8 @@ typedef struct {
 
 #else /* __GNUC__ */
 
+#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2) \
+    || (__GLIBC__ == 2 && __GLIBC_MINOR__ == 0)
 /* With GNU C, use inline functions instead so args are evaluated only once: */
 
 #undef __FD_SET
@@ -61,7 +72,7 @@ static __inline__ void __FD_CLR(unsigned long fd, __kernel_fd_set *fdsetp)
 
 #undef __FD_ISSET
 static __inline__ int __FD_ISSET(unsigned long fd, __kernel_fd_set *p)
-{ 
+{
 	unsigned long _tmp = fd / __NFDBITS;
 	unsigned long _rem = fd % __NFDBITS;
 	return (p->fds_bits[_tmp] & (1UL<<_rem)) != 0;
@@ -74,7 +85,7 @@ static __inline__ int __FD_ISSET(unsigned long fd, __kernel_fd_set *p)
 #undef __FD_ZERO
 static __inline__ void __FD_ZERO(__kernel_fd_set *p)
 {
-	unsigned int *tmp = p->fds_bits;
+	unsigned int *tmp = (unsigned int *)p->fds_bits;
 	int i;
 
 	if (__builtin_constant_p(__FDSET_LONGS)) {
@@ -93,6 +104,6 @@ static __inline__ void __FD_ZERO(__kernel_fd_set *p)
 	}
 }
 
+#endif /* defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2) */
 #endif /* __GNUC__ */
-
 #endif /* _PPC_POSIX_TYPES_H */

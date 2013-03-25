@@ -27,6 +27,7 @@
 #include <asm/psr.h>
 
 #include <linux/config.h>
+#include "nios_defs.h"
 
 #ifdef CONFIG_CRC_CHECK
 /**********************************************/
@@ -42,6 +43,11 @@
 	GEQU	NA_ResetTrap,0
 	GEQU	NA_UnderflowTrap,1
 	GEQU	NA_OverflowTrap,2
+
+	GEQU	_nios_flash_start,NIOS_FLASH_START
+	GEQU	_kernel_flash_start,KERNEL_FLASH_START
+
+	GEQU	_romfs_start,LINUX_ROMFS_START
 
 /*
  * This global variable is used as an extension to the nios'
@@ -123,20 +129,20 @@ finish_move:
 	WRCTL	%g0			; put new STATUS
 	NOP
 
-	;------------------
-	; Set Stack Pointer
-	;
-	MOVIA	%sp,nasys_stack_top
-	SUBIP	%sp,64			; reserve some room on the stack
-
-
 	;------------------------------------
 	; Disable interrupts on known devices
 	;
 .ifdef na_enet
-	MOVIP	%g1, na_enet_reset_n	; ethernet reset address
-	movi	%g0, 0x00		; reset
+.ifdef na_enet_reset
+	MOVIP	%g1, na_enet_reset	; ethernet reset address
+	movi	%g0,0			; reset
 	st	[%g1],%g0		;
+.endif
+.ifdef na_enet_reset_n
+	MOVIP	%g1, na_enet_reset_n	; ethernet reset address
+	movi	%g0,0			; reset
+	st	[%g1],%g0		;
+.endif
 	nop				; give it some time
 	nop				;
 	nop				;
@@ -166,15 +172,38 @@ finish_move:
 	pfx	np_uartstatus		;
 	st	[%g1],%g0		; clear interrupt status
 .endif
+.ifdef na_uart2
+	movi	%g0,0			; 
+	MOVIP	%g1, na_uart2		; 
+	pfx	np_uartcontrol		;
+	st	[%g1],%g0		; clear interrupt enable
+	pfx	np_uartstatus		;
+	st	[%g1],%g0		; clear interrupt status
+.endif
+.ifdef na_uart3
+	movi	%g0,0			; 
+	MOVIP	%g1, na_uart3		; 
+	pfx	np_uartcontrol		;
+	st	[%g1],%g0		; clear interrupt enable
+	pfx	np_uartstatus		;
+	st	[%g1],%g0		; clear interrupt status
+.endif
 .ifdef na_ide_interface
 	movi	%g0,1			; ATA reset
 	MOVIP	%g1,na_ide_interface	; 
 	st	[%g1],%g0		; write to control register
 .endif
 .ifdef na_enet
-	MOVIP	%g1, na_enet_reset_n	; ethernet reset address
-	movi	%g0, 0x01		; reset
+.ifdef na_enet_reset
+	MOVIP	%g1, na_enet_reset	; ethernet reset address
+	movi	%g0,1			; reset
 	st	[%g1],%g0		;
+.endif
+.ifdef na_enet_reset_n
+	MOVIP	%g1, na_enet_reset_n	; ethernet reset address
+	movi	%g0,1			; reset
+	st	[%g1],%g0		;
+.endif
 .endif
 
 	;------------------------------------------------------
@@ -220,6 +249,13 @@ finish_move:
 	bgen	%g1, PSR_SUPERVISOR_BIT	; set initial mode = supervisor
 	st	[%g0], %g1
 	
+	MOVIA	%g1, init_task_union	; load the current task ptr
+	MOVIA	%g0, _current_task
+	st	[%g0], %g1
+
+	ADDIP	%g1, 0x2000-0x40	; set stack at top of the task union
+	mov	%sp, %g1		; and reserve some space for reg win
+
 	MOVIA	%g0,main@h		; call main as a subroutine
 	CALL	%g0
 	 NOP

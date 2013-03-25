@@ -4,6 +4,9 @@
  *
  * Based upon code written by Ross Biro, Linus Torvalds, Bob Manson,
  * and David Mosberger.
+ *
+ * Added Linux support -miguel (weird, eh?, the orignal code was meant
+ * to emulate SunOS).
  */
 
 #include <linux/kernel.h>
@@ -12,238 +15,15 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 
 #include <asm/pgtable.h>
 #include <asm/system.h>
+#include <asm/uaccess.h>
 
-/* change a pid into a task struct. */
-static inline struct task_struct * get_task(int pid)
-{
-	int i;
+#define MAGIC_CONSTANT 0x80000000
 
-	for (i = 1; i < NR_TASKS; i++) {
-		if (task[i] != NULL && (task[i]->pid == pid))
-			return task[i];
-	}
-	return NULL;
-}
-
-/*
- * This routine gets a long from any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- */
-static unsigned long get_long(struct task_struct * tsk,
-	struct vm_area_struct * vma, unsigned long addr)
-{
-	pgd_t * pgdir;
-	pmd_t * pgmiddle;
-	pte_t * pgtable;
-	unsigned long page, retval;
-
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (pgd_none(*pgdir)) {
-		do_no_page(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return 0;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		do_no_page(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return 0;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		do_no_page(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	if (page >= high_memory)
-		return 0;
-	page += addr & ~PAGE_MASK;
-	retval = *(unsigned long *) page;
-	flush_page_to_ram(page);
-	return retval;
-}
-
-/*
- * This routine puts a long into any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- *
- * Now keeps R/W state of page so that a text page stays readonly
- * even if a debugger scribbles breakpoints into it.  -M.U-
- */
-static void put_long(struct task_struct * tsk, struct vm_area_struct * vma,
-	unsigned long addr, unsigned long data)
-{
-	pgd_t *pgdir;
-	pmd_t *pgmiddle;
-	pte_t *pgtable;
-	unsigned long page;
-
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (!pgd_present(*pgdir)) {
-		do_no_page(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		do_no_page(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		do_no_page(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-	if (!pte_write(*pgtable)) {
-		do_wp_page(tsk, vma, addr, 1);
-		goto repeat;
-	}
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	flush_cache_page(vma, page);
-	if (page < high_memory) {
-		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
-		flush_page_to_ram(page);
-	}
-/* we're bypassing pagetables, so we have to set the dirty bit ourselves */
-/* this should also re-instate whatever read-only mode there was before */
-	set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
-	flush_tlb_page(vma, page);
-}
-
-static struct vm_area_struct * find_extend_vma(struct task_struct * tsk,
-					       unsigned long addr)
-{
-	struct vm_area_struct * vma;
-
-	addr &= PAGE_MASK;
-	vma = find_vma(tsk,addr);
-	if (!vma)
-		return NULL;
-	if (vma->vm_start <= addr)
-		return vma;
-	if (!(vma->vm_flags & VM_GROWSDOWN))
-		return NULL;
-	if (vma->vm_end - addr > tsk->rlim[RLIMIT_STACK].rlim_cur)
-		return NULL;
-	vma->vm_offset -= vma->vm_start - addr;
-	vma->vm_start = addr;
-	return vma;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls get_long() to read a long.
- */
-static int read_long(struct task_struct * tsk, unsigned long addr,
-		     unsigned long * result)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	*result = get_long(tsk, vma, addr);
-	return 0;
-}
-
-static int read_byte(struct task_struct *tsk, unsigned long addr,
-		     unsigned char *result)
-{
-	struct vm_area_struct *vma = find_extend_vma(tsk, addr&~3);
-	unsigned long tmp;
-
-	if(!vma)
-		return -EIO;
-	tmp = get_long(tsk, vma, (addr & ~3));
-	switch(addr & 3) {
-	case 0:
-		*result = (tmp & 0xff000000)>>24;
-		break;
-	case 1:
-		*result = (tmp & 0x00ff0000)>>16;
-		break;
-	case 2:
-		*result = (tmp & 0x0000ff00)>>8;
-		break;
-	case 3:
-		*result = (tmp & 0x000000ff);
-		break;
-	}
-	return 0;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls put_long() to write a long.
- */
-static int write_long(struct task_struct * tsk, unsigned long addr,
-		      unsigned long data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	put_long(tsk, vma, addr, data);
-	return 0;
-}
-
-static int write_byte(struct task_struct * tsk, unsigned long addr,
-		      unsigned char data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, (addr & ~3));
-	unsigned long tmp;
-
-	if (!vma)
-		return -EIO;
-	tmp = get_long(tsk, vma, (addr & ~3));
-	switch(addr & 3) {
-	case 0:
-		tmp &= 0x00ffffff;
-		tmp |= (data << 24);
-		break;
-	case 1:
-		tmp &= 0xff00ffff;
-		tmp |= ((data << 16) & 0x00ff0000);
-		break;
-	case 2:
-		tmp &= 0xffff00ff;
-		tmp |= ((data << 8) & 0x0000ff00);
-		break;
-	case 3:
-		tmp &= 0xffffff00;
-		tmp |= (data & 0x000000ff);
-		break;
-	}
-	put_long(tsk, vma, (addr & ~3), tmp);
-	return 0;
-}
 
 /* Returning from ptrace is a bit tricky because the syscall return
  * low level code assumes any value returned which is negative and
@@ -266,13 +46,34 @@ static inline void pt_succ_return(struct pt_regs *regs, unsigned long value)
 	regs->npc += 4;
 }
 
+static void
+pt_succ_return_linux(struct pt_regs *regs, unsigned long value, long *addr)
+{
+	if(put_user(value, addr))
+		return pt_error_return(regs, EFAULT);
+	regs->u_regs[UREG_I0] = 0;
+	regs->psr &= ~PSR_C;
+	regs->pc = regs->npc;
+	regs->npc += 4;
+}
+
+static void
+pt_os_succ_return (struct pt_regs *regs, unsigned long val, long *addr)
+{
+	if (current->personality == PER_SUNOS)
+		pt_succ_return (regs, val);
+	else
+		pt_succ_return_linux (regs, val, addr);
+}
+
 /* Fuck me gently with a chainsaw... */
 static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
-				   struct task_struct *tsk)
+				   struct task_struct *tsk, long *addr)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
-
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
+	int v;
+	
 	if(offset >= 1024)
 		offset -= 1024; /* whee... */
 	if(offset & ((sizeof(unsigned long) - 1))) {
@@ -281,90 +82,91 @@ static inline void read_sunos_user(struct pt_regs *regs, unsigned long offset,
 	}
 	if(offset >= 16 && offset < 784) {
 		offset -= 16; offset >>= 2;
-		pt_succ_return(regs, *(((unsigned long *)(&t->reg_window[0]))+offset));	
+		pt_os_succ_return(regs, *(((unsigned long *)(&t->reg_window[0]))+offset), addr);
 		return;
 	}
 	if(offset >= 784 && offset < 832) {
 		offset -= 784; offset >>= 2;
-		pt_succ_return(regs, *(((unsigned long *)(&t->rwbuf_stkptrs[0]))+offset));
+		pt_os_succ_return(regs, *(((unsigned long *)(&t->rwbuf_stkptrs[0]))+offset), addr);
 		return;
 	}
 	switch(offset) {
 	case 0:
-		regs->u_regs[UREG_I0] = t->ksp;
+		v = t->ksp;
 		break;
 	case 4:
-		regs->u_regs[UREG_I0] = t->kpc;
+		v = t->kpc;
 		break;
 	case 8:
-		regs->u_regs[UREG_I0] = t->kpsr;
+		v = t->kpsr;
 		break;
 	case 12:
-		regs->u_regs[UREG_I0] = t->uwinmask;
+		v = t->uwinmask;
 		break;
 	case 832:
-		regs->u_regs[UREG_I0] = t->w_saved;
+		v = t->w_saved;
 		break;
 	case 896:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I0];
+		v = cregs->u_regs[UREG_I0];
 		break;
 	case 900:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I1];
+		v = cregs->u_regs[UREG_I1];
 		break;
 	case 904:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I2];
+		v = cregs->u_regs[UREG_I2];
 		break;
 	case 908:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I3];
+		v = cregs->u_regs[UREG_I3];
 		break;
 	case 912:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I4];
+		v = cregs->u_regs[UREG_I4];
 		break;
 	case 916:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I5];
+		v = cregs->u_regs[UREG_I5];
 		break;
 	case 920:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I6];
+		v = cregs->u_regs[UREG_I6];
 		break;
 	case 924:
-		if(tsk->tss.flags & 0x80000000)
-			regs->u_regs[UREG_I0] = cregs->u_regs[UREG_G1];
+		if(tsk->thread.flags & MAGIC_CONSTANT)
+			v = cregs->u_regs[UREG_G1];
 		else
-			regs->u_regs[UREG_I0] = 0;
+			v = 0;
 		break;
 	case 940:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I0];
+		v = cregs->u_regs[UREG_I0];
 		break;
 	case 944:
-		regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I1];
+		v = cregs->u_regs[UREG_I1];
 		break;
 
 	case 948:
 		/* Isn't binary compatibility _fun_??? */
 		if(cregs->psr & PSR_C)
-			regs->u_regs[UREG_I0] = cregs->u_regs[UREG_I0] << 24;
+			v = cregs->u_regs[UREG_I0] << 24;
 		else
-			regs->u_regs[UREG_I0] = 0;
+			v = 0;
 		break;
 
 		/* Rest of them are completely unsupported. */
 	default:
-		printk("%s [%d]: Wants to read user offset %d\n",
+		printk("%s [%d]: Wants to read user offset %ld\n",
 		       current->comm, current->pid, offset);
 		pt_error_return(regs, EIO);
 		return;
 	}
-	regs->psr &= ~PSR_C;
-	regs->pc = regs->npc;
-	regs->npc += 4;
+	if (current->personality == PER_SUNOS)
+		pt_succ_return (regs, v);
+	else
+		pt_succ_return_linux (regs, v, addr);
 	return;
 }
 
 static inline void write_sunos_user(struct pt_regs *regs, unsigned long offset,
 				    struct task_struct *tsk)
 {
-	struct pt_regs *cregs = tsk->tss.kregs;
-	struct thread_struct *t = &tsk->tss;
+	struct pt_regs *cregs = tsk->thread.kregs;
+	struct thread_struct *t = &tsk->thread;
 	unsigned long value = regs->u_regs[UREG_I3];
 
 	if(offset >= 1024)
@@ -415,7 +217,7 @@ static inline void write_sunos_user(struct pt_regs *regs, unsigned long offset,
 
 		/* Rest of them are completely unsupported or "no-touch". */
 	default:
-		printk("%s [%d]: Wants to write user offset %d\n",
+		printk("%s [%d]: Wants to write user offset %ld\n",
 		       current->comm, current->pid, offset);
 		goto failure;
 	}
@@ -430,6 +232,28 @@ failure:
 /* #define ALLOW_INIT_TRACING */
 /* #define DEBUG_PTRACE */
 
+#ifdef DEBUG_PTRACE
+char *pt_rq [] = {
+	/* 0  */ "TRACEME", "PEEKTEXT", "PEEKDATA", "PEEKUSR",
+	/* 4  */ "POKETEXT", "POKEDATA", "POKEUSR", "CONT",
+	/* 8  */ "KILL", "SINGLESTEP", "SUNATTACH", "SUNDETACH",
+	/* 12 */ "GETREGS", "SETREGS", "GETFPREGS", "SETFPREGS",
+	/* 16 */ "READDATA", "WRITEDATA", "READTEXT", "WRITETEXT",
+	/* 20 */ "GETFPAREGS", "SETFPAREGS", "unknown", "unknown",
+	/* 24 */ "SYSCALL", ""
+};
+#endif
+
+/*
+ * Called by kernel/ptrace.c when detaching..
+ *
+ * Make sure single step bits etc are not set.
+ */
+void ptrace_disable(struct task_struct *child)
+{
+	/* nothing to do */
+}
+
 asmlinkage void do_ptrace(struct pt_regs *regs)
 {
 	unsigned long request = regs->u_regs[UREG_I0];
@@ -439,175 +263,160 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	unsigned long addr2 = regs->u_regs[UREG_I4];
 	struct task_struct *child;
 
+	lock_kernel();
 #ifdef DEBUG_PTRACE
-	printk("do_ptrace: rq=%d pid=%d addr=%08lx data=%08lx addr2=%08lx\n",
-	       (int) request, (int) pid, addr, data, addr2);
+	{
+		char *s;
+
+		if ((request >= 0) && (request <= 24))
+			s = pt_rq [request];
+		else
+			s = "unknown";
+
+		if (request == PTRACE_POKEDATA && data == 0x91d02001){
+			printk ("do_ptrace: breakpoint pid=%d, addr=%08lx addr2=%08lx\n",
+				pid, addr, addr2);
+		} else 
+			printk("do_ptrace: rq=%s(%d) pid=%d addr=%08lx data=%08lx addr2=%08lx\n",
+			       s, (int) request, (int) pid, addr, data, addr2);
+	}
 #endif
 	if(request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED) {
+		if (current->ptrace & PT_PTRACED) {
 			pt_error_return(regs, EPERM);
-			return;
+			goto out;
 		}
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		pt_succ_return(regs, 0);
-		return;
+		goto out;
 	}
 #ifndef ALLOW_INIT_TRACING
 	if(pid == 1) {
 		/* Can't dork with init. */
 		pt_error_return(regs, EPERM);
-		return;
+		goto out;
 	}
 #endif
-	if(!(child = get_task(pid))) {
+	read_lock(&tasklist_lock);
+	child = find_task_by_pid(pid);
+	if (child)
+		get_task_struct(child);
+	read_unlock(&tasklist_lock);
+
+	if (!child) {
 		pt_error_return(regs, ESRCH);
-		return;
+		goto out;
 	}
 
-	if(request == PTRACE_SUNATTACH) {
-		if(child == current) {
-			/* Try this under SunOS/Solaris, bwa haha
-			 * You'll never be able to kill the process. ;-)
-			 */
+	if ((current->personality == PER_SUNOS && request == PTRACE_SUNATTACH)
+	    || (current->personality != PER_SUNOS && request == PTRACE_ATTACH)) {
+		if (ptrace_attach(child)) {
 			pt_error_return(regs, EPERM);
-			return;
+			goto out_tsk;
 		}
-		if((!child->dumpable ||
-		    (current->uid != child->euid) ||
-		    (current->uid != child->uid) ||
-		    (current->gid != child->egid) ||
-		    (current->gid != child->gid)) && !suser()) {
-			pt_error_return(regs, EPERM);
-			return;
-		}
-		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED) {
-			pt_error_return(regs, EPERM);
-			return;
-		}
-		child->flags |= PF_PTRACED;
-		if(child->p_pptr != current) {
-			REMOVE_LINKS(child);
-			child->p_pptr = current;
-			SET_LINKS(child);
-		}
-		send_sig(SIGSTOP, child, 1);
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
-	if(!(child->flags & PF_PTRACED)) {
+	if (!(child->ptrace & PT_PTRACED)) {
 		pt_error_return(regs, ESRCH);
-		return;
+		goto out_tsk;
 	}
 	if(child->state != TASK_STOPPED) {
 		if(request != PTRACE_KILL) {
 			pt_error_return(regs, ESRCH);
-			return;
+			goto out_tsk;
 		}
 	}
 	if(child->p_pptr != current) {
 		pt_error_return(regs, ESRCH);
-		return;
+		goto out_tsk;
 	}
 	switch(request) {
 	case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 	case PTRACE_PEEKDATA: {
 		unsigned long tmp;
-		int res;
 
-		/* Non-word alignment _not_ allowed on Sparc. */
-		if(addr & (sizeof(unsigned long) - 1)) {
-			pt_error_return(regs, EINVAL);
-			return;
-		}
-		res = read_long(child, addr, &tmp);
-		if (res < 0) {
-			pt_error_return(regs, -res);
-			return;
-		}
-		pt_succ_return(regs, tmp);
-		return;
+		if (access_process_vm(child, addr,
+				      &tmp, sizeof(tmp), 0) == sizeof(tmp))
+			pt_os_succ_return(regs, tmp, (long *)data);
+		else
+			pt_error_return(regs, EIO);
+		goto out_tsk;
 	}
 
 	case PTRACE_PEEKUSR:
-		read_sunos_user(regs, addr, child);
-		return;
+		read_sunos_user(regs, addr, child, (long *) data);
+		goto out_tsk;
 
 	case PTRACE_POKEUSR:
 		write_sunos_user(regs, addr, child);
-		return;
+		goto out_tsk;
 
 	case PTRACE_POKETEXT: /* write the word at location addr. */
 	case PTRACE_POKEDATA: {
-		struct vm_area_struct *vma;
-		int res;
-
-		/* Non-word alignment _not_ allowed on Sparc. */
-		if(addr & (sizeof(unsigned long) - 1)) {
-			pt_error_return(regs, EINVAL);
-			return;
-		}
-		vma = find_extend_vma(child, addr);
-		if(vma && request == PTRACE_POKEDATA && (vma->vm_flags & VM_EXEC)) {
-			pt_error_return(regs, EIO);
-			return;
-		}
-		res = write_long(child, addr, data);
-		if(res < 0)
-			pt_error_return(regs, -res);
+		if (access_process_vm(child, addr,
+				      &data, sizeof(data), 1) == sizeof(data))
+			pt_succ_return(regs, 0);
 		else
-			pt_succ_return(regs, res);
-		return;
+			pt_error_return(regs, EIO);
+		goto out_tsk;
 	}
 
 	case PTRACE_GETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
+		struct pt_regs *cregs = child->thread.kregs;
 		int rval;
 
-		rval = verify_area(VERIFY_WRITE, pregs, sizeof(struct pt_regs) - 4);
+		rval = verify_area(VERIFY_WRITE, pregs, sizeof(struct pt_regs));
 		if(rval) {
-			pt_error_return(regs, rval);
-			return;
+			pt_error_return(regs, -rval);
+			goto out_tsk;
 		}
-		pregs->psr = cregs->psr;
-		pregs->pc = cregs->pc;
-		pregs->npc = cregs->npc;
-		pregs->y = cregs->y;
+		__put_user(cregs->psr, (&pregs->psr));
+		__put_user(cregs->pc, (&pregs->pc));
+		__put_user(cregs->npc, (&pregs->npc));
+		__put_user(cregs->y, (&pregs->y));
 		for(rval = 1; rval < 16; rval++)
-			pregs->u_regs[rval - 1] = cregs->u_regs[rval];
+			__put_user(cregs->u_regs[rval], (&pregs->u_regs[rval - 1]));
 		pt_succ_return(regs, 0);
-		return;
+#ifdef DEBUG_PTRACE
+		printk ("PC=%x nPC=%x o7=%x\n", cregs->pc, cregs->npc, cregs->u_regs [15]);
+#endif
+		goto out_tsk;
 	}
 
 	case PTRACE_SETREGS: {
 		struct pt_regs *pregs = (struct pt_regs *) addr;
-		struct pt_regs *cregs = child->tss.kregs;
-		unsigned long psr;
-		int rval, i;
+		struct pt_regs *cregs = child->thread.kregs;
+		unsigned long psr, pc, npc, y;
+		int i;
 
-		rval = verify_area(VERIFY_READ, pregs, sizeof(struct pt_regs) - 4);
-		if(rval) {
-			pt_error_return(regs, rval);
-			return;
-		}
 		/* Must be careful, tracing process can only set certain
 		 * bits in the psr.
 		 */
-		psr = (pregs->psr) & PSR_ICC;
+		i = verify_area(VERIFY_READ, pregs, sizeof(struct pt_regs));
+		if(i) {
+			pt_error_return(regs, -i);
+			goto out_tsk;
+		}
+		__get_user(psr, (&pregs->psr));
+		__get_user(pc, (&pregs->pc));
+		__get_user(npc, (&pregs->npc));
+		__get_user(y, (&pregs->y));
+		psr &= PSR_ICC;
 		cregs->psr &= ~PSR_ICC;
 		cregs->psr |= psr;
-		if(!((pregs->pc | pregs->npc) & 3)) {
-			cregs->pc = pregs->pc;
-			cregs->npc = pregs->npc;
+		if(!((pc | npc) & 3)) {
+			cregs->pc = pc;
+			cregs->npc =npc;
 		}
-		cregs->y = pregs->y;
+		cregs->y = y;
 		for(i = 1; i < 16; i++)
-			cregs->u_regs[i] = pregs->u_regs[i-1];
+			__get_user(cregs->u_regs[i], (&pregs->u_regs[i-1]));
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 	case PTRACE_GETFPREGS: {
@@ -622,21 +431,26 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 				unsigned long insn;
 			} fpq[16];
 		} *fps = (struct fps *) addr;
-		int rval, i;
+		int i;
 
-		rval = verify_area(VERIFY_WRITE, fps, sizeof(struct fps));
-		if(rval) { pt_error_return(regs, rval); return; }
+		i = verify_area(VERIFY_WRITE, fps, sizeof(struct fps));
+		if(i) {
+			pt_error_return(regs, -i);
+			goto out_tsk;
+		}
 		for(i = 0; i < 32; i++)
-			fps->regs[i] = child->tss.float_regs[i];
-		fps->fsr = child->tss.fsr;
-		fps->fpqd = child->tss.fpqdepth;
-		fps->flags = fps->extra = 0;
+			__put_user(child->thread.float_regs[i], (&fps->regs[i]));
+		__put_user(child->thread.fsr, (&fps->fsr));
+		__put_user(child->thread.fpqdepth, (&fps->fpqd));
+		__put_user(0, (&fps->flags));
+		__put_user(0, (&fps->extra));
 		for(i = 0; i < 16; i++) {
-			fps->fpq[i].insnaddr = child->tss.fpqueue[i].insn_addr;
-			fps->fpq[i].insn = child->tss.fpqueue[i].insn;
+			__put_user(child->thread.fpqueue[i].insn_addr,
+				   (&fps->fpq[i].insnaddr));
+			__put_user(child->thread.fpqueue[i].insn, (&fps->fpq[i].insn));
 		}
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 	case PTRACE_SETFPREGS: {
@@ -651,91 +465,92 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 				unsigned long insn;
 			} fpq[16];
 		} *fps = (struct fps *) addr;
-		int rval, i;
+		int i;
 
-		rval = verify_area(VERIFY_READ, fps, sizeof(struct fps));
-		if(rval) { pt_error_return(regs, rval); return; }
-		for(i = 0; i < 32; i++)
-			child->tss.float_regs[i] = fps->regs[i];
-		child->tss.fsr = fps->fsr;
-		child->tss.fpqdepth = fps->fpqd;
+		i = verify_area(VERIFY_READ, fps, sizeof(struct fps));
+		if(i) {
+			pt_error_return(regs, -i);
+			goto out_tsk;
+		}
+		copy_from_user(&child->thread.float_regs[0], &fps->regs[0], (32 * sizeof(unsigned long)));
+		__get_user(child->thread.fsr, (&fps->fsr));
+		__get_user(child->thread.fpqdepth, (&fps->fpqd));
 		for(i = 0; i < 16; i++) {
-			child->tss.fpqueue[i].insn_addr = fps->fpq[i].insnaddr;
-			child->tss.fpqueue[i].insn = fps->fpq[i].insn;
+			__get_user(child->thread.fpqueue[i].insn_addr,
+				   (&fps->fpq[i].insnaddr));
+			__get_user(child->thread.fpqueue[i].insn, (&fps->fpq[i].insn));
 		}
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 	case PTRACE_READTEXT:
 	case PTRACE_READDATA: {
-		unsigned char *dest = (unsigned char *) addr2;
-		unsigned long src = addr;
-		unsigned char tmp;
-		int res, len = data;
+		int res = ptrace_readdata(child, addr, (void *) addr2, data);
 
-		res = verify_area(VERIFY_WRITE, (void *) dest, len);
-		if(res) {
-			pt_error_return(regs, -res);
-			return;
+		if (res == data) {
+			pt_succ_return(regs, 0);
+			goto out_tsk;
 		}
-		while(len) {
-			res = read_byte(child, src, &tmp);
-			if(res < 0) {
-				pt_error_return(regs, -res);
-				return;
-			}
-			*dest = tmp;
-			src++; dest++; len--;
-		}
-		pt_succ_return(regs, 0);
-		return;
+		/* Partial read is an IO failure */
+		if (res >= 0)
+			res = -EIO;
+		pt_error_return(regs, -res);
+		goto out_tsk;
 	}
 
 	case PTRACE_WRITETEXT:
 	case PTRACE_WRITEDATA: {
-		unsigned char *src = (unsigned char *) addr2;
-		unsigned long dest = addr;
-		int res, len = data;
+		int res = ptrace_writedata(child, (void *) addr2, addr, data);
 
-		res = verify_area(VERIFY_READ, (void *) src, len);
-		if(res) {
-			pt_error_return(regs, -res);
-			return;
+		if (res == data) {
+			pt_succ_return(regs, 0);
+			goto out_tsk;
 		}
-		while(len) {
-			res = write_byte(child, dest, *src);
-			if(res < 0) {
-				pt_error_return(regs, -res);
-				return;
-			}
-			src++; dest++; len--;
-		}
-		pt_succ_return(regs, 0);
-		return;
+		/* Partial write is an IO failure */
+		if (res >= 0)
+			res = -EIO;
+		pt_error_return(regs, -res);
+		goto out_tsk;
 	}
 
 	case PTRACE_SYSCALL: /* continue and stop at (return from) syscall */
-		data = 0;
 		addr = 1;
 
 	case PTRACE_CONT: { /* restart after signal. */
-		if ((unsigned long) data > NSIG) {
+		if ((unsigned long) data > _NSIG) {
 			pt_error_return(regs, EIO);
-			return;
+			goto out_tsk;
 		}
+		if (addr != 1) {
+			if (addr & 3) {
+				pt_error_return(regs, EINVAL);
+				goto out_tsk;
+			}
+#ifdef DEBUG_PTRACE
+			printk ("Original: %08lx %08lx\n", child->thread.kregs->pc, child->thread.kregs->npc);
+			printk ("Continuing with %08lx %08lx\n", addr, addr+4);
+#endif
+			child->thread.kregs->pc = addr;
+			child->thread.kregs->npc = addr + 4;
+		}
+
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
+
 		child->exit_code = data;
-		if((addr != 1) & !(addr & 3)) {
-			child->tss.kregs->pc = addr;
-			child->tss.kregs->npc = addr + 4;
-		}
+#ifdef DEBUG_PTRACE
+		printk("CONT: %s [%d]: set exit_code = %x %x %x\n", child->comm,
+			child->pid, child->exit_code,
+			child->thread.kregs->pc,
+			child->thread.kregs->npc);
+		       
+#endif
 		wake_up_process(child);
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 /*
@@ -746,35 +561,35 @@ asmlinkage void do_ptrace(struct pt_regs *regs)
 	case PTRACE_KILL: {
 		if (child->state == TASK_ZOMBIE) {	/* already dead */
 			pt_succ_return(regs, 0);
-			return;
+			goto out_tsk;
 		}
 		wake_up_process(child);
 		child->exit_code = SIGKILL;
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 	case PTRACE_SUNDETACH: { /* detach a process that was attached. */
-		if ((unsigned long) data > NSIG) {
+		int err = ptrace_detach(child, data);
+		if (err) {
 			pt_error_return(regs, EIO);
-			return;
+			goto out_tsk;
 		}
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
-		wake_up_process(child);
-		child->exit_code = data;
-		REMOVE_LINKS(child);
-		child->p_pptr = child->p_opptr;
-		SET_LINKS(child);
 		pt_succ_return(regs, 0);
-		return;
+		goto out_tsk;
 	}
 
 	/* PTRACE_DUMPCORE unsupported... */
 
 	default:
 		pt_error_return(regs, EIO);
-		return;
+		goto out_tsk;
 	}
+out_tsk:
+	if (child)
+		free_task_struct(child);
+out:
+	unlock_kernel();
 }
 
 asmlinkage void syscall_trace(void)
@@ -782,20 +597,25 @@ asmlinkage void syscall_trace(void)
 #ifdef DEBUG_PTRACE
 	printk("%s [%d]: syscall_trace\n", current->comm, current->pid);
 #endif
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+			!= (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;
-	current->tss.flags ^= 0x80000000;
-	notify_parent(current);
+	current->thread.flags ^= MAGIC_CONSTANT;
+	notify_parent(current, SIGCHLD);
 	schedule();
 	/*
 	 * this isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the
 	 * stopping signal is not SIGTRAP.  -brl
 	 */
-	if (current->exit_code)
-		current->signal |= (1 << (current->exit_code - 1));
-	current->exit_code = 0;
+#ifdef DEBUG_PTRACE
+	printk("%s [%d]: syscall_trace exit= %x\n", current->comm,
+		current->pid, current->exit_code);
+#endif
+	if (current->exit_code) {
+		send_sig (current->exit_code, current, 1);
+		current->exit_code = 0;
+	}
 }

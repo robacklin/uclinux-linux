@@ -1,7 +1,9 @@
 /*
  *	NET3:	Implementation of the ICMP protocol layer. 
  *	
- *		Alan Cox, <alan@cymru.net>
+ *		Alan Cox, <alan@redhat.com>
+ *
+ *	Version: $Id: icmp.c,v 1.82.2.1 2001/12/13 08:59:27 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -14,6 +16,9 @@
  *	Other than that this module is a complete rewrite.
  *
  *	Fixes:
+ *	Clemens Fruhwirth	:	introduce global icmp rate limiting
+ *					with icmp type masking ability instead
+ *					of broken per type icmp timeouts.
  *		Mike Shaver	:	RFC1122 checks.
  *		Alan Cox	:	Multicast ping reply as self.
  *		Alan Cox	:	Fix atomicity lockup in ip_build_xmit 
@@ -38,203 +43,24 @@
  *					path MTU bug.
  *		Thomas Quinot	:	ICMP Dest Unreach codes up to 15 are
  *					valid (RFC 1812).
- *		Alan Cox	:	Spoofing and junk icmp protections.
- *              Elliot Poger    :       Added support for SO_BINDTODEVICE.
- *	Willy Konynenberg	:	Transparent proxy adapted to new
- *					socket hash code.
+ *		Andi Kleen	:	Check all packet lengths properly
+ *					and moved all kfree_skb() up to
+ *					icmp_rcv.
+ *		Andi Kleen	:	Move the rate limit bookkeeping
+ *					into the dest entry and use a token
+ *					bucket filter (thanks to ANK). Make
+ *					the rates sysctl configurable.
+ *		Yu Tianli	:	Fixed two ugly bugs in icmp_send
+ *					- IP option length was accounted wrongly
+ *					- ICMP header length was not accounted at all.
+ *              Tristan Greaves :       Added sysctl option to ignore bogus broadcast
+ *                                      responses from broken routers.
  *
+ * To Fix:
  *
- * RFC1122 (Host Requirements -- Comm. Layer) Status:
- * (boy, are there a lot of rules for ICMP)
- *  3.2.2 (Generic ICMP stuff)
- *   MUST discard messages of unknown type. (OK)
- *   MUST copy at least the first 8 bytes from the offending packet
- *     when sending ICMP errors. (OBSOLETE -- see RFC1812)
- *   MUST pass received ICMP errors up to protocol level. (OK)
- *   SHOULD send ICMP errors with TOS == 0. (OBSOLETE -- see RFC1812)
- *   MUST NOT send ICMP errors in reply to:
- *     ICMP errors (OK)
- *     Broadcast/multicast datagrams (OK)
- *     MAC broadcasts (OK)
- *     Non-initial fragments (OK)
- *     Datagram with a source address that isn't a single host. (OK)
- *  3.2.2.1 (Destination Unreachable)
- *   All the rules govern the IP layer, and are dealt with in ip.c, not here.
- *  3.2.2.2 (Redirect)
- *   Host SHOULD NOT send ICMP_REDIRECTs.  (OK)
- *   MUST update routing table in response to host or network redirects.
- *     (host OK, network OBSOLETE)
- *   SHOULD drop redirects if they're not from directly connected gateway
- *     (OK -- we drop it if it's not from our old gateway, which is close
- *      enough)
- * 3.2.2.3 (Source Quench)
- *   MUST pass incoming SOURCE_QUENCHs to transport layer (OK)
- *   Other requirements are dealt with at the transport layer.
- * 3.2.2.4 (Time Exceeded)
- *   MUST pass TIME_EXCEEDED to transport layer (OK)
- *   Other requirements dealt with at IP (generating TIME_EXCEEDED).
- * 3.2.2.5 (Parameter Problem)
- *   SHOULD generate these (OK)
- *   MUST pass received PARAMPROBLEM to transport layer (NOT YET)
- *   	[Solaris 2.X seems to assert EPROTO when this occurs] -- AC
- * 3.2.2.6 (Echo Request/Reply)
- *   MUST reply to ECHO_REQUEST, and give app to do ECHO stuff (OK, OK)
- *   MAY discard broadcast ECHO_REQUESTs. (We don't, but that's OK.)
- *   MUST reply using same source address as the request was sent to.
- *     We're OK for unicast ECHOs, and it doesn't say anything about
- *     how to handle broadcast ones, since it's optional.
- *   MUST copy data from REQUEST to REPLY (OK)
- *     unless it would require illegal fragmentation (OK)
- *   MUST pass REPLYs to transport/user layer (OK)
- *   MUST use any provided source route (reversed) for REPLY. (NOT YET)
- * 3.2.2.7 (Information Request/Reply)
- *   MUST NOT implement this. (I guess that means silently discard...?) (OK)
- * 3.2.2.8 (Timestamp Request/Reply)
- *   MAY implement (OK)
- *   SHOULD be in-kernel for "minimum variability" (OK)
- *   MAY discard broadcast REQUESTs.  (OK, but see source for inconsistency)
- *   MUST reply using same source address as the request was sent to. (OK)
- *   MUST reverse source route, as per ECHO (NOT YET)
- *   MUST pass REPLYs to transport/user layer (requires RAW, just like 
- *	ECHO) (OK)
- *   MUST update clock for timestamp at least 15 times/sec (OK)
- *   MUST be "correct within a few minutes" (OK)
- * 3.2.2.9 (Address Mask Request/Reply)
- *   MAY implement (OK)
- *   MUST send a broadcast REQUEST if using this system to set netmask
- *     (OK... we don't use it)
- *   MUST discard received REPLYs if not using this system (OK)
- *   MUST NOT send replies unless specifically made agent for this sort
- *     of thing. (OK)
+ *	- Should use skb_pull() instead of all the manual checking.
+ *	  This would also greatly simply some upper layer error handlers. --AK
  *
- *
- * RFC 1812 (IPv4 Router Requirements) Status (even longer):
- *  4.3.2.1 (Unknown Message Types)
- *   MUST pass messages of unknown type to ICMP user iface or silently discard
- *     them (OK)
- *  4.3.2.2 (ICMP Message TTL)
- *   MUST initialize TTL when originating an ICMP message (OK)
- *  4.3.2.3 (Original Message Header)
- *   SHOULD copy as much data from the offending packet as possible without
- *     the length of the ICMP datagram exceeding 576 bytes (OK)
- *   MUST leave original IP header of the offending packet, but we're not
- *     required to undo modifications made (OK)
- *  4.3.2.4 (Original Message Source Address)
- *   MUST use one of addresses for the interface the orig. packet arrived as
- *     source address (OK)
- *  4.3.2.5 (TOS and Precedence)
- *   SHOULD leave TOS set to the same value unless the packet would be 
- *     discarded for that reason (OK)
- *   MUST use TOS=0 if not possible to leave original value (OK)
- *   MUST leave IP Precedence for Source Quench messages (OK -- not sent 
- *	at all)
- *   SHOULD use IP Precedence = 6 (Internetwork Control) or 7 (Network Control)
- *     for all other error messages (OK, we use 6)
- *   MAY allow configuration of IP Precedence (OK -- not done)
- *   MUST leave IP Precedence and TOS for reply messages (OK)
- *  4.3.2.6 (Source Route)
- *   SHOULD use reverse source route UNLESS sending Parameter Problem on source
- *     routing and UNLESS the packet would be immediately discarded (NOT YET)
- *  4.3.2.7 (When Not to Send ICMP Errors)
- *   MUST NOT send ICMP errors in reply to:
- *     ICMP errors (OK)
- *     Packets failing IP header validation tests unless otherwise noted (OK)
- *     Broadcast/multicast datagrams (OK)
- *     MAC broadcasts (OK)
- *     Non-initial fragments (OK)
- *     Datagram with a source address that isn't a single host. (OK)
- *  4.3.2.8 (Rate Limiting)
- *   SHOULD be able to limit error message rate (OK)
- *   SHOULD allow setting of rate limits (OK, in the source)
- *  4.3.3.1 (Destination Unreachable)
- *   All the rules govern the IP layer, and are dealt with in ip.c, not here.
- *  4.3.3.2 (Redirect)
- *   MAY ignore ICMP Redirects if running a routing protocol or if forwarding
- *     is enabled on the interface (OK -- ignores)
- *  4.3.3.3 (Source Quench)
- *   SHOULD NOT originate SQ messages (OK)
- *   MUST be able to limit SQ rate if originates them (OK as we don't 
- *	send them)
- *   MAY ignore SQ messages it receives (OK -- we don't)
- *  4.3.3.4 (Time Exceeded)
- *   Requirements dealt with at IP (generating TIME_EXCEEDED).
- *  4.3.3.5 (Parameter Problem)
- *   MUST generate these for all errors not covered by other messages (OK)
- *   MUST include original value of the value pointed by (OK)
- *  4.3.3.6 (Echo Request)
- *   MUST implement echo server function (OK)
- *   MUST process at ER of at least max(576, MTU) (OK)
- *   MAY reject broadcast/multicast ER's (We don't, but that's OK)
- *   SHOULD have a config option for silently ignoring ER's (OK)
- *   MUST have a default value for the above switch = NO (OK)
- *   MUST have application layer interface for Echo Request/Reply (OK)
- *   MUST reply using same source address as the request was sent to.
- *     We're OK for unicast ECHOs, and it doesn't say anything about
- *     how to handle broadcast ones, since it's optional.
- *   MUST copy data from Request to Reply (OK)
- *   SHOULD update Record Route / Timestamp options (??)
- *   MUST use reversed Source Route for Reply if possible (NOT YET)
- *  4.3.3.7 (Information Request/Reply)
- *   SHOULD NOT originate or respond to these (OK)
- *  4.3.3.8 (Timestamp / Timestamp Reply)
- *   MAY implement (OK)
- *   MUST reply to every Timestamp message received (OK)
- *   MAY discard broadcast REQUESTs.  (OK, but see source for inconsistency)
- *   MUST reply using same source address as the request was sent to. (OK)
- *   MUST use reversed Source Route if possible (NOT YET)
- *   SHOULD update Record Route / Timestamp options (??)
- *   MUST pass REPLYs to transport/user layer (requires RAW, just like 
- *	ECHO) (OK)
- *   MUST update clock for timestamp at least 16 times/sec (OK)
- *   MUST be "correct within a few minutes" (OK)
- * 4.3.3.9 (Address Mask Request/Reply)
- *   MUST have support for receiving AMRq and responding with AMRe (OK, 
- *	but only as a compile-time option)
- *   SHOULD have option for each interface for AMRe's, MUST default to 
- *	NO (NOT YET)
- *   MUST NOT reply to AMRq before knows the correct AM (OK)
- *   MUST NOT respond to AMRq with source address 0.0.0.0 on physical
- *    	interfaces having multiple logical i-faces with different masks
- *	(NOT YET)
- *   SHOULD examine all AMRe's it receives and check them (NOT YET)
- *   SHOULD log invalid AMRe's (AM+sender) (NOT YET)
- *   MUST NOT use contents of AMRe to determine correct AM (OK)
- *   MAY broadcast AMRe's after having configured address masks (OK -- doesn't)
- *   MUST NOT do broadcast AMRe's if not set by extra option (OK, no option)
- *   MUST use the { <NetPrefix>, -1 } form of broadcast addresses (OK)
- * 4.3.3.10 (Router Advertisement and Solicitations)
- *   MUST support router part of Router Discovery Protocol on all networks we
- *     support broadcast or multicast addressing. (OK -- done by gated)
- *   MUST have all config parameters with the respective defaults (OK)
- * 5.2.7.1 (Destination Unreachable)
- *   MUST generate DU's (OK)
- *   SHOULD choose a best-match response code (OK)
- *   SHOULD NOT generate Host Isolated codes (OK)
- *   SHOULD use Communication Administratively Prohibited when administratively
- *     filtering packets (NOT YET -- bug-to-bug compatibility)
- *   MAY include config option for not generating the above and silently
- *	discard the packets instead (OK)
- *   MAY include config option for not generating Precedence Violation and
- *     Precedence Cutoff messages (OK as we don't generate them at all)
- *   MUST use Host Unreachable or Dest. Host Unknown codes whenever other hosts
- *     on the same network might be reachable (OK -- no net unreach's at all)
- *   MUST use new form of Fragmentation Needed and DF Set messages (OK)
- * 5.2.7.2 (Redirect)
- *   MUST NOT generate network redirects (OK)
- *   MUST be able to generate host redirects (OK)
- *   SHOULD be able to generate Host+TOS redirects (NO as we don't use TOS)
- *   MUST have an option to use Host redirects instead of Host+TOS ones (OK as
- *     no Host+TOS Redirects are used)
- *   MUST NOT generate redirects unless forwarding to the same i-face and the
- *     dest. address is on the same subnet as the src. address and no source
- *     routing is in use. (OK)
- *   MUST NOT follow redirects when using a routing protocol (OK)
- *   MAY use redirects if not using a routing protocol (OK, compile-time option)
- *   MUST comply to Host Requirements when not acting as a router (OK)
- *  5.2.7.3 (Time Exceeded)
- *   MUST generate Time Exceeded Code 0 when discarding packet due to TTL=0 (OK)
- *   MAY have a per-interface option to disable origination of TE messages, but
- *     it MUST default to "originate" (OK -- we don't support it)
  */
 
 #include <linux/config.h>
@@ -247,6 +73,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/string.h>
+#include <linux/netfilter_ipv4.h>
 #include <net/snmp.h>
 #include <net/ip.h>
 #include <net/route.h>
@@ -254,22 +81,41 @@
 #include <net/icmp.h>
 #include <net/tcp.h>
 #include <net/udp.h>
-#include <net/snmp.h>
+#include <net/raw.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <linux/errno.h>
 #include <linux/timer.h>
+#include <linux/init.h>
 #include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <net/checksum.h>
 
-#define min(a,b)	((a)<(b)?(a):(b))
+/*
+ *	Build xmit assembly blocks
+ */
+
+struct icmp_bxm
+{
+	struct sk_buff *skb;
+	int offset;
+	int data_len;
+
+	unsigned int csum;
+	struct {
+		struct icmphdr icmph;
+		__u32	       times[3];
+	} data;
+	int head_len;
+	struct ip_options replyopts;
+	unsigned char  optbuf[40];
+};
 
 /*
  *	Statistics
  */
  
-struct icmp_mib icmp_statistics;
+struct icmp_mib icmp_statistics[NR_CPUS*2];
 
 /* An array of errno for error messages from dest unreach. */
 /* RFC 1122: 3.2.2.1 States that NET_UNREACH, HOS_UNREACH and SR_FAIELD MUST be considered 'transient errs'. */
@@ -279,7 +125,7 @@ struct icmp_err icmp_err_convert[] = {
   { EHOSTUNREACH,	0 },	/*	ICMP_HOST_UNREACH	*/
   { ENOPROTOOPT,	1 },	/*	ICMP_PROT_UNREACH	*/
   { ECONNREFUSED,	1 },	/*	ICMP_PORT_UNREACH	*/
-  { EOPNOTSUPP,		0 },	/*	ICMP_FRAG_NEEDED	*/
+  { EMSGSIZE,		0 },	/*	ICMP_FRAG_NEEDED	*/
   { EOPNOTSUPP,		0 },	/*	ICMP_SR_FAILED		*/
   { ENETUNREACH,	1 },	/* 	ICMP_NET_UNKNOWN	*/
   { EHOSTDOWN,		1 },	/*	ICMP_HOST_UNKNOWN	*/
@@ -293,174 +139,131 @@ struct icmp_err icmp_err_convert[] = {
   { EHOSTUNREACH,	1 }	/*	ICMP_PREC_CUTOFF	*/
 };
 
-/*
- *	A spare long used to speed up statistics updating
+extern int sysctl_ip_default_ttl;
+
+/* Control parameters for ECHO replies. */
+int sysctl_icmp_echo_ignore_all;
+int sysctl_icmp_echo_ignore_broadcasts;
+
+/* Control parameter - ignore bogus broadcast responses? */
+int sysctl_icmp_ignore_bogus_error_responses;
+
+/* 
+ * 	Configurable global rate limit.
+ *
+ *	ratelimit defines tokens/packet consumed for dst->rate_token bucket
+ *	ratemask defines which icmp types are ratelimited by setting
+ * 	it's bit position.
+ *
+ *	default: 
+ *	dest unreachable (3), source quench (4),
+ *	time exceeded (11), parameter problem (12)
  */
- 
-unsigned long dummy;
 
-/*
- *	ICMP transmit rate limit control structures. We use a relatively simple
- *	approach to the problem: For each type of ICMP message with rate limit
- *	we count the number of messages sent during some time quantum. If this
- *	count exceeds given maximal value, we ignore all messages not separated
- *	from the last message sent at least by specified time.
- */
-
-#define XRLIM_CACHE_SIZE 16		/* How many destination hosts do we cache */
-
-struct icmp_xrl_cache			/* One entry of the ICMP rate cache */
-{
-	__u32 daddr;			/* Destination address */
-	unsigned long counter;		/* Message counter */
-	unsigned long next_reset;	/* Time of next reset of the counter */
-	unsigned long last_access;	/* Time of last access to this entry (LRU) */
-	unsigned int restricted;	/* Set if we're in restricted mode */
-	unsigned long next_packet;	/* When we'll allow a next packet if restricted */
-};
-
-struct icmp_xrlim
-{
-	unsigned long timeout;		/* Time quantum for rate measuring */
-	unsigned long limit;		/* Maximal number of messages per time quantum allowed */
-	unsigned long delay;		/* How long we wait between packets when restricting */
-	struct icmp_xrl_cache cache[XRLIM_CACHE_SIZE];	/* Rate cache */
-};
+int sysctl_icmp_ratelimit = 1*HZ;
+int sysctl_icmp_ratemask = 0x1818;
 
 /*
  *	ICMP control array. This specifies what to do with each ICMP.
  */
- 
+
 struct icmp_control
 {
 	unsigned long *output;		/* Address to increment on output */
 	unsigned long *input;		/* Address to increment on input */
-	void (*handler)(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len);
-	unsigned long error;		/* This ICMP is classed as an error message */
-	struct icmp_xrlim *xrlim;	/* Transmit rate limit control structure or NULL for no limits */
+	void (*handler)(struct sk_buff *skb);
+	short	error;		/* This ICMP is classed as an error message */
 };
 
-static struct icmp_control icmp_pointers[19];
+static struct icmp_control icmp_pointers[NR_ICMP_TYPES+1];
 
 /*
- *	Build xmit assembly blocks
- */
-
-struct icmp_bxm
-{
-	void *data_ptr;
-	int data_len;
-	struct icmphdr icmph;
-	unsigned long csum;
-	struct options replyopts;
-	unsigned char  optbuf[40];
-};
-
-/*
- *	The ICMP socket. This is the most convenient way to flow control
+ *	The ICMP socket(s). This is the most convenient way to flow control
  *	our ICMP output as well as maintain a clean interface throughout
  *	all layers. All Socketless IP sends will soon be gone.
  */
 	
-struct socket icmp_socket;
+static struct inode __icmp_inode[NR_CPUS];
+#define icmp_socket (&__icmp_inode[smp_processor_id()].u.socket_i)
+#define icmp_socket_cpu(X) (&__icmp_inode[(X)].u.socket_i)
+
+static int icmp_xmit_lock(void)
+{
+	local_bh_disable();
+	if (unlikely(!spin_trylock(&icmp_socket->sk->lock.slock))) {
+		/* This can happen if the output path signals a
+		 * dst_link_failure() for an outgoing ICMP packet.
+		 */
+		local_bh_enable();
+		return 1;
+	}
+	return 0;
+}
+
+static void icmp_xmit_unlock(void)
+{
+	spin_unlock_bh(&icmp_socket->sk->lock.slock);
+}
 
 /*
  *	Send an ICMP frame.
  */
 
-
-/*
- *	Initialize the transmit rate limitation mechanism.
- */
-
-#ifndef CONFIG_NO_ICMP_LIMIT
-
-static void xrlim_init(void)
-{
-	int type, entry;
-	struct icmp_xrlim *xr;
-
-	for (type=0; type<=18; type++) {
-		xr = icmp_pointers[type].xrlim;
-		if (xr) {
-			for (entry=0; entry<XRLIM_CACHE_SIZE; entry++)
-				xr->cache[entry].daddr = INADDR_NONE;
-		}
-	}
-}
-
 /*
  *	Check transmit rate limitation for given message.
+ *	The rate information is held in the destination cache now.
+ *	This function is generic and could be used for other purposes
+ *	too. It uses a Token bucket filter as suggested by Alexey Kuznetsov.
+ *
+ *	Note that the same dst_entry fields are modified by functions in 
+ *	route.c too, but these work for packet destinations while xrlim_allow
+ *	works for icmp destinations. This means the rate limiting information
+ *	for one "ip object" is shared - and these ICMPs are twice limited:
+ *	by source and by destination.
  *
  *	RFC 1812: 4.3.2.8 SHOULD be able to limit error message rate
- *			  SHOULD allow setting of rate limits (we allow 
- *			  in the source)
+ *			  SHOULD allow setting of rate limits 
+ *
+ * 	Shared between ICMPv4 and ICMPv6.
  */
-
-static int xrlim_allow(int type, __u32 addr)
+#define XRLIM_BURST_FACTOR 6
+int xrlim_allow(struct dst_entry *dst, int timeout)
 {
-	struct icmp_xrlim *r;
-	struct icmp_xrl_cache *c;
 	unsigned long now;
 
-	if (type > 18)			/* No time limit present */
-		return 1;
-	r = icmp_pointers[type].xrlim;
-	if (!r)
-		return 1;
-
-	for (c = r->cache; c < &r->cache[XRLIM_CACHE_SIZE]; c++)	
-	  /* Cache lookup */
-		if (c->daddr == addr)
-			break;
-
-	now = jiffies;		/* Cache current time (saves accesses to volatile variable) */
-
-	if (c == &r->cache[XRLIM_CACHE_SIZE]) {		/* Cache miss */
-		unsigned long oldest = now;		/* Find the oldest entry to replace */
-		struct icmp_xrl_cache *d;
-		c = r->cache;
-		for (d = r->cache; d < &r->cache[XRLIM_CACHE_SIZE]; d++)
-			if (!d->daddr) {		/* Unused entry */
-				c = d;
-				break;
-			} else if (d->last_access < oldest) {
-				oldest = d->last_access;
-				c = d;
-			}
-		c->last_access = now;			/* Fill the entry with new data */
-		c->daddr = addr;
-		c->counter = 1;
-		c->next_reset = now + r->timeout;
-		c->restricted = 0;
+	now = jiffies;
+	dst->rate_tokens += now - dst->rate_last;
+	dst->rate_last = now;
+	if (dst->rate_tokens > XRLIM_BURST_FACTOR*timeout)
+        	dst->rate_tokens = XRLIM_BURST_FACTOR*timeout;
+	if (dst->rate_tokens >= timeout) {
+		dst->rate_tokens -= timeout;
 		return 1;
 	}
-
-	c->last_access = now;
-	if (c->next_reset > now) {			/* Let's increment the counter */
-		c->counter++;
-		if (c->counter == r->limit) {		/* Limit exceeded, start restrictions */
-			c->restricted = 1;
-			c->next_packet = now + r->delay;
-			return 0;
-		}
-		if (c->restricted) {			/* Any restrictions pending? */
-			if (c->next_packet > now)
-				return 0;
-			c->next_packet = now + r->delay;
-			return 1;
-		}
-	} else {					/* Reset the counter */
-		if (c->counter < r->limit)		/* Switch off all restrictions */
-			c->restricted = 0;
-		c->next_reset = now + r->timeout;
-		c->counter = 0;
-	}
-
-	return 1;					/* Send the packet */
+	return 0; 
 }
 
-#endif /* CONFIG_NO_ICMP_LIMIT */
+static inline int icmpv4_xrlim_allow(struct rtable *rt, int type, int code)
+{
+	struct dst_entry *dst = &rt->u.dst; 
+
+	if (type > NR_ICMP_TYPES)
+		return 1;
+
+	/* Don't limit PMTU discovery. */
+	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED)
+		return 1;
+
+	/* No rate limit on loopback */
+	if (dst->dev && (dst->dev->flags&IFF_LOOPBACK))
+ 		return 1;
+
+	/* Limit if icmp type is enabled in ratemask. */
+	if((1 << type) & sysctl_icmp_ratemask)
+		return xrlim_allow(dst, sysctl_icmp_ratelimit);
+	else
+		return 1;
+}
 
 /*
  *	Maintain the counters used in the SNMP statistics for outgoing ICMP
@@ -468,26 +271,31 @@ static int xrlim_allow(int type, __u32 addr)
  
 static void icmp_out_count(int type)
 {
-	if(type>18)
+	if (type>NR_ICMP_TYPES)
 		return;
-	(*icmp_pointers[type].output)++;
-	icmp_statistics.IcmpOutMsgs++;
+	(icmp_pointers[type].output)[(smp_processor_id()*2+!in_softirq())*sizeof(struct icmp_mib)/sizeof(unsigned long)]++;
+	ICMP_INC_STATS(IcmpOutMsgs);
 }
  
 /*
  *	Checksum each fragment, and on the first include the headers and final checksum.
  */
  
-static void icmp_glue_bits(const void *p, __u32 saddr, char *to, unsigned int offset, unsigned int fraglen)
+static int icmp_glue_bits(const void *p, char *to, unsigned int offset,
+                          unsigned int fraglen, struct sk_buff *skb)
 {
 	struct icmp_bxm *icmp_param = (struct icmp_bxm *)p;
 	struct icmphdr *icmph;
-	unsigned long csum;
+	unsigned int csum;
+
+	if (icmp_pointers[icmp_param->data.icmph.type].error)
+		nf_ct_attach(skb, icmp_param->skb);
 
 	if (offset) {
-		icmp_param->csum=csum_partial_copy(icmp_param->data_ptr+offset-sizeof(struct icmphdr), 
-				to, fraglen,icmp_param->csum);
-		return;
+		icmp_param->csum=skb_copy_and_csum_bits(icmp_param->skb,
+							icmp_param->offset+(offset-icmp_param->head_len), 
+							to, fraglen,icmp_param->csum);
+		return 0;
 	}
 
 	/*
@@ -495,30 +303,60 @@ static void icmp_glue_bits(const void *p, __u32 saddr, char *to, unsigned int of
 	 *	the other fragments first, so that we get the checksum
 	 *	for the whole packet here.
 	 */
-	csum = csum_partial_copy((void *)&icmp_param->icmph,
-		to, sizeof(struct icmphdr), 
+	csum = csum_partial_copy_nocheck((void *)&icmp_param->data,
+		to, icmp_param->head_len,
 		icmp_param->csum);
-	csum = csum_partial_copy(icmp_param->data_ptr,
-		to+sizeof(struct icmphdr),
-		fraglen-sizeof(struct icmphdr), csum);
+	csum=skb_copy_and_csum_bits(icmp_param->skb,
+				    icmp_param->offset, 
+				    to+icmp_param->head_len,
+				    fraglen-icmp_param->head_len,
+				    csum);
 	icmph=(struct icmphdr *)to;
 	icmph->checksum = csum_fold(csum);
+	return 0;
 }
- 
+
 /*
  *	Driving logic for building and sending ICMP messages.
  */
 
-static void icmp_build_xmit(struct icmp_bxm *icmp_param, __u32 saddr, __u32 daddr, __u8 tos)
+static void icmp_reply(struct icmp_bxm *icmp_param, struct sk_buff *skb)
 {
-	struct sock *sk=icmp_socket.data;
-	icmp_param->icmph.checksum=0;
+	struct sock *sk=icmp_socket->sk;
+	struct ipcm_cookie ipc;
+	struct rtable *rt = (struct rtable*)skb->dst;
+	u32 daddr;
+
+	if (ip_options_echo(&icmp_param->replyopts, skb))
+		return;
+
+	if (icmp_xmit_lock())
+		return;
+
+	icmp_param->data.icmph.checksum=0;
 	icmp_param->csum=0;
-	icmp_out_count(icmp_param->icmph.type);
-	sk->ip_tos = tos;
-	ip_build_xmit(sk, icmp_glue_bits, icmp_param, 
-		icmp_param->data_len+sizeof(struct icmphdr),
-		daddr, saddr, &icmp_param->replyopts, 0, IPPROTO_ICMP, 1);
+	icmp_out_count(icmp_param->data.icmph.type);
+
+	sk->protinfo.af_inet.tos = skb->nh.iph->tos;
+	sk->protinfo.af_inet.ttl = sysctl_ip_default_ttl;
+	daddr = ipc.addr = rt->rt_src;
+	ipc.opt = NULL;
+	if (icmp_param->replyopts.optlen) {
+		ipc.opt = &icmp_param->replyopts;
+		if (ipc.opt->srr)
+			daddr = icmp_param->replyopts.faddr;
+	}
+	if (ip_route_output(&rt, daddr, rt->rt_spec_dst, RT_TOS(skb->nh.iph->tos), 0))
+		goto out;
+	if (icmpv4_xrlim_allow(rt, icmp_param->data.icmph.type, 
+			       icmp_param->data.icmph.code)) { 
+		ip_build_xmit(sk, icmp_glue_bits, icmp_param, 
+			      icmp_param->data_len+icmp_param->head_len,
+			      &ipc, rt, MSG_DONTWAIT);
+	}
+	ip_rt_put(rt);
+out:
+	icmp_xmit_unlock();
 }
 
 
@@ -532,276 +370,304 @@ static void icmp_build_xmit(struct icmp_bxm *icmp_param, __u32 saddr, __u32 dadd
  *			MUST reply to only the first fragment.
  */
 
-void icmp_send(struct sk_buff *skb_in, int type, int code, unsigned long info, struct device *dev)
+void icmp_send(struct sk_buff *skb_in, int type, int code, u32 info)
 {
 	struct iphdr *iph;
-	struct icmphdr *icmph;
-	int atype, room;
+	int room;
 	struct icmp_bxm icmp_param;
-	__u32 saddr;
-	
+	struct rtable *rt = (struct rtable*)skb_in->dst;
+	struct ipcm_cookie ipc;
+	u32 saddr;
+	u8  tos;
+
+	if (!rt)
+		return;
+
 	/*
-	 *	Find the original header
+	 *	Find the original header. It is expected to be valid, of course.
+	 *	Check this, icmp_send is called from the most obscure devices
+	 *	sometimes.
 	 */
-	 
-	iph = skb_in->ip_hdr;
-	
+	iph = skb_in->nh.iph;
+
+	if ((u8*)iph < skb_in->head || (u8*)(iph+1) > skb_in->tail)
+		return;
+
 	/*
 	 *	No replies to physical multicast/broadcast
 	 */
-	 
-	if(skb_in->pkt_type!=PACKET_HOST)
+	if (skb_in->pkt_type!=PACKET_HOST)
 		return;
-		
+
 	/*
 	 *	Now check at the protocol level
 	 */
-	 
-	atype=ip_chk_addr(iph->daddr);
-	if(atype==IS_BROADCAST||atype==IS_MULTICAST)
+	if (rt->rt_flags&(RTCF_BROADCAST|RTCF_MULTICAST))
 		return;
-		
+
 	/*
 	 *	Only reply to fragment 0. We byte re-order the constant
 	 *	mask for efficiency.
 	 */
-	 
-	if(iph->frag_off&htons(IP_OFFSET))
+	if (iph->frag_off&htons(IP_OFFSET))
 		return;
-		
+
 	/* 
 	 *	If we send an ICMP error to an ICMP error a mess would result..
 	 */
-	 
-	if(icmp_pointers[type].error)
-	{
+	if (icmp_pointers[type].error) {
 		/*
 		 *	We are an error, check if we are replying to an ICMP error
 		 */
-		 
-		if(iph->protocol==IPPROTO_ICMP)
-		{
-			icmph = (struct icmphdr *)((char *)iph + (iph->ihl<<2));
+		if (iph->protocol==IPPROTO_ICMP) {
+			u8 inner_type;
+
+			if (skb_copy_bits(skb_in,
+					  skb_in->nh.raw + (iph->ihl<<2)
+					  + offsetof(struct icmphdr, type)
+					  - skb_in->data,
+					  &inner_type, 1))
+				return;
+
 			/*
 			 *	Assume any unknown ICMP type is an error. This isn't
 			 *	specified by the RFC, but think about it..
 			 */
-			if(icmph->type>18 || icmp_pointers[icmph->type].error)
+			if (inner_type>NR_ICMP_TYPES || icmp_pointers[inner_type].error)
 				return;
 		}
 	}
 
-	/*
-	 *	Check the rate limit
-	 */
-
-#ifndef CONFIG_NO_ICMP_LIMIT
-	if (!xrlim_allow(type, iph->saddr))
+	if (icmp_xmit_lock())
 		return;
-#endif	
 
 	/*
 	 *	Construct source address and options.
 	 */
-	 
-	saddr=iph->daddr;
-	if(saddr!=dev->pa_addr && dev->pa_addr != 0 && ip_chk_addr(saddr)!=IS_MYADDR)
-		saddr=dev->pa_addr;
-	if(ip_options_echo(&icmp_param.replyopts, NULL, saddr, iph->saddr, skb_in))
-		return;
+
+#ifdef CONFIG_IP_ROUTE_NAT	
+	/*
+	 *	Restore original addresses if packet has been translated.
+	 */
+	if (rt->rt_flags&RTCF_NAT && IPCB(skb_in)->flags&IPSKB_TRANSLATED) {
+		iph->daddr = rt->key.dst;
+		iph->saddr = rt->key.src;
+	}
+#endif
+
+	saddr = iph->daddr;
+	if (!(rt->rt_flags & RTCF_LOCAL))
+		saddr = 0;
+
+	tos = icmp_pointers[type].error ?
+		((iph->tos & IPTOS_TOS_MASK) | IPTOS_PREC_INTERNETCONTROL) :
+			iph->tos;
+
+	if (ip_route_output(&rt, iph->saddr, saddr, RT_TOS(tos), 0))
+		goto out;
+
+	if (ip_options_echo(&icmp_param.replyopts, skb_in)) 
+		goto ende;
+
 
 	/*
 	 *	Prepare data for ICMP header.
 	 */
 
-	icmp_param.icmph.type=type;
-	icmp_param.icmph.code=code;
-	icmp_param.icmph.un.gateway = info;
-	icmp_param.data_ptr=iph;
-	room = 576 - sizeof(struct iphdr) - icmp_param.replyopts.optlen;
-	icmp_param.data_len=(iph->ihl<<2)+skb_in->len;	/* RFC says return as much as we can without exceeding 576 bytes */
+	icmp_param.data.icmph.type=type;
+	icmp_param.data.icmph.code=code;
+	icmp_param.data.icmph.un.gateway = info;
+	icmp_param.data.icmph.checksum=0;
+	icmp_param.csum=0;
+	icmp_param.skb=skb_in;
+	icmp_param.offset=skb_in->nh.raw - skb_in->data;
+	icmp_out_count(icmp_param.data.icmph.type);
+	icmp_socket->sk->protinfo.af_inet.tos = tos;
+	icmp_socket->sk->protinfo.af_inet.ttl = sysctl_ip_default_ttl;
+	ipc.addr = iph->saddr;
+	ipc.opt = &icmp_param.replyopts;
+	if (icmp_param.replyopts.srr) {
+		ip_rt_put(rt);
+		if (ip_route_output(&rt, icmp_param.replyopts.faddr, saddr, RT_TOS(tos), 0))
+			goto out;
+	}
+
+	if (!icmpv4_xrlim_allow(rt, type, code))
+		goto ende;
+
+	/* RFC says return as much as we can without exceeding 576 bytes. */
+
+	room = rt->u.dst.pmtu;
+	if (room > 576)
+		room = 576;
+	room -= sizeof(struct iphdr) + icmp_param.replyopts.optlen;
+	room -= sizeof(struct icmphdr);
+
+	icmp_param.data_len=skb_in->len-icmp_param.offset;
 	if (icmp_param.data_len > room)
 		icmp_param.data_len = room;
-	
-	/*
-	 *	Build and send the packet.
-	 */
+	icmp_param.head_len = sizeof(struct icmphdr);
 
-	icmp_build_xmit(&icmp_param, saddr, iph->saddr, 
-			icmp_pointers[type].error ? 
-			(iph->tos & 0x1E) | 0xC0 : iph->tos);
+	ip_build_xmit(icmp_socket->sk, icmp_glue_bits, &icmp_param, 
+		icmp_param.data_len+sizeof(struct icmphdr),
+		&ipc, rt, MSG_DONTWAIT);
+
+ende:
+	ip_rt_put(rt);
+out:
+	icmp_xmit_unlock();
 }
 
 
 /* 
  *	Handle ICMP_DEST_UNREACH, ICMP_TIME_EXCEED, and ICMP_QUENCH. 
  */
- 
-static void icmp_unreach(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len)
+
+static void icmp_unreach(struct sk_buff *skb)
 {
 	struct iphdr *iph;
-	int hash;
+	struct icmphdr *icmph;
+	int hash, protocol;
 	struct inet_protocol *ipprot;
-	unsigned char *dp;	
-	int match_addr=0;
-	
-	if(len<sizeof(struct iphdr))
-		goto flush_it;
-		
-	iph = (struct iphdr *) (icmph + 1);
-	
-	len-=iph->ihl<<2;
-	if(len<0)
-		goto flush_it;
-	
-	dp= ((unsigned char *)iph)+(iph->ihl<<2);
-	
-	if(icmph->type==ICMP_DEST_UNREACH)
-	{
-		switch(icmph->code & 15)
-		{
+	struct sock *raw_sk;
+	u32 info = 0;
+
+	/*
+	 *	Incomplete header ?
+	 * 	Only checks for the IP header, there should be an
+	 *	additional check for longer headers in upper levels.
+	 */
+
+	if (!pskb_may_pull(skb, sizeof(struct iphdr))) {
+		ICMP_INC_STATS_BH(IcmpInErrors);
+		return;
+	}
+
+	icmph = skb->h.icmph;
+	iph = (struct iphdr *) skb->data;
+
+	if (iph->ihl<5) {
+		/* Mangled header, drop. */
+		ICMP_INC_STATS_BH(IcmpInErrors);
+		return;
+	}
+
+	if(icmph->type==ICMP_DEST_UNREACH) {
+		switch(icmph->code & 15) {
 			case ICMP_NET_UNREACH:
 				break;
 			case ICMP_HOST_UNREACH:
 				break;
 			case ICMP_PROT_UNREACH:
-				NETDEBUG(printk(KERN_INFO "ICMP: %s:%d: protocol unreachable.\n",
-					in_ntoa(iph->daddr), (int)iph->protocol));
-			/* Drop through */
+				break;
 			case ICMP_PORT_UNREACH:
-				match_addr=1;
 				break;
 			case ICMP_FRAG_NEEDED:
-#ifdef CONFIG_NO_PATH_MTU_DISCOVERY
-				NETDEBUG(printk(KERN_INFO "ICMP: %s: fragmentation needed and DF set.\n",
-								in_ntoa(iph->daddr))); 
-				break;
-#else
-			{
-				unsigned short old_mtu = ntohs(iph->tot_len);
-				unsigned short new_mtu = ntohs(icmph->un.echo.sequence);
-
-				/*
-				 * RFC1191 5.  4.2BSD based router can return incorrect
-				 * Total Length.  If current mtu is unknown or old_mtu
-				 * is not less than current mtu, reduce old_mtu by 4 times
-				 * the header length.
-				 */
-
-				if (skb->sk == NULL /* can this happen? */
-					|| skb->sk->ip_route_cache == NULL
-					|| skb->sk->ip_route_cache->rt_mtu <= old_mtu)
-				{
-					NETDEBUG(printk(KERN_INFO "4.2BSD based fragmenting router between here and %s, mtu corrected from %d", in_ntoa(iph->daddr), old_mtu));
-					old_mtu -= 4 * iph->ihl;
-					NETDEBUG(printk(" to %d\n", old_mtu));
+				if (ipv4_config.no_pmtu_disc) {
+					if (net_ratelimit())
+						printk(KERN_INFO "ICMP: %u.%u.%u.%u: fragmentation needed and DF set.\n",
+						       NIPQUAD(iph->daddr));
+				} else {
+					info = ip_rt_frag_needed(iph, ntohs(icmph->un.frag.mtu));
+					if (!info) 
+						goto out;
 				}
-
-				if (new_mtu < 68 || new_mtu >= old_mtu)
-				{
-					/*
-					 * 	It is either dumb router, which does not
-					 *	understand Path MTU Disc. protocol
-					 *	or broken (f.e. Linux<=1.3.37 8) router.
-					 *	Try to guess...
-					 *	The table is taken from RFC-1191.
-					 */
-					if (old_mtu > 32000)
-						new_mtu = 32000;
-					else if (old_mtu > 17914)
-						new_mtu = 17914;
-					else if (old_mtu > 8166)
-						new_mtu = 8166;
-					else if (old_mtu > 4352)
-						new_mtu = 4352;
-					else if (old_mtu > 2002)
-						new_mtu = 2002;
-					else if (old_mtu > 1492)
-						new_mtu = 1492;
-					else if (old_mtu > 576)
-						new_mtu = 576;
-					else if (old_mtu > 296)
-						new_mtu = 296;
-					/*
-					 *	These two are not from the RFC but
-					 *	are needed for AMPRnet AX.25 paths.
-					 */
-					else if (old_mtu > 216)
-						new_mtu = 216;
-					else if (old_mtu > 128)
-						new_mtu = 128;
-					else
-					/*
-					 *	Despair..
-					 */
-						new_mtu = 68;
-				}
-				/*
-				 * Ugly trick to pass MTU to protocol layer.
-				 * Really we should add argument "info" to error handler.
-				 */
-				iph->id = htons(new_mtu);
 				break;
-			}
-#endif
 			case ICMP_SR_FAILED:
-				NETDEBUG(printk(KERN_INFO "ICMP: %s: Source Route Failed.\n", in_ntoa(iph->daddr)));
+				if (net_ratelimit())
+					printk(KERN_INFO "ICMP: %u.%u.%u.%u: Source Route Failed.\n", NIPQUAD(iph->daddr));
 				break;
 			default:
 				break;
 		}
-		if(icmph->code>NR_ICMP_UNREACH)	/* Invalid type */
-			goto flush_it;
+		if (icmph->code>NR_ICMP_UNREACH)
+			goto out;
+	} else if (icmph->type == ICMP_PARAMETERPROB) {
+		info = ntohl(icmph->un.gateway)>>24;
 	}
-	
+
 	/*
 	 *	Throw it at our lower layers
 	 *
 	 *	RFC 1122: 3.2.2 MUST extract the protocol ID from the passed header.
 	 *	RFC 1122: 3.2.2.1 MUST pass ICMP unreach messages to the transport layer.
 	 *	RFC 1122: 3.2.2.2 MUST pass ICMP time expired messages to transport layer.
-	 *
-	 *	Rule: Require port unreachable and protocol unreachable come
-	 *		from the host in question. Stop junk spoofs.
 	 */
-	
-	if(!match_addr || saddr == iph->daddr)
+
+	/*
+	 *	Check the other end isnt violating RFC 1122. Some routers send
+	 *	bogus responses to broadcast frames. If you see this message
+	 *	first check your netmask matches at both ends, if it does then
+	 *	get the other vendor to fix their kit.
+	 */
+
+	if (!sysctl_icmp_ignore_bogus_error_responses)
 	{
-		/*
-		 *	Get the protocol(s). 
-		 */
-	 
-		hash = iph->protocol & (MAX_INET_PROTOS -1);
-
-		/*
-		 *	This can't change while we are doing it. 
-		 */
-	 
-		ipprot = (struct inet_protocol *) inet_protos[hash];
-		while(ipprot != NULL) 
+	
+		if (inet_addr_type(iph->daddr) == RTN_BROADCAST)
 		{
-			struct inet_protocol *nextip;
-	
-			nextip = (struct inet_protocol *) ipprot->next;
-		
-			/* 
-			 *	Pass it off to everyone who wants it. 
-			 */
-	
-			/* RFC1122: OK. Passes appropriate ICMP errors to the */
-			/* appropriate protocol layer (MUST), as per 3.2.2. */
-	
-			if (iph->protocol == ipprot->protocol && ipprot->err_handler) 
-			{
-				ipprot->err_handler(icmph->type, icmph->code, dp,
-					    iph->daddr, iph->saddr, ipprot, len);
-			}
-
-			ipprot = nextip;
+			if (net_ratelimit())
+				printk(KERN_WARNING "%u.%u.%u.%u sent an invalid ICMP type %u, code %u error to a broadcast: %u.%u.%u.%u on %s\n",
+					NIPQUAD(skb->nh.iph->saddr),
+					icmph->type, icmph->code,
+					NIPQUAD(iph->daddr),
+					skb->dev->name);
+			goto out;
 		}
 	}
-flush_it:
-	kfree_skb(skb, FREE_READ);
+
+	/* Checkin full IP header plus 8 bytes of protocol to
+	 * avoid additional coding at protocol handlers.
+	 */
+	if (!pskb_may_pull(skb, iph->ihl*4+8))
+		goto out;
+
+	iph = (struct iphdr *) skb->data;
+	protocol = iph->protocol;
+
+	/*
+	 *	Deliver ICMP message to raw sockets. Pretty useless feature?
+	 */
+
+	/* Note: See raw.c and net/raw.h, RAWV4_HTABLE_SIZE==MAX_INET_PROTOS */
+	hash = protocol & (MAX_INET_PROTOS - 1);
+	read_lock(&raw_v4_lock);
+	if ((raw_sk = raw_v4_htable[hash]) != NULL) 
+	{
+		while ((raw_sk = __raw_v4_lookup(raw_sk, protocol, iph->daddr,
+						 iph->saddr, skb->dev->ifindex)) != NULL) {
+			raw_err(raw_sk, skb, info);
+			raw_sk = raw_sk->next;
+			iph = (struct iphdr *)skb->data;
+		}
+	}
+	read_unlock(&raw_v4_lock);
+
+	/*
+	 *	This can't change while we are doing it. 
+	 *	Callers have obtained BR_NETPROTO_LOCK so
+	 *	we are OK.
+	 */
+
+	ipprot = (struct inet_protocol *) inet_protos[hash];
+	while (ipprot) {
+		struct inet_protocol *nextip;
+
+		nextip = (struct inet_protocol *) ipprot->next;
+	
+		/* 
+		 *	Pass it off to everyone who wants it. 
+		 */
+
+		/* RFC1122: OK. Passes appropriate ICMP errors to the */
+		/* appropriate protocol layer (MUST), as per 3.2.2. */
+
+		if (protocol == ipprot->protocol && ipprot->err_handler)
+ 			ipprot->err_handler(skb, info);
+
+		ipprot = nextip;
+  	}
+out:;
 }
 
 
@@ -809,77 +675,40 @@ flush_it:
  *	Handle ICMP_REDIRECT. 
  */
 
-static void icmp_redirect(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 source, __u32 daddr, int len)
+static void icmp_redirect(struct sk_buff *skb)
 {
 	struct iphdr *iph;
 	unsigned long ip;
 
+	if (skb->len < sizeof(struct iphdr)) {
+		ICMP_INC_STATS_BH(IcmpInErrors);
+		return; 
+	}
+
 	/*
 	 *	Get the copied header of the packet that caused the redirect
 	 */
-	
-	if(len<=sizeof(struct iphdr))
-		goto flush_it;
-	 
-	iph = (struct iphdr *) (icmph + 1);
+	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
+		return;
+
+	iph = (struct iphdr *) skb->data;
 	ip = iph->daddr;
 
-	/*
-	 *	If we are a router and we run a routing protocol, we MUST NOT follow redirects.
-	 *	When using no routing protocol, we MAY follow redirects. (RFC 1812, 5.2.7.2)
-	 */
-
-#if !defined(CONFIG_IP_DUMB_ROUTER)
-	if (sysctl_ip_forward) {
-	NETDEBUG(printk(KERN_INFO "icmp: ICMP redirect ignored. dest = %lX, "
-	       "orig gw = %lX, \"new\" gw = %lX, device = %s.\n", ntohl(ip),
-		ntohl(source), ntohl(icmph->un.gateway), dev->name));
-		goto flush_it;
-	}
-#endif
-	switch(icmph->code & 7) 
-	{
+	switch (skb->h.icmph->code & 7) {
 		case ICMP_REDIR_NET:
-			/*
-			 *	This causes a problem with subnetted networks. What we should do
-			 *	is use ICMP_ADDRESS to get the subnet mask of the problem route
-			 *	and set both. But we don't.. [RFC1812 says routers MUST NOT
-			 *	generate Network Redirects]
-			 */
-#ifdef not_a_good_idea
-			ip_rt_add((RTF_DYNAMIC | RTF_MODIFIED | RTF_GATEWAY),
-				ip, 0, icmph->un.gateway, dev,0, 0, 0);
-#endif
+		case ICMP_REDIR_NETTOS:
 			/*
 			 *	As per RFC recommendations now handle it as
 			 *	a host redirect.
 			 */
 			 
 		case ICMP_REDIR_HOST:
-			/*
-			 *	Add better route to host.
-			 *	But first check that the redirect
-			 *	comes from the old gateway..
-			 *	And make sure it's an ok host address
-			 *	(not some confused thing sending our
-			 *	address)
-			 */
-			NETDEBUG(printk(KERN_INFO "ICMP redirect from %s\n", in_ntoa(source)));
-			ip_rt_redirect(source, ip, icmph->un.gateway, dev);
-			break;
-		case ICMP_REDIR_NETTOS:
 		case ICMP_REDIR_HOSTTOS:
-			NETDEBUG(printk(KERN_INFO "ICMP: cannot handle TOS redirects yet!\n"));
+			ip_rt_redirect(skb->nh.iph->saddr, ip, skb->h.icmph->un.gateway, iph->saddr, iph->tos, skb->dev);
 			break;
 		default:
 			break;
   	}
-
-  	/*
-  	 *	Discard the original packet
-  	 */
-flush_it:
-  	kfree_skb(skb, FREE_READ);
 }
 
 /*
@@ -890,19 +719,20 @@ flush_it:
  *	RFC 1812: 4.3.3.6 SHOULD have a config option for silently ignoring echo requests, MUST have default=NOT.
  *	See also WRT handling of options once they are done and working.
  */
- 
-static void icmp_echo(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len)
+
+static void icmp_echo(struct sk_buff *skb)
 {
-#ifndef CONFIG_IP_IGNORE_ECHO_REQUESTS
-	struct icmp_bxm icmp_param;
-	icmp_param.icmph=*icmph;
-	icmp_param.icmph.type=ICMP_ECHOREPLY;
-	icmp_param.data_ptr=(icmph+1);
-	icmp_param.data_len=len;
-	if (ip_options_echo(&icmp_param.replyopts, NULL, daddr, saddr, skb)==0)
-		icmp_build_xmit(&icmp_param, daddr, saddr, skb->ip_hdr->tos);
-#endif
-	kfree_skb(skb, FREE_READ);
+	if (!sysctl_icmp_echo_ignore_all) {
+		struct icmp_bxm icmp_param;
+
+		icmp_param.data.icmph=*skb->h.icmph;
+		icmp_param.data.icmph.type=ICMP_ECHOREPLY;
+		icmp_param.skb=skb;
+		icmp_param.offset=0;
+		icmp_param.data_len=skb->len;
+		icmp_param.head_len=sizeof(struct icmphdr);
+		icmp_reply(&icmp_param, skb);
+	}
 }
 
 /*
@@ -913,41 +743,36 @@ static void icmp_echo(struct icmphdr *icmph, struct sk_buff *skb, struct device 
  *		  MUST be updated at least at 15Hz.
  */
  
-static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len)
+static void icmp_timestamp(struct sk_buff *skb)
 {
-	__u32 times[3];		/* So the new timestamp works on ALPHA's.. */
+	struct timeval tv;
 	struct icmp_bxm icmp_param;
 	
 	/*
 	 *	Too short.
 	 */
 	 
-	if(len<12)
-	{
-		icmp_statistics.IcmpInErrors++;
-		kfree_skb(skb, FREE_READ);
+	if (skb->len < 4) {
+		ICMP_INC_STATS_BH(IcmpInErrors);
 		return;
 	}
-	
+
 	/*
 	 *	Fill in the current time as ms since midnight UT: 
 	 */
-	 
-	{
-		struct timeval tv;
-		do_gettimeofday(&tv);
-		times[1] = htonl((tv.tv_sec % 86400) * 1000 + tv.tv_usec / 1000);
-	}
-	times[2] = times[1];
-	memcpy((void *)&times[0], icmph+1, 4);		/* Incoming stamp */
-	icmp_param.icmph=*icmph;
-	icmp_param.icmph.type=ICMP_TIMESTAMPREPLY;
-	icmp_param.icmph.code=0;
-	icmp_param.data_ptr=&times;
-	icmp_param.data_len=12;
-	if (ip_options_echo(&icmp_param.replyopts, NULL, daddr, saddr, skb)==0)
-		icmp_build_xmit(&icmp_param, daddr, saddr, skb->ip_hdr->tos);
-	kfree_skb(skb,FREE_READ);
+	do_gettimeofday(&tv);
+	icmp_param.data.times[1] = htonl((tv.tv_sec % 86400) * 1000 + tv.tv_usec / 1000);
+	icmp_param.data.times[2] = icmp_param.data.times[1];
+	if (skb_copy_bits(skb, 0, &icmp_param.data.times[0], 4))
+		BUG();
+	icmp_param.data.icmph=*skb->h.icmph;
+	icmp_param.data.icmph.type=ICMP_TIMESTAMPREPLY;
+	icmp_param.data.icmph.code=0;
+	icmp_param.skb=skb;
+	icmp_param.offset=0;
+	icmp_param.data_len=0;
+	icmp_param.head_len=sizeof(struct icmphdr)+12;
+	icmp_reply(&icmp_param, skb);
 }
 
 
@@ -959,239 +784,224 @@ static void icmp_timestamp(struct icmphdr *icmph, struct sk_buff *skb, struct de
  * agent.  Receiving a request doesn't constitute implicit permission to 
  * act as one. Of course, implementing this correctly requires (SHOULD) 
  * a way to turn the functionality on and off.  Another one for sysctl(), 
- * I guess. -- MS 
- * Botched with a CONFIG option for now - Linus add scts sysctl please.. 
- */
- 
-static void icmp_address(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len)
-{
-#ifdef CONFIG_IP_ADDR_AGENT	/* Don't use, broken */
-	struct icmp_bxm icmp_param;
-	icmp_param.icmph.type=ICMP_ADDRESSREPLY;
-	icmp_param.icmph.code=0;
-	icmp_param.icmph.un.echo.id = icmph->un.echo.id;
-	icmp_param.icmph.un.echo.sequence = icmph->un.echo.sequence;
-	icmp_param.data_ptr=&dev->pa_mask;
-	icmp_param.data_len=4;
-	if (ip_options_echo(&icmp_param.replyopts, NULL, daddr, saddr, skb)==0)
-		icmp_build_xmit(&icmp_param, daddr, saddr, skb->iph->tos);
-#endif	
-	kfree_skb(skb, FREE_READ);	
-}
-
-static void icmp_discard(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len)
-{
-	kfree_skb(skb, FREE_READ);
-}
-
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-/*
- *	Check incoming icmp packets not addressed locally, to check whether
- *	they relate to a (proxying) socket on our system.
- *	Needed for transparent proxying.
+ * I guess. -- MS
  *
- *	This code is presently ugly and needs cleanup.
- *	Probably should add a chkaddr entry to ipprot to call a chk routine
- *	in udp.c or tcp.c...
+ * RFC1812 (4.3.3.9).	A router MUST implement it.
+ *			A router SHOULD have switch turning it on/off.
+ *		      	This switch MUST be ON by default.
+ *
+ * Gratuitous replies, zero-source replies are not implemented,
+ * that complies with RFC. DO NOT implement them!!! All the idea
+ * of broadcast addrmask replies as specified in RFC950 is broken.
+ * The problem is that it is not uncommon to have several prefixes
+ * on one physical interface. Moreover, addrmask agent can even be
+ * not aware of existing another prefixes.
+ * If source is zero, addrmask agent cannot choose correct prefix.
+ * Gratuitous mask announcements suffer from the same problem.
+ * RFC1812 explains it, but still allows to use ADDRMASK,
+ * that is pretty silly. --ANK
+ *
+ * All these rules are so bizarre, that I removed kernel addrmask
+ * support at all. It is wrong, it is obsolete, nobody uses it in
+ * any case. --ANK
+ *
+ * Furthermore you can do it with a usermode address agent program
+ * anyway...
  */
 
-extern struct sock *tcp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport, struct device *dev);
-extern struct sock *udp_v4_lookup(u32 saddr, u16 sport, u32 daddr, u16 dport, struct device *dev);
-
-int icmp_chkaddr(struct sk_buff *skb)
+static void icmp_address(struct sk_buff *skb)
 {
-	struct icmphdr *icmph=(struct icmphdr *)(skb->h.raw + skb->h.iph->ihl*4);
-	struct iphdr *iph = (struct iphdr *) (icmph + 1);
-	void (*handler)(struct icmphdr *icmph, struct sk_buff *skb, struct device *dev, __u32 saddr, __u32 daddr, int len) = icmp_pointers[icmph->type].handler;
+#if 0
+	if (net_ratelimit())
+		printk(KERN_DEBUG "a guy asks for address mask. Who is it?\n");
+#endif		
+}
 
-	if (handler == icmp_unreach || handler == icmp_redirect) {
-		struct sock *sk;
+/*
+ * RFC1812 (4.3.3.9).	A router SHOULD listen all replies, and complain
+ *			loudly if an inconsistency is found.
+ */
 
-		switch (iph->protocol) {
-		case IPPROTO_TCP:
-			{
-			struct tcphdr *th = (struct tcphdr *)(((unsigned char *)iph)+(iph->ihl<<2));
+static void icmp_address_reply(struct sk_buff *skb)
+{
+	struct rtable *rt = (struct rtable*)skb->dst;
+	struct net_device *dev = skb->dev;
+	struct in_device *in_dev;
+	struct in_ifaddr *ifa;
+	u32 mask;
 
-			sk = tcp_v4_lookup(iph->saddr, th->source, iph->daddr, th->dest, skb->dev);
-			if (!sk) return 0;
-			if (sk->saddr != iph->saddr) return 0;
-			if (sk->daddr != iph->daddr) return 0;
-			if (sk->dummy_th.dest != th->dest) return 0;
-			/*
-			 * This packet came from us.
-			 */
-			return 1;
-			}
-		case IPPROTO_UDP:
-			{
-			struct udphdr *uh = (struct udphdr *)(((unsigned char *)iph)+(iph->ihl<<2));
+	if (skb->len < 4 || !(rt->rt_flags&RTCF_DIRECTSRC))
+		return;
 
-			sk = udp_v4_lookup(iph->saddr, uh->source, iph->daddr, uh->dest, skb->dev);
-			if (!sk) return 0;
-			if (sk->saddr != iph->saddr && ip_chk_addr(iph->saddr) != IS_MYADDR)
-				return 0;
-			/*
-			 * This packet may have come from us.
-			 * Assume it did.
-			 */
-			return 1;
-			}
+	in_dev = in_dev_get(dev);
+	if (!in_dev)
+		return;
+	read_lock(&in_dev->lock);
+	if (in_dev->ifa_list &&
+	    IN_DEV_LOG_MARTIANS(in_dev) &&
+	    IN_DEV_FORWARD(in_dev)) {
+		if (skb_copy_bits(skb, 0, &mask, 4))
+			BUG();
+		for (ifa=in_dev->ifa_list; ifa; ifa = ifa->ifa_next) {
+			if (mask == ifa->ifa_mask && inet_ifa_match(rt->rt_src, ifa))
+				break;
+		}
+		if (!ifa && net_ratelimit()) {
+			printk(KERN_INFO "Wrong address mask %u.%u.%u.%u from %s/%u.%u.%u.%u\n",
+			       NIPQUAD(mask), dev->name, NIPQUAD(rt->rt_src));
 		}
 	}
-	return 0;
+	read_unlock(&in_dev->lock);
+	in_dev_put(in_dev);
 }
 
-#endif
+static void icmp_discard(struct sk_buff *skb)
+{
+}
+
 /* 
- *	Deal with incoming ICMP packets. 
+ *	Deal with incoming ICMP packets.
  */
  
-int icmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
-	 __u32 daddr, unsigned short len,
-	 __u32 saddr, int redo, struct inet_protocol *protocol)
+int icmp_rcv(struct sk_buff *skb)
 {
-	struct icmphdr *icmph=(void *)skb->h.raw;
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-	int r;
-#endif
-	icmp_statistics.IcmpInMsgs++;
-	
-	if(len < sizeof(struct icmphdr))
-	{
-		icmp_statistics.IcmpInErrors++;
-		NETDEBUG(printk(KERN_INFO "ICMP: runt packet\n"));
-		kfree_skb(skb, FREE_READ);
-		return 0;
+	struct icmphdr *icmph;
+	struct rtable *rt = (struct rtable*)skb->dst;
+
+	ICMP_INC_STATS_BH(IcmpInMsgs);
+
+	switch (skb->ip_summed) {
+	case CHECKSUM_HW:
+		if ((u16)csum_fold(skb->csum) == 0)
+			break;
+		NETDEBUG(if (net_ratelimit()) printk(KERN_DEBUG "icmp v4 hw csum failure\n"));
+	case CHECKSUM_NONE:
+		if ((u16)csum_fold(skb_checksum(skb, 0, skb->len, 0)))
+			goto error;
+	default:;
 	}
-	
-  	/*
-	 *	Validate the packet
-  	 */
-	
-	if (ip_compute_csum((unsigned char *) icmph, len)) 
-	{
-		/* Failed checksum! */
-		icmp_statistics.IcmpInErrors++;
-		NETDEBUG(printk(KERN_INFO "ICMP: failed checksum from %s!\n", in_ntoa(saddr)));
-		kfree_skb(skb, FREE_READ);
-		return(0);
-	}
-	
+
+	if (!pskb_pull(skb, sizeof(struct icmphdr)))
+		goto error;
+
+	icmph = skb->h.icmph;
+
 	/*
 	 *	18 is the highest 'known' ICMP type. Anything else is a mystery
 	 *
 	 *	RFC 1122: 3.2.2  Unknown ICMP messages types MUST be silently discarded.
 	 */
-	 
-	if(icmph->type > 18)
-	{
-		icmp_statistics.IcmpInErrors++;		/* Is this right - or do we ignore ? */
-		kfree_skb(skb,FREE_READ);
-		return(0);
-	}
-	
+	if (icmph->type > NR_ICMP_TYPES)
+		goto error;
+
+
 	/*
 	 *	Parse the ICMP message 
 	 */
 
-#ifdef CONFIG_IP_TRANSPARENT_PROXY
-	/*
-	 *	We may get non-local addresses and still want to handle them
-	 *	locally, due to transparent proxying.
-	 *	Thus, narrow down the test to what is really meant.
-	 */
-	if (daddr!=dev->pa_addr && ((r = ip_chk_addr(daddr)) == IS_BROADCAST || r == IS_MULTICAST))
-#else
-	if (daddr && daddr!=dev->pa_addr && ip_chk_addr(daddr) != IS_MYADDR)
-#endif
-	{
+ 	if (rt->rt_flags&(RTCF_BROADCAST|RTCF_MULTICAST)) {
 		/*
-		 *	RFC 1122: 3.2.2.6 An ICMP_ECHO to broadcast MAY be silently ignored (we don't as it is used
-		 *	by some network mapping tools).
-		 *	RFC 1122: 3.2.2.8 An ICMP_TIMESTAMP MAY be silently discarded if to broadcast/multicast.
+		 *	RFC 1122: 3.2.2.6 An ICMP_ECHO to broadcast MAY be
+		 *	  silently ignored (we let user decide with a sysctl).
+		 *	RFC 1122: 3.2.2.8 An ICMP_TIMESTAMP MAY be silently
+		 *	  discarded if to broadcast/multicast.
 		 */
-		if (icmph->type != ICMP_ECHO) 
-		{
-			icmp_statistics.IcmpInErrors++;
-			kfree_skb(skb, FREE_READ);
-			return(0);
+		if (icmph->type == ICMP_ECHO &&
+		    sysctl_icmp_echo_ignore_broadcasts) {
+			goto error;
+		}
+		if (icmph->type != ICMP_ECHO &&
+		    icmph->type != ICMP_TIMESTAMP &&
+		    icmph->type != ICMP_ADDRESS &&
+		    icmph->type != ICMP_ADDRESSREPLY) {
+			goto error;
   		}
-  		/*
-  		 *	Reply the multicast/broadcast using a legal
-  		 *	interface - in this case the device we got
-  		 *	it from.
-  		 */
-		daddr=dev->pa_addr;
 	}
-	
-	len-=sizeof(struct icmphdr);
-	(*icmp_pointers[icmph->type].input)++;
-	(icmp_pointers[icmph->type].handler)(icmph,skb,skb->dev,saddr,daddr,len);
+
+	icmp_pointers[icmph->type].input[smp_processor_id()*2*sizeof(struct icmp_mib)/sizeof(unsigned long)]++;
+	(icmp_pointers[icmph->type].handler)(skb);
+
+drop:
+	kfree_skb(skb);
 	return 0;
+error:
+	ICMP_INC_STATS_BH(IcmpInErrors);
+	goto drop;
 }
-
-/*
- *	This table defined limits of ICMP sending rate for various ICMP messages.
- */
-
-static struct icmp_xrlim
-	xrl_unreach = { 4*HZ, 80, HZ/4 },		/* Host Unreachable */
-	xrl_redirect = { 2*HZ, 10, HZ/2 },		/* Redirect */
-	xrl_generic = { 3*HZ, 30, HZ/4 };		/* All other errors */
 
 /*
  *	This table is the definition of how we handle ICMP.
  */
  
-static struct icmp_control icmp_pointers[19] = {
+static struct icmp_control icmp_pointers[NR_ICMP_TYPES+1] = {
 /* ECHO REPLY (0) */
- { &icmp_statistics.IcmpOutEchoReps, &icmp_statistics.IcmpInEchoReps, icmp_discard, 0, NULL },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
+ { &icmp_statistics[0].IcmpOutEchoReps, &icmp_statistics[0].IcmpInEchoReps, icmp_discard, 0 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
 /* DEST UNREACH (3) */
- { &icmp_statistics.IcmpOutDestUnreachs, &icmp_statistics.IcmpInDestUnreachs, icmp_unreach, 1, &xrl_unreach },
+ { &icmp_statistics[0].IcmpOutDestUnreachs, &icmp_statistics[0].IcmpInDestUnreachs, icmp_unreach, 1 },
 /* SOURCE QUENCH (4) */
- { &icmp_statistics.IcmpOutSrcQuenchs, &icmp_statistics.IcmpInSrcQuenchs, icmp_unreach, 1, NULL },
+ { &icmp_statistics[0].IcmpOutSrcQuenchs, &icmp_statistics[0].IcmpInSrcQuenchs, icmp_unreach, 1 },
 /* REDIRECT (5) */
- { &icmp_statistics.IcmpOutRedirects, &icmp_statistics.IcmpInRedirects, icmp_redirect, 1, &xrl_redirect },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
+ { &icmp_statistics[0].IcmpOutRedirects, &icmp_statistics[0].IcmpInRedirects, icmp_redirect, 1 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
 /* ECHO (8) */
- { &icmp_statistics.IcmpOutEchos, &icmp_statistics.IcmpInEchos, icmp_echo, 0, NULL },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
- { &dummy, &icmp_statistics.IcmpInErrors, icmp_discard, 1, NULL },
+ { &icmp_statistics[0].IcmpOutEchos, &icmp_statistics[0].IcmpInEchos, icmp_echo, 0 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].IcmpInErrors, icmp_discard, 1 },
 /* TIME EXCEEDED (11) */
- { &icmp_statistics.IcmpOutTimeExcds, &icmp_statistics.IcmpInTimeExcds, icmp_unreach, 1, &xrl_generic },
+ { &icmp_statistics[0].IcmpOutTimeExcds, &icmp_statistics[0].IcmpInTimeExcds, icmp_unreach, 1 },
 /* PARAMETER PROBLEM (12) */
-/* FIXME: RFC1122 3.2.2.5 - MUST pass PARAM_PROB messages to transport layer */
- { &icmp_statistics.IcmpOutParmProbs, &icmp_statistics.IcmpInParmProbs, icmp_discard, 1, &xrl_generic },
+ { &icmp_statistics[0].IcmpOutParmProbs, &icmp_statistics[0].IcmpInParmProbs, icmp_unreach, 1 },
 /* TIMESTAMP (13) */
- { &icmp_statistics.IcmpOutTimestamps, &icmp_statistics.IcmpInTimestamps, icmp_timestamp, 0, NULL },
+ { &icmp_statistics[0].IcmpOutTimestamps, &icmp_statistics[0].IcmpInTimestamps, icmp_timestamp, 0  },
 /* TIMESTAMP REPLY (14) */
- { &icmp_statistics.IcmpOutTimestampReps, &icmp_statistics.IcmpInTimestampReps, icmp_discard, 0, NULL },
+ { &icmp_statistics[0].IcmpOutTimestampReps, &icmp_statistics[0].IcmpInTimestampReps, icmp_discard, 0 },
 /* INFO (15) */
- { &dummy, &dummy, icmp_discard, 0, NULL },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].dummy, icmp_discard, 0 },
 /* INFO REPLY (16) */
- { &dummy, &dummy, icmp_discard, 0, NULL },
+ { &icmp_statistics[0].dummy, &icmp_statistics[0].dummy, icmp_discard, 0 },
 /* ADDR MASK (17) */
- { &icmp_statistics.IcmpOutAddrMasks, &icmp_statistics.IcmpInAddrMasks, icmp_address, 0, NULL },
+ { &icmp_statistics[0].IcmpOutAddrMasks, &icmp_statistics[0].IcmpInAddrMasks, icmp_address, 0  },
 /* ADDR MASK REPLY (18) */
- { &icmp_statistics.IcmpOutAddrMaskReps, &icmp_statistics.IcmpInAddrMaskReps, icmp_discard, 0, NULL }
+ { &icmp_statistics[0].IcmpOutAddrMaskReps, &icmp_statistics[0].IcmpInAddrMaskReps, icmp_address_reply, 0 }
 };
 
-void icmp_init(struct proto_ops *ops)
+void __init icmp_init(struct net_proto_family *ops)
 {
-	struct sock *sk;
-	int err;
-	icmp_socket.type=SOCK_RAW;
-	icmp_socket.ops=ops;
-	if((err=ops->create(&icmp_socket, IPPROTO_ICMP))<0)
-		panic("Failed to create the ICMP control socket.\n");
-	sk=icmp_socket.data;
-	sk->allocation=GFP_ATOMIC;
-	sk->num = 256;			/* Don't receive any data */
-#ifndef CONFIG_NO_ICMP_LIMIT
-	xrlim_init();
-#endif
-}
+	int err, i;
 
+	for (i = 0; i < NR_CPUS; i++) {
+		__icmp_inode[i].i_mode = S_IFSOCK;
+		__icmp_inode[i].i_sock = 1;
+		__icmp_inode[i].i_uid = 0;
+		__icmp_inode[i].i_gid = 0;
+		init_waitqueue_head(&__icmp_inode[i].i_wait);
+		init_waitqueue_head(&__icmp_inode[i].u.socket_i.wait);
+
+		icmp_socket_cpu(i)->inode = &__icmp_inode[i];
+		icmp_socket_cpu(i)->state = SS_UNCONNECTED;
+		icmp_socket_cpu(i)->type = SOCK_RAW;
+
+		if ((err=ops->create(icmp_socket_cpu(i), IPPROTO_ICMP)) < 0)
+			panic("Failed to create the ICMP control socket.\n");
+
+		icmp_socket_cpu(i)->sk->allocation=GFP_ATOMIC;
+
+		/* Enough space for 2 64K ICMP packets, including
+		 * sk_buff struct overhead.
+		 */
+		icmp_socket_cpu(i)->sk->sndbuf =
+			(2 * ((64 * 1024) + sizeof(struct sk_buff)));
+
+		icmp_socket_cpu(i)->sk->protinfo.af_inet.ttl = MAXTTL;
+		icmp_socket_cpu(i)->sk->protinfo.af_inet.pmtudisc = IP_PMTUDISC_DONT;
+
+		/* Unhash it so that IP input processing does not even
+		 * see it, we do not wish this socket to see incoming
+		 * packets.
+		 */
+		icmp_socket_cpu(i)->sk->prot->unhash(icmp_socket_cpu(i)->sk);
+	}
+}

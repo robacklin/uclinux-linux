@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -64,16 +64,17 @@
  * 09/24/98 hl - v1.01b Fixed reset.
  * 10/05/98 hl - v1.02 split the source code and release.
  * 12/19/98 bv - v1.02a Use spinlocks for 2.1.95 and up
+ * 01/31/99 bv - v1.02b Use mdelay instead of waitForPause
+ * 08/08/99 bv - v1.02c Use waitForPause again.
  **************************************************************************/
 
-#ifndef CVT_LINUX_VERSION
-#define CVT_LINUX_VERSION(V,P,S)        (V * 65536 + P * 256 + S)
-#endif
-
+#include <linux/version.h>
 #include <linux/sched.h>
 #include <asm/io.h>
 #include "i60uscsi.h"
 
+#define JIFFIES_TO_MS(t) ((t) * 1000 / HZ)
+#define MS_TO_JIFFIES(j) ((j * HZ) / 1000)
 
 /* ---- INTERNAL FUNCTIONS ---- */
 static UCHAR waitChipReady(ORC_HCS * hcsp);
@@ -155,13 +156,9 @@ static UCHAR dftNvRam[64] =
 /***************************************************************************/
 static void waitForPause(unsigned amount)
 {
-	ULONG the_time = jiffies + amount;	/* 0.01 seconds per jiffy */
-
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
-	while (time_before_eq(jiffies, the_time));
-#else
-	while (jiffies < the_time);
-#endif
+	ULONG the_time = jiffies + MS_TO_JIFFIES(amount);
+	while (time_before_eq(jiffies, the_time))
+		cpu_relax();
 }
 
 /***************************************************************************/
@@ -169,10 +166,10 @@ UCHAR waitChipReady(ORC_HCS * hcsp)
 {
 	int i;
 
-	for (i = 0; i < 2000; i++) {	/* Wait 1 second for report timeout     */
+	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (ORC_RD(hcsp->HCS_Base, ORC_HCTRL) & HOSTSTOP)	/* Wait HOSTSTOP set */
 			return (TRUE);
-		waitForPause(5);	/* wait 500ms before try again  */
+		waitForPause(100);	/* wait 100ms before try again  */
 	}
 	return (FALSE);
 }
@@ -182,10 +179,10 @@ UCHAR waitFWReady(ORC_HCS * hcsp)
 {
 	int i;
 
-	for (i = 0; i < 2000; i++) {	/* Wait 1 second for report timeout     */
+	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (ORC_RD(hcsp->HCS_Base, ORC_HSTUS) & RREADY)		/* Wait READY set */
 			return (TRUE);
-		waitForPause(5);	/* wait 500ms before try again  */
+		waitForPause(100);	/* wait 100ms before try again  */
 	}
 	return (FALSE);
 }
@@ -195,10 +192,10 @@ UCHAR waitSCSIRSTdone(ORC_HCS * hcsp)
 {
 	int i;
 
-	for (i = 0; i < 2000; i++) {	/* Wait 1 second for report timeout     */
+	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (!(ORC_RD(hcsp->HCS_Base, ORC_HCTRL) & SCSIRST))	/* Wait SCSIRST done */
 			return (TRUE);
-		waitForPause(5);	/* wait 500ms before try again  */
+		waitForPause(100);	/* wait 100ms before try again  */
 	}
 	return (FALSE);
 }
@@ -208,10 +205,10 @@ UCHAR waitHDOoff(ORC_HCS * hcsp)
 {
 	int i;
 
-	for (i = 0; i < 2000; i++) {	/* Wait 1 second for report timeout     */
+	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if (!(ORC_RD(hcsp->HCS_Base, ORC_HCTRL) & HDO))		/* Wait HDO off */
 			return (TRUE);
-		waitForPause(5);	/* wait 500ms before try again  */
+		waitForPause(100);	/* wait 100ms before try again  */
 	}
 	return (FALSE);
 }
@@ -221,10 +218,10 @@ UCHAR waitHDIset(ORC_HCS * hcsp, UCHAR * pData)
 {
 	int i;
 
-	for (i = 0; i < 2000; i++) {	/* Wait 1 second for report timeout     */
+	for (i = 0; i < 10; i++) {	/* Wait 1 second for report timeout     */
 		if ((*pData = ORC_RD(hcsp->HCS_Base, ORC_HSTUS)) & HDI)
 			return (TRUE);	/* Wait HDI set */
-		waitForPause(5);	/* wait 500ms before try again  */
+		waitForPause(100);	/* wait 100ms before try again  */
 	}
 	return (FALSE);
 }
@@ -463,15 +460,9 @@ void setup_SCBs(ORC_HCS * hcsp)
 	pVirEscb = (ESCB *) hcsp->HCS_virEscbArray;
 
 	for (i = 0; i < orc_num_scb; i++) {
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1,3,0)
-		pPhysEscb = (PVOID) ((ULONG) hcsp->HCS_virEscbArray + (sizeof(ESCB) * i));
-		pVirScb->SCB_SGPAddr = (U32) VIRT_TO_BUS(pPhysEscb);
-		pVirScb->SCB_SensePAddr = (U32) VIRT_TO_BUS(pPhysEscb);
-#else
 		pPhysEscb = (PVOID) (hcsp->HCS_physEscbArray + (sizeof(ESCB) * i));
 		pVirScb->SCB_SGPAddr = (U32) pPhysEscb;
 		pVirScb->SCB_SensePAddr = (U32) pPhysEscb;
-#endif
 		pVirScb->SCB_EScb = pVirEscb;
 		pVirScb->SCB_ScbIdx = i;
 		pVirScb++;
@@ -565,33 +556,16 @@ int orc_reset_scsi_bus(ORC_HCS * pHCB)
 {				/* I need Host Control Block Information */
 	ULONG flags;
 
-#if 0
-	printk("inia100: enter inia100_reset\n");
-#endif
-
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	save_flags(flags);
-	cli();
-#else
 	spin_lock_irqsave(&(pHCB->BitAllocFlagLock), flags);
-#endif
 
 	initAFlag(pHCB);
 	/* reset scsi bus */
 	ORC_WR(pHCB->HCS_Base + ORC_HCTRL, SCSIRST);
 	if (waitSCSIRSTdone(pHCB) == FALSE) {
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-		restore_flags(flags);
-#else
 		spin_unlock_irqrestore(&(pHCB->BitAllocFlagLock), flags);
-#endif
 		return (SCSI_RESET_ERROR);
 	} else {
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-		restore_flags(flags);
-#else
 		spin_unlock_irqrestore(&(pHCB->BitAllocFlagLock), flags);
-#endif
 		return (SCSI_RESET_SUCCESS);
 	}
 }
@@ -612,16 +586,7 @@ int orc_device_reset(ORC_HCS * pHCB, ULONG SCpnt, unsigned int target, unsigned 
 	UCHAR i;
 	ULONG flags;
 
-#if 0
-	printk("inia100: enter inia100_reset\n");
-#endif
-
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	save_flags(flags);
-	cli();
-#else
 	spin_lock_irqsave(&(pHCB->BitAllocFlagLock), flags);
-#endif
 	pScb = (ORC_SCB *) NULL;
 	pVirEscb = (ESCB *) NULL;
 
@@ -639,19 +604,11 @@ int orc_device_reset(ORC_HCS * pHCB, ULONG SCpnt, unsigned int target, unsigned 
 
 	if (i == orc_num_scb) {
 		printk("Unable to Reset - No SCB Found\n");
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-		restore_flags(flags);
-#else
 		spin_unlock_irqrestore(&(pHCB->BitAllocFlagLock), flags);
-#endif
 		return (SCSI_RESET_NOT_RUNNING);
 	}
 	if ((pScb = orc_alloc_scb(pHCB)) == NULL) {
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-		restore_flags(flags);
-#else
 		spin_unlock_irqrestore(&(pHCB->BitAllocFlagLock), flags);
-#endif
 		return (SCSI_RESET_NOT_RUNNING);
 	}
 	pScb->SCB_Opcode = ORC_BUSDEVRST;
@@ -670,31 +627,20 @@ int orc_device_reset(ORC_HCS * pHCB, ULONG SCpnt, unsigned int target, unsigned 
 		pVirEscb->SCB_Srb = (unsigned char *) SCpnt;
 	}
 	orc_exec_scb(pHCB, pScb);	/* Start execute SCB            */
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	restore_flags(flags);
-#else
 	spin_unlock_irqrestore(&(pHCB->BitAllocFlagLock), flags);
-#endif
 	return SCSI_RESET_PENDING;
 }
 
 
 /***************************************************************************/
-ORC_SCB *orc_alloc_scb(ORC_HCS * hcsp)
+ORC_SCB *__orc_alloc_scb(ORC_HCS * hcsp)
 {
 	ORC_SCB *pTmpScb;
 	UCHAR Ch;
 	ULONG idx;
 	UCHAR index;
 	UCHAR i;
-	ULONG flags;
 
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	save_flags(flags);
-	cli();
-#else
-	spin_lock_irqsave(&(hcsp->BitAllocFlagLock), flags);
-#endif
 	Ch = hcsp->HCS_Index;
 	for (i = 0; i < 8; i++) {
 		for (index = 0; index < 32; index++) {
@@ -705,19 +651,20 @@ ORC_SCB *orc_alloc_scb(ORC_HCS * hcsp)
 		}
 		idx = index + 32 * i;
 		pTmpScb = (PVOID) ((ULONG) hcsp->HCS_virScbArray + (idx * sizeof(ORC_SCB)));
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-		restore_flags(flags);
-#else
-		spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 		return (pTmpScb);
 	}
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	restore_flags(flags);
-#else
-	spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 	return (NULL);
+}
+
+ORC_SCB *orc_alloc_scb(ORC_HCS * hcsp)
+{
+	ORC_SCB *pTmpScb;
+	ULONG flags;
+
+	spin_lock_irqsave(&(hcsp->BitAllocFlagLock), flags);
+	pTmpScb = __orc_alloc_scb(hcsp);
+	spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
+	return (pTmpScb);
 }
 
 
@@ -729,22 +676,13 @@ void orc_release_scb(ORC_HCS * hcsp, ORC_SCB * scbp)
 	UCHAR i;
 	UCHAR Ch;
 
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	save_flags(flags);
-	cli();
-#else
 	spin_lock_irqsave(&(hcsp->BitAllocFlagLock), flags);
-#endif
 	Ch = hcsp->HCS_Index;
 	Index = scbp->SCB_ScbIdx;
 	i = Index / 32;
 	Index %= 32;
 	hcsp->BitAllocFlag[Ch][i] |= (1 << Index);
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	restore_flags(flags);
-#else
 	spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 }
 
 
@@ -765,11 +703,11 @@ int Addinia100_into_Adapter_table(WORD wBIOS, WORD wBASE, BYTE bInterrupt,
 		if (inia100_adpt[i].ADPT_BIOS < wBIOS)
 			continue;
 		if (inia100_adpt[i].ADPT_BIOS == wBIOS) {
-			if (inia100_adpt[i].ADPT_BASE == wBASE)
+			if (inia100_adpt[i].ADPT_BASE == wBASE) {
 				if (inia100_adpt[i].ADPT_Bus != 0xFF)
 					return (FAILURE);
-				else if (inia100_adpt[i].ADPT_BASE < wBASE)
-					continue;
+			} else if (inia100_adpt[i].ADPT_BASE < wBASE)
+				continue;
 		}
 		for (j = MAX_SUPPORTED_ADAPTERS - 1; j > i; j--) {
 			inia100_adpt[j].ADPT_BASE = inia100_adpt[j - 1].ADPT_BASE;
@@ -873,15 +811,7 @@ int orc_abort_srb(ORC_HCS * hcsp, ULONG SCpnt)
 	UCHAR i;
 	ULONG flags;
 
-#if 0
-	printk("inia100: abort SRB \n");
-#endif
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	save_flags(flags);
-	cli();
-#else
 	spin_lock_irqsave(&(hcsp->BitAllocFlagLock), flags);
-#endif
 
 	pVirScb = (ORC_SCB *) hcsp->HCS_virScbArray;
 
@@ -889,37 +819,21 @@ int orc_abort_srb(ORC_HCS * hcsp, ULONG SCpnt)
 		pVirEscb = pVirScb->SCB_EScb;
 		if ((pVirScb->SCB_Status) && (pVirEscb->SCB_Srb == (unsigned char *) SCpnt)) {
 			if (pVirScb->SCB_TagMsg == 0) {
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-				restore_flags(flags);
-#else
 				spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 				return (SCSI_ABORT_BUSY);
 			} else {
 				if (abort_SCB(hcsp, pVirScb)) {
 					pVirEscb->SCB_Srb = NULL;
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-					restore_flags(flags);
-#else
 					spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 					return (SCSI_ABORT_SUCCESS);
 				} else {
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-					restore_flags(flags);
-#else
 					spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 					return (SCSI_ABORT_NOT_RUNNING);
 				}
 			}
 		}
 	}
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2,1,95)
-	restore_flags(flags);
-#else
 	spin_unlock_irqrestore(&(hcsp->BitAllocFlagLock), flags);
-#endif
 	return (SCSI_ABORT_NOT_RUNNING);
 }
 

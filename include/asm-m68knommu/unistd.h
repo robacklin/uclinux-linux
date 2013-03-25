@@ -5,7 +5,6 @@
  * This file contains the system call numbers.
  */
 
-#define __NR_setup		  0	/* used only by init, to get system going */
 #define __NR_exit		  1
 #define __NR_fork		  2
 #define __NR_read		  3
@@ -57,7 +56,7 @@
 #define __NR_geteuid		 49
 #define __NR_getegid		 50
 #define __NR_acct		 51
-#define __NR_phys		 52
+#define __NR_umount2		 52
 #define __NR_lock		 53
 #define __NR_ioctl		 54
 #define __NR_fcntl		 55
@@ -81,7 +80,7 @@
 #define __NR_sigpending		 73
 #define __NR_sethostname	 74
 #define __NR_setrlimit		 75
-#define __NR_getrlimit		 76
+#define __NR_old_getrlimit	 76
 #define __NR_getrusage		 77
 #define __NR_gettimeofday	 78
 #define __NR_settimeofday	 79
@@ -117,7 +116,7 @@
 #define __NR_olduname		109
 #define __NR_iopl		/* 110 */ not supported
 #define __NR_vhangup		111
-#define __NR_idle		112
+#define __NR_idle		/* 112 */ Obsolete
 #define __NR_vm86		/* 113 */ not supported
 #define __NR_wait4		114
 #define __NR_swapoff		115
@@ -169,6 +168,74 @@
 #define __NR_sched_rr_get_interval	161
 #define __NR_nanosleep		162
 #define __NR_mremap		163
+#define __NR_setresuid		164
+#define __NR_getresuid		165
+#define __NR_query_module	167
+#define __NR_poll		168
+#define __NR_nfsservctl		169
+#define __NR_setresgid		170
+#define __NR_getresgid		171
+#define __NR_prctl		172
+#define __NR_rt_sigreturn	173
+#define __NR_rt_sigaction	174
+#define __NR_rt_sigprocmask	175
+#define __NR_rt_sigpending	176
+#define __NR_rt_sigtimedwait	177
+#define __NR_rt_sigqueueinfo	178
+#define __NR_rt_sigsuspend	179
+#define __NR_pread		180
+#define __NR_pwrite		181
+#define __NR_lchown		182
+#define __NR_getcwd		183
+#define __NR_capget		184
+#define __NR_capset		185
+#define __NR_sigaltstack	186
+#define __NR_sendfile		187
+#define __NR_getpmsg		188	/* some people actually want streams */
+#define __NR_putpmsg		189	/* some people actually want streams */
+#define __NR_vfork		190
+#define __NR_getrlimit		191
+#define __NR_mmap2		192
+#define __NR_truncate64		193
+#define __NR_ftruncate64	194
+#define __NR_stat64		195
+#define __NR_lstat64		196
+#define __NR_fstat64		197
+#define __NR_chown32		198
+#define __NR_getuid32		199
+#define __NR_getgid32		200
+#define __NR_geteuid32		201
+#define __NR_getegid32		202
+#define __NR_setreuid32		203
+#define __NR_setregid32		204
+#define __NR_getgroups32	205
+#define __NR_setgroups32	206
+#define __NR_fchown32		207
+#define __NR_setresuid32	208
+#define __NR_getresuid32	209
+#define __NR_setresgid32	210
+#define __NR_getresgid32	211
+#define __NR_lchown32		212
+#define __NR_setuid32		213
+#define __NR_setgid32		214
+#define __NR_setfsuid32		215
+#define __NR_setfsgid32		216
+#define __NR_pivot_root		217
+#define __NR_getdents64		220
+#define __NR_gettid		221
+#define __NR_tkill		222
+#define __NR_setxattr		223
+#define __NR_lsetxattr		224
+#define __NR_fsetxattr		225
+#define __NR_getxattr		226
+#define __NR_lgetxattr		227
+#define __NR_fgetxattr		228
+#define __NR_listxattr		229
+#define __NR_llistxattr		230
+#define __NR_flistxattr		231
+#define __NR_removexattr	232
+#define __NR_lremovexattr	233
+#define __NR_fremovexattr	234
 
 /* user-visible error numbers are in the range -1 - -122: see
    <asm-m68k/errno.h> */
@@ -185,140 +252,141 @@ do { \
 	return (type) (res); \
 } while (0)
 
-#define _syscall0(type, name)						\
-type name(void)								\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name)				\
-			: "cc", "%d0");					\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall0(type, name)							\
+type name(void)									\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name)					\
+			: "cc", "%d0");						\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 
-#define _syscall1(type, name, atype, a)					\
-type name(atype a)							\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%2, %%d1\n\t"				\
-  			"movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name),				\
-			  "g" ((long)a)					\
-			: "cc", "%d0", "%d1");				\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall1(type, name, atype, a)						\
+type name(atype a)								\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%2, %%d1\n\t"					\
+  			"movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name),					\
+			  "g" ((long)a)						\
+			: "cc", "%d0", "%d1");					\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 
-#define _syscall2(type, name, atype, a, btype, b)			\
-type name(atype a, btype b)						\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%3, %%d2\n\t"				\
-  			"movel	%2, %%d1\n\t"				\
-			"movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name),				\
-			  "ai" ((long)a),				\
-			  "g" ((long)b)					\
-			: "cc", "%d0", "%d1", "%d2");			\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall2(type, name, atype, a, btype, b)				\
+type name(atype a, btype b)							\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%3, %%d2\n\t"					\
+  			"movel	%2, %%d1\n\t"					\
+			"movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name),					\
+			  "a" ((long)a),					\
+			  "g" ((long)b)						\
+			: "cc", "%d0", "%d1", "%d2");				\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 
-#define _syscall3(type, name, atype, a, btype, b, ctype, c)		\
-type name(atype a, btype b, ctype c)					\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%4, %%d3\n\t"				\
-			"movel	%3, %%d2\n\t"				\
-  			"movel	%2, %%d1\n\t"				\
-			"movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name),				\
-			  "ai" ((long)a),				\
-			  "ai" ((long)b),				\
-			  "g" ((long)c)					\
-			: "cc", "%d0", "%d1", "%d2", "%d3");		\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall3(type, name, atype, a, btype, b, ctype, c)			\
+type name(atype a, btype b, ctype c)						\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%4, %%d3\n\t"					\
+			"movel	%3, %%d2\n\t"					\
+  			"movel	%2, %%d1\n\t"					\
+			"movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name),					\
+			  "a" ((long)a),					\
+			  "a" ((long)b),					\
+			  "g" ((long)c)						\
+			: "cc", "%d0", "%d1", "%d2", "%d3");			\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 
-#define _syscall4(type, name, atype, a, btype, b, ctype, c, dtype, d)	\
-type name(atype a, btype b, ctype c, dtype d)				\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%5, %%d4\n\t"				\
-			"movel	%4, %%d3\n\t"				\
-			"movel	%3, %%d2\n\t"				\
-  			"movel	%2, %%d1\n\t"				\
-			"movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name),				\
-			  "ai" ((long)a),				\
-			  "ai" ((long)b),				\
-			  "ai" ((long)c),				\
-			  "g" ((long)d)					\
-			: "cc", "%d0", "%d1", "%d2", "%d3",		\
-			  "%d4");					\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall4(type, name, atype, a, btype, b, ctype, c, dtype, d)		\
+type name(atype a, btype b, ctype c, dtype d)					\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%5, %%d4\n\t"					\
+			"movel	%4, %%d3\n\t"					\
+			"movel	%3, %%d2\n\t"					\
+  			"movel	%2, %%d1\n\t"					\
+			"movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name),					\
+			  "a" ((long)a),					\
+			  "a" ((long)b),					\
+			  "a" ((long)c),					\
+			  "g" ((long)d)						\
+			: "cc", "%d0", "%d1", "%d2", "%d3",			\
+			  "%d4");						\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 
-#define _syscall5(type, name, atype, a, btype, b, ctype, c, dtype, d, etype, e)\
-type name(atype a, btype b, ctype c, dtype d, etype e)			\
-{									\
-  long __res;								\
-  __asm__ __volatile__ ("movel	%6, %%d5\n\t"				\
-			"movel	%5, %%d4\n\t"				\
-			"movel	%4, %%d3\n\t"				\
-			"movel	%3, %%d2\n\t"				\
-  			"movel	%2, %%d1\n\t"				\
-			"movel	%1, %%d0\n\t"				\
-  			"trap	#0\n\t"					\
-  			"movel	%%d0, %0"				\
-			: "=g" (__res)					\
-			: "i" (__NR_##name),				\
-			  "ai" ((long)a),				\
-			  "ai" ((long)b),				\
-			  "ai" ((long)c),				\
-			  "ai" ((long)d),				\
-			  "g" ((long)e)					\
-			: "cc", "%d0", "%d1", "%d2", "%d3",		\
-			  "%d4", "%d5");				\
-  if ((unsigned long)(__res) >= (unsigned long)(-125)) {			\
-    errno = -__res;							\
-    __res = -1;								\
-  }									\
-  return (type)__res;							\
+#define _syscall5(type, name, atype, a, btype, b, ctype, c, dtype, d, etype, e)	\
+type name(atype a, btype b, ctype c, dtype d, etype e)				\
+{										\
+  long __res;									\
+  __asm__ __volatile__ ("movel	%6, %%d5\n\t"					\
+			"movel	%5, %%d4\n\t"					\
+			"movel	%4, %%d3\n\t"					\
+			"movel	%3, %%d2\n\t"					\
+  			"movel	%2, %%d1\n\t"					\
+			"movel	%1, %%d0\n\t"					\
+  			"trap	#0\n\t"						\
+  			"movel	%%d0, %0"					\
+			: "=g" (__res)						\
+			: "i" (__NR_##name),					\
+			  "a" ((long)a),					\
+			  "a" ((long)b),					\
+			  "a" ((long)c),					\
+			  "a" ((long)d),					\
+			  "g" ((long)e)						\
+			: "cc", "%d0", "%d1", "%d2", "%d3",			\
+			  "%d4", "%d5");					\
+  if ((unsigned long)(__res) >= (unsigned long)(-125)) {				\
+    errno = -__res;								\
+    __res = -1;									\
+  }										\
+  return (type)__res;								\
 }
 		
+
 #ifdef __KERNEL_SYSCALLS__
 
 /*
@@ -334,61 +402,19 @@ type name(atype a, btype b, ctype c, dtype d, etype e)			\
  * some others too.
  */
 #define __NR__exit __NR_exit
-static inline _syscall0(int,idle)
-static inline _syscall0(int,fork)
-static inline _syscall2(int,clone,unsigned long,flags,char *,usp)
 static inline _syscall0(int,pause)
-static inline _syscall0(int,setup)
 static inline _syscall0(int,sync)
 static inline _syscall0(pid_t,setsid)
 static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
+static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
+static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
 static inline _syscall1(int,dup,int,fd)
 static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
 static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
 static inline _syscall1(int,close,int,fd)
 static inline _syscall1(int,_exit,int,exitcode)
 static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-
-/*
- * This is the mechanism for creating a new kernel thread.
- *
- * NOTE! Only a kernel-only process(ie the swapper or direct descendants
- * who haven't done an "execve()") should use this: it will work within
- * a system call from a "real" process, but the process memory space will
- * not be free'd until both the parent and the child have exited.
- */
-static inline pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
-{
-	long retval;
-	long clone_arg = flags | CLONE_VM;
-	unsigned long fs;
-
-	fs = get_fs();
-	set_fs (KERNEL_DS);
-
-	__asm__ __volatile__ (
-			"movel	%%sp, %%d2\n\t"
-			"movel	%5, %%d1\n\t"
-			"movel	%1, %%d0\n\t"
-			"trap	#0\n\t"
-			"cmpl	%%sp, %%d2\n\t"
-			"jeq	1f\n\t"
-			"movel	%3, %%sp@-\n\t"
-			"jsr	%4@\n\t"
-			"movel	%2, %%d0\n\t"
-			"trap	#0\n"
-			"1:"
-		: "=d" (retval)
-		: "i" (__NR_clone),
-		  "i" (__NR_exit),
-		  "ai" (arg),
-		  "a" (fn),
-		  "ai" (clone_arg)
-		: "cc", "%d0", "%d1", "%d2");
-
-	set_fs (fs);
-	return retval;
-}
+static inline _syscall1(int,delete_module,const char *,name)
 
 static inline pid_t wait(int * wait_stat)
 {

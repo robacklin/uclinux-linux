@@ -681,7 +681,7 @@ no:
          else {
             write1_io(0, IO_FIFO_READ);   /* put fifo in read mode */
             hostdata->fifo = FI_FIFO_READING;
-            cmd->SCp.have_data_in = 0;    /* nothing transfered yet */
+            cmd->SCp.have_data_in = 0;    /* nothing transferred yet */
             }
 
          }
@@ -1845,7 +1845,7 @@ static char setup_buffer[SETUP_BUFFER_SIZE];
 static char setup_used[MAX_SETUP_ARGS];
 static int done_setup = 0;
 
-in2000__INITFUNC( void in2000_setup (char *str, int *ints) )
+void __init in2000_setup (char *str, int *ints)
 {
 int i;
 char *p1,*p2;
@@ -1877,7 +1877,7 @@ char *p1,*p2;
 /* check_setup_args() returns index if key found, 0 if not
  */
 
-in2000__INITFUNC( static int check_setup_args(char *key, int *flags, int *val, char *buf) )
+static int __init check_setup_args(char *key, int *flags, int *val, char *buf)
 {
 int x;
 char *cp;
@@ -1909,21 +1909,21 @@ char *cp;
  * special macros declared in 'asm/io.h'. We use readb() and readl()
  * when reading from the card's BIOS area in in2000_detect().
  */
-static const unsigned int *bios_tab[] in2000__INITDATA = {
-   (unsigned int *)0xc8000,
-   (unsigned int *)0xd0000,
-   (unsigned int *)0xd8000,
+static u32 bios_tab[] in2000__INITDATA = {
+   0xc8000,
+   0xd0000,
+   0xd8000,
    0
    };
 
-static const unsigned short base_tab[] in2000__INITDATA = {
+static unsigned short base_tab[] in2000__INITDATA = {
    0x220,
    0x200,
    0x110,
    0x100,
    };
 
-static const int int_tab[] in2000__INITDATA = {
+static int int_tab[] in2000__INITDATA = {
    15,
    14,
    11,
@@ -1931,7 +1931,7 @@ static const int int_tab[] in2000__INITDATA = {
    };
 
 
-in2000__INITFUNC( int in2000_detect(Scsi_Host_Template * tpnt) )
+int __init in2000_detect(Scsi_Host_Template * tpnt)
 {
 struct Scsi_Host *instance;
 struct IN2000_hostdata *hostdata;
@@ -1973,13 +1973,13 @@ char buf[32];
  * for the obvious ID strings. We look for the 2 most common ones and
  * hope that they cover all the cases...
  */
-      else if (readl(bios_tab[bios]+0x04) == 0x41564f4e ||
-               readl(bios_tab[bios]+0x0c) == 0x61776c41) {
+      else if (isa_readl(bios_tab[bios]+0x10) == 0x41564f4e ||
+               isa_readl(bios_tab[bios]+0x30) == 0x61776c41) {
          printk("Found IN2000 BIOS at 0x%x ",(unsigned int)bios_tab[bios]);
 
 /* Read the switch image that's mapped into EPROM space */
 
-         switches = ~((readb(bios_tab[bios]+0x08) & 0xff));
+         switches = ~((isa_readb(bios_tab[bios]+0x20) & 0xff));
 
 /* Find out where the IO space is */
 
@@ -2023,9 +2023,11 @@ char buf[32];
  * initialize it.
  */
 
-      tpnt->proc_dir = &proc_scsi_in2000; /* done more than once? harmless. */
-      detect_count++;
+      tpnt->proc_name = "in2000";
       instance  = scsi_register(tpnt, sizeof(struct IN2000_hostdata));
+      if(instance == NULL)
+      	continue;
+      detect_count++;
       if (!instance_list)
          instance_list = instance;
       hostdata = (struct IN2000_hostdata *)instance->hostdata;
@@ -2071,7 +2073,7 @@ char buf[32];
 
 /* Older BIOS's had a 'sync on/off' switch - use its setting */
 
-      if (readl(bios_tab[bios]+0x04) == 0x41564f4e && (switches & SW_SYNC_DOS5))
+      if (isa_readl(bios_tab[bios]+0x10) == 0x41564f4e && (switches & SW_SYNC_DOS5))
          hostdata->sync_off = 0x00;    /* sync defaults to on */
       else
          hostdata->sync_off = 0xff;    /* sync defaults to off */
@@ -2186,13 +2188,6 @@ int size;
       }
     return 0;
 }
-
-
-
-struct proc_dir_entry proc_scsi_in2000 = {
-   PROC_SCSI_IN2000, 6, "in2000",
-   S_IFDIR | S_IRUGO | S_IXUGO, 2
-   };
 
 
 int in2000_proc_info(char *buf, char **start, off_t off, int len, int hn, int in)
@@ -2365,12 +2360,9 @@ static int stop = 0;
 
 }
 
+MODULE_LICENSE("GPL");
 
-#ifdef MODULE
 
-Scsi_Host_Template driver_template = IN2000;
-
+static Scsi_Host_Template driver_template = IN2000;
 #include "scsi_module.c"
-
-#endif
 

@@ -183,7 +183,7 @@
 #define H8_SYSTEM_DELAY_TEST            0x100000
 #define H8_POWER_SWITCH_TEST            0x200000
 
-/* cpu speeds and clock divisor values */
+/* CPU speeds and clock divisor values */
 #define MHZ_14                           5
 #define MHZ_28                           4
 #define MHZ_57                           3
@@ -229,7 +229,7 @@ struct h8_data {
  * H8 command buffers
  */
 typedef struct h8_cmd_q {
-        DLNODE(struct h8_cmd_q) link; /* double linked list */
+        struct list_head link;          /* double linked list */
         int             ncmd;           /* number of bytes in command */
         int             nrsp;           /* number of bytes in response */
         int             cnt;            /* number of bytes sent/received */
@@ -237,10 +237,6 @@ typedef struct h8_cmd_q {
         u_char          cmdbuf[H8_MAX_CMD_SIZE]; /* buffer to store command */
         u_char          rcvbuf[H8_MAX_CMD_SIZE]; /* buffer to store response */
 } h8_cmd_q_t;
-
-typedef struct __queue_head {
-	DLNODE(struct h8_cmd_q) link;
-} queue_head_t;
 
 union   intr_buf {
         u_char  byte[2];

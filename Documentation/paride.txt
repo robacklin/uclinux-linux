@@ -1,29 +1,7 @@
 
 		Linux and parallel port IDE devices
 
-
-PARIDE-1.03s   (c) 1997-8  Grant Guenther <grant@torque.net>
-
-*************************************************************************
-
-Special notes for the 2.0 version:
-
-(i)   This is the paride from 2.1 retrofitted to work with 2.0.
-     
-(ii)  PARPORT is _not_ supported.  If you obtain the PARPORT patches
-      for 2.0 and try to use them, it might work.  I have not tried
-      it.
-
-(iii) There is no guarantee of any ongoing support or future development
-      for this special retrofit.
-
-(iv)  I have not built or tested PARIDE with SMP support in 2.0.35,
-      use it at your own risk.
-
-(v)   The pcd driver in 2.1 now contains support for playing audio 
-      discs.  This functionality is not available in the 2.0 version.
-
-*************************************************************************
+PARIDE v1.03   (c) 1997-8  Grant Guenther <grant@torque.net>
 
 1. Introduction
 
@@ -191,16 +169,22 @@ In the last option, pf.drive1 configures device /dev/pf1, the 0x378
 is the parallel port base address, the 0 is the protocol registration
 number and 36 is the chain ID.
 
-This special version of PARIDE does not support chained devices on the
-same parallel port.
+Please note:  while PARIDE will work both with and without the 
+PARPORT parallel port sharing system that is included by the
+"Parallel port support" option, PARPORT must be included and enabled
+if you want to use chains of devices on the same parallel port.
 
 2.2  Loading and configuring PARIDE as modules
 
 It is much faster and simpler to get to understand the PARIDE drivers
 if you use them as loadable kernel modules.   
 
-Note:  using these drivers with the "kerneld" automatic module loading
+Note 1:  using these drivers with the "kerneld" automatic module loading
 system is not recommended for beginners, and is not documented here.  
+
+Note 2:  if you build PARPORT support as a loadable module, PARIDE must
+also be built as loadable modules, and PARPORT must be loaded before the
+PARIDE modules.
 
 To use PARIDE, you must begin by 
 
@@ -372,7 +356,7 @@ the parallel port.  As the reset operation is potentially disruptive in
 multiple device environments, the PARIDE drivers will not do it 
 automatically.  You can however, force a printer reset by doing:
 
-	insmod lp
+	insmod lp reset=1
 	rmmod lp
 
 If you have one of these marginal cases, you should probably build
@@ -386,9 +370,10 @@ as smoothly as possible, problems will arise.  If you do have problems,
 please check all the obvious things first:  does the drive work in
 DOS with the manufacturer's drivers ?  If that doesn't yield any useful
 clues, then please make sure that only one drive is hooked to your system,
-and that no other device driver is using your parallel port (check in 
-/proc/ioports).  Then, load the appropriate drivers (you can load several 
-protocol modules if you want) as in:
+and that either (a) PARPORT is enabled or (b) no other device driver
+is using your parallel port (check in /proc/ioports).  Then, load the
+appropriate drivers (you can load several protocol modules if you want)
+as in:
 
 	# insmod paride
 	# insmod epat

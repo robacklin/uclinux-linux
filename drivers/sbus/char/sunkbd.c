@@ -1,10 +1,15 @@
 /* keyboard.c: Sun keyboard driver.
  *
- * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1995, 1996, 1997 David S. Miller (davem@caip.rutgers.edu)
+ *
  * Added vuid event generation and /dev/kbd device for SunOS
  * compatibility - Miguel (miguel@nuclecu.unam.mx)
+ *
+ * Added PCI 8042 controller support -DaveM
+ * Added Magic SysRq support -MJ
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/tty.h>
@@ -14,15 +19,32 @@
 #include <linux/signal.h>
 #include <linux/string.h>
 #include <linux/fcntl.h>
+#include <linux/poll.h>
+#include <linux/random.h>
+#include <linux/delay.h>
+#include <linux/init.h>
+#include <linux/sysrq.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
+#include <linux/devfs_fs_kernel.h>
+
 #include <asm/kbio.h>
 #include <asm/vuid_event.h>
-#include <asm/delay.h>
 #include <asm/bitops.h>
 #include <asm/oplib.h>
+#include <asm/uaccess.h>
 
-#include "../../char/kbd_kern.h"
-#include "../../char/diacr.h"
-#include "../../char/vt_kern.h"
+#include <linux/kbd_kern.h>
+#include <linux/kbd_diacr.h>
+#include <linux/vt_kern.h>
+
+#ifdef CONFIG_PCI
+#include <linux/pci.h>
+#include <asm/pbm.h>
+#include <asm/ebus.h>
+#endif
+
+#include "sunkbd.h"
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -58,7 +80,9 @@ extern void reset_vc(unsigned int new_console);
 extern void scrollback(int);
 extern void scrollfront(int);
 
-unsigned char kbd_read_mask = 0x01;	/* modified by psaux.c */
+struct l1a_kbd_state l1a_state;
+
+static spinlock_t sunkbd_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * global state includes the following, and various static variables
@@ -67,30 +91,34 @@ unsigned char kbd_read_mask = 0x01;	/* modified by psaux.c */
  */
 
 /* shift state counters.. */
-static unsigned char k_down[NR_SHIFT] = {0, };
+static unsigned char k_down[NR_SHIFT];
 /* keyboard key bitmap */
-#define BITS_PER_LONG (8*sizeof(unsigned long))
-static unsigned long key_down[256/BITS_PER_LONG] = { 0, };
+static unsigned long key_down[256/BITS_PER_LONG];
 
 void push_kbd (int scan);
-int kbd_redirected = 0;
+int kbd_redirected;
 
-static int dead_key_next = 0;
+static int dead_key_next;
 /* 
  * In order to retrieve the shift_state (for the mouse server), either
  * the variable must be global, or a new procedure must be created to 
  * return the value. I chose the former way.
  */
-/*static*/ int shift_state = 0;
-static int npadch = -1;			/* -1 or number assembled on pad */
-static unsigned char diacr = 0;
-static char rep = 0;			/* flag telling character repeat */
+#ifndef CONFIG_PCI
+int shift_state;
 struct kbd_struct kbd_table[MAX_NR_CONSOLES];
+#endif
+static int npadch = -1;			/* -1 or number assembled on pad */
+static unsigned char diacr;
+static char rep;			/* flag telling character repeat */
 static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
-static struct tty_struct * tty = NULL;
+static struct tty_struct * tty;
+static int compose_led_on;
+static int kbd_delay_ticks = HZ / 5;
+static int kbd_rate_ticks = HZ / 20;
 
-extern void compute_shiftstate(void);
+void sun_compute_shiftstate(void);
 
 typedef void (*k_hand)(unsigned char value, char up_flag);
 typedef void (k_handfn)(unsigned char value, char up_flag);
@@ -121,13 +149,16 @@ static void_fnp spec_fn_table[] = {
 };
 
 /* maximum values each key_handler can handle */
+#ifndef CONFIG_PCI
 const int max_vals[] = {
 	255, SIZE(func_table) - 1, SIZE(spec_fn_table) - 1, NR_PAD - 1,
 	NR_DEAD - 1, 255, 3, NR_SHIFT - 1,
-	255, NR_ASCII - 1, NR_LOCK - 1, 255
+	255, NR_ASCII - 1, NR_LOCK - 1, 255,
+	NR_LOCK - 1
 };
 
 const int NR_TYPES = SIZE(max_vals);
+#endif
 
 static void put_queue(int);
 static unsigned char handle_diacr(unsigned char);
@@ -135,14 +166,26 @@ static unsigned char handle_diacr(unsigned char);
 /* pt_regs - set by keyboard_interrupt(), used by show_ptregs() */
 static struct pt_regs * pt_regs;
 
+#ifdef CONFIG_MAGIC_SYSRQ
+unsigned char sun_sysrq_xlate[128] =
+	"\0\0\0\0\0\201\202\212\203\213\204\214\205\0\206\0"	/* 0x00 - 0x0f */
+	"\207\210\211\0\0\0\0\0\0\0\0\0\0\03312"		/* 0x10 - 0x1f */
+	"34567890-=`\177\0=/*"					/* 0x20 - 0x2f */
+	"\0\0.\0\0\011qwertyuiop"				/* 0x30 - 0x3f */
+	"[]\177\000789-\0\0\0\0\0asd"				/* 0x40 - 0x4f */
+	"fghjkl;'\\\015\0154560\0"				/* 0x50 - 0x5f */
+	"\0\0\0\0zxcvbnm,./\0\012"				/* 0x60 - 0x6f */
+	"123\0\0\0\0\0\0 \0\0\0\0\0\0";				/* 0x70 - 0x7f */
+#endif
+
 volatile unsigned char sunkbd_layout;
 volatile unsigned char sunkbd_type;
 #define SUNKBD_TYPE2        0x02
 #define SUNKBD_TYPE3        0x03
 #define SUNKBD_TYPE4        0x04
 
-#define SUNKBD_LOUT_TYP4    0x00
-#define SUNKBD_LOUT_TYP5    0x22
+#define SUNKBD_LOUT_TYP4    	0x00
+#define SUNKBD_LOUT_TYP5_MASK   0x20
 
 volatile int kbd_reset_pending;
 volatile int kbd_layout_pending;
@@ -192,7 +235,18 @@ static unsigned char sunkbd_clickp;
 #define KEY_ALT         0x86
 #define KEY_L1          0x87
 
-extern void kbd_put_char(unsigned char ch);
+/* Due to sun_kbd_init() being called before rs_init(), and sun_kbd_init() doing:
+ *
+ *	tasklet_enable(&keyboard_tasklet);
+ *	tasklet_schedule(&keyboard_tasklet);
+ *
+ * this might well be called before some driver has claimed interest in
+ * handling the keyboard input/output. So we need to assign an initial nop.
+ */
+static void nop_kbd_put_char(unsigned char c) { }
+static void (*kbd_put_char)(unsigned char) = nop_kbd_put_char;
+
+/* Must be invoked under sunkbd_lock. */
 static inline void send_cmd(unsigned char c)
 {
 	kbd_put_char(c);
@@ -213,6 +267,8 @@ static inline unsigned char vcleds_to_sunkbd(unsigned char vcleds)
 		retval |= LED_NLOCK;
 	if(vcleds & (1<<VC_CAPSLOCK))
 		retval |= LED_CLOCK;
+	if(compose_led_on)
+		retval |= LED_CMPOSE;
 	return retval;
 }
 
@@ -331,7 +387,22 @@ static unsigned char e0_keys[128] = {
   0, 0, 0, 0, 0, 0, 0, 0			      /* 0x78-0x7f */
 };
 
-int setkeycode(unsigned int scancode, unsigned int keycode)
+/* we use this map to determine if a particular key should not be
+   autorepeated. We don't autorepeat CONTROL, LSHIFT, CAPS,
+   ALT, LMETA, RSHIFT, RMETA, ALTG and COMPOSE */
+static unsigned char norepeat_keys[128] = {
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,  /* 0x00-0x0f */
+	0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  /* 0x10-0x1f */
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  /* 0x20-0x2f */
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  /* 0x30-0x3f */
+	0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,  /* 0x40-0x4f */
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,  /* 0x50-0x5f */
+	0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0,  /* 0x60-0x6f */
+	0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0,  /* 0x70-0x7f */
+};
+
+
+int sun_setkeycode(unsigned int scancode, unsigned int keycode)
 {
 	if (scancode < SC_LIM || scancode > 255 || keycode > 127)
 	  return -EINVAL;
@@ -342,7 +413,7 @@ int setkeycode(unsigned int scancode, unsigned int keycode)
 	return 0;
 }
 
-int getkeycode(unsigned int scancode)
+int sun_getkeycode(unsigned int scancode)
 {
 	return
 	  (scancode < SC_LIM || scancode > 255) ? -EINVAL :
@@ -350,11 +421,12 @@ int getkeycode(unsigned int scancode)
 	    e0_keys[scancode - 128];
 }
 
-void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs);
+static void __sunkbd_inchar(unsigned char ch, struct pt_regs *regs);
+void sunkbd_inchar(unsigned char ch, struct pt_regs *regs);
 static void keyboard_timer (unsigned long ignored);
 
 static struct timer_list
-auto_repeat_timer = { NULL, NULL, 0, 0, keyboard_timer };
+auto_repeat_timer = { function: keyboard_timer };
 
 /* Keeps track of the last pressed key */
 static unsigned char last_keycode;
@@ -364,19 +436,28 @@ keyboard_timer (unsigned long ignored)
 {
 	unsigned long flags;
 
-	save_flags(flags); cli();
+	spin_lock_irqsave(&sunkbd_lock, flags);
 
 	/* Auto repeat: send regs = 0 to indicate autorepeat */
-	sunkbd_inchar (last_keycode, 0, 0);
+	__sunkbd_inchar (last_keycode, 0);
 	del_timer (&auto_repeat_timer);
-	auto_repeat_timer.expires = jiffies + HZ/20;
-	add_timer (&auto_repeat_timer);
-	restore_flags(flags);
+	if (kbd_rate_ticks) {
+		auto_repeat_timer.expires = jiffies + kbd_rate_ticks;
+		add_timer (&auto_repeat_timer);
+	}
+
+	spin_unlock_irqrestore(&sunkbd_lock, flags);
 }
 
+#ifndef CONFIG_PCI
+DECLARE_TASKLET_DISABLED(keyboard_tasklet, sun_kbd_bh, 0);
+#endif
+
 /* #define SKBD_DEBUG */
-/* This is our keyboard 'interrupt' routine. */
-void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
+/* This is our keyboard 'interrupt' routine.
+ * Must run under sunkbd_lock.
+ */
+static void __sunkbd_inchar(unsigned char ch, struct pt_regs *regs)
 {
 	unsigned char keycode;
 	char up_flag;                          /* 0 or SUNKBD_UBIT */
@@ -384,25 +465,27 @@ void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
 
 	if(ch == SKBD_RESET) {
 		kbd_reset_pending = 1;
-		return;
+		goto out;
 	}
 	if(ch == SKBD_LYOUT) {
 		kbd_layout_pending = 1;
-		return;
+		goto out;
 	}
 	if(kbd_reset_pending) {
 		sunkbd_type = ch;
 		kbd_reset_pending = 0;
 		if(ch == SUNKBD_TYPE4)
 			send_cmd(SKBDCMD_GLAYOUT);
-		return;
+		goto out;
 	} else if(kbd_layout_pending) {
 		sunkbd_layout = ch;
 		kbd_layout_pending = 0;
-		return;
+		goto out;
 	} else if(ch == SKBD_ALLUP) {
-		/* eat it */
-		return;
+		del_timer (&auto_repeat_timer);
+		memset(key_down, 0, sizeof(key_down));
+		sun_compute_shiftstate();
+		goto out;
 	}
 #ifdef SKBD_DEBUG
 	if(ch == 0x7f)
@@ -413,17 +496,24 @@ void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
 #endif
 
 	/* Whee, a real character. */
-	if (regs){
+	if(regs) {
 		pt_regs = regs;
 		last_keycode = keycode = ch;
-	} else
+	} else {
 		keycode = ch;
+	}
 	
-	mark_bh(KEYBOARD_BH);
 	do_poke_blanked_console = 1;
-	mark_bh(CONSOLE_BH);
+	schedule_console_callback();
+	add_keyboard_randomness(keycode);
+
+	tty = ttytab? ttytab[fg_console]: NULL;
+	if (tty && (!tty->driver_data)) {
+		/* This is to workaround ugly bug in tty_io.c, which
+                   does not do locking when it should */
+		tty = NULL;
+	}
 	kbd = kbd_table + fg_console;
-	tty = ttytab[fg_console];
 	if((raw_mode = (kbd->kbdmode == VC_RAW))) {
 		if (kbd_redirected == fg_console+1)
 			push_kbd (keycode);
@@ -441,17 +531,30 @@ void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
 		rep = 0;
 		clear_bit(keycode, key_down);
 	} else {
-		auto_repeat_timer.expires = jiffies+HZ/5;
-		add_timer (&auto_repeat_timer);
-		rep = set_bit(keycode, key_down);
+		if (!norepeat_keys[keycode]) {
+			if (kbd_rate_ticks) {
+				auto_repeat_timer.expires =
+						jiffies + kbd_delay_ticks;
+				add_timer (&auto_repeat_timer);
+			}
+		}
+		rep = test_and_set_bit(keycode, key_down);
 	}
 
+#ifdef CONFIG_MAGIC_SYSRQ			/* Handle the SysRq hack */
+	if (l1a_state.l1_down) {
+		if (!up_flag)
+			handle_sysrq(sun_sysrq_xlate[keycode], pt_regs, kbd, tty);
+		goto out;
+	}
+#endif
+
 	if(raw_mode)
-		return;
+		goto out;
 
 	if(kbd->kbdmode == VC_MEDIUMRAW) {
 		put_queue(keycode + up_flag);
-		return;
+		goto out;
 	}
 
  	/*
@@ -474,7 +577,7 @@ void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
 		u_char type;
 
 		/* the XOR below used to be an OR */
-		int shift_final = shift_state ^ kbd->lockstate;
+		int shift_final = shift_state ^ kbd->lockstate ^ kbd->slockstate;
 		ushort *key_map = key_maps[shift_final];
 
 		if (key_map != NULL) {
@@ -498,23 +601,32 @@ void sunkbd_inchar(unsigned char ch, unsigned char status, struct pt_regs *regs)
 		} else {
 			/* maybe beep? */
 			/* we have at least to update shift_state */
-			compute_shiftstate();
+			sun_compute_shiftstate();
 		}
 	}
+out:
+	tasklet_schedule(&keyboard_tasklet);
+}
+
+void sunkbd_inchar(unsigned char ch, struct pt_regs *regs)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sunkbd_lock, flags);
+	__sunkbd_inchar(ch, regs);
+	spin_unlock_irqrestore(&sunkbd_lock, flags);
 }
 
 static void put_queue(int ch)
 {
-	wake_up(&keypress_wait);
 	if (tty) {
 		tty_insert_flip_char(tty, ch, 0);
-		tty_schedule_flip(tty);
+		con_schedule_flip(tty);
 	}
 }
 
 static void puts_queue(char *cp)
 {
-	wake_up(&keypress_wait);
 	if (!tty)
 		return;
 
@@ -522,7 +634,7 @@ static void puts_queue(char *cp)
 		tty_insert_flip_char(tty, *cp, 0);
 		cp++;
 	}
-	tty_schedule_flip(tty);
+	con_schedule_flip(tty);
 }
 
 static void applkey(int key, char mode)
@@ -634,7 +746,7 @@ static void send_intr(void)
 	if (!tty)
 		return;
 	tty_insert_flip_char(tty, 0, TTY_BREAK);
-	tty_schedule_flip(tty);
+	con_schedule_flip(tty);
 }
 
 static void scroll_forw(void)
@@ -661,9 +773,16 @@ static void boot_it(void)
 static void compose(void)
 {
 	dead_key_next = 1;
+	compose_led_on = 1;
+	set_leds();
 }
 
+#ifdef CONFIG_PCI
+extern int spawnpid, spawnsig;
+#else
 int spawnpid, spawnsig;
+#endif
+
 
 static void spawn_console(void)
 {
@@ -696,7 +815,7 @@ static void do_ignore(unsigned char value, char up_flag)
 
 static void do_null()
 {
-	compute_shiftstate();
+	sun_compute_shiftstate();
 }
 
 static void do_spec(unsigned char value, char up_flag)
@@ -718,8 +837,11 @@ static void do_self(unsigned char value, char up_flag)
 	if (up_flag)
 		return;		/* no action, if this is a key release */
 
-	if (diacr)
+	if (diacr) {
 		value = handle_diacr(value);
+		compose_led_on = 0;
+		set_leds();
+	}
 
 	if (dead_key_next) {
 		dead_key_next = 0;
@@ -782,7 +904,7 @@ static void do_cons(unsigned char value, char up_flag)
 {
 	if (up_flag)
 		return;
-	want_console = value;
+	set_console(value);
 }
 
 static void do_fn(unsigned char value, char up_flag)
@@ -900,7 +1022,7 @@ static void do_shift(unsigned char value, char up_flag)
 /* called after returning from RAW mode or when changing consoles -
    recompute k_down[] and shift_state from key_down[] */
 /* maybe called when keymap is undefined, so that shiftkey release is seen */
-void compute_shiftstate(void)
+void sun_compute_shiftstate(void)
 {
 	int i, j, k, sym, val;
 
@@ -973,11 +1095,11 @@ static void do_lock(unsigned char value, char up_flag)
 static unsigned char ledstate = 0xff; /* undefined */
 static unsigned char ledioctl;
 
-unsigned char getledstate(void) {
+unsigned char sun_getledstate(void) {
     return ledstate;
 }
 
-void setledstate(struct kbd_struct *kbd, unsigned int led) {
+void sun_setledstate(struct kbd_struct *kbd, unsigned int led) {
     if (!(led & ~7)) {
 	ledioctl = led;
 	kbd->ledmode = LED_SHOW_IOCTL;
@@ -1047,18 +1169,68 @@ static inline unsigned char getleds(void){
  * used, but this allows for easy and efficient race-condition
  * prevention later on.
  */
-static void kbd_bh(void)
+static unsigned char sunkbd_ledstate = 0xff; /* undefined */
+void sun_kbd_bh(unsigned long dummy)
 {
-	unsigned char leds = getleds();
+	unsigned long flags;
+	unsigned char leds, kbd_leds;
 
-	if (leds != ledstate) {
+	spin_lock_irqsave(&sunkbd_lock, flags);
+
+	leds = getleds();
+	kbd_leds = vcleds_to_sunkbd(leds);
+	if (kbd_leds != sunkbd_ledstate) {
 		ledstate = leds;
+		sunkbd_ledstate = kbd_leds;
 		send_cmd(SKBDCMD_SETLED);
-		send_cmd(vcleds_to_sunkbd(leds));
+		send_cmd(kbd_leds);
 	}
+
+	spin_unlock_irqrestore(&sunkbd_lock, flags);
 }
 
-int kbd_init(void)
+/* Support for keyboard "beeps". */ 
+
+/* Timer routine to turn off the beep after the interval expires. */
+static void sunkbd_kd_nosound(unsigned long __unused)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&sunkbd_lock, flags);
+	send_cmd(SKBDCMD_BELLOFF);
+	spin_unlock_irqrestore(&sunkbd_lock, flags);
+}
+
+/*
+ * Initiate a keyboard beep. If the frequency is zero, then we stop
+ * the beep. Any other frequency will start a monotone beep. The beep
+ * will be stopped by a timer after "ticks" jiffies. If ticks is 0,
+ * then we do not start a timer.
+ */
+static void sunkbd_kd_mksound(unsigned int hz, unsigned int ticks)
+{
+	unsigned long flags;
+	static struct timer_list sound_timer = { function: sunkbd_kd_nosound };
+
+	spin_lock_irqsave(&sunkbd_lock, flags);
+
+	del_timer(&sound_timer);
+
+	if (hz) {
+		send_cmd(SKBDCMD_BELLON);
+		if (ticks) {
+			sound_timer.expires = jiffies + ticks;
+			add_timer(&sound_timer);
+		}
+	} else
+		send_cmd(SKBDCMD_BELLOFF);
+
+	spin_unlock_irqrestore(&sunkbd_lock, flags);
+}
+
+extern void (*kd_mksound)(unsigned int hz, unsigned int ticks);
+
+int __init sun_kbd_init(void)
 {
 	int i, opt_node;
 	struct kbd_struct kbd0;
@@ -1067,6 +1239,7 @@ int kbd_init(void)
 	kbd0.ledflagstate = kbd0.default_ledflagstate = KBD_DEFLEDS;
 	kbd0.ledmode = LED_SHOW_FLAGS;
 	kbd0.lockstate = KBD_DEFLOCK;
+	kbd0.slockstate = 0;
 	kbd0.modeflags = KBD_DEFMODE;
 	kbd0.kbdmode = VC_XLATE;
  
@@ -1074,6 +1247,8 @@ int kbd_init(void)
 		kbd_table[i] = kbd0;
 
 	ttytab = console_driver.table;
+
+	kd_mksound = sunkbd_kd_mksound;
 
 	/* XXX Check keyboard-click? property in 'options' PROM node XXX */
 	if(sparc_cpu_model != sun4) {
@@ -1087,8 +1262,12 @@ int kbd_init(void)
 	} else {
 		sunkbd_clickp = 0;
 	}
-	init_bh(KEYBOARD_BH, kbd_bh);
-	mark_bh(KEYBOARD_BH);
+
+	keyboard_tasklet.func = sun_kbd_bh;
+
+	tasklet_enable(&keyboard_tasklet);
+	tasklet_schedule(&keyboard_tasklet);
+
 	return 0;
 }
 
@@ -1097,32 +1276,40 @@ int kbd_init(void)
 #define KBD_QSIZE 32
 static Firm_event kbd_queue [KBD_QSIZE];
 static int kbd_head, kbd_tail;
+static spinlock_t kbd_queue_lock = SPIN_LOCK_UNLOCKED;
 char kbd_opened;
-static struct wait_queue *kbd_wait;
+static int kbd_active = 0;
+static DECLARE_WAIT_QUEUE_HEAD(kbd_wait);
 static struct fasync_struct *kb_fasync;
 
 void
 push_kbd (int scan)
 {
-	int next = (kbd_head + 1) % KBD_QSIZE;
+	unsigned long flags;
+	int next;
 
 	if (scan == KBD_IDLE)
 		return;
+
+	spin_lock_irqsave(&kbd_queue_lock, flags);
+	next = (kbd_head + 1) % KBD_QSIZE;
 	if (next != kbd_tail){
 		kbd_queue [kbd_head].id = scan & KBD_KEYMASK;
 		kbd_queue [kbd_head].value=scan & KBD_UP ? VKEY_UP : VKEY_DOWN;
 		kbd_queue [kbd_head].time = xtime;
 		kbd_head = next;
 	}
-	if (kb_fasync)
-		kill_fasync (kb_fasync, SIGIO);
+	spin_unlock_irqrestore(&kbd_queue_lock, flags);
+
+	kill_fasync (&kb_fasync, SIGIO, POLL_IN);
 	wake_up_interruptible (&kbd_wait);
 }
 
-static int
-kbd_read (struct inode *inode, struct file *f, char *buffer, int count)
+static ssize_t
+kbd_read (struct file *f, char *buffer, size_t count, loff_t *ppos)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
+	unsigned long flags;
 	char *end, *p;
 
 	/* Return EWOULDBLOCK, because this is what the X server expects */
@@ -1130,9 +1317,11 @@ kbd_read (struct inode *inode, struct file *f, char *buffer, int count)
 		if (f->f_flags & O_NONBLOCK)
 			return -EWOULDBLOCK;
 		add_wait_queue (&kbd_wait, &wait);
-		while (kbd_head == kbd_tail && !(current->signal & ~current->blocked)){
-			current->state = TASK_INTERRUPTIBLE;
-			schedule ();
+repeat:
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (kbd_head == kbd_tail && !signal_pending(current)) {
+			schedule();
+			goto repeat;
 		}
 		current->state = TASK_RUNNING;
 		remove_wait_queue (&kbd_wait, &wait);
@@ -1140,70 +1329,96 @@ kbd_read (struct inode *inode, struct file *f, char *buffer, int count)
 	/* There is data in the keyboard, fill the user buffer */
 	end = buffer+count;
 	p = buffer;
-	for (; p < end && kbd_head != kbd_tail; p += sizeof (Firm_event)){
-		*(Firm_event *)p = kbd_queue [kbd_tail];
-#ifdef KBD_DEBUG
-		printk ("[%s]", kbd_queue [kbd_tail].value == VKEY_UP ? "UP" : "DOWN");
+	spin_lock_irqsave(&kbd_queue_lock, flags);
+	for (; p < end && kbd_head != kbd_tail;){
+		Firm_event this_event = kbd_queue[kbd_tail];
+
+		kbd_tail = (kbd_tail + 1) % KBD_QSIZE;
+
+		spin_unlock_irqrestore(&kbd_queue_lock, flags);
+
+#ifdef CONFIG_SPARC32_COMPAT
+		if (current->thread.flags & SPARC_FLAG_32BIT) {
+			if (copy_to_user((Firm_event *)p, &this_event,
+					 sizeof(Firm_event)-sizeof(struct timeval)))
+				return -EFAULT;
+			p += sizeof(Firm_event)-sizeof(struct timeval);
+			if (__put_user(this_event.time.tv_sec, (u32 *)p))
+				return -EFAULT;
+			p += sizeof(u32);
+			if (__put_user(this_event.time.tv_usec, (u32 *)p))
+				return -EFAULT;
+			p += sizeof(u32);
+		} else
 #endif
-		kbd_tail++;
-		kbd_tail %= KBD_QSIZE;
+		{
+			if (copy_to_user((Firm_event *)p, &this_event, 
+					 sizeof(Firm_event)))
+				return -EFAULT;
+			p += sizeof (Firm_event);
+		}
+#ifdef KBD_DEBUG
+		printk ("[%s]", this_event.value == VKEY_UP ? "UP" : "DOWN");
+#endif
+
+		spin_lock_irqsave(&kbd_queue_lock, flags);
 	}
+
+	spin_unlock_irqrestore(&kbd_queue_lock, flags);
+
 	return p-buffer;
 }
 
 /* Needed by X */
-static int
-kbd_fasync (struct inode *inode, struct file *filp, int on)
+static int kbd_fasync (int fd, struct file *filp, int on)
 {
 	int retval;
 
-	retval = fasync_helper (inode, filp, on, &kb_fasync);
+	retval = fasync_helper (fd, filp, on, &kb_fasync);
 	if (retval < 0)
 		return retval;
 	return 0;
 }
 
-static int
-kbd_select (struct inode *i, struct file *f, int sel_type, select_table *wait)
+static unsigned int kbd_poll (struct file *f, poll_table *wait)
 {
-	if (sel_type != SEL_IN)
-		return 0;
+	poll_wait(f, &kbd_wait, wait);
 	if (kbd_head != kbd_tail)
-		return 1;
-	select_wait (&kbd_wait, wait);
+		return POLLIN | POLLRDNORM;
 	return 0;
 }
 
 static int
 kbd_ioctl (struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
 {
+	unsigned char c;
+	unsigned char leds = 0;
+	int value;
+
 	switch (cmd){
-	case KIOCTYPE:	          /* return keyboard type */
-		if (verify_area (VERIFY_WRITE, (void *)arg, sizeof (int)))
+	case KIOCTYPE:		  /* return keyboard type */
+		if (put_user(sunkbd_type, (int *) arg))
 			return -EFAULT;
-	        *(int *) arg = sunkbd_type;
 		break;
 	case KIOCGTRANS:
-		if (verify_area (VERIFY_WRITE, (void *) arg, sizeof (int)))
+		if (put_user(TR_UNTRANS_EVENT, (int *) arg))
 			return -EFAULT;
-	        *(int *) arg = TR_UNTRANS_EVENT;
 		break;
 	case KIOCTRANS:
-		if (verify_area (VERIFY_READ, (void *) arg, sizeof (int)))
+		if (get_user(value, (int *) arg))
 			return -EFAULT;
-	        if (*(int *) arg != TR_UNTRANS_EVENT)
+		if (value != TR_UNTRANS_EVENT)
 			return -EINVAL;
 		break;
 	case KIOCLAYOUT:
-		if (verify_area (VERIFY_WRITE, (void *) arg, sizeof (int)))
+		if (put_user(sunkbd_layout, (int *) arg))
 			return -EFAULT;
-	        *(int *) arg = sunkbd_layout;
 		break;
 	case KIOCSDIRECT:
-		if (verify_area (VERIFY_WRITE, (void *) arg, sizeof (int)))
-			return -EFAULT;
 #ifndef CODING_NEW_DRIVER
-		if (*(int *) arg)
+		if (get_user(value, (int *) arg))
+			return -EFAULT;
+		if(value)
 			kbd_redirected = fg_console + 1;
 		else
 			kbd_redirected = 0;
@@ -1211,16 +1426,82 @@ kbd_ioctl (struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
 #endif
 		break;
 	case KIOCCMD:
-		/* Need to support beep on/off, keyclick on/off */
+		if (get_user(value, (int *) arg))
+			return -EFAULT;
+		c = (unsigned char) value;
+		switch (c) {
+			case SKBDCMD_CLICK:
+			case SKBDCMD_NOCLICK:
+				spin_lock_irq(&sunkbd_lock);
+				send_cmd(c);
+				spin_unlock_irq(&sunkbd_lock);
+				return 0;
+			case SKBDCMD_BELLON:
+				kd_mksound(1,0);
+				return 0;
+			case SKBDCMD_BELLOFF:
+				kd_mksound(0,0);
+				return 0;
+			default:
+				return -EINVAL;
+		}
+	case KIOCSLED:
+		if (get_user(c, (unsigned char *) arg))
+			return -EFAULT;
+
+		if (c & LED_SCRLCK) leds |= (1 << VC_SCROLLOCK);
+		if (c & LED_NLOCK) leds |= (1 << VC_NUMLOCK);
+		if (c & LED_CLOCK) leds |= (1 << VC_CAPSLOCK);
+		compose_led_on = !!(c & LED_CMPOSE);
+		sun_setledstate(kbd_table + fg_console, leds);
+		break;
+	case KIOCGLED:
+		if (put_user(vcleds_to_sunkbd(getleds()), (unsigned char *) arg))
+			return -EFAULT;
+		break;
+	case KIOCGRATE:
+	{
+		struct kbd_rate rate;
+
+		rate.delay = kbd_delay_ticks;
+		if (kbd_rate_ticks)
+			rate.rate = HZ / kbd_rate_ticks;
+		else
+			rate.rate = 0;
+
+		if (copy_to_user((struct kbd_rate *)arg, &rate,
+				 sizeof(struct kbd_rate)))
+			return -EFAULT;
+
 		return 0;
+	}
+	case KIOCSRATE:
+	{
+		struct kbd_rate rate;
+
+		if (verify_area(VERIFY_READ, (void *)arg,
+				sizeof(struct kbd_rate)))
+			return -EFAULT;
+		copy_from_user(&rate, (struct kbd_rate *)arg,
+			       sizeof(struct kbd_rate));
+
+		if (rate.rate > 50)
+			return -EINVAL;
+		if (rate.rate == 0)
+			kbd_rate_ticks = 0;
+		else
+			kbd_rate_ticks = HZ / rate.rate;
+		kbd_delay_ticks = rate.delay;
+
+		return 0;
+	}
 	case FIONREAD:		/* return number of bytes in kbd queue */
 	{
 		int count;
 		
-		if (verify_area (VERIFY_WRITE, (void *) arg, sizeof (int)))
-			return -EFAULT;
 		count = kbd_head - kbd_tail;
-		* (int *)arg = (count < 0) ? KBD_QSIZE - count : count;
+		if (put_user((count < 0) ? KBD_QSIZE - count : count, (int *) arg))
+			return -EFAULT;
 		return 0;
 	}
 	default:
@@ -1233,56 +1514,68 @@ kbd_ioctl (struct inode *i, struct file *f, unsigned int cmd, unsigned long arg)
 static int
 kbd_open (struct inode *i, struct file *f)
 {
+	spin_lock_irq(&kbd_queue_lock);
+	kbd_active++;
+
 	if (kbd_opened)
-		return 0;
+		goto out;
+
 	kbd_opened = fg_console + 1;
+
 	kbd_head = kbd_tail = 0;
+
+ out:
+	spin_unlock_irq(&kbd_queue_lock);
+
 	return 0;
 }
 
-static void
+static int
 kbd_close (struct inode *i, struct file *f)
 {
-	if (kbd_redirected)
-		kbd_table [kbd_opened-1].kbdmode = VC_XLATE;
-	kbd_redirected = 0;
-	kbd_opened = 0;
+	spin_lock_irq(&kbd_queue_lock);
+	if (!--kbd_active) {
+		if (kbd_redirected)
+			kbd_table [kbd_redirected-1].kbdmode = VC_XLATE;
+		kbd_redirected = 0;
+		kbd_opened = 0;
+		kbd_fasync (-1, f, 0);
+	}
+	spin_unlock_irq(&kbd_queue_lock);
 
-	kbd_fasync (i, f, 0);
+	return 0;
 }
 
-static struct
-file_operations kbd_fops =
+static struct file_operations kbd_fops =
 {
-	NULL,			/* seek */
-	kbd_read,		/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	kbd_select,		/* select */
-	kbd_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	kbd_open,		/* open */
-	kbd_close,		/* close */
-	NULL,			/* fsync */
-	kbd_fasync,		/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
+	read:		kbd_read,
+	poll:		kbd_poll,
+	ioctl:		kbd_ioctl,
+	open:		kbd_open,
+	release:	kbd_close,
+	fasync:		kbd_fasync,
 };
 
-void
-keyboard_zsinit(void)
+void __init keyboard_zsinit(void (*put_char)(unsigned char))
 {
 	int timeout = 0;
 
+	kbd_put_char = put_char;
+	if (!kbd_put_char)
+		panic("keyboard_zsinit: no put_char parameter");
+
 	/* Test out the leds */
 	sunkbd_type = 255;
+	sunkbd_layout = 0;
+
 	send_cmd(SKBDCMD_RESET);
-	while((sunkbd_type==255) && timeout < 500000) {
+	send_cmd(SKBDCMD_RESET);
+	while((sunkbd_type==255) && timeout++ < 25000) {
 		udelay(100);
-		timeout += 20;
+		barrier();
 	}
 
-	if(timeout>=500000) {
+	if(timeout>=25000) {
 		printk("keyboard: not present\n");
 		return;
 	}
@@ -1290,27 +1583,39 @@ keyboard_zsinit(void)
 	if(sunkbd_type != SUNKBD_TYPE4) {
 		printk("Sun TYPE %d keyboard detected ", sunkbd_type);
 	} else {
-		udelay(200);
 		timeout=0;
-		while(timeout++ < 500000)
+		while((sunkbd_layout==0) && timeout++ < 10000) {
+			udelay(100);
 			barrier();
+		}
 		printk("Sun TYPE %d keyboard detected ",
-		       ((sunkbd_layout==SUNKBD_LOUT_TYP5) ? 5 : 4));
+		       ((sunkbd_layout & SUNKBD_LOUT_TYP5_MASK) ? 5 : 4));
 	}
 	if(sunkbd_type == SUNKBD_TYPE2)
 		sunkbd_clickp = 0;
 
-	if(sunkbd_clickp)
+	spin_lock_irq(&sunkbd_lock);
+
+	if(sunkbd_clickp) {
+		send_cmd(SKBDCMD_CLICK);
 		printk("with keyclick\n");
-	else
+	} else {
+		send_cmd(SKBDCMD_NOCLICK);
 		printk("without keyclick\n");
+	}
 
 	/* Dork with led lights, then turn them all off */
 	send_cmd(SKBDCMD_SETLED); send_cmd(0xf); /* All on */
 	send_cmd(SKBDCMD_SETLED); send_cmd(0x0); /* All off */
 
+	spin_unlock_irq(&sunkbd_lock);
+
 	/* Register the /dev/kbd interface */
-	if (register_chrdev (KBD_MAJOR, "kbd", &kbd_fops)){
+	devfs_register (NULL, "kbd", DEVFS_FL_DEFAULT,
+			KBD_MAJOR, 0,
+			S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH,
+			&kbd_fops, NULL);
+	if (devfs_register_chrdev (KBD_MAJOR, "kbd", &kbd_fops)){
 		printk ("Could not register /dev/kbd device\n");
 		return;
 	}

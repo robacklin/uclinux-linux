@@ -3,7 +3,7 @@
 /*
  *	nap.h -- Gilbarco/NAP support.
  *
- * 	(C) Copyright 2001, SnapGear (www.snapgear.com) 
+ * 	(C) Copyright 2001-2003, SnapGear (www.snapgear.com) 
  */
 
 /****************************************************************************/
@@ -64,28 +64,55 @@ static __inline__ void mcf_setpa(unsigned int mask, unsigned int bits)
 /*
  *	Gilbarco/NAP based hardware. DTR/DCD lines are wired to GPB lines.
  */
-#define	MCFPP_DCD0	0x0080
-#define	MCFPP_DCD1	0x0020
-#define	MCFPP_DTR0	0x0040
-#define	MCFPP_DTR1	0x0010
+#define	MCF_HAVEDCD0
+#define	MCF_HAVEDCD1
+#define	MCF_HAVEDTR0
+#define	MCF_HAVEDTR1
 
 #ifndef __ASSEMBLY__
 /*
- *	These functions defined to give quasi generic access to the
- *	PPIO bits used for DTR/DCD.
+ *	Functions to abstract access to the DCD/DTR lines. There is no
+ *	standard way to implement these on ColdFire, mostly spare PPIO
+ *	bits are used.
  */
-static __inline__ unsigned int mcf_getppdata(void)
+static __inline__ unsigned int mcf_getppdcd(unsigned int portnr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
-	return((unsigned int) *pp);
+#ifdef CONFIG_SMC91111
+	if (portnr == 0) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		return((*pp & 0x0080) ? 0 : 1);
+	} else if (portnr == 1) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		return((*pp & 0x0004) ? 0 : 1);
+	}
+#else
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		return((*pp & (portnr ? 0x0020 : 0x0080)) ? 0 : 1);
+	}
+#endif
+	return(0);
+}
+static __inline__ unsigned int mcf_getppdtr(unsigned int portnr)
+{
+	volatile unsigned short *pp;
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		return((*pp & (portnr ? 0x0010 : 0x0040)) ? 0 : 1);
+	}
+	return(0);
 }
 
-static __inline__ void mcf_setppdata(unsigned int mask, unsigned int bits)
+static __inline__ void mcf_setppdtr(unsigned int portnr, unsigned int dtr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
-	*pp = (*pp & ~mask) | bits;
+	unsigned short bit;
+	if (portnr < 2) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PBDAT);
+		bit = (portnr ? 0x0010 : 0x0040);
+		*pp = (*pp & ~bit) | (dtr ? 0 : bit);
+	}
 }
 #endif /* __ASSEMBLY__ */
 #endif /* CONFIG_M5272 */

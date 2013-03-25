@@ -55,7 +55,7 @@
  * copied and put under another distribution licence
  * [including the GNU Public Licence.]
  */
-
+#ifdef __KERNEL__
 #ifndef HEADER_SHA_H
 #define HEADER_SHA_H
 
@@ -116,4 +116,7 @@ void SHA1_Transform(SHA_CTX *c, const unsigned char *data);
 }
 #endif
 
+#endif
+#else /* __KERNEL__ */
+#include_next <openssl/sha.h>
 #endif

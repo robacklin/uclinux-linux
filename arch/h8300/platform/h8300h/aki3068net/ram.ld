@@ -1,15 +1,12 @@
-/* AKI3068NET RAM */
+/* AE-3068 (aka. aki3068net) RAM */
 
 OUTPUT_ARCH(h8300h)
 ENTRY("__start")
 
 MEMORY 
 	{
-	ram    : ORIGIN = 0x400000, LENGTH = 0xA0000
-	rdisk  : ORIGIN = 0x4A0000, LENGTH = 0x60000
-	uram   : ORIGIN = 0x510000, LENGTH = 0xF0000
+	ram    : ORIGIN = 0x400000, LENGTH = 0x600000-0x400000
 	eram   : ORIGIN = 0x600000, LENGTH = 0
-        iram   : ORIGIN = 0xffbf20, LENGTH = 0x4000
 	}
 
 SECTIONS
@@ -21,53 +18,65 @@ SECTIONS
         .text :
 	{
 	__stext = . ;
-        *(.text)
+        	*(.text)
+		*(.text.exit)
+		*(.text.lock)
+	. = ALIGN(0x4) ;
+		*(.kstrtab)
+	. = ALIGN(0x4) ;
+		*(.rodata*)
+	. = ALIGN(16);          /* Exception table              */
+	___start___ex_table = .;
+		*(__ex_table)
+	___stop___ex_table = .;
+
+        ___start___ksymtab = .;  /* Kernel symbol table          */
+		 *(__ksymtab)
+	___stop___ksymtab = .;
+
+	. = ALIGN(0x4) ;
 	__etext = . ;
         } > ram
-	.rodata :
-	{
-	___data_rom_start = ALIGN ( 4 ) ;
-	} > ram
-	.erom :
-	{
-	__erom = . ;
-	} > ram
 	.data : 
 	{
-	__ramstart = . ;
 	__sdata = . ;
 	___data_start = . ;
-        *(.data)
+		*(.data)
+		*(.data.exit)	
+		*(.exitcall.exit)
+
+	. = ALIGN(0x2000) ;
+		*(.data.init_task)
+	. = ALIGN(0x2000) ;
+        ___init_begin = .;
+        *(.text.init)
+        *(.data.init)
+        . = ALIGN(16);
+        ___setup_start = .;
+        *(.setup.init)
+        ___setup_end = .;
+        ___initcall_start = .;
+        *(.initcall.init)
+        . = ALIGN(4) ;
+        ___initcall_end = .;
+        ___init_end = .;
 	__edata = . ;
-	edata = ALIGN( 0x10 ) ;
-	___data_end = ALIGN( 0x10 ) ;
+	. = ALIGN(0x4) ;
 	} > ram
-        .bss :
-        {
+	.bss :
+	{
 	__sbss = . ;
-	___bss_start = . ;
-	*(.bss)
-	*(COMMON)
+		*(.bss)
+	. = ALIGN(0x4) ;
+		*(COMMON)
+	. = ALIGN(0x4) ;
 	__ebss = . ;
-	___bss_end = . ;
+	__end = . ;
+	__ramstart = .;
 	} > ram
-	.rootimg :
-	{
-	__rootimage = . ;
-	} > rdisk
-	.dummy1 :
-	{
-	end = ALIGN( 0x10 ) ;
-	__end = ALIGN( 0x10 ) ;
-	} > uram
-	.ram_vec : AT(___bss_end)
-	{
-	__ram_vector       = . ;
-	} > iram 
-	__ram_vector_image = LOADADDR(.ram_vec) ;
         .dummy2 :
         {
-        _COMMAND_START = . - 0x200 ;
+        COMMAND_START = . - 0x200 ;
 	__ramend = . ;
 	} > eram
 }

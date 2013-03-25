@@ -7,6 +7,7 @@
 
 #include <linux/mm.h>
 #include <linux/sysctl.h>
+#include <linux/init.h>
 #include <net/ax25.h>
 #include <net/netrom.h>
 
@@ -16,14 +17,16 @@
 static int min_quality[] = {0}, max_quality[] = {255};
 static int min_obs[]     = {0}, max_obs[]     = {255};
 static int min_ttl[]     = {0}, max_ttl[]     = {255};
-static int min_t1[]      = {5 * NR_SLOWHZ};
-static int max_t1[]      = {600 * NR_SLOWHZ};
+static int min_t1[]      = {5 * HZ};
+static int max_t1[]      = {600 * HZ};
 static int min_n2[]      = {2}, max_n2[]      = {127};
-static int min_t2[]      = {1 * NR_SLOWHZ};
-static int max_t2[]      = {60 * NR_SLOWHZ};
-static int min_t4[]      = {1 * NR_SLOWHZ};
-static int max_t4[]      = {1000 * NR_SLOWHZ};
+static int min_t2[]      = {1 * HZ};
+static int max_t2[]      = {60 * HZ};
+static int min_t4[]      = {1 * HZ};
+static int max_t4[]      = {1000 * HZ};
 static int min_window[]  = {1}, max_window[]  = {127};
+static int min_idle[]    = {0 * HZ};
+static int max_idle[]    = {65535 * HZ};
 static int min_route[]   = {0}, max_route[]   = {1};
 static int min_fails[]   = {1}, max_fails[]   = {10};
 
@@ -54,6 +57,9 @@ static ctl_table nr_table[] = {
         {NET_NETROM_TRANSPORT_REQUESTED_WINDOW_SIZE, "transport_requested_window_size",
          &sysctl_netrom_transport_requested_window_size, sizeof(int), 0644, NULL,
          &proc_dointvec_minmax, &sysctl_intvec, NULL, &min_window, &max_window},
+        {NET_NETROM_TRANSPORT_NO_ACTIVITY_TIMEOUT, "transport_no_activity_timeout",
+         &sysctl_netrom_transport_no_activity_timeout, sizeof(int), 0644, NULL,
+         &proc_dointvec_minmax, &sysctl_intvec, NULL, &min_idle, &max_idle},
         {NET_NETROM_ROUTING_CONTROL, "routing_control",
          &sysctl_netrom_routing_control, sizeof(int), 0644, NULL,
          &proc_dointvec_minmax, &sysctl_intvec, NULL, &min_route, &max_route},
@@ -73,7 +79,7 @@ static ctl_table nr_root_table[] = {
 	{0}
 };
 
-void nr_register_sysctl(void)
+void __init nr_register_sysctl(void)
 {
 	nr_table_header = register_sysctl_table(nr_root_table, 1);
 }

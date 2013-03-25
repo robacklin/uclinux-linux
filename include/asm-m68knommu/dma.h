@@ -485,6 +485,8 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 
 /* Don't define MAX_DMA_ADDRESS; it's useless on the m68k/coldfire and any
    occurrence should be flagged as an error.  */
+/* under 2.4 it is actually needed by the new bootmem allocator */
+#define MAX_DMA_ADDRESS PAGE_OFFSET
 
 /* These are in kernel/dma.c: */
 extern int request_dma(unsigned int dmanr, const char *device_id);	/* reserve a DMA channel */

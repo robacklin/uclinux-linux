@@ -1,119 +1,11 @@
-/* $Id: icn.h,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
-
+/* $Id: icn.h,v 1.1.4.1 2001/11/20 14:19:37 kai Exp $
+ *
  * ISDN lowlevel-module for the ICN active ISDN-Card.
  *
- * Copyright 1994-1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1994 by Fritz Elfert (fritz@isdn4linux.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: icn.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.26.2.1  1998/11/05 22:13:06  fritz
- * Changed mail-address.
- *
- * Revision 1.26  1997/02/14 12:23:16  fritz
- * Added support for new insmod parameter handling.
- *
- * Revision 1.25  1997/02/10 10:10:31  fritz
- * Changes for Kernel 2.1.X compatibility.
- * Enhanced initialization, can recover from
- * misconfiguration by other autoprobing drivers.
- *
- * Revision 1.24  1997/01/29 22:34:46  fritz
- * Cleanup, Corrected D64S setup of 2nd channel.
- *
- * Revision 1.23  1996/12/17 18:47:55  tsbogend
- * changed timeouts from absolute numbers to HZ based values
- *
- * Revision 1.22  1996/11/13 02:37:33  fritz
- * Added delay include.
- *
- * Revision 1.21  1996/08/29 20:35:57  fritz
- * Speed up B-Channel polling interval.
- *
- * Revision 1.20  1996/06/24 17:20:37  fritz
- * Bugfixes in pollbchan_send():
- *   - Using lock field of skbuff breaks networking.
- *   - Added channel locking
- *   - changed dequeuing scheme.
- * Eliminated misc. compiler warnings.
- *
- * Revision 1.19  1996/06/06 13:58:35  fritz
- * Changed code to be architecture independent
- *
- * Revision 1.18  1996/06/03 19:59:30  fritz
- * Removed include of config.h
- *
- * Revision 1.17  1996/05/18 00:47:04  fritz
- * Removed callback debug code.
- *
- * Revision 1.16  1996/05/17 15:46:43  fritz
- * Removed own queue management.
- * Changed queue management to use sk_buffs.
- *
- * Revision 1.15  1996/05/02 04:01:57  fritz
- * Removed ICN_MAXCARDS
- *
- * Revision 1.14  1996/05/02 00:40:29  fritz
- * Major rewrite to support more than one card
- * with a single module.
- * Support for new firmware.
- *
- * Revision 1.13  1996/04/20 16:51:41  fritz
- * Increased status buffer.
- * Misc. typos
- *
- * Revision 1.12  1996/01/22 05:01:22  fritz
- * Revert to GPL.
- *
- * Revision 1.11  1995/12/18  18:25:00  fritz
- * Support for ICN-2B Cards.
- * Change for supporting user-settable service-octet.
- *
- * Revision 1.10  1995/10/29  21:43:10  fritz
- * Added support for leased lines.
- *
- * Revision 1.9  1995/04/23  13:42:10  fritz
- * Added some constants for distinguishing 1TR6 and DSS1
- *
- * Revision 1.8  1995/03/25  23:18:55  fritz
- * Changed ICN_PORTLEN to reflect correct number of ports.
- *
- * Revision 1.7  1995/03/15  12:52:06  fritz
- * Some cleanup
- *
- * Revision 1.6  1995/02/20  03:49:22  fritz
- * Fixed ICN_MAX_SQUEUE to correctly reflect outstanding bytes, not number
- * of buffers.
- *
- * Revision 1.5  1995/01/29  23:36:50  fritz
- * Minor cleanup.
- *
- * Revision 1.4  1995/01/09  07:41:20  fritz
- * Added GPL-Notice
- *
- * Revision 1.3  1995/01/04  05:14:20  fritz
- * removed include of linux/asm/string.h for compiling with Linux 1.1.76
- *
- * Revision 1.2  1995/01/02  02:15:57  fritz
- * Misc. Bugfixes
- *
- * Revision 1.1  1994/12/14  18:02:38  fritz
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -143,7 +35,6 @@ typedef struct icn_cdef {
 #ifdef __KERNEL__
 /* Kernel includes */
 
-#include <linux/module.h>
 #include <linux/version.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
@@ -152,7 +43,7 @@ typedef struct icn_cdef {
 #include <asm/io.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/ioport.h>
@@ -271,6 +162,9 @@ typedef struct icn_card {
 	char *msg_buf_read;     /* Readpointer for statusbuffer     */
 	char *msg_buf_end;      /* Pointer to end of statusbuffer   */
 	int sndcount[ICN_BCH];  /* Byte-counters for B-Ch.-send     */
+	int xlen[ICN_BCH];      /* Byte-counters/Flags for sent-ACK */
+	struct sk_buff *xskb[ICN_BCH];
+	                        /* Current transmitted skb          */
 	struct sk_buff_head
 	 spqueue[ICN_BCH];      /* Sendqueue                        */
 	char regname[35];       /* Name used for request_region     */
@@ -281,6 +175,7 @@ typedef struct icn_card {
  * Main driver data
  */
 typedef struct icn_dev {
+	unsigned long memaddr;	/* Address of memory mapped buffers */
 	icn_shmem *shmem;       /* Pointer to memory-mapped-buffers */
 	int mvalid;             /* IO-shmem has been requested      */
 	int channel;            /* Currently mapped channel         */
@@ -298,29 +193,6 @@ static u_char chan2bank[] =
 {0, 4, 8, 12};                  /* for icn_map_channel() */
 
 static icn_dev dev;
-
-/* With modutils >= 1.1.67 Integers can be changed while loading a
- * module. For this reason define the Port-Base an Shmem-Base as
- * integers.
- */
-static int portbase = ICN_BASEADDR;
-static int membase = ICN_MEMADDR;
-static char *icn_id = "\0";
-static char *icn_id2 = "\0";
-
-#ifdef MODULE
-#if (LINUX_VERSION_CODE > 0x020111)
-MODULE_AUTHOR("Fritz Elfert");
-MODULE_PARM(portbase, "i");
-MODULE_PARM_DESC(portbase, "Port adress of first card");
-MODULE_PARM(membase, "i");
-MODULE_PARM_DESC(membase, "Shared memory adress of all cards");
-MODULE_PARM(icn_id, "s");
-MODULE_PARM_DESC(icn_id, "ID-String of first card");
-MODULE_PARM(icn_id2, "s");
-MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
-#endif
-#endif
 
 #endif                          /* __KERNEL__ */
 
@@ -379,17 +251,6 @@ MODULE_PARM_DESC(icn_id2, "ID-String of first card, second S0 (4B only)");
 		   readb(&msg_i)-readb(&msg_o))
 
 #define CID (card->interface.id)
-
-#define MIN(a,b) ((a<b)?a:b)
-#define MAX(a,b) ((a>b)?a:b)
-
-/* Hopefully, a separate resource-registration-scheme for shared-memory
- * will be introduced into the kernel. Until then, we use the normal
- * routines, designed for port-registration.
- */
-#define check_shmem   check_region
-#define release_shmem release_region
-#define request_shmem request_region
 
 #endif                          /* defined(__KERNEL__) || defined(__DEBUGVAR__) */
 #endif                          /* icn_h */

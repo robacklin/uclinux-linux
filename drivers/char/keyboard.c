@@ -1,8 +1,6 @@
 /*
  * linux/drivers/char/keyboard.c
  *
- * Keyboard driver for Linux v0.99 using Latin-1.
- *
  * Written for linux by Johan Myreen as a translation from
  * the assembly version by Linus (with diacriticals added)
  *
@@ -14,45 +12,38 @@
  * Added decr/incr_console, dynamic keymaps, Unicode support,
  * dynamic function/string keys, led setting,  Sept 1994
  * `Sticky' modifier keys, 951006.
+ *
+ * 11-11-96: SAK should now work in the raw mode (Martin Mares)
  * 
+ * Modified to provide 'generic' keyboard support by Hamish Macdonald
+ * Merge with the m68k keyboard driver and split-off of the PC low-level
+ * parts by Geert Uytterhoeven, May 1997
+ *
+ * 27-05-97: Added support for the Magic SysRq Key (Martin Mares)
+ * 30-07-98: Dead keys redone, aeb@cwi.nl.
  */
 
-#define KEYBOARD_IRQ 1
-#define DISABLE_KBD_DURING_INTERRUPTS 0
-
+#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
-#include <linux/interrupt.h>
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/mm.h>
-#include <linux/ptrace.h>
-#include <linux/signal.h>
 #include <linux/string.h>
-#include <linux/ioport.h>
 #include <linux/random.h>
+#include <linux/init.h>
 
+#include <asm/keyboard.h>
 #include <asm/bitops.h>
 
-#include "kbd_kern.h"
-#include "diacr.h"
-#include "vt_kern.h"
-
-/*
- * On non-x86 hardware we do a full keyboard controller
- * initialization, in case the bootup software hasn't done
- * it. On a x86, the BIOS will already have initialized the
- * keyboard.
- */
-#ifndef __i386__
-#define INIT_KBD
-static int initialize_kbd(void);
-#endif
+#include <linux/kbd_kern.h>
+#include <linux/kbd_diacr.h>
+#include <linux/vt_kern.h>
+#include <linux/kbd_ll.h>
+#include <linux/sysrq.h>
+#include <linux/pm.h>
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
-
-#define KBD_REPORT_ERR
-#define KBD_REPORT_UNKN
-/* #define KBD_IS_FOCUS_9000 */
 
 #ifndef KBD_DEFMODE
 #define KBD_DEFMODE ((1 << VC_REPEAT) | (1 << VC_META))
@@ -70,16 +61,14 @@ static int initialize_kbd(void);
 #define KBD_DEFLOCK 0
 #endif
 
-#include <asm/io.h>
-#include <asm/system.h>
+void (*kbd_ledfunc)(unsigned int led);
+EXPORT_SYMBOL(handle_scancode);
+EXPORT_SYMBOL(kbd_ledfunc);
+EXPORT_SYMBOL(kbd_refresh_leds);
 
-extern void poke_blanked_console(void);
 extern void ctrl_alt_del(void);
-extern void reset_vc(unsigned int new_console);
-extern void scrollback(int);
-extern void scrollfront(int);
 
-unsigned char kbd_read_mask = 0x01;	/* modified by psaux.c */
+struct console;
 
 /*
  * global state includes the following, and various static variables
@@ -88,45 +77,45 @@ unsigned char kbd_read_mask = 0x01;	/* modified by psaux.c */
  */
 
 /* shift state counters.. */
-static unsigned char k_down[NR_SHIFT] = {0, };
+static unsigned char k_down[NR_SHIFT];
 /* keyboard key bitmap */
-#define BITS_PER_LONG (8*sizeof(unsigned long))
-static unsigned long key_down[256/BITS_PER_LONG] = { 0, };
+static unsigned long key_down[256/BITS_PER_LONG];
 
-static int dead_key_next = 0;
+static int dead_key_next;
 /* 
  * In order to retrieve the shift_state (for the mouse server), either
  * the variable must be global, or a new procedure must be created to 
  * return the value. I chose the former way.
  */
-/*static*/ int shift_state = 0;
+int shift_state;
 static int npadch = -1;			/* -1 or number assembled on pad */
-static unsigned char diacr = 0;
-static char rep = 0;			/* flag telling character repeat */
+static unsigned char diacr;
+static char rep;			/* flag telling character repeat */
 struct kbd_struct kbd_table[MAX_NR_CONSOLES];
 static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
-static struct tty_struct * tty = NULL;
+static struct tty_struct * tty;
+static unsigned char prev_scancode;
 
-/* used only by send_data - set by keyboard_interrupt */
-static volatile unsigned char reply_expected = 0;
-static volatile unsigned char acknowledge = 0;
-static volatile unsigned char resend = 0;
-
-extern void compute_shiftstate(void);
+void compute_shiftstate(void);
 
 typedef void (*k_hand)(unsigned char value, char up_flag);
 typedef void (k_handfn)(unsigned char value, char up_flag);
 
 static k_handfn
 	do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
-	do_meta, do_ascii, do_lock, do_lowercase, do_slock, do_ignore;
+	do_meta, do_ascii, do_lock, do_lowercase, do_slock, do_dead2,
+	do_ignore;
 
 static k_hand key_handler[16] = {
 	do_self, do_fn, do_spec, do_pad, do_dead, do_cons, do_cur, do_shift,
-	do_meta, do_ascii, do_lock, do_lowercase, do_slock,
-	do_ignore, do_ignore, do_ignore
+	do_meta, do_ascii, do_lock, do_lowercase, do_slock, do_dead2,
+	do_ignore, do_ignore
 };
+
+/* Key types processed even in raw modes */
+
+#define TYPES_ALLOWED_IN_RAW_MODE ((1 << KT_SPEC) | (1 << KT_SHIFT))
 
 typedef void (*void_fnp)(void);
 typedef void (void_fn)(void);
@@ -143,37 +132,30 @@ static void_fnp spec_fn_table[] = {
 	decr_console,	incr_console,	spawn_console,	bare_num
 };
 
+#define SPECIALS_ALLOWED_IN_RAW_MODE (1 << KVAL(K_SAK))
+
 /* maximum values each key_handler can handle */
 const int max_vals[] = {
 	255, SIZE(func_table) - 1, SIZE(spec_fn_table) - 1, NR_PAD - 1,
 	NR_DEAD - 1, 255, 3, NR_SHIFT - 1,
 	255, NR_ASCII - 1, NR_LOCK - 1, 255,
-	NR_LOCK - 1
+	NR_LOCK - 1, 255
 };
 
 const int NR_TYPES = SIZE(max_vals);
 
-static void put_queue(int);
+/* N.B. drivers/macintosh/mac_keyb.c needs to call put_queue */
+void put_queue(int);
 static unsigned char handle_diacr(unsigned char);
 
-/* pt_regs - set by keyboard_interrupt(), used by show_ptregs() */
-static struct pt_regs * pt_regs;
+/* kbd_pt_regs - set by keyboard_interrupt(), used by show_ptregs() */
+struct pt_regs * kbd_pt_regs;
 
-static inline void kb_wait(void)
-{
-	int i;
+#ifdef CONFIG_MAGIC_SYSRQ
+static int sysrq_pressed;
+#endif
 
-	for (i=0; i<0x100000; i++)
-		if ((inb_p(0x64) & 0x02) == 0)
-			return;
-	printk(KERN_WARNING "Keyboard timed out\n");
-}
-
-static inline void send_cmd(unsigned char c)
-{
-	kb_wait();
-	outb(c,0x64);
-}
+static struct pm_dev *pm_kbd;
 
 /*
  * Many other routines do put_queue, but I think either
@@ -198,324 +180,108 @@ void to_utf8(ushort c) {
 
 /*
  * Translation of escaped scancodes to keycodes.
- * This is now user-settable.
- * The keycodes 1-88,96-111,119 are fairly standard, and
- * should probably not be changed - changing might confuse X.
- * X also interprets scancode 0x5d (KEY_Begin).
- *
- * For 1-88 keycode equals scancode.
+ * This is now user-settable (for machines were it makes sense).
  */
-
-#define E0_KPENTER 96
-#define E0_RCTRL   97
-#define E0_KPSLASH 98
-#define E0_PRSCR   99
-#define E0_RALT    100
-#define E0_BREAK   101  /* (control-pause) */
-#define E0_HOME    102
-#define E0_UP      103
-#define E0_PGUP    104
-#define E0_LEFT    105
-#define E0_RIGHT   106
-#define E0_END     107
-#define E0_DOWN    108
-#define E0_PGDN    109
-#define E0_INS     110
-#define E0_DEL     111
-
-#define E1_PAUSE   119
-
-/*
- * The keycodes below are randomly located in 89-95,112-118,120-127.
- * They could be thrown away (and all occurrences below replaced by 0),
- * but that would force many users to use the `setkeycodes' utility, where
- * they needed not before. It does not matter that there are duplicates, as
- * long as no duplication occurs for any single keyboard.
- */
-#define SC_LIM 89
-
-#define FOCUS_PF1 85           /* actual code! */
-#define FOCUS_PF2 89
-#define FOCUS_PF3 90
-#define FOCUS_PF4 91
-#define FOCUS_PF5 92
-#define FOCUS_PF6 93
-#define FOCUS_PF7 94
-#define FOCUS_PF8 95
-#define FOCUS_PF9 120
-#define FOCUS_PF10 121
-#define FOCUS_PF11 122
-#define FOCUS_PF12 123
-
-#define JAP_86     124
-/* tfj@olivia.ping.dk:
- * The four keys are located over the numeric keypad, and are
- * labelled A1-A4. It's an rc930 keyboard, from
- * Regnecentralen/RC International, Now ICL.
- * Scancodes: 59, 5a, 5b, 5c.
- */
-#define RGN1 124
-#define RGN2 125
-#define RGN3 126
-#define RGN4 127
-
-static unsigned char high_keys[128 - SC_LIM] = {
-  RGN1, RGN2, RGN3, RGN4, 0, 0, 0,                   /* 0x59-0x5f */
-  0, 0, 0, 0, 0, 0, 0, 0,                            /* 0x60-0x67 */
-  0, 0, 0, 0, 0, FOCUS_PF11, 0, FOCUS_PF12,          /* 0x68-0x6f */
-  0, 0, 0, FOCUS_PF2, FOCUS_PF9, 0, 0, FOCUS_PF3,    /* 0x70-0x77 */
-  FOCUS_PF4, FOCUS_PF5, FOCUS_PF6, FOCUS_PF7,        /* 0x78-0x7b */
-  FOCUS_PF8, JAP_86, FOCUS_PF10, 0                   /* 0x7c-0x7f */
-};
-
-/* BTC */
-#define E0_MACRO   112
-/* LK450 */
-#define E0_F13     113
-#define E0_F14     114
-#define E0_HELP    115
-#define E0_DO      116
-#define E0_F17     117
-#define E0_KPMINPLUS 118
-/*
- * My OmniKey generates e0 4c for  the "OMNI" key and the
- * right alt key does nada. [kkoller@nyx10.cs.du.edu]
- */
-#define E0_OK	124
-/*
- * New microsoft keyboard is rumoured to have
- * e0 5b (left window button), e0 5c (right window button),
- * e0 5d (menu button). [or: LBANNER, RBANNER, RMENU]
- * [or: Windows_L, Windows_R, TaskMan]
- */
-#define E0_MSLW	125
-#define E0_MSRW	126
-#define E0_MSTM	127
-
-static unsigned char e0_keys[128] = {
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x00-0x07 */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x08-0x0f */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x10-0x17 */
-  0, 0, 0, 0, E0_KPENTER, E0_RCTRL, 0, 0,	      /* 0x18-0x1f */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x20-0x27 */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x28-0x2f */
-  0, 0, 0, 0, 0, E0_KPSLASH, 0, E0_PRSCR,	      /* 0x30-0x37 */
-  E0_RALT, 0, 0, 0, 0, E0_F13, E0_F14, E0_HELP,	      /* 0x38-0x3f */
-  E0_DO, E0_F17, 0, 0, 0, 0, E0_BREAK, E0_HOME,	      /* 0x40-0x47 */
-  E0_UP, E0_PGUP, 0, E0_LEFT, E0_OK, E0_RIGHT, E0_KPMINPLUS, E0_END,/* 0x48-0x4f */
-  E0_DOWN, E0_PGDN, E0_INS, E0_DEL, 0, 0, 0, 0,	      /* 0x50-0x57 */
-  0, 0, 0, E0_MSLW, E0_MSRW, E0_MSTM, 0, 0,	      /* 0x58-0x5f */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x60-0x67 */
-  0, 0, 0, 0, 0, 0, 0, E0_MACRO,		      /* 0x68-0x6f */
-  0, 0, 0, 0, 0, 0, 0, 0,			      /* 0x70-0x77 */
-  0, 0, 0, 0, 0, 0, 0, 0			      /* 0x78-0x7f */
-};
 
 int setkeycode(unsigned int scancode, unsigned int keycode)
 {
-	if (scancode < SC_LIM || scancode > 255 || keycode > 127)
-	  return -EINVAL;
-	if (scancode < 128)
-	  high_keys[scancode - SC_LIM] = keycode;
-	else
-	  e0_keys[scancode - 128] = keycode;
-	return 0;
+    return kbd_setkeycode(scancode, keycode);
 }
 
 int getkeycode(unsigned int scancode)
 {
-	return
-	  (scancode < SC_LIM || scancode > 255) ? -EINVAL :
-	  (scancode < 128) ? high_keys[scancode - SC_LIM] :
-	    e0_keys[scancode - 128];
+    return kbd_getkeycode(scancode);
 }
 
-#if DISABLE_KBD_DURING_INTERRUPTS
-#define disable_keyboard()	do { send_cmd(0xAD); kb_wait(); } while (0)
-#define enable_keyboard()	send_cmd(0xAE)
-#else
-#define disable_keyboard()	/* nothing */
-#define enable_keyboard()	/* nothing */
-#endif
-
-static void handle_scancode(unsigned char scancode)
+void handle_scancode(unsigned char scancode, int down)
 {
 	unsigned char keycode;
-	static unsigned int prev_scancode = 0;   /* remember E0, E1 */
-	char up_flag;				 /* 0 or 0200 */
+	char up_flag = down ? 0 : 0200;
 	char raw_mode;
+	char have_keycode;
 
-	if (reply_expected) {
-	  /* 0xfa, 0xfe only mean "acknowledge", "resend" for most keyboards */
-	  /* but they are the key-up scancodes for PF6, PF10 on a FOCUS 9000 */
-		reply_expected = 0;
-		if (scancode == 0xfa) {
-			acknowledge = 1;
-			return;
-		} else if (scancode == 0xfe) {
-			resend = 1;
-			return;
-		}
-		/* strange ... */
-		reply_expected = 1;
-#if 0
-		printk(KERN_DEBUG "keyboard reply expected - got %02x\n",
-		       scancode);
-#endif
-	}
-	if (scancode == 0) {
-#ifdef KBD_REPORT_ERR
-		printk(KERN_INFO "keyboard buffer overflow\n");
-#endif
-		prev_scancode = 0;
-		return;
-	}
-	do_poke_blanked_console = 1;
-	mark_bh(CONSOLE_BH);
-	add_keyboard_randomness(scancode);
+	pm_access(pm_kbd);
+	add_keyboard_randomness(scancode | up_flag);
 
 	tty = ttytab? ttytab[fg_console]: NULL;
 	if (tty && (!tty->driver_data)) {
-		/* This is to workaround ugly bug in tty_io.c, which
-                   does not do locking when it should */
+		/*
+		 * We touch the tty structure via the ttytab array
+		 * without knowing whether or not tty is open, which
+		 * is inherently dangerous.  We currently rely on that
+		 * fact that console_open sets tty->driver_data when
+		 * it opens it, and clears it when it closes it.
+		 */
 		tty = NULL;
 	}
 	kbd = kbd_table + fg_console;
-	if ((raw_mode = (kbd->kbdmode == VC_RAW))) {
- 		put_queue(scancode);
+	/*
+	 *  Convert scancode to keycode
+	 */
+	raw_mode = (kbd->kbdmode == VC_RAW);
+	have_keycode = kbd_translate(scancode, &keycode, raw_mode);
+	if (raw_mode) {
+		/*
+		 *	The following is a workaround for hardware
+		 *	which sometimes send the key release event twice 
+		 */
+		unsigned char next_scancode = scancode|up_flag;
+		if (have_keycode && up_flag && next_scancode==prev_scancode) {
+			/* unexpected 2nd release event */
+		} else {
+			/* 
+			 * Only save previous scancode if it was a key-up
+			 * and had a single-byte scancode.  
+			 */
+			if (!have_keycode)
+				prev_scancode = 1;
+			else if (!up_flag || prev_scancode == 1)
+				prev_scancode = 0;
+			else
+				prev_scancode = next_scancode;
+			put_queue(next_scancode);
+		}
 		/* we do not return yet, because we want to maintain
 		   the key_down array, so that we have the correct
 		   values when finishing RAW mode or when changing VT's */
- 	}
-
-	if (scancode == 0xff) {
-	        /* in scancode mode 1, my ESC key generates 0xff */
-		/* the calculator keys on a FOCUS 9000 generate 0xff */
-#ifndef KBD_IS_FOCUS_9000
-#ifdef KBD_REPORT_ERR
-		if (!raw_mode)
-		  printk(KERN_DEBUG "keyboard error\n");
-#endif
-#endif
-		prev_scancode = 0;
-		return;
 	}
 
-	if (scancode == 0xe0 || scancode == 0xe1) {
-		prev_scancode = scancode;
-		return;
- 	}
-
- 	/*
-	 *  Convert scancode to keycode, using prev_scancode.
- 	 */
-	up_flag = (scancode & 0200);
- 	scancode &= 0x7f;
-
-	if (prev_scancode) {
-	  /*
-	   * usually it will be 0xe0, but a Pause key generates
-	   * e1 1d 45 e1 9d c5 when pressed, and nothing when released
-	   */
-	  if (prev_scancode != 0xe0) {
-	      if (prev_scancode == 0xe1 && scancode == 0x1d) {
-		  prev_scancode = 0x100;
-		  return;
-	      } else if (prev_scancode == 0x100 && scancode == 0x45) {
-		  keycode = E1_PAUSE;
-		  prev_scancode = 0;
-	      } else {
-#ifdef KBD_REPORT_UNKN
-		  if (!raw_mode)
-		    printk(KERN_INFO "keyboard: unknown e1 escape sequence\n");
-#endif
-		  prev_scancode = 0;
-		  return;
-	      }
-	  } else {
-	      prev_scancode = 0;
-	      /*
-	       *  The keyboard maintains its own internal caps lock and
-	       *  num lock statuses. In caps lock mode E0 AA precedes make
-	       *  code and E0 2A follows break code. In num lock mode,
-	       *  E0 2A precedes make code and E0 AA follows break code.
-	       *  We do our own book-keeping, so we will just ignore these.
-	       */
-	      /*
-	       *  For my keyboard there is no caps lock mode, but there are
-	       *  both Shift-L and Shift-R modes. The former mode generates
-	       *  E0 2A / E0 AA pairs, the latter E0 B6 / E0 36 pairs.
-	       *  So, we should also ignore the latter. - aeb@cwi.nl
-	       */
-	      if (scancode == 0x2a || scancode == 0x36)
-		return;
-
-	      if (e0_keys[scancode])
-		keycode = e0_keys[scancode];
-	      else {
-#ifdef KBD_REPORT_UNKN
-		  if (!raw_mode)
-		    printk(KERN_INFO "keyboard: unknown scancode e0 %02x\n",
-			   scancode);
-#endif
-		  return;
-	      }
-	  }
-	} else if (scancode >= SC_LIM) {
-	    /* This happens with the FOCUS 9000 keyboard
-	       Its keys PF1..PF12 are reported to generate
-	       55 73 77 78 79 7a 7b 7c 74 7e 6d 6f
-	       Moreover, unless repeated, they do not generate
-	       key-down events, so we have to zero up_flag below */
-	    /* Also, Japanese 86/106 keyboards are reported to
-	       generate 0x73 and 0x7d for \ - and \ | respectively. */
-	    /* Also, some Brazilian keyboard is reported to produce
-	       0x73 and 0x7e for \ ? and KP-dot, respectively. */
-
-	  keycode = high_keys[scancode - SC_LIM];
-
-	  if (!keycode) {
-	      if (!raw_mode) {
-#ifdef KBD_REPORT_UNKN
-		  printk(KERN_INFO "keyboard: unrecognized scancode (%02x)"
-			 " - ignored\n", scancode);
-#endif
-	      }
-	      return;
-	  }
- 	} else
-	  keycode = scancode;
+	if (!have_keycode)
+		goto out;
 
 	/*
 	 * At this point the variable `keycode' contains the keycode.
-	 * Note: the keycode must not be 0.
+	 * Note: the keycode must not be 0 (++Geert: on m68k 0 is valid).
 	 * We keep track of the up/down status of the key, and
 	 * return the keycode if in MEDIUMRAW mode.
 	 */
 
 	if (up_flag) {
 		rep = 0;
- 		if(!clear_bit(keycode, key_down)) {
-		    /* unexpected, but this can happen:
-		       maybe this was a key release for a FOCUS 9000
-		       PF key; if we want to see it, we have to clear
-		       up_flag */
-		    if (keycode >= SC_LIM || keycode == 85)
-		      up_flag = 0;
-		}
+		if(!test_and_clear_bit(keycode, key_down))
+		    up_flag = kbd_unexpected_up(keycode);
 	} else
- 		rep = set_bit(keycode, key_down);
+		rep = test_and_set_bit(keycode, key_down);
 
-	if (raw_mode)
-		return;
+#ifdef CONFIG_MAGIC_SYSRQ		/* Handle the SysRq Hack */
+	if (keycode == SYSRQ_KEY) {
+		sysrq_pressed = !up_flag;
+		goto out;
+	} else if (sysrq_pressed) {
+		if (!up_flag) {
+			handle_sysrq(kbd_sysrq_xlate[keycode], kbd_pt_regs, kbd, tty);
+			goto out;
+		}
+	}
+#endif
 
 	if (kbd->kbdmode == VC_MEDIUMRAW) {
 		/* soon keycodes will require more than one byte */
- 		put_queue(keycode + up_flag);
-		return;
- 	}
+		put_queue(keycode + up_flag);
+		raw_mode = 1;	/* Most key classes will be ignored */
+	}
 
- 	/*
+	/*
 	 * Small change in philosophy: earlier we defined repetition by
 	 *	 rep = keycode == prev_keycode;
 	 *	 prev_keycode = keycode;
@@ -524,9 +290,9 @@ static void handle_scancode(unsigned char scancode)
 	 */
 
 	/*
- 	 *  Repeat a key only if the input buffers are empty or the
- 	 *  characters get echoed locally. This makes key repeat usable
- 	 *  with slow applications and under heavy loads.
+	 *  Repeat a key only if the input buffers are empty or the
+	 *  characters get echoed locally. This makes key repeat usable
+	 *  with slow applications and under heavy loads.
 	 */
 	if (!rep ||
 	    (vc_kbd_mode(kbd,VC_REPEAT) && tty &&
@@ -535,7 +301,8 @@ static void handle_scancode(unsigned char scancode)
 		u_char type;
 
 		/* the XOR below used to be an OR */
-		int shift_final = shift_state ^ kbd->lockstate ^ kbd->slockstate;
+		int shift_final = (shift_state | kbd->slockstate) ^
+		    kbd->lockstate;
 		ushort *key_map = key_maps[shift_final];
 
 		if (key_map != NULL) {
@@ -544,6 +311,8 @@ static void handle_scancode(unsigned char scancode)
 
 			if (type >= 0xf0) {
 			    type -= 0xf0;
+			    if (raw_mode && ! (TYPES_ALLOWED_IN_RAW_MODE & (1 << type)))
+				goto out;
 			    if (type == KT_LETTER) {
 				type = KT_LATIN;
 				if (vc_kbd_led(kbd, VC_CAPSLOCK)) {
@@ -557,7 +326,7 @@ static void handle_scancode(unsigned char scancode)
 			      kbd->slockstate = 0;
 			} else {
 			    /* maybe only if (kbd->kbdmode == VC_UNICODE) ? */
-			    if (!up_flag)
+			    if (!up_flag && !raw_mode)
 			      to_utf8(keysym);
 			}
 		} else {
@@ -565,54 +334,30 @@ static void handle_scancode(unsigned char scancode)
 			/* we have at least to update shift_state */
 #if 1			/* how? two almost equivalent choices follow */
 			compute_shiftstate();
+			kbd->slockstate = 0; /* play it safe */
 #else
-			keysym = U(plain_map[keycode]);
+			keysym = U(key_maps[0][keycode]);
 			type = KTYP(keysym);
 			if (type == KT_SHIFT)
 			  (*key_handler[type])(keysym & 0xff, up_flag);
 #endif
 		}
 	}
+out:
+	do_poke_blanked_console = 1;
+	schedule_console_callback();
 }
 
-static void keyboard_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+void put_queue(int ch)
 {
-	unsigned char status;
-
-	pt_regs = regs;
-	disable_keyboard();
-
-	status = inb_p(0x64);
-	do {
-		unsigned char scancode;
-
-		/* mouse data? */
-		if (status & kbd_read_mask & 0x20)
-			break;
-
-		scancode = inb(0x60);
-		if (status & 0x01)
-			handle_scancode(scancode);
-
-		status = inb(0x64);
-	} while (status & 0x01);
-
-	mark_bh(KEYBOARD_BH);
-	enable_keyboard();
-}
-
-static void put_queue(int ch)
-{
-	wake_up(&keypress_wait);
 	if (tty) {
 		tty_insert_flip_char(tty, ch, 0);
-		tty_schedule_flip(tty);
+		con_schedule_flip(tty);
 	}
 }
 
 static void puts_queue(char *cp)
 {
-	wake_up(&keypress_wait);
 	if (!tty)
 		return;
 
@@ -620,7 +365,7 @@ static void puts_queue(char *cp)
 		tty_insert_flip_char(tty, *cp, 0);
 		cp++;
 	}
-	tty_schedule_flip(tty);
+	con_schedule_flip(tty);
 }
 
 static void applkey(int key, char mode)
@@ -634,6 +379,10 @@ static void applkey(int key, char mode)
 
 static void enter(void)
 {
+	if (diacr) {
+		put_queue(diacr);
+		diacr = 0;
+	}
 	put_queue(13);
 	if (vc_kbd_mode(kbd,VC_CRLF))
 		put_queue(10);
@@ -655,8 +404,8 @@ static void caps_on(void)
 
 static void show_ptregs(void)
 {
-	if (pt_regs)
-		show_regs(pt_regs);
+	if (kbd_pt_regs)
+		show_regs(kbd_pt_regs);
 }
 
 static void hold(void)
@@ -732,7 +481,7 @@ static void send_intr(void)
 	if (!tty)
 		return;
 	tty_insert_flip_char(tty, 0, TTY_BREAK);
-	tty_schedule_flip(tty);
+	con_schedule_flip(tty);
 }
 
 static void scroll_forw(void)
@@ -766,18 +515,14 @@ static void spawn_console(void)
 
 static void SAK(void)
 {
-	do_SAK(tty);
-#if 0
 	/*
-	 * Need to fix SAK handling to fix up RAW/MEDIUM_RAW and
-	 * vt_cons modes before we can enable RAW/MEDIUM_RAW SAK
-	 * handling.
-	 * 
-	 * We should do this some day --- the whole point of a secure
-	 * attention key is that it should be guaranteed to always
-	 * work.
+	 * SAK should also work in all raw modes and reset
+	 * them properly.
 	 */
+
+	do_SAK(tty);
 	reset_vc(fg_console);
+#if 0
 	do_unblank_screen();	/* not in interrupt routine? */
 #endif
 }
@@ -796,6 +541,9 @@ static void do_spec(unsigned char value, char up_flag)
 	if (up_flag)
 		return;
 	if (value >= SIZE(spec_fn_table))
+		return;
+	if ((kbd->kbdmode == VC_RAW || kbd->kbdmode == VC_MEDIUMRAW) &&
+	    !(SPECIALS_ALLOWED_IN_RAW_MODE & (1 << value)))
 		return;
 	spec_fn_table[value]();
 }
@@ -831,40 +579,48 @@ static void do_self(unsigned char value, char up_flag)
 static unsigned char ret_diacr[NR_DEAD] =
 	{A_GRAVE, A_ACUTE, A_CFLEX, A_TILDE, A_DIAER, A_CEDIL };
 
-/* If a dead key pressed twice, output a character corresponding to it,	*/
-/* otherwise just remember the dead key.				*/
-
+/* Obsolete - for backwards compatibility only */
 static void do_dead(unsigned char value, char up_flag)
+{
+	value = ret_diacr[value];
+	do_dead2(value,up_flag);
+}
+
+/*
+ * Handle dead key. Note that we now may have several
+ * dead keys modifying the same character. Very useful
+ * for Vietnamese.
+ */
+static void do_dead2(unsigned char value, char up_flag)
 {
 	if (up_flag)
 		return;
 
-	value = ret_diacr[value];
-	if (diacr == value) {   /* pressed twice */
-		diacr = 0;
-		put_queue(value);
-		return;
-	}
-	diacr = value;
+	diacr = (diacr ? handle_diacr(value) : value);
 }
 
 
-/* If space is pressed, return the character corresponding the pending	*/
-/* dead key, otherwise try to combine the two.				*/
-
+/*
+ * We have a combining character DIACR here, followed by the character CH.
+ * If the combination occurs in the table, return the corresponding value.
+ * Otherwise, if CH is a space or equals DIACR, return DIACR.
+ * Otherwise, conclude that DIACR was not combining after all,
+ * queue it and return CH.
+ */
 unsigned char handle_diacr(unsigned char ch)
 {
 	int d = diacr;
 	int i;
 
 	diacr = 0;
-	if (ch == ' ')
-		return d;
 
 	for (i = 0; i < accent_table_size; i++) {
 		if (accent_table[i].diacr == d && accent_table[i].base == ch)
 			return accent_table[i].result;
 	}
+
+	if (ch == ' ' || ch == d)
+		return d;
 
 	put_queue(d);
 	return ch;
@@ -890,8 +646,8 @@ static void do_fn(unsigned char value, char up_flag)
 
 static void do_pad(unsigned char value, char up_flag)
 {
-	static const char *pad_chars = "0123456789+-*/\015,.?";
-	static const char *app_map = "pqrstuvwxylSRQMnn?";
+	static const char *pad_chars = "0123456789+-*/\015,.?()";
+	static const char *app_map = "pqrstuvwxylSRQMnnmPQ";
 
 	if (up_flag)
 		return;		/* no action, if this is a key release */
@@ -1008,8 +764,8 @@ void compute_shiftstate(void)
 	    k = i*BITS_PER_LONG;
 	    for(j=0; j<BITS_PER_LONG; j++,k++)
 	      if(test_bit(k, key_down)) {
-		sym = U(plain_map[k]);
-		if(KTYP(sym) == KT_SHIFT) {
+		sym = U(key_maps[0][k]);
+		if(KTYP(sym) == KT_SHIFT || KTYP(sym) == KT_SLOCK) {
 		  val = KVAL(sym);
 		  if (val == KVAL(K_CAPSSHIFT))
 		    val = KVAL(K_SHIFT);
@@ -1061,40 +817,15 @@ static void do_lock(unsigned char value, char up_flag)
 
 static void do_slock(unsigned char value, char up_flag)
 {
+	do_shift(value,up_flag);
 	if (up_flag || rep)
 		return;
 	chg_vc_kbd_slock(kbd, value);
-}
-
-/*
- * send_data sends a character to the keyboard and waits
- * for a acknowledge, possibly retrying if asked to. Returns
- * the success status.
- */
-static int send_data(unsigned char data)
-{
-	int retries = 3;
-	int i;
-
-	do {
-		kb_wait();
-		acknowledge = 0;
-		resend = 0;
-		reply_expected = 1;
-		outb_p(data, 0x60);
-		for(i=0; i<0x200000; i++) {
-			extern void allow_interrupts(void);
-			allow_interrupts();
-			inb_p(0x64);		/* just as a delay */
-			if (acknowledge)
-				return 1;
-			if (resend)
-				break;
-		}
-		if (!resend)
-			return 0;
-	} while (retries-- > 0);
-	return 0;
+	/* try to make Alt, oops, AltGr and such work */
+	if (!key_maps[kbd->lockstate ^ kbd->slockstate]) {
+		kbd->slockstate = 0;
+		chg_vc_kbd_slock(kbd, value);
+	}
 }
 
 /*
@@ -1176,22 +907,41 @@ static inline unsigned char getleds(void){
  * Aside from timing (which isn't really that important for
  * keyboard interrupts as they happen often), using the software
  * interrupt routines for this thing allows us to easily mask
- * this when we don't want any of the above to happen. Not yet
- * used, but this allows for easy and efficient race-condition
- * prevention later on.
+ * this when we don't want any of the above to happen.
+ * This allows for easy and efficient race-condition prevention
+ * for kbd_ledfunc => input_event(dev, EV_LED, ...) => ...
  */
-static void kbd_bh(void)
+static void kbd_bh(unsigned long dummy)
 {
 	unsigned char leds = getleds();
 
 	if (leds != ledstate) {
 		ledstate = leds;
-		if (!send_data(0xed) || !send_data(leds))
-			send_data(0xf4);	/* re-enable kbd if any errors */
+		kbd_leds(leds);
+		if (kbd_ledfunc) kbd_ledfunc(leds);
 	}
 }
 
-int kbd_init(void)
+EXPORT_SYMBOL(keyboard_tasklet);
+DECLARE_TASKLET_DISABLED(keyboard_tasklet, kbd_bh, 0);
+
+/*
+ * This allows a newly plugged keyboard to pick the LED state.
+ * We do it in this seemindly backwards fashion to ensure proper locking.
+ * Built-in keyboard does refresh on its own.
+ */
+void kbd_refresh_leds(void)
+{
+	tasklet_disable(&keyboard_tasklet);
+	if (ledstate != 0xff && kbd_ledfunc != NULL) kbd_ledfunc(ledstate);
+	tasklet_enable(&keyboard_tasklet);
+}
+
+typedef void (pm_kbd_func) (void);
+
+pm_callback pm_kbd_request_override = NULL;
+
+int __init kbd_init(void)
 {
 	int i;
 	struct kbd_struct kbd0;
@@ -1209,194 +959,12 @@ int kbd_init(void)
 
 	ttytab = console_driver.table;
 
-	request_irq(KEYBOARD_IRQ, keyboard_interrupt, 0, "keyboard", NULL);
-	request_region(0x60,16,"keyboard");
-#ifdef INIT_KBD
-	initialize_kbd();
-#endif
-	init_bh(KEYBOARD_BH, kbd_bh);
-	mark_bh(KEYBOARD_BH);
+	kbd_init_hw();
+
+	tasklet_enable(&keyboard_tasklet);
+	tasklet_schedule(&keyboard_tasklet);
+	
+	pm_kbd = pm_register(PM_SYS_DEV, PM_SYS_KBC, pm_kbd_request_override);
+
 	return 0;
 }
-
-#ifdef INIT_KBD
-/*
- * keyboard controller registers
- */
-#define KBD_STATUS_REG      (unsigned int) 0x64
-#define KBD_CNTL_REG        (unsigned int) 0x64
-#define KBD_DATA_REG	    (unsigned int) 0x60
-/*
- * controller commands
- */
-#define KBD_READ_MODE	    (unsigned int) 0x20
-#define KBD_WRITE_MODE	    (unsigned int) 0x60
-#define KBD_SELF_TEST	    (unsigned int) 0xAA
-#define KBD_SELF_TEST2	    (unsigned int) 0xAB
-#define KBD_CNTL_ENABLE	    (unsigned int) 0xAE
-/*
- * keyboard commands
- */
-#define KBD_ENABLE	    (unsigned int) 0xF4
-#define KBD_DISABLE	    (unsigned int) 0xF5
-#define KBD_RESET	    (unsigned int) 0xFF
-/*
- * keyboard replies
- */
-#define KBD_ACK		    (unsigned int) 0xFA
-#define KBD_POR		    (unsigned int) 0xAA
-/*
- * status register bits
- */
-#define KBD_OBF		    (unsigned int) 0x01
-#define KBD_IBF		    (unsigned int) 0x02
-#define KBD_GTO		    (unsigned int) 0x40
-#define KBD_PERR	    (unsigned int) 0x80
-/*
- * keyboard controller mode register bits
- */
-#define KBD_EKI		    (unsigned int) 0x01
-#define KBD_SYS		    (unsigned int) 0x04
-#define KBD_DMS		    (unsigned int) 0x20
-#define KBD_KCC		    (unsigned int) 0x40
-
-#define TIMEOUT_CONST	500000
-
-static int kbd_wait_for_input(void)
-{
-        int     n;
-        int     status, data;
-
-        n = TIMEOUT_CONST;
-        do {
-                status = inb(KBD_STATUS_REG);
-                /*
-                 * Wait for input data to become available.  This bit will
-                 * then be cleared by the following read of the DATA
-                 * register.
-                 */
-
-                if (!(status & KBD_OBF))
-			continue;
-
-		data = inb(KBD_DATA_REG);
-
-                /*
-                 * Check to see if a timeout error has occurred.  This means
-                 * that transmission was started but did not complete in the
-                 * normal time cycle.  PERR is set when a parity error occurred
-                 * in the last transmission.
-                 */
-                if (status & (KBD_GTO | KBD_PERR)) {
-			continue;
-                }
-		return (data & 0xff);
-        } while (--n);
-        return (-1);	/* timed-out if fell through to here... */
-}
-
-static void kbd_write(int address, int data)
-{
-	int status;
-
-	do {
-		status = inb(KBD_STATUS_REG);  /* spin until input buffer empty*/
-	} while (status & KBD_IBF);
-	outb(data, address);               /* write out the data*/
-}
-
-static int initialize_kbd(void)
-{
-	unsigned long flags;
-
-	save_flags(flags); cli();
-
-	/* Flush any pending input. */
-	while (kbd_wait_for_input() != -1)
-		continue;
-
-	/*
-	 * Test the keyboard interface.
-	 * This seems to be the only way to get it going.
-	 * If the test is successful a x55 is placed in the input buffer.
-	 */
-	kbd_write(KBD_CNTL_REG, KBD_SELF_TEST);
-	if (kbd_wait_for_input() != 0x55) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "keyboard failed self test.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	/*
-	 * Perform a keyboard interface test.  This causes the controller
-	 * to test the keyboard clock and data lines.  The results of the
-	 * test are placed in the input buffer.
-	 */
-	kbd_write(KBD_CNTL_REG, KBD_SELF_TEST2);
-	if (kbd_wait_for_input() != 0x00) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "keyboard failed self test 2.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	/* Enable the keyboard by allowing the keyboard clock to run. */
-	kbd_write(KBD_CNTL_REG, KBD_CNTL_ENABLE);
-
-	/*
-	 * Reset keyboard. If the read times out
-	 * then the assumption is that no keyboard is
-	 * plugged into the machine.
-	 * This defaults the keyboard to scan-code set 2.
-	 */
-	kbd_write(KBD_DATA_REG, KBD_RESET);
-	if (kbd_wait_for_input() != KBD_ACK) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "reset kbd failed, no ACK.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	if (kbd_wait_for_input() != KBD_POR) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "reset kbd failed, not POR.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	/*
-	 * now do a DEFAULTS_DISABLE always
-	 */
-	kbd_write(KBD_DATA_REG, KBD_DISABLE);
-	if (kbd_wait_for_input() != KBD_ACK) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "disable kbd failed, no ACK.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	/*
-	 * Enable keyboard interrupt, operate in "sys" mode,
-	 *  enable keyboard (by clearing the disable keyboard bit),
-	 *  disable mouse, do conversion of keycodes.
-	 */
-	kbd_write(KBD_CNTL_REG, KBD_WRITE_MODE);
-	kbd_write(KBD_DATA_REG, KBD_EKI|KBD_SYS|KBD_DMS|KBD_KCC);
-
-	/*
-	 * now ENABLE the keyboard to set it scanning...
-	 */
-	kbd_write(KBD_DATA_REG, KBD_ENABLE);
-	if (kbd_wait_for_input() != KBD_ACK) {
-		printk(KERN_WARNING "initialize_kbd: "
-		       "keyboard enable failed.\n");
-		restore_flags(flags);
-		return(-1);
-	}
-
-	restore_flags(flags);
-
-	return (1);
-}
-#endif /* INIT_KBD */

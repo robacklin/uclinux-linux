@@ -1,28 +1,28 @@
 /*
  * Helpfile for jazzdma.c -- Mips Jazz R4030 DMA controller support
  */
-
-#ifndef __ASM_JAZZDMA_H
-#define __ASM_JAZZDMA_H
+#ifndef _ASM_JAZZDMA_H
+#define _ASM_JAZZDMA_H
 
 /*
  * Prototypes and macros
  */
+extern void vdma_init(void);
+extern unsigned long vdma_alloc(unsigned long paddr, unsigned long size);
+extern int vdma_free(unsigned long laddr);
+extern int vdma_remap(unsigned long laddr, unsigned long paddr,
+                      unsigned long size);
+extern unsigned long vdma_phys2log(unsigned long paddr);
+extern unsigned long vdma_log2phys(unsigned long laddr);
+extern void vdma_stats(void);		/* for debugging only */
 
-unsigned long vdma_init(unsigned long memory_start, unsigned long memory_end);
-unsigned long vdma_alloc(unsigned long paddr, unsigned long size);
-int vdma_free(unsigned long laddr);
-int vdma_remap(unsigned long laddr, unsigned long paddr, unsigned long size);
-unsigned long vdma_phys2log(unsigned long paddr);
-unsigned long vdma_log2phys(unsigned long laddr);
-void vdma_stats(void);		/* for debugging only */
-
-void vdma_enable(int channel);
-void vdma_disable(int channel);
-void vdma_set_mode(int channel, int mode);
-void vdma_set_addr(int channel, long addr);
-void vdma_set_count(int channel, int count);
-int vdma_get_residue(int channel);
+extern void vdma_enable(int channel);
+extern void vdma_disable(int channel);
+extern void vdma_set_mode(int channel, int mode);
+extern void vdma_set_addr(int channel, long addr);
+extern void vdma_set_count(int channel, int count);
+extern int vdma_get_residue(int channel);
+extern int vdma_get_enable(int channel);
 
 /*
  * some definitions used by the driver functions
@@ -30,7 +30,7 @@ int vdma_get_residue(int channel);
 #define VDMA_PAGESIZE		4096
 #define VDMA_PGTBL_ENTRIES	4096
 #define VDMA_PGTBL_SIZE		(sizeof(VDMA_PGTBL_ENTRY) * VDMA_PGTBL_ENTRIES)
-#define VDMA_PAGE_EMPTY		0
+#define VDMA_PAGE_EMPTY		0xff000000
 
 /*
  * Macros to get page no. and offset of a given address
@@ -48,8 +48,7 @@ int vdma_get_residue(int channel);
 /*
  * VDMA pagetable entry description
  */
-typedef volatile struct VDMA_PGTBL_ENTRY
-{
+typedef volatile struct VDMA_PGTBL_ENTRY {
 	unsigned int frame;		/* physical frame no. */
 	unsigned int owner;		/* owner of this entry (0=free) */
 } VDMA_PGTBL_ENTRY;
@@ -76,8 +75,9 @@ typedef volatile struct VDMA_PGTBL_ENTRY
 #define R4030_MEM_INTR           (1<<9)
 #define R4030_ADDR_INTR          (1<<10)
 
-/* channel mode register bits */
-
+/*
+ * Channel mode register bits
+ */
 #define R4030_MODE_ATIME_40      (0) /* device access time on remote bus */
 #define R4030_MODE_ATIME_80      (1)
 #define R4030_MODE_ATIME_120     (2)
@@ -93,4 +93,4 @@ typedef volatile struct VDMA_PGTBL_ENTRY
 #define R4030_MODE_BURST         (1<<6)	/* Rev. 2 only */
 #define R4030_MODE_FAST_ACK      (1<<7)	/* Rev. 2 only */
 
-#endif /* __ASM_JAZZDMA_H */
+#endif /* _ASM_JAZZDMA_H */

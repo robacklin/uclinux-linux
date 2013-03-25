@@ -1,43 +1,19 @@
-# $Id: Makefile,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+# $Id: Makefile,v 1.35 2000/12/15 00:41:18 davem Exp $
 # Makefile for Sparc library files..
 #
 
-CFLAGS := $(CFLAGS) -ansi
+.S.s:
+	$(CPP) $(AFLAGS) -ansi -DST_DIV0=0x2 $< -o $*.s
 
-OBJS  = mul.o rem.o sdiv.o udiv.o umul.o urem.o ashrdi3.o memcpy.o memset.o \
-        strlen.o
+.S.o:
+	$(CC) $(AFLAGS) -ansi -DST_DIV0=0x2 -c $< -o $*.o
 
-lib.a: $(OBJS)
-	$(AR) rcs lib.a $(OBJS)
-	sync
+L_TARGET = lib.a
 
-memcpy.o: memcpy.S
-	$(CC) -ansi -c -o memcpy.o memcpy.S
-
-strlen.o: strlen.S
-	$(CC) -ansi -c -o strlen.o strlen.S
-
-mul.o: mul.S
-	$(CC) -c -o mul.o mul.S
-
-rem.o: rem.S
-	$(CC) -DST_DIV0=0x2 -c -o rem.o rem.S
-
-sdiv.o: sdiv.S
-	$(CC) -DST_DIV0=0x2 -c -o sdiv.o sdiv.S
-
-udiv.o: udiv.S
-	$(CC) -DST_DIV0=0x2 -c -o udiv.o udiv.S
-
-umul.o: umul.S
-	$(CC) -c -o umul.o umul.S
-
-urem.o: urem.S
-	$(CC) -DST_DIV0=0x2 -c -o urem.o urem.S
-
-ashrdi3.o: ashrdi3.S
-	$(CC) -c -o ashrdi3.o ashrdi3.S
-
-dep:
+obj-y := mul.o rem.o sdiv.o udiv.o umul.o urem.o ashrdi3.o memcpy.o memset.o \
+         strlen.o checksum.o blockops.o memscan.o memcmp.o strncmp.o \
+	 strncpy_from_user.o divdi3.o udivdi3.o strlen_user.o \
+	 copy_user.o locks.o atomic.o bitops.o debuglocks.o lshrdi3.o \
+	 ashldi3.o rwsem.o muldi3.o
 
 include $(TOPDIR)/Rules.make

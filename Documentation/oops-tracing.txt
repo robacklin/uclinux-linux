@@ -1,3 +1,57 @@
+Quick Summary
+-------------
+
+Install ksymoops from
+ftp://ftp.<country>.kernel.org/pub/linux/utils/kernel/ksymoops
+Read the ksymoops man page.
+ksymoops < the_oops.txt
+
+and send the output the maintainer of the kernel area that seems to be
+involved with the problem, not to the ksymoops maintainer. Don't worry
+too much about getting the wrong person. If you are unsure send it to
+the person responsible for the code relevant to what you were doing.
+If it occurs repeatably try and describe how to recreate it. Thats
+worth even more than the oops
+
+If you are totally stumped as to whom to send the report, send it to 
+linux-kernel@vger.kernel.org. Thanks for your help in making Linux as
+stable as humanly possible.
+
+Where is the_oops.txt?
+----------------------
+
+Normally the Oops text is read from the kernel buffers by klogd and
+handed to syslogd which writes it to a syslog file, typically
+/var/log/messages (depends on /etc/syslog.conf).  Sometimes klogd dies,
+in which case you can run dmesg > file to read the data from the kernel
+buffers and save it.  Or you can cat /proc/kmsg > file, however you
+have to break in to stop the transfer, kmsg is a "never ending file".
+If the machine has crashed so badly that you cannot enter commands or
+the disk is not available then you have three options :-
+
+(1) Hand copy the text from the screen and type it in after the machine
+    has restarted.  Messy but it is the only option if you have not
+    planned for a crash.
+
+(2) Boot with a serial console (see Documentation/serial-console.txt),
+    run a null modem to a second machine and capture the output there
+    using your favourite communication program.  Minicom works well.
+
+(3) Patch the kernel with one of the crash dump patches.  These save
+    data to a floppy disk or video rom or a swap partition.  None of
+    these are standard kernel patches so you have to find and apply
+    them yourself.  Search kernel archives for kmsgdump, lkcd and
+    oops+smram.
+
+No matter how you capture the log output, feed the resulting file to
+ksymoops along with /proc/ksyms and /proc/modules that applied at the
+time of the crash.  /var/log/ksymoops can be useful to capture the
+latter, man ksymoops for details.
+
+
+Full Information
+----------------
+
 From: Linus Torvalds <torvalds@transmeta.com>
 
 How to track down an Oops.. [originally a mail to linux-kernel]
@@ -20,9 +74,8 @@ Oh, it helps if the report happens on a kernel that is compiled with the
 same compiler and similar setups.
 
 The other thing to do is disassemble the "Code:" part of the bug report: 
-ksymoops will do this too with the correct tools (and new version of 
-ksymoops), but if you don't have the tools you can just do a silly 
-program:
+ksymoops will do this too with the correct tools, but if you don't have
+the tools you can just do a silly program:
 
 	char str[] = "\xXX\xXX\xXX...";
 	main(){}
@@ -41,7 +94,7 @@ and then you get a better idea of what happens than with the gdb
 disassembly.
 
 Now, the trick is just then to combine all the data you have: the C 
-sources (and general knowledge of what it _should_ do, the assembly 
+sources (and general knowledge of what it _should_ do), the assembly 
 listing and the code disassembly (and additionally the register dump you 
 also get from the "oops" message - that can be useful to see _what_ the 
 corrupted pointers were, and when you have the assembler listing you can 
@@ -148,3 +201,26 @@ Roger Maris Cancer Center    INTERNET: greg@wind.rmcc.com
 820 4th St. N.
 Fargo, ND  58122
 Phone: 701-234-7556
+
+
+---------------------------------------------------------------------------
+Tainted kernels:
+
+Some oops reports contain the string 'Tainted: ' after the program
+counter, this indicates that the kernel has been tainted by some
+mechanism.  The string is followed by a series of position sensitive
+characters, each representing a particular tainted value.
+
+  1: 'G' if all modules loaded have a GPL or compatible license, 'P' if
+     any proprietary module has been loaded.  Modules without a
+     MODULE_LICENSE or with a MODULE_LICENSE that is not recognised by
+     insmod as GPL compatible are assumed to be proprietary.
+
+  2: 'F' if any module was force loaded by insmod -f, ' ' if all
+     modules were loaded normally.
+
+The primary reason for the 'Tainted: ' string is to tell kernel
+debuggers if this is a clean kernel or if anything unusual has
+occurred.  Tainting is permanent, even if an offending module is
+unloading the tainted value remains to indicate that the kernel is not
+trustworthy.

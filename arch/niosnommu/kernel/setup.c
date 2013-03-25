@@ -7,8 +7,8 @@
  *
  *  Copyright (C) 2001       Vic Phillips {vic@microtronix.com}
  *  Copyleft  (C) 2000       James D. Schettine {james@telos-systems.com}
- *  Copyright (C) 1999       Greg Ungerer <gerg@uClinux.org>
- *  Copyright (C) 1998-2000  D. Jeff Dionne <jeff@uClinux.org>
+ *  Copyright (C) 1999       Greg Ungerer (gerg@moreton.com.au)
+ *  Copyright (C) 1998,2000  D. Jeff Dionne <jeff@uClinux.org>
  *  Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
  *  Copyright (C) 1995       Hamish Macdonald
  */
@@ -29,9 +29,12 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/major.h>
+#include <linux/bootmem.h>
+#include <linux/seq_file.h>
 
 #include <asm/irq.h>
 #include <asm/byteorder.h>
+#include <asm/niosconf.h>
 
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/blk.h>
@@ -39,22 +42,19 @@
 #endif
 
 #ifdef CONFIG_NIOS_SPI
-#include <linux/spi.h>
-#endif
-
-extern void register_console(void (*proc)(const char *));
-extern void console_print_NIOS(const char * b);
-
-#ifdef CONFIG_CONSOLE
-extern struct consw *conswitchp;
-#ifdef CONFIG_FRAMEBUFFER
-extern struct consw fb_con;
-#endif
+#include <asm/spi.h>
+extern ssize_t spi_write(struct file *filp, const char *buf, size_t count, loff_t *ppos);
+extern ssize_t spi_read (struct file *filp, char *buf, size_t count, loff_t *ppos);
+extern loff_t spi_lseek (struct file *filp, loff_t offset, int origin);
+extern int spi_open     (struct inode *inode, struct file *filp);
+extern int spi_release  (struct inode *inode, struct file *filp);
 #endif
 
 unsigned long rom_length;
 unsigned long memory_start;
 unsigned long memory_end;
+
+struct task_struct *_current_task;
 
 #define COMMAND_LINE_SIZE 256
 
@@ -70,71 +70,15 @@ char console_device[16];
 char console_default[] = "/dev/ttyS0";
 
 extern int cpu_idle(void);
-static struct pt_regs fake_regs[] = {{ 0, cpu_idle, 0, 0, {0,}, 0}};
+static struct pt_regs fake_regs = { 0, (unsigned long)cpu_idle, 0, 0, {0,}};
 
-#ifdef CONFIG_UCCS8900
+#define CPU "NIOS"
+
+#if defined (CONFIG_CS89x0) || (CONFIG_SMC91111)
 unsigned char *cs8900a_hwaddr;
 unsigned char cs8900a_hwaddr_array[6];
 #endif
 
-#define CPU "NIOS"
-
-/* setup some dummy routines */
-static void dummy_waitbut(void)
-{
-}
-
-/*
- *	Setup the console. There may be a console defined in
- *	the command line arguments, so we look there first. If the
- *	command line arguments don't exist then we default to the
- *	first serial port. If we are going to use a console then
- *	setup its device name and the UART for it.
- */
-void setup_console(void)
-{
-	char *sp, *cp;
-	int i;
-	extern void rs_console_print(const char *b);
-	extern int rs_console_setup(char *arg);
-
-	/* Quickly check if any command line arguments for CONSOLE. */
-	for (sp = NULL, i = 0; (i < sizeof(command_line)-8); i++) {
-		if (command_line[i] == 0)
-			break;
-		if (command_line[i] == 'C') {
-			if (!strncmp(&command_line[i], "CONSOLE=", 8)) {
-				sp = &command_line[i + 8];
-				break;
-			}
-		}
-	}
-
-	/* If no CONSOLE defined then default one */
-	if (sp == NULL) {
-		strcpy(console_device, console_default);
-	}
-	else {
-		/* If console specified then copy it into name buffer */
-		for (cp = sp, i = 0; (i < (sizeof(console_device) - 1)); i++) {
-			if ((*sp == 0) || (*sp == ' ') || (*sp == ','))
-				break;
-			console_device[i] = *sp++;
-		}
-		console_device[i] = 0;
-	}
-
-#ifdef CONFIG_NIOS_SERIAL
-	/* If a serial console then init it */
-	if (!strncmp(console_device, "/dev/ttyS", 9) 
-	 || !strncmp(console_device, "/dev/cua", 8)) {
-		register_console(console_print_NIOS);
-	}
-#endif
-}
-
-
-#ifdef CONFIG_EXCALIBUR
 inline void flash_command(int base, int offset, short data)
 {
 	volatile unsigned short * ptr=(unsigned short*) (base);
@@ -149,11 +93,10 @@ inline void exit_se_flash(int base)
 	flash_command(base, 0x555, 0x90);
 	*(unsigned short*)base=0;
 }
-#endif /* CONFIG_EXCALIBUR */
 
-void setup_arch(char **cmdline_p,
-		unsigned long * memory_start_p, unsigned long * memory_end_p)
+void setup_arch(char **cmdline_p)
 {
+	int bootmap_size;
 	extern int _stext, _etext;
 	extern int _edata, _end;
 #ifdef DEBUG
@@ -162,11 +105,11 @@ void setup_arch(char **cmdline_p,
 	extern int *romarray;
 #endif
 #endif
-	unsigned char *psrc=(unsigned char *)((((int)na_flash_kernel) + ((int)na_flash_kernel_end))/2);
+	unsigned char *psrc=(unsigned char *)((NIOS_FLASH_START + NIOS_FLASH_END)>>1);
 	int i=0;
 
-	memory_start = &_end;
-	memory_end = (int) nasys_program_mem_end - 4096; /* <- stack area */
+	memory_start = (unsigned long)&_end;
+	memory_end = (int) nasys_program_mem_end;
 
 	/* copy the command line from booting paramter region */
 	flash_command((int)psrc, 0x555, 0x88);
@@ -174,13 +117,13 @@ void setup_arch(char **cmdline_p,
 		command_line[i++]=*psrc++;
 	}
 	command_line[i]=0;
-	exit_se_flash( ((((int)na_flash_kernel) + ((int)na_flash_kernel_end))/2) );
+	exit_se_flash(((NIOS_FLASH_START + NIOS_FLASH_END)>>1) );
 	if (command_line[0]==0)
 		memcpy(command_line, default_command_line, sizeof(default_command_line));
 
-	setup_console();
 	printk("\x0F\r\n\nuClinux/NIOS\n");
 	printk("Altera NIOS Excalibur support (C) 2001 Microtronix Datacom Ltd.\n");
+
 #ifdef DEBUG
 	printk("KERNEL -> TEXT=0x%08x-0x%08x DATA=0x%08x-0x%08x "
 		"BSS=0x%08x-0x%08x\n", (int) &_stext, (int) &_etext,
@@ -196,13 +139,17 @@ void setup_arch(char **cmdline_p,
 		(int) memory_start, (int) memory_end,
 		(int) memory_end, (int) nasys_program_mem_end);
 #endif
-	init_task.mm->start_code = (unsigned long) &_stext;
-	init_task.mm->end_code = (unsigned long) &_etext;
-	init_task.mm->end_data = (unsigned long) &_edata;
-	init_task.mm->brk = (unsigned long) &_end;
-	init_task.tss.kregs = &fake_regs;
 
+	init_mm.start_code = (unsigned long) &_stext;
+	init_mm.end_code = (unsigned long) &_etext;
+	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.brk = (unsigned long) 0; 
+//vic FIXME - this necessary ?
+	init_task.thread.kregs = &fake_regs;
+
+#if 0
 	ROOT_DEV = MKDEV(BLKMEM_MAJOR,0);
+#endif
 
 	/* Keep a copy of command line */
 	*cmdline_p = &command_line[0];
@@ -216,15 +163,13 @@ void setup_arch(char **cmdline_p,
 	else
 		printk("No Command line passed\n");
 #endif
-	*memory_start_p = memory_start;
-	*memory_end_p = memory_end;
 
 
-#ifdef CONFIG_UCCS8900
+#if defined (CONFIG_CS89x0) || (CONFIG_SMC91111)
 	/* now read the hwaddr of the ethernet --wentao*/
-	flash_command(((int)na_flash_kernel), 0x555, 0x88);
-	memcpy(cs8900a_hwaddr_array,na_flash_kernel,6);
-	exit_se_flash((int)na_flash_kernel);
+	flash_command(NIOS_FLASH_START, 0x555, 0x88);
+	memcpy(cs8900a_hwaddr_array,(void*)NIOS_FLASH_START,6);
+	exit_se_flash(NIOS_FLASH_START);
 	/* now do the checking, make sure we got a valid addr */
 	if (cs8900a_hwaddr_array[0] & (unsigned char)1)
 	{
@@ -238,19 +183,31 @@ void setup_arch(char **cmdline_p,
 		cs8900a_hwaddr[2],cs8900a_hwaddr[3],
 		cs8900a_hwaddr[4],cs8900a_hwaddr[5]);
 #endif
-#endif /* CONFIG_UCCS8900 */
-
-#ifdef CONFIG_NIOS_SPI
-	if ( register_NIOS_SPI() )
-		printk( "*** Cannot initialize SPI device.\n" );
 #endif
 
-/* console */
-#ifdef CONFIG_CONSOLE
-#ifdef CONFIG_FRAMEBUFFER
-	conswitchp = &fb_con;
-#else
-	conswitchp = 0;
+
+	/*
+	 * give all the memory to the bootmap allocator,  tell it to put the
+	 * boot mem_map at the start of memory
+	 */
+	bootmap_size = init_bootmem_node(
+			NODE_DATA(0),
+			memory_start >> PAGE_SHIFT, /* map goes here */
+			PAGE_OFFSET >> PAGE_SHIFT,	/* 0 on coldfire */
+			memory_end >> PAGE_SHIFT);
+	/*
+	 * free the usable memory,  we have to make sure we do not free
+	 * the bootmem bitmap so we then reserve it after freeing it :-)
+	 */
+	free_bootmem(memory_start, memory_end - memory_start);
+	reserve_bootmem(memory_start, bootmap_size);
+	/*
+	 * get kmalloc into gear
+	 */
+	paging_init();
+#ifdef CONFIG_VT
+#if defined(CONFIG_DUMMY_CONSOLE)
+	conswitchp = &dummy_con;
 #endif
 #endif
 
@@ -263,14 +220,13 @@ void setup_arch(char **cmdline_p,
 int get_cpuinfo(char * buffer)
 {
     char *cpu, *mmu, *fpu;
-    u_long clockfreq, clockfactor;
+    u_long clockfreq;
 
     cpu = CPU;
     mmu = "none";
     fpu = "none";
-    clockfactor = 1;
-
-    clockfreq = loops_per_sec*clockfactor;
+ 
+    clockfreq = nasys_clock_freq;
 
     return(sprintf(buffer, "CPU:\t\t%s\n"
 		   "MMU:\t\t%s\n"
@@ -279,12 +235,40 @@ int get_cpuinfo(char * buffer)
 		   "BogoMips:\t%lu.%02lu\n"
 		   "Calibration:\t%lu loops\n",
 		   cpu, mmu, fpu,
-		   clockfreq/100000,(clockfreq/100000)%10,
-		   loops_per_sec/500000,(loops_per_sec/5000)%100,
-		   loops_per_sec));
+		   clockfreq/1000000,(clockfreq/100000)%10,
+		   (loops_per_jiffy*HZ)/500000,((loops_per_jiffy*HZ)/5000)%100,
+		   (loops_per_jiffy*HZ)));
 
 }
 
+/*
+ *	Get CPU information for use by the procfs.
+ */
+
+static int show_cpuinfo(struct seq_file *m, void *v)
+{
+    char *cpu, *mmu, *fpu;
+    u_long clockfreq, clockfactor=1;
+
+    cpu = CPU;
+    mmu = "none";
+    fpu = "none";
+
+    clockfreq = nasys_clock_freq;
+
+    seq_printf(m, "CPU:\t\t%s\n"
+		   "MMU:\t\t%s\n"
+		   "FPU:\t\t%s\n"
+		   "Clocking:\t%lu.%1luMHz\n"
+		   "BogoMips:\t%lu.%02lu\n"
+		   "Calibration:\t%lu loops\n",
+		   cpu, mmu, fpu,
+		   clockfreq/1000000,(clockfreq/100000)%10,
+		   (loops_per_jiffy*HZ)/500000,((loops_per_jiffy*HZ)/5000)%100,
+		   (loops_per_jiffy*HZ));
+
+	return 0;
+}
 
 static int bcd2char( int x )
 {
@@ -320,25 +304,25 @@ void arch_gettod(int *year, int *month, int *date, int *hour, int *min, int *sec
 	    return;
 	}
 
-	spi_lseek( NULL, NULL, clockCS, 0 /* == SEEK_SET */ );
+	spi_lseek( NULL, clockCS, 0 /* == SEEK_SET */ );
 
 	spi_data.register_addr = clock_write_control;
 	spi_data.value         = 0x40; // Write protect
-	spi_write( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_write( NULL, (const char *)&spi_data, 3, NULL  );
 
 	spi_data.register_addr = clock_read_sec;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL );
 	*sec = (int)bcd2char( spi_data.value );
 
 	spi_data.register_addr = clock_read_min;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL  );
 	*min = (int)bcd2char( spi_data.value );
 
 	spi_data.register_addr = clock_read_hour;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL  );
 	hr = (int)bcd2char( spi_data.value );
 	if ( hr & 0x40 )  // Check 24-hr bit
  	    hr = (hr & 0x3F) + 12;     // Convert to 24-hr
@@ -349,17 +333,17 @@ void arch_gettod(int *year, int *month, int *date, int *hour, int *min, int *sec
 
 	spi_data.register_addr = clock_read_date;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL  );
 	*date = (int)bcd2char( spi_data.value );
 
 	spi_data.register_addr = clock_read_month;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL  );
 	*month = (int)bcd2char( spi_data.value );
 
 	spi_data.register_addr = clock_read_year;
 	spi_data.value         = 0;
-	spi_read( NULL, NULL, (const char *)&spi_data, 3 );
+	spi_read( NULL, (char *)&spi_data, 3, NULL  );
 	*year = (int)bcd2char( spi_data.value );
 
 
@@ -370,3 +354,24 @@ void arch_gettod(int *year, int *month, int *date, int *hour, int *min, int *sec
 #endif
 }
 
+static void *cpuinfo_start (struct seq_file *m, loff_t *pos)
+{
+	return *pos < NR_CPUS ? ((void *) 0x12345678) : NULL;
+}
+
+static void *cpuinfo_next (struct seq_file *m, void *v, loff_t *pos)
+{
+	++*pos;
+	return cpuinfo_start (m, pos);
+}
+
+static void cpuinfo_stop (struct seq_file *m, void *v)
+{
+}
+
+struct seq_operations cpuinfo_op = {
+	start:	cpuinfo_start,
+	next:	cpuinfo_next,
+	stop:	cpuinfo_stop,
+	show:	show_cpuinfo
+};

@@ -16,7 +16,7 @@
 unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum);
 
 /*
- * the same as csum_partial_copy, but copies from src while it
+ * the same as csum_partial, but copies from src while it
  * checksums
  *
  * here even more important to align src and dst on a 32-bit (or even
@@ -33,8 +33,11 @@ unsigned int csum_partial_copy(const char *src, char *dst, int len, int sum);
  * better 64-bit) boundary
  */
 
-unsigned int csum_partial_copy_fromuser(const char *src, char *dst, int len, int sum);
+extern unsigned int csum_partial_copy_from_user(const char *src, char *dst,
+						int len, int sum, int *csum_err);
 
+#define csum_partial_copy_nocheck(src, dst, len, sum)	\
+	csum_partial_copy((src), (dst), (len), (sum))
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
@@ -84,8 +87,8 @@ static inline unsigned int csum_fold(unsigned int sum)
  * returns a 16-bit checksum, already complemented
  */
 
-static inline unsigned short int
-csum_tcpudp_magic(unsigned long saddr, unsigned long daddr, unsigned short len,
+static inline unsigned int
+csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr, unsigned short len,
 		  unsigned short proto, unsigned int sum)
 {
 	__asm__ ("addl  %1,%0\n\t"
@@ -96,7 +99,14 @@ csum_tcpudp_magic(unsigned long saddr, unsigned long daddr, unsigned short len,
 		 : "=&d" (sum), "=&d" (saddr)
 		 : "0" (daddr), "1" (saddr), "d" (len + proto),
 		   "d"(sum));
-	return csum_fold(sum);
+	return sum;
+}
+
+static inline unsigned short int
+csum_tcpudp_magic(unsigned long saddr, unsigned long daddr, unsigned short len,
+		  unsigned short proto, unsigned int sum)
+{
+	return csum_fold(csum_tcpudp_nofold(saddr,daddr,len,proto,sum));
 }
 
 /*
@@ -108,6 +118,37 @@ static inline unsigned short
 ip_compute_csum(unsigned char * buff, int len)
 {
 	return csum_fold (csum_partial(buff, len, 0));
+}
+
+#define _HAVE_ARCH_IPV6_CSUM
+static __inline__ unsigned short int
+csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr,
+		__u32 len, unsigned short proto, unsigned int sum) 
+{
+	register unsigned long tmp;
+	__asm__("addl %2@,%0\n\t"
+		"movel %2@(4),%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %2@(8),%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %2@(12),%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %3@,%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %3@(4),%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %3@(8),%1\n\t"
+		"addxl %1,%0\n\t"
+		"movel %3@(12),%1\n\t"
+		"addxl %1,%0\n\t"
+		"addxl %4,%0\n\t"
+		"clrl %1\n\t"
+		"addxl %1,%0"
+		: "=&d" (sum), "=&d" (tmp)
+		: "a" (saddr), "a" (daddr), "d" (len + proto),
+		  "0" (sum));
+
+	return csum_fold(sum);
 }
 
 #endif /* _M68K_CHECKSUM_H */

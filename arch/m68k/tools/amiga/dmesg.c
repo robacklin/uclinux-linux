@@ -3,13 +3,8 @@
  *					   in Chip RAM with the kernel command
  *					   line option `debug=mem'.
  *
- *  © Copyright 1996 by Geert Uytterhoeven
- *		       (Geert.Uytterhoeven@cs.kuleuven.ac.be)
+ *  © Copyright 1996 by Geert Uytterhoeven <geert@linux-m68k.org>
  *
- *
- *  Compilation (under AmigaOS):
- *
- *	gcc -o dmesg dmesg.c -noixemul -idirafter INCLUDE: -Wall -s -O3
  *
  *  Usage:
  *

@@ -22,28 +22,26 @@
 #include <linux/version.h>
 #endif
 
+#ifndef LinuxVersionCode
 #define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
+#endif
 
 #include <linux/types.h>
 #include <linux/kdev_t.h>
 
 #define SYM53C416_SCSI_ID 7
 
-extern struct proc_dir_entry proc_scsi_sym53c416;
-
-extern int sym53c416_detect(Scsi_Host_Template *);
-extern const char *sym53c416_info(struct Scsi_Host *);
-extern int sym53c416_command(Scsi_Cmnd *);
-extern int sym53c416_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-extern int sym53c416_abort(Scsi_Cmnd *);
-extern int sym53c416_reset(Scsi_Cmnd *, unsigned int);
-extern int sym53c416_bios_param(Disk *, kdev_t, int *);
-extern void sym53c416_setup(char *str, int *ints);
-
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,75)
+static int sym53c416_detect(Scsi_Host_Template *);
+static const char *sym53c416_info(struct Scsi_Host *);
+static int sym53c416_command(Scsi_Cmnd *);
+static int sym53c416_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+static int sym53c416_abort(Scsi_Cmnd *);
+static int sym53c416_reset(Scsi_Cmnd *, unsigned int);
+static int sym53c416_bios_param(Disk *, kdev_t, int *);
+static void sym53c416_setup(char *str, int *ints);
 
 #define SYM53C416 {                                          \
-                  proc_dir:          &proc_scsi_sym53c416,   \
+                  proc_name:         "sym53c416",   \
                   name:              "Symbios Logic 53c416", \
                   detect:            sym53c416_detect,       \
                   info:              sym53c416_info,         \
@@ -59,33 +57,4 @@ extern void sym53c416_setup(char *str, int *ints);
                   unchecked_isa_dma: 1,                      \
                   use_clustering:    ENABLE_CLUSTERING       \
                   }
-
-#else
-
-#define SYM53C416 {                       \
-                  NULL,                   \
-                  NULL,                   \
-                  &proc_scsi_sym53c416,   \
-                  NULL,                   \
-                  "Symbios Logic 53c416", \
-                  sym53c416_detect,       \
-                  NULL,                   \
-                  sym53c416_info,         \
-                  sym53c416_command,      \
-                  sym53c416_queuecommand, \
-                  sym53c416_abort,        \
-                  sym53c416_reset,        \
-                  NULL,                   \
-                  sym53c416_bios_param,   \
-                  1,                      \
-                  SYM53C416_SCSI_ID,      \
-                  32, /* ???? */          \
-                  1,                      \
-                  0,                      \
-                  1,                      \
-                  ENABLE_CLUSTERING       \
-                  }
-
-#endif
-
 #endif

@@ -1,466 +1,425 @@
-!
-! SYS_SIZE is the number of clicks (16 bytes) to be loaded.
-! 0x7F00 is 0x7F000 bytes = 508kB, more than enough for current
-! versions of linux which compress the kernel
-!
-#include <linux/config.h>
-SYSSIZE = DEF_SYSSIZE
-!
-!	bootsect.s		Copyright (C) 1991, 1992 Linus Torvalds
-!	modified by Drew Eckhardt
-!	modified by Bruce Evans (bde)
-!
-! bootsect.s is loaded at 0x7c00 by the bios-startup routines, and moves
-! itself out of the way to address 0x90000, and jumps there.
-!
-! bde - should not jump blindly, there may be systems with only 512K low
-! memory.  Use int 0x12 to get the top of memory, etc.
-!
-! It then loads 'setup' directly after itself (0x90200), and the system
-! at 0x10000, using BIOS interrupts. 
-!
-! NOTE! currently system is at most (8*65536-4096) bytes long. This should 
-! be no problem, even in the future. I want to keep it simple. This 508 kB
-! kernel size should be enough, especially as this doesn't contain the
-! buffer cache as in minix (and especially now that the kernel is 
-! compressed :-)
-!
-! The loader has been made as simple as possible, and continuous
-! read errors will result in a unbreakable loop. Reboot by hand. It
-! loads pretty fast by getting whole tracks at a time whenever possible.
+/*
+ *	bootsect.S		Copyright (C) 1991, 1992 Linus Torvalds
+ *
+ *	modified by Drew Eckhardt
+ *	modified by Bruce Evans (bde)
+ *	modified by Chris Noe (May 1999) (as86 -> gas)
+ *
+ * 360k/720k disk support: Andrzej Krzysztofowicz <ankry@green.mif.pg.gda.pl>
+ *
+ * BIG FAT NOTE: We're in real mode using 64k segments.  Therefore segment
+ * addresses must be multiplied by 16 to obtain their respective linear
+ * addresses. To avoid confusion, linear addresses are written using leading
+ * hex while segment addresses are written as segment:offset.
+ *
+ * bde - should not jump blindly, there may be systems with only 512K low
+ * memory.  Use int 0x12 to get the top of memory, etc.
+ *
+ * It then loads 'setup' directly after itself (0x90200), and the system
+ * at 0x10000, using BIOS interrupts. 
+ *
+ * NOTE! currently system is at most (8*65536-4096) bytes long. This should 
+ * be no problem, even in the future. I want to keep it simple. This 508 kB
+ * kernel size should be enough, especially as this doesn't contain the
+ * buffer cache as in minix (and especially now that the kernel is 
+ * compressed :-)
+ *
+ * The loader has been made as simple as possible, and continuous
+ * read errors will result in a unbreakable loop. Reboot by hand. It
+ * loads pretty fast by getting whole tracks at a time whenever possible.
+ */
 
-.text
+#include <asm/boot.h>
 
-SETUPSECS = 4				! nr of setup-sectors
-BOOTSEG   = 0x07C0			! original address of boot-sector
-INITSEG   = DEF_INITSEG			! we move boot here - out of the way
-SETUPSEG  = DEF_SETUPSEG		! setup starts here
-SYSSEG    = DEF_SYSSEG			! system loaded at 0x10000 (65536).
+SETUPSECTS	= 4			/* default nr of setup-sectors */
+BOOTSEG		= 0x07C0		/* original address of boot-sector */
+INITSEG		= DEF_INITSEG		/* we move boot here - out of the way */
+SETUPSEG	= DEF_SETUPSEG		/* setup starts here */
+SYSSEG		= DEF_SYSSEG		/* system loaded at 0x10000 (65536) */
+SYSSIZE		= DEF_SYSSIZE		/* system size: # of 16-byte clicks */
+					/* to be loaded */
+ROOT_DEV	= 0 			/* ROOT_DEV is now written by "build" */
+SWAP_DEV	= 0			/* SWAP_DEV is now written by "build" */
 
-! ROOT_DEV & SWAP_DEV are now written by "build".
-ROOT_DEV = 0
-SWAP_DEV = 0
 #ifndef SVGA_MODE
 #define SVGA_MODE ASK_VGA
 #endif
+
 #ifndef RAMDISK
 #define RAMDISK 0
-#endif 
-#ifndef CONFIG_ROOT_RDONLY
-#define CONFIG_ROOT_RDONLY 1
 #endif
 
-! ld86 requires an entry symbol. This may as well be the usual one.
-.globl	_main
-_main:
-#if 0 /* hook for debugger, harmless unless BIOS is fussy (old HP) */
-	int	3
+#ifndef ROOT_RDONLY
+#define ROOT_RDONLY 1
 #endif
-	mov	ax,#BOOTSEG
-	mov	ds,ax
-	mov	ax,#INITSEG
-	mov	es,ax
-	mov	cx,#256
-	sub	si,si
-	sub	di,di
+
+.code16
+.text
+
+.global _start
+_start:
+
+# First things first. Move ourself from 0x7C00 -> 0x90000 and jump there.
+
+	movw	$BOOTSEG, %ax
+	movw	%ax, %ds		# %ds = BOOTSEG
+	movw	$INITSEG, %ax
+	movw	%ax, %es		# %ax = %es = INITSEG
+	movw	$256, %cx
+	subw	%si, %si
+	subw	%di, %di
 	cld
 	rep
 	movsw
-	jmpi	go,INITSEG
+	ljmp	$INITSEG, $go
 
-! ax and es already contain INITSEG
+# bde - changed 0xff00 to 0x4000 to use debugger at 0x6400 up (bde).  We
+# wouldn't have to worry about this if we checked the top of memory.  Also
+# my BIOS can be configured to put the wini drive tables in high memory
+# instead of in the vector table.  The old stack might have clobbered the
+# drive table.
 
-go:	mov	di,#0x4000-12	! 0x4000 is arbitrary value >= length of
-				! bootsect + length of setup + room for stack
-				! 12 is disk parm size
+go:	movw	$0x4000-12, %di		# 0x4000 is an arbitrary value >=
+					# length of bootsect + length of
+					# setup + room for stack;
+					# 12 is disk parm size.
+	movw	%ax, %ds		# %ax and %es already contain INITSEG
+	movw	%ax, %ss
+	movw	%di, %sp		# put stack at INITSEG:0x4000-12.
 
-! bde - changed 0xff00 to 0x4000 to use debugger at 0x6400 up (bde).  We
-! wouldn't have to worry about this if we checked the top of memory.  Also
-! my BIOS can be configured to put the wini drive tables in high memory
-! instead of in the vector table.  The old stack might have clobbered the
-! drive table.
+# Many BIOS's default disk parameter tables will not recognize
+# multi-sector reads beyond the maximum sector number specified
+# in the default diskette parameter tables - this may mean 7
+# sectors in some cases.
+#
+# Since single sector reads are slow and out of the question,
+# we must take care of this by creating new parameter tables
+# (for the first disk) in RAM.  We will set the maximum sector
+# count to 36 - the most we will encounter on an ED 2.88.  
+#
+# High doesn't hurt.  Low does.
+#
+# Segments are as follows: %cs = %ds = %es = %ss = INITSEG, %fs = 0,
+# and %gs is unused.
 
-	mov	ds,ax
-	mov	ss,ax		! put stack at INITSEG:0x4000-12.
-	mov	sp,di
-/*
- *	Many BIOS's default disk parameter tables will not 
- *	recognize multi-sector reads beyond the maximum sector number
- *	specified in the default diskette parameter tables - this may
- *	mean 7 sectors in some cases.
- *
- *	Since single sector reads are slow and out of the question,
- *	we must take care of this by creating new parameter tables
- *	(for the first disk) in RAM.  We will set the maximum sector
- *	count to 36 - the most we will encounter on an ED 2.88.  
- *
- *	High doesn't hurt.  Low does.
- *
- *	Segments are as follows: ds=es=ss=cs - INITSEG,
- *		fs = 0, gs is unused.
- */
+	movw	%cx, %fs		# %fs = 0
+	movw	$0x78, %bx		# %fs:%bx is parameter table address
+	pushw	%ds
+	ldsw	%fs:(%bx), %si		# %ds:%si is source
+	movb	$6, %cl			# copy 12 bytes
+	pushw	%di			# %di = 0x4000-12.
+	rep				# don't worry about cld
+	movsw				# already done above
+	popw	%di
+	popw	%ds
+	movb	$36, 0x4(%di)		# patch sector count
+	movw	%di, %fs:(%bx)
+	movw	%es, %fs:2(%bx)
 
-! cx contains 0 from rep movsw above
+# Get disk drive parameters, specifically number of sectors/track.
 
-	mov	fs,cx
-	mov	bx,#0x78		! fs:bx is parameter table address
-	push	ds
-	seg fs
-	lds	si,(bx)			! ds:si is source
+# It seems that there is no BIOS call to get the number of sectors.
+# Guess 36 sectors if sector 36 can be read, 18 sectors if sector 18
+# can be read, 15 if sector 15 can be read.  Otherwise guess 9.
+# Note that %cx = 0 from rep movsw above.
 
-	mov	cl,#6			! copy 12 bytes
-	cld
-	push	di
-
-	rep
-	movsw
-
-	pop	di
-	pop	ds
-
-	movb	4(di),*36		! patch sector count
-
-	seg fs
-	mov	(bx),di
-	seg fs
-	mov	2(bx),es
-
-! load the setup-sectors directly after the bootblock.
-! Note that 'es' is already set up.
-! Also cx is 0 from rep movsw above.
-
-load_setup:
-	xor	ah,ah			! reset FDC 
-	xor	dl,dl
-	int 	0x13	
-
-	xor	dx, dx			! drive 0, head 0
-	mov	cl,#0x02		! sector 2, track 0
-	mov	bx,#0x0200		! address = 512, in INITSEG
-	mov	ah,#0x02		! service 2, nr of sectors
-	mov	al,setup_sects		! (assume all on head 0, track 0)
-	int	0x13			! read it
-	jnc	ok_load_setup		! ok - continue
-
-	push	ax			! dump error code
-	call	print_nl
-	mov	bp, sp
-	call	print_hex
-	pop	ax	
-	
-	jmp	load_setup
-
-ok_load_setup:
-
-! Get disk drive parameters, specifically nr of sectors/track
-
-#if 0
-
-! bde - the Phoenix BIOS manual says function 0x08 only works for fixed
-! disks.  It doesn't work for one of my BIOS's (1987 Award).  It was
-! fatal not to check the error code.
-
-	xor	dl,dl
-	mov	ah,#0x08		! AH=8 is get drive parameters
-	int	0x13
-	xor	ch,ch
-#else
-
-! It seems that there is no BIOS call to get the number of sectors.  Guess
-! 36 sectors if sector 36 can be read, 18 sectors if sector 18 can be read,
-! 15 if sector 15 can be read.  Otherwise guess 9.
-
-	mov	si,#disksizes		! table of sizes to try
-
+	movw	$disksizes, %si		# table of sizes to try
 probe_loop:
 	lodsb
-	cbw				! extend to word
-	mov	sectors, ax
-	cmp	si,#disksizes+4
-	jae	got_sectors		! if all else fails, try 9
-	xchg	ax, cx			! cx = track and sector
-	xor	dx, dx			! drive 0, head 0
-	xor	bl, bl
-	mov	bh,setup_sects
-	inc	bh
-	shl	bh,#1			! address after setup (es = cs)
-	mov	ax,#0x0201		! service 2, 1 sector
-	int	0x13
-	jc	probe_loop		! try next value
+	cbtw				# extend to word
+	movw	%ax, sectors
+	cmpw	$disksizes+4, %si
+	jae	got_sectors		# If all else fails, try 9
 
-#endif
+	xchgw	%cx, %ax		# %cx = track and sector
+	xorw	%dx, %dx		# drive 0, head 0
+	movw	$0x0200, %bx		# address = 512, in INITSEG (%es = %cs)
+	movw	$0x0201, %ax		# service 2, 1 sector
+	int	$0x13
+	jc	probe_loop		# try next value
 
 got_sectors:
+	movb	$0x03, %ah		# read cursor pos
+	xorb	%bh, %bh
+	int	$0x10
+	movw	$9, %cx
+	movb	$0x07, %bl		# page 0, attribute 7 (normal)
+					# %bh is set above; int10 doesn't
+					# modify it
+	movw	$msg1, %bp
+	movw	$0x1301, %ax		# write string, move cursor
+	int	$0x10			# tell the user we're loading..
 
-! Restore es
+# Load the setup-sectors directly after the moved bootblock (at 0x90200).
+# We should know the drive geometry to do it, as setup may exceed first
+# cylinder (for 9-sector 360K and 720K floppies).
 
-	mov	ax,#INITSEG
-	mov	es,ax
+	movw	$0x0001, %ax		# set sread (sector-to-read) to 1 as
+	movw	$sread, %si		# the boot sector has already been read
+	movw	%ax, (%si)
 
-! Print some inane message
+	xorw	%ax, %ax		# reset FDC
+	xorb	%dl, %dl
+	int	$0x13
+	movw	$0x0200, %bx		# address = 512, in INITSEG
+next_step:
+	movb	setup_sects, %al
+	movw	sectors, %cx
+	subw	(%si), %cx		# (%si) = sread
+	cmpb	%cl, %al
+	jbe	no_cyl_crossing
+	movw	sectors, %ax
+	subw	(%si), %ax		# (%si) = sread
+no_cyl_crossing:
+	call	read_track
+	pushw	%ax			# save it
+	call	set_next		# set %bx properly; it uses %ax,%cx,%dx
+	popw	%ax			# restore
+	subb	%al, setup_sects	# rest - for next step
+	jnz	next_step
 
-	mov	ah,#0x03		! read cursor pos
-	xor	bh,bh
-	int	0x10
-	
-	mov	cx,#9
-	mov	bx,#0x0007		! page 0, attribute 7 (normal)
-	mov	bp,#msg1
-	mov	ax,#0x1301		! write string, move cursor
-	int	0x10
-
-! ok, we've written the message, now
-! we want to load the system (at 0x10000)
-
-	mov	ax,#SYSSEG
-	mov	es,ax		! segment of 0x010000
+	pushw	$SYSSEG
+	popw	%es			# %es = SYSSEG
 	call	read_it
 	call	kill_motor
 	call	print_nl
 
-! After that we check which root-device to use. If the device is
-! defined (!= 0), nothing is done and the given device is used.
-! Otherwise, one of /dev/fd0H2880 (2,32) or /dev/PS0 (2,28) or /dev/at0 (2,8),
-! depending on the number of sectors we pretend to know we have.
+# After that we check which root-device to use. If the device is
+# defined (!= 0), nothing is done and the given device is used.
+# Otherwise, one of /dev/fd0H2880 (2,32) or /dev/PS0 (2,28) or /dev/at0 (2,8)
+# depending on the number of sectors we pretend to know we have.
 
-	seg cs
-	mov	ax,root_dev
-	or	ax,ax
+# Segments are as follows: %cs = %ds = %ss = INITSEG,
+#	%es = SYSSEG, %fs = 0, %gs is unused.
+
+	movw	root_dev, %ax
+	orw	%ax, %ax
 	jne	root_defined
-	seg cs
-	mov	bx,sectors
-	mov	ax,#0x0208		! /dev/ps0 - 1.2Mb
-	cmp	bx,#15
+
+	movw	sectors, %bx
+	movw	$0x0208, %ax		# /dev/ps0 - 1.2Mb
+	cmpw	$15, %bx
 	je	root_defined
-	mov	al,#0x1c		! /dev/PS0 - 1.44Mb
-	cmp	bx,#18
+
+	movb	$0x1c, %al		# /dev/PS0 - 1.44Mb
+	cmpw	$18, %bx
 	je	root_defined
-	mov	al,#0x20		! /dev/fd0H2880 - 2.88Mb
-	cmp	bx,#36
+
+	movb	$0x20, %al		# /dev/fd0H2880 - 2.88Mb
+	cmpw	$36, %bx
 	je	root_defined
-	mov	al,#0			! /dev/fd0 - autodetect
+
+	movb	$0, %al			# /dev/fd0 - autodetect
 root_defined:
-	seg cs
-	mov	root_dev,ax
+	movw	%ax, root_dev
 
-! after that (everything loaded), we jump to
-! the setup-routine loaded directly after
-! the bootblock:
+# After that (everything loaded), we jump to the setup-routine
+# loaded directly after the bootblock:
 
-	jmpi	0,SETUPSEG
+	ljmp	$SETUPSEG, $0
 
-! This routine loads the system at address 0x10000, making sure
-! no 64kB boundaries are crossed. We try to load it as fast as
-! possible, loading whole tracks whenever we can.
-!
-! in:	es - starting address segment (normally 0x1000)
-!
-sread:	.word 0			! sectors read of current track
-head:	.word 0			! current head
-track:	.word 0			! current track
+# These variables are addressed via %si register as it gives shorter code.
+
+sread:	.word 0				# sectors read of current track
+head:	.word 0				# current head
+track:	.word 0				# current track
+
+# This routine loads the system at address SYSSEG, making sure
+# no 64kB boundaries are crossed. We try to load it as fast as
+# possible, loading whole tracks whenever we can.
 
 read_it:
-	mov	al,setup_sects
-	inc	al
-	mov	sread,al
-	mov ax,es
-	test ax,#0x0fff
-die:	jne die			! es must be at 64kB boundary
-	xor bx,bx		! bx is starting address within segment
+	movw	%es, %ax		# %es = SYSSEG when called
+	testw	$0x0fff, %ax
+die:	jne	die			# %es must be at 64kB boundary
+	xorw	%bx, %bx		# %bx is starting address within segment
 rp_read:
 #ifdef __BIG_KERNEL__
-#define CALL_HIGHLOAD_KLUDGE .word 0x1eff,0x220 ! call far * bootsect_kludge
-				! NOTE: as86 can't assemble this
-	CALL_HIGHLOAD_KLUDGE	! this is within setup.S
+					# look in setup.S for bootsect_kludge
+	bootsect_kludge = 0x220		# 0x200 + 0x20 which is the size of the
+	lcall	bootsect_kludge		# bootsector + bootsect_kludge offset
 #else
-	mov ax,es
-	sub ax,#SYSSEG
+	movw	%es, %ax
+	subw	$SYSSEG, %ax
+	movw	%bx, %cx
+	shr	$4, %cx
+	add	%cx, %ax		# check offset
 #endif
-	cmp ax,syssize		! have we loaded all yet?
-	jbe ok1_read
+	cmpw	syssize, %ax		# have we loaded everything yet?
+	jbe	ok1_read
+
 	ret
+
 ok1_read:
-	mov ax,sectors
-	sub ax,sread
-	mov cx,ax
-	shl cx,#9
-	add cx,bx
-	jnc ok2_read
-	je ok2_read
-	xor ax,ax
-	sub ax,bx
-	shr ax,#9
+	movw	sectors, %ax
+	subw	(%si), %ax		# (%si) = sread
+	movw	%ax, %cx
+	shlw	$9, %cx
+	addw	%bx, %cx
+	jnc	ok2_read
+
+	je	ok2_read
+
+	xorw	%ax, %ax
+	subw	%bx, %ax
+	shrw	$9, %ax
 ok2_read:
-	call read_track
-	mov cx,ax
-	add ax,sread
-	cmp ax,sectors
-	jne ok3_read
-	mov ax,#1
-	sub ax,head
-	jne ok4_read
-	inc track
-ok4_read:
-	mov head,ax
-	xor ax,ax
-ok3_read:
-	mov sread,ax
-	shl cx,#9
-	add bx,cx
-	jnc rp_read
-	mov ax,es
-	add ah,#0x10
-	mov es,ax
-	xor bx,bx
-	jmp rp_read
+	call	read_track
+	call	set_next
+	jmp	rp_read
 
 read_track:
 	pusha
 	pusha	
-	mov	ax, #0xe2e 	! loading... message 2e = .
-	mov	bx, #7
- 	int	0x10
+	movw	$0xe2e, %ax 		# loading... message 2e = .
+	movw	$7, %bx
+ 	int	$0x10
 	popa		
 
-	mov	dx,track
-	mov	cx,sread
-	inc	cx
-	mov	ch,dl
-	mov	dx,head
-	mov	dh,dl
-	and	dx,#0x0100
-	mov	ah,#2
-	
-	push	dx				! save for error dump
-	push	cx
-	push	bx
-	push	ax
+# Accessing head, track, sread via %si gives shorter code.
 
-	int	0x13
+	movw	4(%si), %dx		# 4(%si) = track
+	movw	(%si), %cx		# (%si)  = sread
+	incw	%cx
+	movb	%dl, %ch
+	movw	2(%si), %dx		# 2(%si) = head
+	movb	%dl, %dh
+	andw	$0x0100, %dx
+	movb	$2, %ah
+	pushw	%dx			# save for error dump
+	pushw	%cx
+	pushw	%bx
+	pushw	%ax
+	int	$0x13
 	jc	bad_rt
-	add	sp, #8
+
+	addw	$8, %sp
 	popa
 	ret
 
-bad_rt:	push	ax				! save error code
-	call	print_all			! ah = error, al = read
-	
-	
-	xor ah,ah
-	xor dl,dl
-	int 0x13
-	
+set_next:
+	movw	%ax, %cx
+	addw	(%si), %ax		# (%si) = sread
+	cmp	sectors, %ax
+	jne	ok3_set
+	movw	$0x0001, %ax
+	xorw	%ax, 2(%si)		# change head
+	jne	ok4_set
+	incw	4(%si)			# next track
+ok4_set:
+	xorw	%ax, %ax
+ok3_set:
+	movw	%ax, (%si)		# set sread
+	shlw	$9, %cx
+	addw	%cx, %bx
+	jnc	set_next_fin
+	movw	%es, %ax
+	addb	$0x10, %ah
+	movw	%ax, %es
+	xorw	%bx, %bx
+set_next_fin:
+	ret
 
-	add	sp, #10
-	popa	
+bad_rt:
+	pushw	%ax			# save error code
+	call	print_all		# %ah = error, %al = read
+	xorb	%ah, %ah
+	xorb	%dl, %dl
+	int	$0x13
+	addw	$10, %sp
+	popa
 	jmp read_track
 
-/*
- *	print_all is for debugging purposes.  
- *	It will print out all of the registers.  The assumption is that this is
- *	called from a routine, with a stack frame like
- *	dx 
- *	cx
- *	bx
- *	ax
- *	error
- *	ret <- sp
- *
-*/
+# print_all is for debugging purposes.  
+#
+# it will print out all of the registers.  The assumption is that this is
+# called from a routine, with a stack frame like
+#
+#	%dx 
+#	%cx
+#	%bx
+#	%ax
+#	(error)
+#	ret <- %sp
  
 print_all:
-	mov	cx, #5		! error code + 4 registers
-	mov	bp, sp	
-
+	movw	$5, %cx			# error code + 4 registers
+	movw	%sp, %bp
 print_loop:
-	push	cx		! save count left
-	call	print_nl	! nl for readability
-
-	cmp	cl, #5
-	jae	no_reg		! see if register name is needed
+	pushw	%cx			# save count remaining
+	call	print_nl		# <-- for readability
+	cmpb	$5, %cl
+	jae	no_reg			# see if register name is needed
 	
-	mov	ax, #0xe05 + 'A - 1
-	sub	al, cl
-	int	0x10
-
-	mov	al, #'X
-	int	0x10
-
-	mov	al, #':
-	int	0x10
-
+	movw	$0xe05 + 'A' - 1, %ax
+	subb	%cl, %al
+	int	$0x10
+	movb	$'X', %al
+	int	$0x10
+	movb	$':', %al
+	int	$0x10
 no_reg:
-	add	bp, #2		! next register
-	call	print_hex	! print it
-	pop	cx
+	addw	$2, %bp			# next register
+	call	print_hex		# print it
+	popw	%cx
 	loop	print_loop
 	ret
 
 print_nl:
-	mov	ax, #0xe0d	! CR
-	int	0x10
-	mov	al, #0xa	! LF
-	int 	0x10
+	movw	$0xe0d, %ax		# CR
+	int	$0x10
+	movb	$0xa, %al		# LF
+	int 	$0x10
 	ret
 
-/*
- *	print_hex is for debugging purposes, and prints the word
- *	pointed to by ss:bp in hexadecimal.
-*/
+# print_hex is for debugging purposes, and prints the word
+# pointed to by %ss:%bp in hexadecimal.
 
 print_hex:
-	mov	cx, #4		! 4 hex digits
-	mov	dx, (bp)	! load word into dx
+	movw	$4, %cx			# 4 hex digits
+	movw	(%bp), %dx		# load word into %dx
 print_digit:
-	rol	dx, #4		! rotate so that lowest 4 bits are used
-	mov	ax, #0xe0f	! ah = request, al = mask for nybble
-	and	al, dl
-	add	al, #0x90	! convert al to ascii hex (four instructions)
+	rolw	$4, %dx			# rotate to use low 4 bits
+	movw	$0xe0f, %ax		# %ah = request
+	andb	%dl, %al		# %al = mask for nybble
+	addb	$0x90, %al		# convert %al to ascii hex
+	daa				# in only four instructions!
+	adc	$0x40, %al
 	daa
-	adc	al, #0x40
-	daa
-	int	0x10
+	int	$0x10
 	loop	print_digit
 	ret
 
+# This procedure turns off the floppy drive motor, so
+# that we enter the kernel in a known state, and
+# don't have to worry about it later.
+# NOTE: Doesn't save %ax or %dx; do it yourself if you need to.
 
-/*
- * This procedure turns off the floppy drive motor, so
- * that we enter the kernel in a known state, and
- * don't have to worry about it later.
- */
 kill_motor:
-	push dx
-	mov dx,#0x3f2
-	xor al, al
-	outb
-	pop dx
+#if 1
+	xorw	%ax, %ax		# reset FDC
+	xorb	%dl, %dl
+	int	$0x13
+#else
+	movw	$0x3f2, %dx
+	xorb	%al, %al
+	outb	%al, %dx
+#endif
 	ret
 
-sectors:
-	.word 0
+sectors:	.word 0
+disksizes:	.byte 36, 18, 15, 9
+msg1:		.byte 13, 10
+		.ascii "Loading"
 
-disksizes:
-	.byte 36,18,15,9
-
-msg1:
-	.byte 13,10
-	.ascii "Loading"
+# XXX: This is a fairly snug fit.
 
 .org 497
-setup_sects:
-	.byte SETUPSECS
-root_flags:
-	.word CONFIG_ROOT_RDONLY
-syssize:
-	.word SYSSIZE
-swap_dev:
-	.word SWAP_DEV
-ram_size:
-	.word RAMDISK
-vid_mode:
-	.word SVGA_MODE
-root_dev:
-	.word ROOT_DEV
-boot_flag:
-	.word 0xAA55
+setup_sects:	.byte SETUPSECTS
+root_flags:	.word ROOT_RDONLY
+syssize:	.word SYSSIZE
+swap_dev:	.word SWAP_DEV
+ram_size:	.word RAMDISK
+vid_mode:	.word SVGA_MODE
+root_dev:	.word ROOT_DEV
+boot_flag:	.word 0xAA55

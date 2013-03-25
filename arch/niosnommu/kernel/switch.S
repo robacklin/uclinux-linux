@@ -1,8 +1,8 @@
+//vic - change use of current_set to just current - needs verification
 /*
  * Feb 26, 2001 Ken Hill
  *	Port to Nios architecture
  *
- * $Id: switch.S,v 1.1 2002/08/01 23:25:18 mdurrant Exp $
  * switch.S: Sparc task switch code.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -12,8 +12,10 @@
 #include <asm/psr.h>
 #include <asm/asmmacro.h>
 #include <asm/niosasm.h>
-#include <asm/ptrace.h>
+//vic#include <asm/ptrace.h>
 #include <asm/winmacro.h>
+
+#include "nios_defs.h"
 
 #define sw_ntask     g0
 #define sw_tmp       g1
@@ -28,12 +30,10 @@
 	.align 4
 	.globl	C_LABEL(nios_switch_to)
 C_LABEL(nios_switch_to):
-	mov	%sw_ntask, %o0
+	mov	%sw_ntask, %o1
 
 	/* Save kernel state. */
 	
-//vic	FLUSH_ALL_KERNEL_WINDOWS; 
-//vic	STORE_WINDOW
 	pfx	8
 	wrctl	%g5				; disable interrupts
 	 nop
@@ -47,26 +47,25 @@ C_LABEL(nios_switch_to):
 	ld	%sw_tmp, [%sw_epsr]		/* get STATUS extension */
 	ANDNIP	%sw_tmp, 0xffff			/* clear lower */
 	or	%sw_psr, %sw_tmp
-	LOAD_CURRENT sw_tmp			/* get current task ptr */
-	STBO	%sw_tmp, THREAD_KPSR, %sw_psr	/* save STATUS & ESTATUS  */
-	STBO	%sw_tmp, THREAD_KSP, %sp	/* save current stack ptr */
-	STBO	%sw_tmp, THREAD_KPC, %o7	/* save current return pc */
+	mov	%sw_tmp, %o0			/* get 'prev' task ptr */
+	STBO	%sw_tmp, (TASK_THREAD+THREAD_KPSR), %sw_psr	/* save STATUS & ESTATUS  */
+	STBO	%sw_tmp, (TASK_THREAD+THREAD_KSP), %sp	/* save current stack ptr */
+	STBO	%sw_tmp, (TASK_THREAD+THREAD_KPC), %o7	/* save current return pc */
 
 	/* Load new kernel state. */
 
-	MOVIA	%sw_tmp,C_LABEL(current_set)	/* set new task as current */
+	MOVIA	%sw_tmp,C_LABEL(_current_task)	/* set new task as current */
 	st	[%sw_tmp], %sw_ntask
-	LDBO	%sw_psr, %sw_ntask, THREAD_KPSR	/* get saved STATUS & ESTATUS */
+	LDBO	%sw_psr, %sw_ntask, (TASK_THREAD+THREAD_KPSR)	/* get saved STATUS & ESTATUS */
 	ANDNIP	%sw_psr, PSR_IE			/* Clear IE bit */
 	wrctl	%sw_psr				/* set new STATUS (IE=0) */
 	 nop
 	 nop
 	ANDNIP	%sw_psr, 0xffff			/* clear lower */
 	st	[%sw_epsr], %sw_psr		/* set new STATUS extension */
-	LDBO	%sp, %sw_ntask, THREAD_KSP	/* set new stack ptr */
-	LDBO	%o7, %sw_ntask, THREAD_KPC	/* set new return pc */
+	LDBO	%sp, %sw_ntask, (TASK_THREAD+THREAD_KSP)	/* set new stack ptr */
+	LDBO	%o7, %sw_ntask, (TASK_THREAD+THREAD_KPC)	/* set new return pc */
 
-//vic	LOAD_WINDOW
 	FILL_WINDOWS				/* fill reg file from stack */
 
 	pfx	9				/* Ok to interrupt now */

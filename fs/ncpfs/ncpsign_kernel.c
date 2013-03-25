@@ -9,19 +9,8 @@
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 
-#if 0
-#ifdef MODULE
-#include <linux/module.h>
-#include <linux/version.h>
-#endif
-#endif
-
 #include <linux/string.h>
 #include <linux/ncp.h>
-#if 0
-#include <linux/ncp_fs.h>
-#include <linux/ncp_fs_sb.h>
-#endif
 #include "ncpsign_kernel.h"
 
 #define rol32(i,c) (((((i)&0xffffffff)<<c)&0xffffffff)| \
@@ -36,24 +25,24 @@
 #define PVAL(buf,pos) ((unsigned)BVAL(buf,pos))
 #define BSET(buf,pos,val) (BVAL(buf,pos) = (val))
 
-static inline word
+static inline __u16
 WVAL_LH(__u8 * buf, int pos)
 {
 	return PVAL(buf, pos) | PVAL(buf, pos + 1) << 8;
 }
-static inline dword
+static inline __u32
 DVAL_LH(__u8 * buf, int pos)
 {
 	return WVAL_LH(buf, pos) | WVAL_LH(buf, pos + 2) << 16;
 }
 static inline void
-WSET_LH(__u8 * buf, int pos, word val)
+WSET_LH(__u8 * buf, int pos, __u16 val)
 {
 	BSET(buf, pos, val & 0xff);
 	BSET(buf, pos + 1, val >> 8);
 }
 static inline void
-DSET_LH(__u8 * buf, int pos, dword val)
+DSET_LH(__u8 * buf, int pos, __u32 val)
 {
 	WSET_LH(buf, pos, val & 0xffff);
 	WSET_LH(buf, pos + 2, val >> 16);
@@ -62,8 +51,6 @@ DSET_LH(__u8 * buf, int pos, dword val)
 #define GET_LE32(p) DVAL_LH(p,0)
 #define PUT_LE32(p,v) DSET_LH(p,0,v)
 #endif
-
-#define min(a,b) ((a)<(b)?(a):(b))
 
 static void nwsign(char *r_data1, char *r_data2, char *outdata) {
  int i;
@@ -113,7 +100,7 @@ void sign_packet(struct ncp_server *server, int *size) {
  memcpy(data,server->sign_root,8);
  PUT_LE32(data+8,(*size));
  memcpy(data+12,server->packet+sizeof(struct ncp_request_header)-1,
-  min((*size)-sizeof(struct ncp_request_header)+1,52));
+  min_t(unsigned int,(*size)-sizeof(struct ncp_request_header)+1,52));
 
  nwsign(server->sign_last,data,server->sign_last);
 

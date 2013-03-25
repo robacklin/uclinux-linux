@@ -35,7 +35,7 @@ void install_linux_ticker(void)
 
 	if (!linux_lvl14)
 		return;
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	linux_lvl14[0] =  lvl14_save[0];
 	linux_lvl14[1] =  lvl14_save[1];
 	linux_lvl14[2] =  lvl14_save[2];
@@ -49,7 +49,7 @@ void install_obp_ticker(void)
     
 	if (!linux_lvl14)
 		return;
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	linux_lvl14[0] =  obp_lvl14[0];
 	linux_lvl14[1] =  obp_lvl14[1];
 	linux_lvl14[2] =  obp_lvl14[2];
@@ -60,6 +60,8 @@ void install_obp_ticker(void)
 void claim_ticker14(void (*handler)(int, void *, struct pt_regs *),
 		    int irq_nr, unsigned int timeout )
 {
+	int cpu = smp_processor_id();
+
 	/* first we copy the obp handler instructions
 	 */
 	disable_irq(irq_nr);
@@ -78,7 +80,7 @@ void claim_ticker14(void (*handler)(int, void *, struct pt_regs *),
 			 "counter14",
 			 NULL)) {
 		install_linux_ticker();
-		load_profile_irq(timeout);
+		load_profile_irq(cpu, timeout);
 		enable_irq(irq_nr);
 	}
 }

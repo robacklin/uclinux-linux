@@ -2,7 +2,7 @@
 #define _M68K_USER_H
 
 #include <asm/page.h>
-#include <linux/ptrace.h>
+
 /* Core file format: The core file is written in such a way that gdb
    can understand it and provide useful information to the user (under
    linux we use the 'trad-core' bfd).  There are quite a number of
@@ -35,14 +35,30 @@ struct user_m68kfp_struct {
 	unsigned long  fpcntl[3];	/* fp control regs */
 };
 
+/* This is the old layout of "struct pt_regs" as of Linux 1.x, and
+   is still the layout used by user (the new pt_regs doesn't have
+   all registers). */
+struct user_regs_struct {
+	long d1,d2,d3,d4,d5,d6,d7;
+	long a0,a1,a2,a3,a4,a5,a6;
+	long d0;
+	long usp;
+	long orig_d0;
+	short stkadj;
+	short sr;
+	long pc;
+	short fmtvec;
+	short __fill;
+};
+
+	
 /* When the kernel dumps core, it starts by dumping the user struct -
    this will be used by gdb to figure out where the data and stack segments
    are within the file, and what virtual addresses to use. */
 struct user{
 /* We start with the registers, to mimic the way that "memory" is returned
    from the ptrace(3,...) function.  */
-  struct pt_regs regs;		/* Where the registers are actually stored */
-  struct switch_stack regs2;	/* Backward compatibility, sort of */
+  struct user_regs_struct regs;	/* Where the registers are actually stored */
 /* ptrace does not yet supply these.  Someday.... */
   int u_fpvalid;		/* True if math co-processor being used. */
                                 /* for this mess. Not yet used. */
@@ -58,7 +74,8 @@ struct user{
 				   esp register.  */
   long int signal;     		/* Signal that caused the core dump. */
   int reserved;			/* No longer used */
-  struct pt_regs * u_ar0;	/* Used by gdb to help find the values for */
+  struct user_regs_struct *u_ar0;
+				/* Used by gdb to help find the values for */
 				/* the registers. */
   struct user_m68kfp_struct* u_fpstate;	/* Math Co-processor pointer. */
   unsigned long magic;		/* To uniquely identify a core file */

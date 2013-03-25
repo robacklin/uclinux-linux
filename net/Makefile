@@ -1,97 +1,74 @@
+# $USAGI: Makefile,v 1.15 2003/11/12 05:11:58 yoshfuji Exp $
 #
 # Makefile for the linux networking.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# 2 Sep 2000, Christoph Hellwig <hch@infradead.org>
+# Rewritten to use lists instead of if-statements.
 #
-# Note 2! The CFLAGS definition is now in the main makefile...
 
-MOD_SUB_DIRS := ipv4
-ALL_SUB_DIRS := 802 ax25 bridge core ethernet ipv4 ipx unix appletalk netrom rose #decnet
-SUB_DIRS     := core ethernet unix
-MOD_LIST_NAME := NET_MISC_MODULES
+O_TARGET :=	network.o
 
+mod-subdirs :=	ipv4/netfilter ipv6/netfilter bridge/netfilter ipx irda bluetooth atm netlink sched core sctp 802
+export-objs :=	netsyms.o
+
+subdir-y :=	core ethernet
+subdir-m :=	ipv4 # hum?
+
+
+subdir-$(CONFIG_NET)		+= 802 sched netlink
+subdir-$(CONFIG_IPV6)		+= ipv6
+subdir-$(CONFIG_INET)		+= ipv4
+subdir-$(CONFIG_NETFILTER)	+= ipv4/netfilter
+subdir-$(CONFIG_UNIX)		+= unix
+subdir-$(CONFIG_IP_SCTP)	+= sctp
+
+ifneq ($(CONFIG_IPV6),n)
+ifneq ($(CONFIG_IPV6),)
+subdir-$(CONFIG_NETFILTER)	+= ipv6/netfilter
+endif
+endif
+
+ifeq ($(CONFIG_IPV6),y)
+subdir-$(CONFIG_IPV6_IPV6_TUNNEL)              += ipv6
+endif
+
+ifneq ($(CONFIG_BRIDGE),n)
+ifneq ($(CONFIG_BRIDGE),)
+subdir-$(CONFIG_BRIDGE)		+= bridge/netfilter
+endif
+endif
+
+subdir-$(CONFIG_KHTTPD)		+= khttpd
+subdir-$(CONFIG_PACKET)		+= packet
+subdir-$(CONFIG_NET_SCHED)	+= sched
+subdir-$(CONFIG_BRIDGE)		+= bridge
+subdir-$(CONFIG_IPX)		+= ipx
+subdir-$(CONFIG_ATALK)		+= appletalk
+subdir-$(CONFIG_WAN_ROUTER)	+= wanrouter
+subdir-$(CONFIG_X25)		+= x25
+subdir-$(CONFIG_LAPB)		+= lapb
+subdir-$(CONFIG_NETROM)		+= netrom
+subdir-$(CONFIG_ROSE)		+= rose
+subdir-$(CONFIG_AX25)		+= ax25
+subdir-$(CONFIG_IRDA)		+= irda
+subdir-$(CONFIG_BLUEZ)		+= bluetooth
+subdir-$(CONFIG_SUNRPC)		+= sunrpc
+subdir-$(CONFIG_ATM)		+= atm
+subdir-$(CONFIG_DECNET)		+= decnet
+subdir-$(CONFIG_ECONET)		+= econet
+subdir-$(CONFIG_IPSEC)		+= ipsec
+subdir-$(CONFIG_KLIPS)		+= ipsec
+subdir-$(CONFIG_VLAN_8021Q)           += 8021q
+
+ifeq ($(CONFIG_NETFILTER),y)
+  mod-subdirs += ipv4/ipvs
+  subdir-$(CONFIG_IP_VS) += ipv4/ipvs
+endif
+
+obj-y	:= socket.o $(join $(subdir-y), $(patsubst %,/%.o,$(notdir $(subdir-y))))
 ifeq ($(CONFIG_NET),y)
-SUB_DIRS += 802
-endif
-
-ifeq ($(CONFIG_INET),y)
-SUB_DIRS += ipv4
-endif
-
-ifeq ($(CONFIG_BRIDGE),y)
-SUB_DIRS += bridge
-endif
-
-ifeq ($(CONFIG_IPX),y)
-SUB_DIRS += ipx
-else
-  ifeq ($(CONFIG_IPX),m)
-  MOD_SUB_DIRS += ipx
-  endif
-endif
-
-ifeq ($(CONFIG_ATALK),y)
-SUB_DIRS += appletalk
-else
-  ifeq ($(CONFIG_ATALK),m)
-  MOD_SUB_DIRS += appletalk
-  endif
-endif
-
-ifeq ($(CONFIG_NETROM),y)
-SUB_DIRS += netrom
-else
-  ifeq ($(CONFIG_NETROM),m)
-  MOD_SUB_DIRS += netrom
-  endif
-endif
-
-ifeq ($(CONFIG_ROSE),y)
-SUB_DIRS += rose
-else
-  ifeq ($(CONFIG_ROSE),m)
-  MOD_SUB_DIRS += rose
-  endif
-endif
-
-ifeq ($(CONFIG_AX25),y)
-SUB_DIRS += ax25
-else
-  ifeq ($(CONFIG_AX25),m)
-  MOD_SUB_DIRS += ax25
-  endif
-endif
-
-ifeq ($(CONFIG_IPSEC),y)
-LINK_DIRS := ipsec
-ALL_SUB_DIRS += ipsec
-SUB_DIRS += ipsec
-else
-  ifeq ($(CONFIG_IPSEC),m)
-  LINK_DIRS := ipsec
-  ALL_SUB_DIRS += ipsec
-  MOD_SUB_DIRS += ipsec
-  endif
-endif
-
-L_TARGET     := network.a
-L_OBJS	     := socket.o protocols.o sysctl_net.o $(join $(SUB_DIRS),$(SUB_DIRS:%=/%.o))
-ifeq ($(CONFIG_NET),y)
-ifeq ($(CONFIG_MODULES),y)
-LX_OBJS = netsyms.o
-endif
-endif
-
-M_OBJS	     :=
-
-ifeq ($(CONFIG_NETLINK),y)
-L_OBJS += netlink.o
-else
-  ifeq ($(CONFIG_NETLINK),m)
-    M_OBJS += netlink.o
-  endif
+obj-$(CONFIG_MODULES)		+= netsyms.o
+obj-$(CONFIG_SYSCTL)		+= sysctl_net.o
 endif
 
 include $(TOPDIR)/Rules.make

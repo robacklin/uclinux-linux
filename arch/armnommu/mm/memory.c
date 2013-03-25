@@ -9,4 +9,3 @@ int is_in_rom(unsigned long addr) {
 		return 0;
 }
 #endif
-

@@ -300,7 +300,7 @@ pastStringData\@:
 	.macro	nm_printchar char
 	MOVIP		%o0,\char
 	_BSR		nr_uart_txchar
-	NOP
+	MOVI		%o1,0
 	.endm
 
 	.macro	nm_print2chars char1,char2
@@ -426,7 +426,7 @@ txCharLoop\@:
 .macro nm_d_txchar	c
 	SUBI	%sp,16+8		; 32 or 16 bit, that's enough space
 	STS	[%sp,16+0],%g6
-	STS	[%sp,16+0],%g7
+	STS	[%sp,16+1],%g7
 	nm_txchar \c
 	LDS	%g6,[%sp,16+0]
 	LDS	%g7,[%sp,16+1]
@@ -472,274 +472,311 @@ nm_d_delayloop\@:
 .endm
 
 ;
-; File: nios_map.s
+; File: excalibur.s
 ;
 ; This file is a machine generated address map
-; for a Nios hardware design.
-; ./cpu32.ptf
-;
-; Generated: 2001.07.31 14:04:02
+; for a CPU named cpu using toolchain "gnu".
+; C:/Altera/Excalibur/sopc_builder_2_6_1/examples/verilog/nios_dev_board/LDK_2_0_with_91C111_full/LDK2.ptf
+; Generated: 2002.09.26 13:43:23
 ;
 
-	; Simple macro to equate & globalize at once
-	.macro GEQU sym,val
+.ifndef _excalibur_
+.equ _excalibur_,1
+
+
+	; minor macro to .equate and .global
+	.macro	GEQU sym,val
 	.global \sym
 	.equ \sym,\val
 	.endm
 
+; The Memory Map
 
-    GEQU na_null                , 0x00000000 ;                                      
-    GEQU na_cpu32_cpu           , 0x00000000 ; altera_nios                          
-    GEQU na_cpu32_cpu_end       , 0x08000000 
-    GEQU na_mon                 , 0x00000000 ; altera_avalon_onchip_memory          
-    GEQU na_uart0               , 0x00000400 ; altera_avalon_uart                   
-    GEQU na_uart0_irq           , 17         
-    GEQU na_sram                , 0x00040000 ; altera_nios_dev_board_sram32         
-    GEQU na_sram_end            , 0x00080000 
-    GEQU na_flash               , 0x00100000 ; altera_nios_dev_board_flash          
-    GEQU na_flash_end           , 0x00200000 
-    GEQU na_timer0              , 0x00000440 ; altera_avalon_timer                  
-    GEQU na_timer0_irq          , 16         
-    GEQU na_uart1               , 0x000004a0 ; altera_avalon_uart                   
-    GEQU na_uart1_irq           , 18         
-    GEQU na_seven_seg_pio       , 0x00000420 ; altera_avalon_pio                    
-    GEQU na_spi                 , 0x00000480 ; altera_avalon_spi                    
-    GEQU na_spi_irq             , 19         
-    GEQU na_sdram               , 0x01000000 ; altera_avalon_sdram_controller       
-    GEQU na_sdram_end           , 0x02000000 
-    GEQU na_led_pio             , 0x00000460 ; altera_avalon_pio                    
-    GEQU na_button_pio          , 0x00000470 ; altera_avalon_pio                    
-    GEQU na_ide_interface       , 0x00000500 ; altera_avalon_user_defined_interface 
-    GEQU na_ide_ctl_in          , 0x00000580 ; altera_avalon_pio                    
-    GEQU na_flash_kernel        , 0x00800000 ; mtx_sodimm_flash_controller          
-    GEQU na_flash_kernel_end    , 0x01000000 
-    GEQU na_enet                , 0x00004000 ; altera_avalon_cs8900                 
-    GEQU na_enet_irq            , 35         
-    GEQU na_enet_reset          , 0x00004020 ; altera_avalon_pio                    
-    GEQU nasys_printf_uart      , 0x00000400 ; altera_avalon_uart                   
-    GEQU nasys_printf_uart_irq  , 17         
-    GEQU nasys_gdb_uart         , 0x000004a0 ; altera_avalon_uart                   
-    GEQU nasys_gdb_uart_irq     , 18         
-    GEQU nasys_main_flash       , 0x00100000 ; altera_nios_dev_board_flash          
-    GEQU nasys_main_flash_end   , 0x00200000 
-    GEQU nasys_program_mem      , 0x01000000 ;                                      
-    GEQU nasys_program_mem_end  , 0x02000000 
-    GEQU nasys_data_mem         , 0x01000000 ;                                      
-    GEQU nasys_data_mem_end     , 0x02000000 
-    GEQU nasys_stack_top        , 0x02000000 ;                                      
-    GEQU nasys_vector_table     , 0x00040000 ;                                      
-    GEQU nasys_vector_table_end , 0x00040100 
-    GEQU nasys_reset_address    , 0x00000000 ;                                      
-    GEQU nasys_clock_freq       , 33333000   ;                                      
-    GEQU nasys_clock_freq_1000  , 33333      ;                                      
+	GEQU na_mon               , 0x00000000 ; altera_avalon_onchip_memory
+	GEQU na_mon_end           , 0x00000400
+	GEQU na_cpu               , 0x00000000 ; altera_nios
+	GEQU na_uart0             , 0x00000400 ; altera_avalon_uart
+	GEQU na_uart0_irq         , 17
+	GEQU na_timer0            , 0x00000440 ; altera_avalon_timer
+	GEQU na_timer0_irq        , 16
+	GEQU na_ssram_detect      , 0x00000460 ; altera_avalon_pio
+	GEQU na_button_pio        , 0x00000470 ; altera_avalon_pio
+	GEQU na_spi               , 0x00000480 ; altera_avalon_spi
+	GEQU na_spi_irq           , 19
+	GEQU na_uart1             , 0x000004a0 ; altera_avalon_uart
+	GEQU na_uart1_irq         , 18
+	GEQU na_ide_interface     , 0x00000500 ; altera_avalon_user_defined_interface
+	GEQU na_ide_interface_irq , 25
+	GEQU na_enet              , 0x00004000 ; altera_avalon_lan91c111
+	GEQU na_enet_end          , 0x00004020
+	GEQU na_enet_irq          , 35
+	GEQU na_enet_reset_n      , 0x00004020 ; altera_avalon_pio
+	GEQU na_flash             , 0x00100000 ; altera_nios_dev_board_flash
+	GEQU na_flash_end         , 0x00200000
+	GEQU na_flash_kernel      , 0x00800000 ; mtx_sodimm_flash_controller
+	GEQU na_flash_kernel_end  , 0x01000000
+	GEQU na_sdram             , 0x01000000 ; altera_avalon_sdram_controller
+	GEQU na_sdram_end         , 0x02000000
+ 
+	GEQU na_null                 , 0
+	GEQU nasys_flash_count       , 1
+	GEQU nasys_flash_0           , na_flash
+	GEQU nasys_pio_count         , 3
+	GEQU nasys_pio_0             , na_ssram_detect
+	GEQU nasys_pio_1             , na_button_pio
+	GEQU nasys_pio_2             , na_enet_reset_n
+	GEQU nasys_spi_count         , 1
+	GEQU nasys_spi_0             , na_spi
+	GEQU nasys_spi_0_irq         , 19
+	GEQU nasys_timer_count       , 1
+	GEQU nasys_timer_0           , na_timer0
+	GEQU nasys_timer_0_irq       , 16
+	GEQU nasys_uart_count        , 2
+	GEQU nasys_uart_0            , na_uart0
+	GEQU nasys_uart_0_irq        , 17
+	GEQU nasys_uart_1            , na_uart1
+	GEQU nasys_uart_1_irq        , 18
+	GEQU nasys_usersocket_count  , 1
+	GEQU nasys_usersocket_0      , na_ide_interface
+	GEQU nasys_usersocket_0_irq  , 25
+	GEQU nasys_vector_table      , 0x01000000
+	GEQU nasys_vector_table_size , 0x00000100
+	GEQU nasys_vector_table_end  , 0x01000100
+	GEQU nasys_reset_address     , 0x00000000
+	GEQU nasys_clock_freq        , 33333000
+	GEQU nasys_clock_freq_1000   , 33333
+	GEQU nasys_debug_core        , 0
+	GEQU nasys_printf_uart       , na_uart0
+	GEQU nasys_printf_uart_irq   , na_uart0_irq
+	GEQU nasys_debug_uart        , na_uart1
+	GEQU nasys_debug_uart_irq    , na_uart1_irq
+	GEQU nasys_main_flash        , na_flash
+	GEQU nasys_main_flash_size   , na_flash_size
+	GEQU nasys_main_flash_end    , na_flash_end
+	GEQU nasys_program_mem       , 0x01000100
+	GEQU nasys_program_mem_size  , 0x00ffff00
+	GEQU nasys_program_mem_end   , 0x02000000
+	GEQU nasys_data_mem          , 0x01000100
+	GEQU nasys_data_mem_size     , 0x00ffff00
+	GEQU nasys_data_mem_end      , 0x02000000
+	GEQU nasys_stack_top         , 0x02000000
+ 
+	.equ PLUGS_PLUG_COUNT          , 5 ; Maximum number of plugs
+	.equ PLUGS_ADAPTER_COUNT       , 2 ; Maximum number of adapters
+	.equ PLUGS_DNS                 , 1 ; Have routines for DNS lookups
+	.equ PLUGS_PING                , 1 ; Respond to icmp echo (ping) messages
+	.equ PLUGS_TCP                 , 1 ; Support tcp in/out connections
+	.equ PLUGS_IRQ                 , 1 ; Run at interrupte level
+	.equ PLUGS_DEBUG               , 1 ; Support debug routines
+	.equ __nios_catch_irqs__       , 1 ; Include panic handler for all irqs (needs uart)
+	.equ __nios_use_constructors__ , 1 ; Call c++ static constructors
+	.equ __nios_use_cwpmgr__       , 1 ; Handle register window underflows
+	.equ __nios_use_fast_mul__     , 1 ; Faster but larger int multiply routine
+	.equ __nios_use_small_printf__ , 1 ; Smaller non-ANSI printf, with no floating point
+	.equ __nios_use_multiply__     , 0 ; Use MUL instruction for 16x16
+	.equ __nios_use_mstep__        , 0 ; Use MSTEP instruction for 16x16
 
-	.macro nm_system_name_string
-	.asciz "cpu32"
+
+
+	.macro	nm_system_name_string
+	.asciz	"LDK2"
 	.endm
 
-	.macro nm_monitor_string
-	.asciz "rev2_1"
+	.macro	nm_cpu_name_string
+	.asciz	"cpu"
 	.endm
 
+	.macro	nm_monitor_string
+	.asciz	"L20e1"
+	.endm
+
+	.equ	nios_32,1
+
+	.macro	nm_cpu_architecture
+	.asciz	"nios_32"
+	.endm
+
+; Structures and Routines For Each Peripheral
 
 
-; Parameters for each peripheral.
 
+.if __nios32__
+    .equ nios_wordsize,4
+.else
+    .equ nios_wordsize,2
+.endif
 
-; Parameters for altera_nios named na_cpu32_cpu at 0x00008235:
-;         num_regs = 512
-;       shift_size = 7
-;            mstep = 1
-;         multiply = 0
-;        wvalid_wr = 0
-;      rom_decoder = 1
-;   mainmem_module = 
-;   datamem_module = 
-;  maincomm_module = uart0
-;   gdbcomm_module = uart1
-; germs_monitor_id = MDL
-;     reset_offset = 0x0
-;     reset_module = mon
-;   vecbase_offset = 0x0
-;   vecbase_module = sram
+    GEQU    nasys_debug_core_irq,     8
 
-; Parameters for altera_avalon_onchip_memory named na_mon at 0x00008235:
-;     Writeable = 0
-;      Contents = user_file
-;      Initfile = cpu32_sdk\\Custom_Germs\\nios_germs_monitor.srec
-; Size_In_Bytes = 1K
+;;; debug registers offsets from base
+    GEQU    np_debug_interrupt,        0        ;read-only,  4 bits, reading stops trace
+    GEQU    np_debug_n_samples_lsb,    1        ;read-only, 16 bits
+    GEQU    np_debug_n_samples_msb,    2        ;read-only, 16 bits
+    GEQU    np_debug_data_valid,       3        ;read-only, 1 bit, 
+                                                ;true when trace registers contain valid sample
+    GEQU    np_debug_trace_address,    4        ;read-only, 16 or 32 bits
+    GEQU    np_debug_trace_data,       5        ;read-only, 16 or 32 bits
+    GEQU    np_debug_trace_code,       6        ;read-only, 16 or 32 bits
+    GEQU    np_debug_write_status,     7        ;read-only, 1 bit, 
+                                                ;true when read to readback tracedata
+    GEQU    np_debug_start,            8        ;write-only, write any value to start
+    GEQU    np_debug_stop,             9        ;write-only, write any value to stop
+    GEQU    np_debug_read_sample,      10        ;write-only, write any value to read
+    GEQU    np_debug_trace_mode,       11        ;write-only, 1 bit
+    GEQU    np_debug_mem_int_enable,   12        ;write-only, 16 or 32 bits ?????
+    GEQU    np_debug_ext_brk_enable,   13        ;write-only, 1 bit
+    GEQU    np_debug_sw_reset,         14        ;write-only, reset sampels and trace memory
+    
+    GEQU    np_debug_address_pattern_0,16        ;write-only, 16 or 32 bits
+    GEQU    np_debug_address_mask_0,   17        ;write-only, 16 or 32 bits
+    GEQU    np_debug_data_pattern_0,   18        ;write-only, 16 or 32 bits
+    GEQU    np_debug_data_mask_0,      19        ;write-only, 16 or 32 bits
+    GEQU    np_debug_code_0,           20        ;write-only, 16 or 32 bits
+    
+    GEQU    np_debug_address_pattern_1,24        ;write-only, 16 or 32 bits
+    GEQU    np_debug_address_mask_1,   25        ;write-only, 16 or 32 bits
+    GEQU    np_debug_data_pattern_1,   26        ;write-only, 16 or 32 bits
+    GEQU    np_debug_data_mask_1,      27        ;write-only, 16 or 32 bits
+    GEQU    np_debug_code_1,           28        ;write-only, 16 or 32 bits
 
-; Parameters for altera_avalon_uart named na_uart0 at 0x00008235:
-;       baud = 115200
-;  data_bits = 8
-; fixed_baud = 1
-;     parity = N
-;  stop_bits = 2
-; clock_freq = 33333000
+;;; debug Register Bits/Codes
+;;; ************************************************
+;;; debug_interrupt register
+;;; bit numbers
+    GEQU    np_debug_interrupt_code_dbp0_bit, 0
+    GEQU    np_debug_interrupt_code_dbp1_bit, 1
+    GEQU    np_debug_interrupt_code_ibp0_bit, 2
+    GEQU    np_debug_interrupt_code_ibp1_bit, 3
+    GEQU    np_debug_interrupt_code_mem_bit, 4
 
-; Parameters for altera_avalon_timer named na_timer0 at 0x00008235:
+;;; bit masks
+    GEQU    np_debug_interrupt_code_ext_mask,  (0)
+    GEQU    np_debug_interrupt_code_dbp0_mask, (1<<0)
+    GEQU    np_debug_interrupt_code_dbp1_mask, (1<<1)
+    GEQU    np_debug_interrupt_code_ibp0_mask, (1<<2)
+    GEQU    np_debug_interrupt_code_ibp1_mask, (1<<3)
+    GEQU    np_debug_interrupt_code_mem_mask,  (1<<4)
 
-; Parameters for altera_avalon_uart named na_uart1 at 0x00008235:
-;       baud = 115200
-;  data_bits = 8
-; fixed_baud = 0
-;     parity = N
-;  stop_bits = 1
+;;; ************************************************
+;;; debug_trace_code register
+;;; bit numbers
+    GEQU    np_debug_trace_code_skp_bit, 1
+    GEQU    np_debug_trace_code_fifo_full_bit, 2
+    GEQU    np_debug_trace_code_bus_bit, 3
+    GEQU    np_debug_trace_code_rw_bit, 4
+    GEQU    np_debug_trace_code_intr_bit, 5
+    
+;;; bit masks
+    GEQU    np_debug_trace_code_skp_mask,       (1<<0)
+    GEQU    np_debug_trace_code_fifo_full_mask, (1<<1)
+    GEQU    np_debug_trace_code_data_trans_mask,(1<<2)     ;instr trans if 0
+    GEQU    np_debug_trace_code_write_mask,     (1<<3)     ;read if 0
+    GEQU    np_debug_trace_code_intr_mask,      (1<<4)
+.if __nios32__
+    GEQU    np_debug_trace_code_skp_cnt_mask, (63<<2)
+.else
+    GEQU    np_debug_trace_code_skp_cnt_mask, (31<<2)
+.endif
 
-; Parameters for altera_avalon_pio named na_seven_seg_pio at 0x00008235:
-;   has_tri = 0
-;   has_out = 1
-;    has_in = 0
-; edge_type = NONE
-;  irq_type = NONE
-
-; Parameters for altera_avalon_spi named na_spi at 0x00008235:
-;      databits = 16
-;   targetclock = 250000.0
-;   clock_units = KHz
-;     numslaves = 2
-;      ismaster = 1
-; clockpolarity = 0
-;    clockphase = 1
-;      lsbfirst = 0
-;    extradelay = 1
-; targetssdelay = 5.0E-6
-;   delay_units = us
-
-; Parameters for altera_avalon_sdram_controller named na_sdram at 0x00008235:
-;      sdram_data_width = 32
-;      sdram_addr_width = 11
-;      sdram_bank_width = 2
-;       sdram_row_width = 11
-;       sdram_col_width = 8
-; sdram_num_chipselects = 2
-;        refresh_period = 15.625us
-;         powerup_delay = 100us
-;           cas_latency = 1
-; precharge_control_bit = 10
-;                 t_rfc = 70ns
-;                  t_rp = 20ns
-;                 t_mrd = 2clocks
-;                 t_rcd = 20ns
-;                  t_ac = 17ns
-;   t_wr_auto_precharge = 1clock + 7ns
-;        t_wr_precharge = 14ns
-; init_refresh_commands = 2
-;        init_nop_delay = 0
-;           shared_data = 0
-;         enable_ifetch = 1
-;              highperf = 1
-
-; Parameters for altera_avalon_pio named na_led_pio at 0x00008235:
-;   has_tri = 0
-;   has_out = 1
-;    has_in = 0
-; edge_type = NONE
-;  irq_type = NONE
-
-; Parameters for altera_avalon_pio named na_button_pio at 0x00008235:
-;   has_tri = 0
-;   has_out = 0
-;    has_in = 1
-; edge_type = NONE
-;  irq_type = NONE
-
-; Parameters for altera_avalon_user_defined_interface named na_ide_interface at 0x00008235:
-
-; Parameters for altera_avalon_pio named na_ide_ctl_in at 0x00008235:
-;   has_tri = 0
-;   has_out = 0
-;    has_in = 1
-; edge_type = NONE
-;  irq_type = NONE
-
-; Parameters for altera_avalon_pio named na_enet_reset at 0x00008235:
-;   has_tri = 0
-;   has_out = 1
-;    has_in = 0
-; edge_type = NONE
-;  irq_type = NONE
-
-; end of file
-;
-; File: nios_peripherals.s
-;
-; This file is a machine peripherals definition
-; for a Nios hardware design.
-; ./cpu32.ptf
-;
-; Generated: 2001.07.31 14:04:03
-;
-
-; : 1 present 
-
-; altera_avalon_cs8900: 1 present 
-
-; altera_avalon_onchip_memory: 1 present 
-
-; altera_avalon_pio: 5 present 
+;;; useful constants
+    GEQU    np_debug_trace_code_op_mask, (np_debug_trace_code_data_trans_mask|np_debug_trace_code_write_mask)
+    GEQU    np_debug_trace_code_read, np_debug_trace_code_data_trans_mask
+    GEQU    np_debug_trace_code_write, (np_debug_trace_code_data_trans_mask|np_debug_trace_code_write_mask)
+    GEQU    np_debug_trace_code_fetch, 0
+    
+;;; ************************************************
+;;; debug_code_* registers
+;;; bit numbers
+    GEQU    np_debug_break_code_read_bit,  0
+    GEQU    np_debug_break_code_write_bit, 1
+    GEQU    np_debug_break_code_fetch_bit, 2
+    
+;;; bit masks
+    GEQU    np_debug_break_code_read_mask,  (1<<0)
+    GEQU    np_debug_break_code_write_mask, (1<<1)
+    GEQU    np_debug_break_code_fetch_mask, (1<<2)
+    
+;;; ************************************************
+;;; debug_write_status register
+;;; bit numbers
+    GEQU    np_debug_write_status_writing_bit, 0
+    GEQU    np_debug_write_status_nios32_bit,  1
+    GEQU    np_debug_write_status_trace_bit,   2
+    
+;;; bit masks
+    GEQU    np_debug_write_status_writing_mask, (1<<0)
+    GEQU    np_debug_write_status_nios32_mask,  (1<<1)
+    GEQU    np_debug_write_status_trace_mask,   (1<<2)
+    
 ; ----------------------------------------------
-; PIO Peripheral
+; UART Peripheral
 ;
 	;
-	; PIO Registers
+	; UART Registers
 	;
-	.equ np_piodata,          0 ; read/write, up to 32 bits
-	.equ np_piodirection,     1 ; write/readable, up to 32 bits, 1->output bit
-	.equ np_piointerruptmask, 2 ; write/readable, up to 32 bits, 1->enable interrupt
-	.equ np_pioedgecapture,   3 ; read, up to 32 bits, cleared by any write.
-
-
-; altera_avalon_sdram_controller: 1 present 
-
-; altera_avalon_spi: 1 present 
-; ----------------------------------------------
-; SPI Peripheral
-;
-	;
-	; SPI Registers
-	;
-	.equ np_spirxdata,      0 ; Read-only, 1-16 bit
-	.equ np_spitxdata,      1 ; Write-only, 1-16 bit
-	.equ np_spistatus,      2 ; Read-only, 9-bit
-	.equ np_spicontrol,     3 ; Read/Write, 9-bit
-	.equ np_spireserved,    4 ; reserved
-	.equ np_spislaveselect, 5 ; Read/Write, 1-16 bit, master only
+	.equ np_uartrxdata,      0 ; Read-only, 8-bit
+	.equ np_uarttxdata,      1 ; Write-only, 8-bit
+	.equ np_uartstatus,      2 ; Read-only, 8-bit
+	.equ np_uartcontrol,     3 ; Read/Write, 9-bit
+	.equ np_uartdivisor,     4 ; Read/Write, 16-bit, optional
+	.equ np_uartendofpacket, 5 ; Read/Write, end-of-packet character
 
 	;
-	; SPI Status Register
+	; UART Status Register
 	;
-	.equ np_spistatus_e_mask,    (1 << 8)
-	.equ np_spistatus_rrdy_mask, (1 << 7)
-	.equ np_spistatus_trdy_mask, (1 << 6)
-	.equ np_spistatus_tmt_mask,  (1 << 5)
-	.equ np_spistatus_toe_mask,  (1 << 4)
-	.equ np_spistatus_roe_mask,  (1 << 3)
+	.equ np_uartstatus_eop_mask,  (1<<12)
+	.equ np_uartstatus_cts_mask,  (1<<11)
+	.equ np_uartstatus_dcts_mask, (1<<10)
+	.equ np_uartstatus_e_mask,    (1<<8)
+	.equ np_uartstatus_rrdy_mask, (1<<7)
+	.equ np_uartstatus_trdy_mask, (1<<6)
+	.equ np_uartstatus_tmt_mask,  (1<<5)
+	.equ np_uartstatus_toe_mask,  (1<<4)
+	.equ np_uartstatus_roe_mask,  (1<<3)
+	.equ np_uartstatus_brk_mask,  (1<<2)
+	.equ np_uartstatus_fe_mask,   (1<<1)
+	.equ np_uartstatus_pe_mask,   (1<<0)
 
-	.equ np_spistatus_e_bit,    8
-	.equ np_spistatus_rrdy_bit, 7
-	.equ np_spistatus_trdy_bit, 6
-	.equ np_spistatus_tmt_bit,  5
-	.equ np_spistatus_toe_bit,  4
-	.equ np_spistatus_roe_bit,  3
+	.equ np_uartstatus_eop_bit,  12
+	.equ np_uartstatus_cts_bit,  11
+	.equ np_uartstatus_dcts_bit, 10
+	.equ np_uartstatus_e_bit,    8
+	.equ np_uartstatus_rrdy_bit, 7
+	.equ np_uartstatus_trdy_bit, 6
+	.equ np_uartstatus_tmt_bit,  5
+	.equ np_uartstatus_toe_bit,  4
+	.equ np_uartstatus_roe_bit,  3
+	.equ np_uartstatus_brk_bit,  2
+	.equ np_uartstatus_fe_bit,   1
+	.equ np_uartstatus_pe_bit,   0
 
 	;
-	; SPI Control Register
+	; UART Control Register
 	;
-	.equ np_spicontrol_ie_mask,    (1 << 8)
-	.equ np_spicontrol_irrdy_mask, (1 << 7)
-	.equ np_spicontrol_itrdy_mask, (1 << 6)
-	.equ np_spicontrol_itoe_mask,  (1 << 4)
-	.equ np_spicontrol_iroe_mask,  (1 << 3)
+	.equ np_uartcontrol_eop_mask,   (1<<10)
+	.equ np_uartcontrol_tbrk_mask,  (1<<9)
+	.equ np_uartcontrol_ie_mask,    (1<<8)
+	.equ np_uartcontrol_irrdy_mask, (1<<7)
+	.equ np_uartcontrol_itrdy_mask, (1<<6)
+	.equ np_uartcontrol_itmt_mask,  (1<<5)
+	.equ np_uartcontrol_itoe_mask,  (1<<4)
+	.equ np_uartcontrol_iroe_mask,  (1<<3)
+	.equ np_uartcontrol_ibrk_mask,  (1<<2)
+	.equ np_uartcontrol_ife_mask,   (1<<1)
+	.equ np_uartcontrol_ipe_mask,   (1<<0)
 
-	.equ np_spicontrol_ie_bit,    8
-	.equ np_spicontrol_irrdy_bit, 7
-	.equ np_spicontrol_itrdy_bit, 6
-	.equ np_spicontrol_itoe_bit,  4
-	.equ np_spicontrol_iroe_bit,  3
+	.equ np_uartcontrol_eop_bit,  10
+	.equ np_uartcontrol_tbrk_bit,  9
+	.equ np_uartcontrol_ie_bit,    8
+	.equ np_uartcontrol_irrdy_bit, 7
+	.equ np_uartcontrol_itrdy_bit, 6
+	.equ np_uartcontrol_itmt_bit,  5
+	.equ np_uartcontrol_itoe_bit,  4
+	.equ np_uartcontrol_iroe_bit,  3
+	.equ np_uartcontrol_ibrk_bit,  2
+	.equ np_uartcontrol_ife_bit,   1
+	.equ np_uartcontrol_ipe_bit,   0
 
-
-; altera_avalon_timer: 1 present 
 ; ----------------------------------------------
 ; Timer Peripheral
 ;
@@ -774,78 +811,70 @@ nm_d_delayloop\@:
 	.equ np_timercontrol_cont_mask,  (1<<1) ; continous mode
 	.equ np_timercontrol_ito_mask,   (1<<0) ; enable time out interrupt
 
-
-; altera_avalon_uart: 2 present 
 ; ----------------------------------------------
-; UART Peripheral
+; PIO Peripheral
 ;
 	;
-	; UART Registers
+	; PIO Registers
 	;
-	.equ np_uartrxdata,  0 ; Read-only, 8-bit
-	.equ np_uarttxdata,  1 ; Write-only, 8-bit
-	.equ np_uartstatus,  2 ; Read-only, 8-bit
-	.equ np_uartcontrol, 3 ; Read/Write, 9-bit
-	.equ np_uartdivisor, 4 ; Read/Write, 16-bit, optional
+	.equ np_piodata,          0 ; read/write, up to 32 bits
+	.equ np_piodirection,     1 ; write/readable, up to 32 bits, 1->output bit
+	.equ np_piointerruptmask, 2 ; write/readable, up to 32 bits, 1->enable interrupt
+	.equ np_pioedgecapture,   3 ; read, up to 32 bits, cleared by any write.
 
+; ----------------------------------------------
+; SPI Peripheral
+;
 	;
-	; UART Status Register
+	; SPI Registers
 	;
-	.equ np_uartstatus_e_mask,    (1<<8)
-	.equ np_uartstatus_rrdy_mask, (1<<7)
-	.equ np_uartstatus_trdy_mask, (1<<6)
-	.equ np_uartstatus_tmt_mask,  (1<<5)
-	.equ np_uartstatus_toe_mask,  (1<<4)
-	.equ np_uartstatus_roe_mask,  (1<<3)
-	.equ np_uartstatus_brk_mask,  (1<<2)
-	.equ np_uartstatus_fe_mask,   (1<<1)
-	.equ np_uartstatus_pe_mask,   (1<<0)
-
-	.equ np_uartstatus_e_bit,    8
-	.equ np_uartstatus_rrdy_bit, 7
-	.equ np_uartstatus_trdy_bit, 6
-	.equ np_uartstatus_tmt_bit,  5
-	.equ np_uartstatus_toe_bit,  4
-	.equ np_uartstatus_roe_bit,  3
-	.equ np_uartstatus_brk_bit,  2
-	.equ np_uartstatus_fe_bit,   1
-	.equ np_uartstatus_pe_bit,   0
+	.equ np_spirxdata,      0 ; Read-only, 1-16 bit
+  .equ np_spitxdata,      1 ; Write-only, same width as rxdata
+	.equ np_spistatus,      2 ; Read-only, 9-bit
+	.equ np_spicontrol,     3 ; Read/Write, 9-bit
+	.equ np_spireserved,    4 ; reserved
+	.equ np_spislaveselect, 5 ; Read/Write, 1-16 bit, master only
+  .equ np_spiendofpacket, 6 ; Read/write, same width as txdata, rxdata.
 
 	;
-	; UART Control Register
+	; SPI Status Register
 	;
-	.equ np_uartcontrol_tbrk_mask,  (1<<9)
-	.equ np_uartcontrol_ie_mask,    (1<<8)
-	.equ np_uartcontrol_irrdy_mask, (1<<7)
-	.equ np_uartcontrol_itrdy_mask, (1<<6)
-	.equ np_uartcontrol_itmt_mask,  (1<<5)
-	.equ np_uartcontrol_itoe_mask,  (1<<4)
-	.equ np_uartcontrol_iroe_mask,  (1<<3)
-	.equ np_uartcontrol_ibrk_mask,  (1<<2)
-	.equ np_uartcontrol_ife_mask,   (1<<1)
-	.equ np_uartcontrol_ipe_mask,   (1<<0)
+  .equ np_spistatus_eop_mask,  (1 << 9)
+  .equ np_spistatus_e_mask,    (1 << 8)
+	.equ np_spistatus_rrdy_mask, (1 << 7)
+	.equ np_spistatus_trdy_mask, (1 << 6)
+	.equ np_spistatus_tmt_mask,  (1 << 5)
+	.equ np_spistatus_toe_mask,  (1 << 4)
+	.equ np_spistatus_roe_mask,  (1 << 3)
 
-	.equ np_uartcontrol_tbrk_bit,  9
-	.equ np_uartcontrol_ie_bit,    8
-	.equ np_uartcontrol_irrdy_bit, 7
-	.equ np_uartcontrol_itrdy_bit, 6
-	.equ np_uartcontrol_itmt_bit,  5
-	.equ np_uartcontrol_itoe_bit,  4
-	.equ np_uartcontrol_iroe_bit,  3
-	.equ np_uartcontrol_ibrk_bit,  2
-	.equ np_uartcontrol_ife_bit,   1
-	.equ np_uartcontrol_ipe_bit,   0
+  .equ np_spistatus_eop_bit,  9
+  .equ np_spistatus_e_bit,    8
+	.equ np_spistatus_rrdy_bit, 7
+	.equ np_spistatus_trdy_bit, 6
+	.equ np_spistatus_tmt_bit,  5
+	.equ np_spistatus_toe_bit,  4
+	.equ np_spistatus_roe_bit,  3
+
+	;
+	; SPI Control Register
+	;
+  .equ np_spicontrol_ieop_mask,  (1 << 9)
+	.equ np_spicontrol_ie_mask,    (1 << 8)
+	.equ np_spicontrol_irrdy_mask, (1 << 7)
+	.equ np_spicontrol_itrdy_mask, (1 << 6)
+	.equ np_spicontrol_itoe_mask,  (1 << 4)
+	.equ np_spicontrol_iroe_mask,  (1 << 3)
+
+  .equ np_spicontrol_ieop_bit,  9
+	.equ np_spicontrol_ie_bit,    8
+	.equ np_spicontrol_irrdy_bit, 7
+	.equ np_spicontrol_itrdy_bit, 6
+	.equ np_spicontrol_itoe_bit,  4
+	.equ np_spicontrol_iroe_bit,  3
 
 
-; altera_avalon_user_defined_interface: 1 present 
 
-; altera_nios: 1 present 
 
-; altera_nios_dev_board_flash: 1 present 
-
-; altera_nios_dev_board_sram32: 1 present 
-
-; mtx_sodimm_flash_controller: 1 present 
-
+.endif ; _excalibur_
 
 ; end of file

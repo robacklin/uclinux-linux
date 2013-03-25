@@ -1,5 +1,5 @@
 #
-# Makefile for the uClinux memory manager.
+# Makefile for the linux memory manager.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -7,14 +7,18 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-O_TARGET := mm.o
-O_OBJS	 := memory.o mmap.o filemap.o mprotect.o mlock.o mremap.o \
-		vmalloc.o swap.o vmscan.o swapfile.o
+O_TARGET := mmnommu.o
+obj-y	 := bootmem.o filemap.o mlock.o mmap.o \
+			mprotect.o mremap.o numa.o \
+			slab.o swapfile.o vmalloc.o vmscan.o memory.o \
+			swap.o oom_kill.o
 
-ifdef CONFIG_ALLOC2
-	    O_OBJS += kmalloc2.o page_alloc2.o
+ifdef CONFIG_CONTIGUOUS_PAGE_ALLOC
+obj-y    += page_alloc2.o
 else
-	    O_OBJS += kmalloc.o page_alloc.o
+obj-y    += page_alloc.o
 endif
+
+export-objs := filemap.o memory.o page_alloc.o page_alloc2.o
 
 include $(TOPDIR)/Rules.make

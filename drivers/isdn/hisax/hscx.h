@@ -1,26 +1,12 @@
-/* $Id: hscx.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * hscx.h   HSCX specific defines
+/* $Id: hscx.h,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * HSCX specific defines
  *
- *
- * $Log: hscx.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.3.2.2  1998/04/08 21:57:30  keil
- * New init code to fix problems during init if S0 is allready activ
- *
- * Revision 1.3.2.1  1997/10/17 22:10:45  keil
- * new files on 2.0
- *
- * Revision 1.3  1997/07/27 21:38:35  keil
- * new B-channel interface
- *
- * Revision 1.2  1997/06/26 11:16:18  keil
- * first version
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 

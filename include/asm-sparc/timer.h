@@ -1,12 +1,17 @@
-/* $Id: timer.h,v 1.1.1.1 1999-11-22 03:47:02 christ Exp $
+/* $Id: timer.h,v 1.21 1999/04/20 13:22:51 anton Exp $
  * timer.h:  Definitions for the timer chips on the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
+
+#include <linux/config.h>
+
 #ifndef _SPARC_TIMER_H
 #define _SPARC_TIMER_H
 
-#include <asm/system.h>  /* For NCPUS */
+#include <asm/system.h>  /* For SUN4M_NCPUS */
+#include <asm/sun4paddr.h>
+#include <asm/btfixup.h>
 
 /* Timer structures. The interrupt timer has two properties which
  * are the counter (which is handled in do_timer in sched.c) and the limit.
@@ -24,13 +29,18 @@
  */
 
 struct sun4c_timer_info {
-  volatile unsigned int cur_count10;
-  volatile unsigned int timer_limit10;
-  volatile unsigned int cur_count14;
-  volatile unsigned int timer_limit14;
+  __volatile__ unsigned int cur_count10;
+  __volatile__ unsigned int timer_limit10;
+  __volatile__ unsigned int cur_count14;
+  __volatile__ unsigned int timer_limit14;
 };
 
 #define SUN4C_TIMER_PHYSADDR   0xf3000000
+#ifdef CONFIG_SUN4
+#define SUN_TIMER_PHYSADDR SUN4_300_TIMER_PHYSADDR
+#else
+#define SUN_TIMER_PHYSADDR SUN4C_TIMER_PHYSADDR
+#endif
 
 /* A sun4m has two blocks of registers which are probably of the same
  * structure. LSI Logic's L64851 is told to _decrement_ from the limit
@@ -47,20 +57,20 @@ struct sun4c_timer_info {
 #define SUN4M_PRM_CNT_LVALUE  0x7FFFFC00
 
 struct sun4m_timer_percpu_info {
-  volatile unsigned int l14_timer_limit;    /* Initial value is 0x009c4000 */
-  volatile unsigned int l14_cur_count;
+  __volatile__ unsigned int l14_timer_limit;    /* Initial value is 0x009c4000 */
+  __volatile__ unsigned int l14_cur_count;
 
   /* This register appears to be write only and/or inaccessible
    * on Uni-Processor sun4m machines.
    */
-  volatile unsigned int l14_limit_noclear;  /* Data access error is here */
+  __volatile__ unsigned int l14_limit_noclear;  /* Data access error is here */
 
-  volatile unsigned int cntrl;            /* =1 after POST on Aurora */
-  volatile unsigned char space[PAGE_SIZE - 16];
+  __volatile__ unsigned int cntrl;            /* =1 after POST on Aurora */
+  __volatile__ unsigned char space[PAGE_SIZE - 16];
 };
 
 struct sun4m_timer_regs {
-	struct sun4m_timer_percpu_info cpu_timers[NCPUS];
+	struct sun4m_timer_percpu_info cpu_timers[SUN4M_NCPUS];
 	volatile unsigned int l10_timer_limit;
 	volatile unsigned int l10_cur_count;
 
@@ -76,7 +86,25 @@ struct sun4m_timer_regs {
 };
 
 extern struct sun4m_timer_regs *sun4m_timers;
-extern volatile unsigned int *master_l10_counter;
-extern volatile unsigned int *master_l10_limit;
+
+#define SUN4D_PRM_CNT_L       0x80000000
+#define SUN4D_PRM_CNT_LVALUE  0x7FFFFC00
+
+struct sun4d_timer_regs {
+	volatile unsigned int l10_timer_limit;
+	volatile unsigned int l10_cur_countx;
+	volatile unsigned int l10_limit_noclear;
+	volatile unsigned int ctrl;
+	volatile unsigned int l10_cur_count;
+};
+
+extern struct sun4d_timer_regs *sun4d_timers;
+
+extern __volatile__ unsigned int *master_l10_counter;
+extern __volatile__ unsigned int *master_l10_limit;
+
+/* FIXME: Make do_[gs]ettimeofday btfixup calls */
+BTFIXUPDEF_CALL(void, bus_do_settimeofday, struct timeval *tv)
+#define bus_do_settimeofday(tv) BTFIXUP_CALL(bus_do_settimeofday)(tv)
 
 #endif /* !(_SPARC_TIMER_H) */

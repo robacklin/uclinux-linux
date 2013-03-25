@@ -1,14 +1,15 @@
 /*
  *  linux/kernel/sched.c
  *
+ *  Kernel scheduler and related syscalls
+ *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
- *  1996-04-21	Modified by Ulrich Windl to make NTP work
  *  1996-12-23  Modified by Dave Grothe to fix bugs in semaphores and
  *              make semaphores SMP safe
- *  1997-01-28  Modified by Finn Arne Gangstad to make timers scale better.
- *  1997-09-10	Updated NTP code according to technical memorandum Jan '96
- *		"A Kernel Model for Precision Timekeeping" by Dave Mills
+ *  1998-11-19	Implemented schedule_timeout() and related stuff
+ *		by Andrea Arcangeli
+ *  1998-12-28  Implemented better SMP scheduling by Ingo Molnar
  */
 
 /*
@@ -18,218 +19,113 @@
  * current-task
  */
 
-/*
- * uClinux revisions for NO_MM
- * Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- */  
-
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/timer.h>
-#include <linux/kernel.h>
-#include <linux/kernel_stat.h>
-#include <linux/fdreg.h>
-#include <linux/errno.h>
-#include <linux/time.h>
-#include <linux/ptrace.h>
-#include <linux/delay.h>
-#include <linux/interrupt.h>
-#include <linux/tqueue.h>
-#include <linux/resource.h>
+#include <linux/config.h>
 #include <linux/mm.h>
-#include <linux/smp.h>
+#include <linux/init.h>
+#include <linux/smp_lock.h>
+#include <linux/nmi.h>
+#include <linux/interrupt.h>
+#include <linux/kernel_stat.h>
+#include <linux/completion.h>
+#include <linux/prefetch.h>
+#include <linux/compiler.h>
 
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/segment.h>
-#include <asm/pgtable.h>
+#include <asm/uaccess.h>
 #include <asm/mmu_context.h>
 
-#include <linux/timex.h>
+extern void timer_bh(void);
+extern void tqueue_bh(void);
+extern void immediate_bh(void);
 
 /*
- * kernel variables
+ * scheduler variables
  */
 
-int securelevel = 0;			/* system security level */
-
-long tick = (1000000 + HZ/2) / HZ;	/* timer interrupt period */
-volatile struct timeval xtime;		/* The current time */
-int tickadj = 500/HZ ? 500/HZ : 1;	/* microsecs */
-
-DECLARE_TASK_QUEUE(tq_timer);
-DECLARE_TASK_QUEUE(tq_immediate);
-DECLARE_TASK_QUEUE(tq_scheduler);
-
-/*
- * phase-lock loop variables
- */
-/* TIME_ERROR prevents overwriting the CMOS clock */
-int time_state = TIME_ERROR;	/* clock synchronization status */
-int time_status = STA_UNSYNC;	/* clock status bits */
-long time_offset = 0;		/* time adjustment (us) */
-long time_constant = 2;		/* pll time constant */
-long time_tolerance = MAXFREQ;	/* frequency tolerance (ppm) */
-long time_precision = 1;	/* clock precision (us) */
-long time_maxerror = NTP_PHASE_LIMIT;	/* maximum error (us) */
-long time_esterror = NTP_PHASE_LIMIT;	/* estimated error (us) */
-long time_phase = 0;		/* phase offset (scaled us) */
-long time_freq = ((1000000 + HZ/2) % HZ - HZ/2) << SHIFT_USEC;	/* frequency offset (scaled ppm) */
-long time_adj = 0;		/* tick adjust (scaled 1 / HZ) */
-long time_reftime = 0;		/* time at last adjustment (s) */
-
-long time_adjust = 0;
-long time_adjust_step = 0;
-
-int need_resched = 0;
-unsigned long event = 0;
-
-extern int _setitimer(int, struct itimerval *, struct itimerval *);
-unsigned int * prof_buffer = NULL;
-unsigned long prof_len = 0;
-unsigned long prof_shift = 0;
-
-#define _S(nr) (1<<((nr)-1))
+unsigned securebits = SECUREBITS_DEFAULT; /* systemwide security settings */
 
 extern void mem_use(void);
 
-static unsigned long init_kernel_stack[1024] = { STACK_MAGIC, };
-#ifndef NO_MM
-unsigned long init_user_stack[1024] = { STACK_MAGIC, };
-static struct vm_area_struct init_mmap = INIT_MMAP;
-#endif /* !NO_MM */
-static struct fs_struct init_fs = INIT_FS;
-static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
-
-struct mm_struct init_mm = INIT_MM;
-struct task_struct init_task = INIT_TASK;
-
-unsigned long volatile jiffies=0;
-
-struct task_struct *current_set[NR_CPUS];
-struct task_struct *last_task_used_math = NULL;
-
-struct task_struct * task[NR_TASKS] = {&init_task, };
-
-struct kernel_stat kstat = { 0 };
-
-static inline void add_to_runqueue(struct task_struct * p)
-{
-#ifdef __SMP__
-	int cpu=smp_processor_id();
-#endif	
-#if 1	/* sanity tests */
-	if (p->next_run || p->prev_run) {
-		printk("task already on run-queue\n");
-		return;
-	}
+/*
+ * Scheduling quanta.
+ *
+ * NOTE! The unix "nice" value influences how long a process
+ * gets. The nice value ranges from -20 to +19, where a -20
+ * is a "high-priority" task, and a "+10" is a low-priority
+ * task.
+ *
+ * We want the time-slice to be around 50ms or so, so this
+ * calculation depends on the value of HZ.
+ */
+#if HZ < 200
+#define TICK_SCALE(x)	((x) >> 2)
+#elif HZ < 400
+#define TICK_SCALE(x)	((x) >> 1)
+#elif HZ < 800
+#define TICK_SCALE(x)	(x)
+#elif HZ < 1600
+#define TICK_SCALE(x)	((x) << 1)
+#else
+#define TICK_SCALE(x)	((x) << 2)
 #endif
-	if (p->policy != SCHED_OTHER || p->counter > current->counter + 3)
-		need_resched = 1;
-	nr_running++;
-	(p->prev_run = init_task.prev_run)->next_run = p;
-	p->next_run = &init_task;
-	init_task.prev_run = p;
-#ifdef __SMP__
-	/* this is safe only if called with cli()*/
-	while(set_bit(31,&smp_process_available))
-	{
-		while(test_bit(31,&smp_process_available))
-		{
-			if(clear_bit(cpu,&smp_invalidate_needed))
-			{
-				local_flush_tlb();
-				set_bit(cpu,&cpu_callin_map[0]);
-			}
-		}
-	}
-	smp_process_available++;
-	clear_bit(31,&smp_process_available);
-	if ((0!=p->pid) && smp_threads_ready)
-	{
-		int i;
-		for (i=0;i<smp_num_cpus;i++)
-		{
-			if (0==current_set[cpu_logical_map[i]]->pid) 
-			{
-				smp_message_pass(cpu_logical_map[i], MSG_RESCHEDULE, 0L, 0);
-				break;
-			}
-		}
-	}
-#endif
-}
 
-static inline void del_from_runqueue(struct task_struct * p)
-{
-	struct task_struct *next = p->next_run;
-	struct task_struct *prev = p->prev_run;
+#define NICE_TO_TICKS(nice)	(TICK_SCALE(20-(nice))+1)
 
-#if 1	/* sanity tests */
-	if (!next || !prev) {
-		printk("task not on run-queue\n");
-		return;
-	}
-#endif
-	if (p == &init_task) {
-		static int nr = 0;
-		if (nr < 5) {
-			nr++;
-			printk("idle task may not sleep\n");
-		}
-		return;
-	}
-	nr_running--;
-	next->prev_run = prev;
-	prev->next_run = next;
-	p->next_run = NULL;
-	p->prev_run = NULL;
-}
-
-static inline void move_last_runqueue(struct task_struct * p)
-{
-	struct task_struct *next = p->next_run;
-	struct task_struct *prev = p->prev_run;
-
-	/* remove from list */
-	next->prev_run = prev;
-	prev->next_run = next;
-	/* add back to list */
-	p->next_run = &init_task;
-	prev = init_task.prev_run;
-	init_task.prev_run = p;
-	p->prev_run = prev;
-	prev->next_run = p;
-}
 
 /*
- * Wake up a process. Put it on the run-queue if it's not
- * already there.  The "current" process is always on the
- * run-queue (except when the actual re-schedule is in
- * progress), and as such you're allowed to do the simpler
- * "current->state = TASK_RUNNING" to mark yourself runnable
- * without the overhead of this.
+ *	Init task must be ok at boot for the ix86 as we will check its signals
+ *	via the SMP irq return path.
  */
-inline void wake_up_process(struct task_struct * p)
-{
-	unsigned long flags;
+ 
+struct task_struct * init_tasks[NR_CPUS] = {&init_task, };
 
-	save_flags(flags);
-	cli();
-	p->state = TASK_RUNNING;
-	if (!p->next_run)
-		add_to_runqueue(p);
-	restore_flags(flags);
-}
+/*
+ * The tasklist_lock protects the linked list of processes.
+ *
+ * The runqueue_lock locks the parts that actually access
+ * and change the run-queues, and have to be interrupt-safe.
+ *
+ * If both locks are to be concurrently held, the runqueue_lock
+ * nests inside the tasklist_lock.
+ *
+ * task->alloc_lock nests inside tasklist_lock.
+ */
+spinlock_t runqueue_lock __cacheline_aligned = SPIN_LOCK_UNLOCKED;  /* inner */
+rwlock_t tasklist_lock __cacheline_aligned = RW_LOCK_UNLOCKED;	/* outer */
 
-static void process_timeout(unsigned long __data)
-{
-	struct task_struct * p = (struct task_struct *) __data;
+static LIST_HEAD(runqueue_head);
 
-	p->timeout = 0;
-	wake_up_process(p);
-}
+/*
+ * We align per-CPU scheduling data on cacheline boundaries,
+ * to prevent cacheline ping-pong.
+ */
+static union {
+	struct schedule_data {
+		struct task_struct * curr;
+		cycles_t last_schedule;
+	} schedule_data;
+	char __pad [SMP_CACHE_BYTES];
+} aligned_data [NR_CPUS] __cacheline_aligned = { {{&init_task,0}}};
+
+#define cpu_curr(cpu) aligned_data[(cpu)].schedule_data.curr
+#define last_schedule(cpu) aligned_data[(cpu)].schedule_data.last_schedule
+
+struct kernel_stat kstat;
+extern struct task_struct *child_reaper;
+
+#ifdef CONFIG_SMP
+
+#define idle_task(cpu) (init_tasks[cpu_number_map(cpu)])
+#define can_schedule(p,cpu) \
+	((p)->cpus_runnable & (p)->cpus_allowed & (1UL << cpu))
+
+#else
+
+#define idle_task(cpu) (&init_task)
+#define can_schedule(p,cpu) (1)
+
+#endif
+
+void scheduling_functions_start_here(void) { }
 
 /*
  * This is the function that decides how desirable a process is..
@@ -244,138 +140,404 @@ static void process_timeout(unsigned long __data)
  *	   +ve: "goodness" value (the larger, the better)
  *	 +1000: realtime process, select this.
  */
-static inline int goodness(struct task_struct * p, struct task_struct * prev, int this_cpu)
+
+static inline int goodness(struct task_struct * p, int this_cpu, struct mm_struct *this_mm)
 {
 	int weight;
 
-#ifdef __SMP__	
-	/* We are not permitted to run a task someone else is running */
-	if (p->processor != NO_PROC_ID)
-		return -1000;
-#ifdef PAST_2_0		
-	/* This process is locked to a processor group */
-	if (p->processor_mask && !(p->processor_mask & (1<<this_cpu))
-		return -1000;
-#endif		
+	/*
+	 * select the current process after every other
+	 * runnable process, but before the idle thread.
+	 * Also, dont trigger a counter recalculation.
+	 */
+	weight = -1;
+	if (p->policy & SCHED_YIELD)
+		goto out;
+
+	/*
+	 * Non-RT process - normal case first.
+	 */
+	if (p->policy == SCHED_OTHER) {
+		/*
+		 * Give the process a first-approximation goodness value
+		 * according to the number of clock-ticks it has left.
+		 *
+		 * Don't do any other calculations if the time slice is
+		 * over..
+		 */
+		weight = p->counter;
+		if (!weight)
+			goto out;
+			
+#ifdef CONFIG_SMP
+		/* Give a largish advantage to the same processor...   */
+		/* (this is equivalent to penalizing other processors) */
+		if (p->processor == this_cpu)
+			weight += PROC_CHANGE_PENALTY;
 #endif
+
+		/* .. and a slight advantage to the current MM */
+		if (p->mm == this_mm || !p->mm)
+			weight += 1;
+		weight += 20 - p->nice;
+		goto out;
+	}
 
 	/*
 	 * Realtime process, select the first one on the
 	 * runqueue (taking priorities within processes
 	 * into account).
 	 */
-	if (p->policy != SCHED_OTHER)
-		return 1000 + p->rt_priority;
-
-	/*
-	 * Give the process a first-approximation goodness value
-	 * according to the number of clock-ticks it has left.
-	 *
-	 * Don't do any other calculations if the time slice is
-	 * over..
-	 */
-	weight = p->counter;
-	if (weight) {
-			
-#ifdef __SMP__
-		/* Give a largish advantage to the same processor...   */
-		/* (this is equivalent to penalizing other processors) */
-		if (p->last_processor == this_cpu)
-			weight += PROC_CHANGE_PENALTY;
-#endif
-
-		/* .. and a slight advantage to the current process */
-		if (p == prev)
-			weight += 1;
-	}
-
+	weight = 1000 + p->rt_priority;
+out:
 	return weight;
 }
 
-
 /*
-  The following allow_interrupts function is used to workaround a rare but
-  nasty deadlock situation that is possible for 2.0.x Intel SMP because it uses
-  a single kernel lock and interrupts are only routed to the boot CPU.  There
-  are two deadlock scenarios this code protects against.
-
-  The first scenario is that if a CPU other than the boot CPU holds the kernel
-  lock and needs to wait for an operation to complete that itself requires an
-  interrupt, there is a deadlock since the boot CPU may be able to accept the
-  interrupt but will not be able to acquire the kernel lock to process it.
-
-  The workaround for this deadlock requires adding calls to allow_interrupts to
-  places where this deadlock is possible.  These places are known to be present
-  in buffer.c and keyboard.c.  It is also possible that there are other such
-  places which have not been identified yet.  In order to break the deadlock,
-  the code in allow_interrupts temporarily yields the kernel lock directly to
-  the boot CPU to allow the interrupt to be processed.  The boot CPU interrupt
-  entry code indicates that it is spinning waiting for the kernel lock by
-  setting the smp_blocked_interrupt_pending variable.  This code notices that
-  and manipulates the active_kernel_processor variable to yield the kernel lock
-  without ever clearing it.  When the interrupt has been processed, the
-  saved_active_kernel_processor variable contains the value for the interrupt
-  exit code to restore, either the APICID of the CPU that granted it the kernel
-  lock, or NO_PROC_ID in the normal case where no yielding occurred.  Restoring
-  active_kernel_processor from saved_active_kernel_processor returns the kernel
-  lock back to the CPU that yielded it.
-
-  The second form of deadlock is even more insidious.  Suppose the boot CPU
-  takes a page fault and then the previous scenario ensues.  In this case, the
-  boot CPU would spin with interrupts disabled waiting to acquire the kernel
-  lock.  To resolve this deadlock, the kernel lock acquisition code must enable
-  interrupts briefly so that the pending interrupt can be handled as in the
-  case above.
-
-  An additional form of deadlock is where kernel code running on a non-boot CPU
-  waits for the jiffies variable to be incremented.  This deadlock is avoided
-  by having the spin loops in ENTER_KERNEL increment jiffies approximately
-  every 10 milliseconds.  Finally, if approximately 60 seconds elapse waiting
-  for the kernel lock, a message will be printed if possible to indicate that a
-  deadlock has been detected.
-
-		Leonard N. Zubkoff
-		   4 August 1997
-*/
-
-#if defined(__SMP__) && defined(__i386__)
-
-volatile unsigned char smp_blocked_interrupt_pending = 0;
-
-volatile unsigned char saved_active_kernel_processor = NO_PROC_ID;
-
-void allow_interrupts(void)
+ * the 'goodness value' of replacing a process on a given CPU.
+ * positive value means 'replace', zero or negative means 'dont'.
+ */
+static inline int preemption_goodness(struct task_struct * prev, struct task_struct * p, int cpu)
 {
-  if (smp_processor_id() == boot_cpu_id) return;
-  if (smp_blocked_interrupt_pending)
-    {
-      unsigned long saved_kernel_counter;
-      long timeout_counter;
-      saved_active_kernel_processor = active_kernel_processor;
-      saved_kernel_counter = kernel_counter;
-      kernel_counter = 0;
-      active_kernel_processor = boot_cpu_id;
-      timeout_counter = 6000000;
-      while (active_kernel_processor != saved_active_kernel_processor &&
-	     --timeout_counter >= 0)
-	{
-	  udelay(10);
-	  barrier();
-	}
-      if (timeout_counter < 0)
-	panic("FORWARDED INTERRUPT TIMEOUT (AKP = %d, Saved AKP = %d)\n",
-	      active_kernel_processor, saved_active_kernel_processor);
-      kernel_counter = saved_kernel_counter;
-      saved_active_kernel_processor = NO_PROC_ID;
-    }
+	return goodness(p, cpu, prev->active_mm) - goodness(prev, cpu, prev->active_mm);
 }
 
-#else
+/*
+ * This is ugly, but reschedule_idle() is very timing-critical.
+ * We are called with the runqueue spinlock held and we must
+ * not claim the tasklist_lock.
+ */
+static FASTCALL(void reschedule_idle(struct task_struct * p));
 
-void allow_interrupts(void) {}
+static void fastcall reschedule_idle(struct task_struct * p)
+{
+#ifdef CONFIG_SMP
+	int this_cpu = smp_processor_id();
+	struct task_struct *tsk, *target_tsk;
+	int cpu, best_cpu, i, max_prio;
+	cycles_t oldest_idle;
 
+	/*
+	 * shortcut if the woken up task's last CPU is
+	 * idle now.
+	 */
+	best_cpu = p->processor;
+	if (can_schedule(p, best_cpu)) {
+		tsk = idle_task(best_cpu);
+		if (cpu_curr(best_cpu) == tsk) {
+			int need_resched;
+send_now_idle:
+			/*
+			 * If need_resched == -1 then we can skip sending
+			 * the IPI altogether, tsk->need_resched is
+			 * actively watched by the idle thread.
+			 */
+			need_resched = tsk->need_resched;
+			tsk->need_resched = 1;
+			if ((best_cpu != this_cpu) && !need_resched)
+				smp_send_reschedule(best_cpu);
+			return;
+		}
+	}
+
+	/*
+	 * We know that the preferred CPU has a cache-affine current
+	 * process, lets try to find a new idle CPU for the woken-up
+	 * process. Select the least recently active idle CPU. (that
+	 * one will have the least active cache context.) Also find
+	 * the executing process which has the least priority.
+	 */
+	oldest_idle = (cycles_t) -1;
+	target_tsk = NULL;
+	max_prio = 0;
+
+	for (i = 0; i < smp_num_cpus; i++) {
+		cpu = cpu_logical_map(i);
+		if (!can_schedule(p, cpu))
+			continue;
+		tsk = cpu_curr(cpu);
+		/*
+		 * We use the first available idle CPU. This creates
+		 * a priority list between idle CPUs, but this is not
+		 * a problem.
+		 */
+		if (tsk == idle_task(cpu)) {
+#if defined(__i386__) && defined(CONFIG_SMP)
+                        /*
+			 * Check if two siblings are idle in the same
+			 * physical package. Use them if found.
+			 */
+			if (smp_num_siblings == 2) {
+				if (cpu_curr(cpu_sibling_map[cpu]) == 
+			            idle_task(cpu_sibling_map[cpu])) {
+					oldest_idle = last_schedule(cpu);
+					target_tsk = tsk;
+					break;
+				}
+				
+                        }
+#endif		
+			if (last_schedule(cpu) < oldest_idle) {
+				oldest_idle = last_schedule(cpu);
+				target_tsk = tsk;
+			}
+		} else {
+			if (oldest_idle == (cycles_t)-1) {
+				int prio = preemption_goodness(tsk, p, cpu);
+
+				if (prio > max_prio) {
+					max_prio = prio;
+					target_tsk = tsk;
+				}
+			}
+		}
+	}
+	tsk = target_tsk;
+	if (tsk) {
+		if (oldest_idle != (cycles_t)-1) {
+			best_cpu = tsk->processor;
+			goto send_now_idle;
+		}
+		tsk->need_resched = 1;
+		if (tsk->processor != this_cpu)
+			smp_send_reschedule(tsk->processor);
+	}
+	return;
+		
+
+#else /* UP */
+	int this_cpu = smp_processor_id();
+	struct task_struct *tsk;
+
+	tsk = cpu_curr(this_cpu);
+	if (preemption_goodness(tsk, p, this_cpu) > 0)
+		tsk->need_resched = 1;
 #endif
+}
 
+/*
+ * Careful!
+ *
+ * This has to add the process to the _end_ of the 
+ * run-queue, not the beginning. The goodness value will
+ * determine whether this process will run next. This is
+ * important to get SCHED_FIFO and SCHED_RR right, where
+ * a process that is either pre-empted or its time slice
+ * has expired, should be moved to the tail of the run 
+ * queue for its priority - Bhavesh Davda
+ */
+static inline void add_to_runqueue(struct task_struct * p)
+{
+	list_add_tail(&p->run_list, &runqueue_head);
+	nr_running++;
+}
+
+static inline void move_last_runqueue(struct task_struct * p)
+{
+	list_del(&p->run_list);
+	list_add_tail(&p->run_list, &runqueue_head);
+}
+
+/*
+ * Wake up a process. Put it on the run-queue if it's not
+ * already there.  The "current" process is always on the
+ * run-queue (except when the actual re-schedule is in
+ * progress), and as such you're allowed to do the simpler
+ * "current->state = TASK_RUNNING" to mark yourself runnable
+ * without the overhead of this.
+ */
+static inline int try_to_wake_up(struct task_struct * p, int synchronous)
+{
+	unsigned long flags;
+	int success = 0;
+
+	/*
+	 * We want the common case fall through straight, thus the goto.
+	 */
+	spin_lock_irqsave(&runqueue_lock, flags);
+	p->state = TASK_RUNNING;
+	if (task_on_runqueue(p))
+		goto out;
+	add_to_runqueue(p);
+	if (!synchronous || !(p->cpus_allowed & (1UL << smp_processor_id())))
+		reschedule_idle(p);
+	success = 1;
+out:
+	spin_unlock_irqrestore(&runqueue_lock, flags);
+	return success;
+}
+
+inline int fastcall wake_up_process(struct task_struct * p)
+{
+	return try_to_wake_up(p, 0);
+}
+
+static void process_timeout(unsigned long __data)
+{
+	struct task_struct * p = (struct task_struct *) __data;
+
+	wake_up_process(p);
+}
+
+/**
+ * schedule_timeout - sleep until timeout
+ * @timeout: timeout value in jiffies
+ *
+ * Make the current task sleep until @timeout jiffies have
+ * elapsed. The routine will return immediately unless
+ * the current task state has been set (see set_current_state()).
+ *
+ * You can set the task state as follows -
+ *
+ * %TASK_UNINTERRUPTIBLE - at least @timeout jiffies are guaranteed to
+ * pass before the routine returns. The routine will return 0
+ *
+ * %TASK_INTERRUPTIBLE - the routine may return early if a signal is
+ * delivered to the current task. In this case the remaining time
+ * in jiffies will be returned, or 0 if the timer expired in time
+ *
+ * The current task state is guaranteed to be TASK_RUNNING when this 
+ * routine returns.
+ *
+ * Specifying a @timeout value of %MAX_SCHEDULE_TIMEOUT will schedule
+ * the CPU away without a bound on the timeout. In this case the return
+ * value will be %MAX_SCHEDULE_TIMEOUT.
+ *
+ * In all cases the return value is guaranteed to be non-negative.
+ */
+signed long fastcall schedule_timeout(signed long timeout)
+{
+	struct timer_list timer;
+	unsigned long expire;
+
+	switch (timeout)
+	{
+	case MAX_SCHEDULE_TIMEOUT:
+		/*
+		 * These two special cases are useful to be comfortable
+		 * in the caller. Nothing more. We could take
+		 * MAX_SCHEDULE_TIMEOUT from one of the negative value
+		 * but I' d like to return a valid offset (>=0) to allow
+		 * the caller to do everything it want with the retval.
+		 */
+		schedule();
+		goto out;
+	default:
+		/*
+		 * Another bit of PARANOID. Note that the retval will be
+		 * 0 since no piece of kernel is supposed to do a check
+		 * for a negative retval of schedule_timeout() (since it
+		 * should never happens anyway). You just have the printk()
+		 * that will tell you if something is gone wrong and where.
+		 */
+		if (timeout < 0)
+		{
+			printk(KERN_ERR "schedule_timeout: wrong timeout "
+			       "value %lx from %p\n", timeout,
+			       __builtin_return_address(0));
+			current->state = TASK_RUNNING;
+			goto out;
+		}
+	}
+
+	expire = timeout + jiffies;
+
+	init_timer(&timer);
+	timer.expires = expire;
+	timer.data = (unsigned long) current;
+	timer.function = process_timeout;
+
+	add_timer(&timer);
+	schedule();
+	del_timer_sync(&timer);
+
+	timeout = expire - jiffies;
+
+ out:
+	return timeout < 0 ? 0 : timeout;
+}
+
+/*
+ * schedule_tail() is getting called from the fork return path. This
+ * cleans up all remaining scheduler things, without impacting the
+ * common case.
+ */
+static inline void __schedule_tail(struct task_struct *prev)
+{
+#ifdef CONFIG_SMP
+	int policy;
+
+	/*
+	 * prev->policy can be written from here only before `prev'
+	 * can be scheduled (before setting prev->cpus_runnable to ~0UL).
+	 * Of course it must also be read before allowing prev
+	 * to be rescheduled, but since the write depends on the read
+	 * to complete, wmb() is enough. (the spin_lock() acquired
+	 * before setting cpus_runnable is not enough because the spin_lock()
+	 * common code semantics allows code outside the critical section
+	 * to enter inside the critical section)
+	 */
+	policy = prev->policy;
+	prev->policy = policy & ~SCHED_YIELD;
+	wmb();
+
+	/*
+	 * fast path falls through. We have to clear cpus_runnable before
+	 * checking prev->state to avoid a wakeup race. Protect against
+	 * the task exiting early.
+	 */
+	task_lock(prev);
+	task_release_cpu(prev);
+	mb();
+	if (prev->state == TASK_RUNNING)
+		goto needs_resched;
+
+out_unlock:
+	task_unlock(prev);	/* Synchronise here with release_task() if prev is TASK_ZOMBIE */
+	return;
+
+	/*
+	 * Slow path - we 'push' the previous process and
+	 * reschedule_idle() will attempt to find a new
+	 * processor for it. (but it might preempt the
+	 * current process as well.) We must take the runqueue
+	 * lock and re-check prev->state to be correct. It might
+	 * still happen that this process has a preemption
+	 * 'in progress' already - but this is not a problem and
+	 * might happen in other circumstances as well.
+	 */
+needs_resched:
+	{
+		unsigned long flags;
+
+		/*
+		 * Avoid taking the runqueue lock in cases where
+		 * no preemption-check is necessery:
+		 */
+		if ((prev == idle_task(smp_processor_id())) ||
+						(policy & SCHED_YIELD))
+			goto out_unlock;
+
+		spin_lock_irqsave(&runqueue_lock, flags);
+		if ((prev->state == TASK_RUNNING) && !task_has_cpu(prev))
+			reschedule_idle(prev);
+		spin_unlock_irqrestore(&runqueue_lock, flags);
+		goto out_unlock;
+	}
+#else
+	prev->policy &= ~SCHED_YIELD;
+#endif /* CONFIG_SMP */
+}
+
+asmlinkage void schedule_tail(struct task_struct *prev)
+{
+	__schedule_tail(prev);
+}
+
+#ifdef CONFIG_SYSCALLTIMER
+extern void timepeg_schedule_switchout(void);
+extern void timepeg_schedule_switchin(void);
+#endif
 
 /*
  *  'schedule()' is the scheduler function. It's a very simple and nice
@@ -389,1371 +551,674 @@ void allow_interrupts(void) {}
  */
 asmlinkage void schedule(void)
 {
-	int c;
-	struct task_struct * p;
-	struct task_struct * prev, * next;
-	unsigned long timeout = 0;
-	int this_cpu=smp_processor_id();
+	struct schedule_data * sched_data;
+	struct task_struct *prev, *next, *p;
+	struct list_head *tmp;
+	int this_cpu, c;
 
-/* check alarm, wake up any interruptible tasks that have got a signal */
 
-	allow_interrupts();
+	spin_lock_prefetch(&runqueue_lock);
 
-	if (intr_count)
-		goto scheduling_in_interrupt;
-
-	if (bh_active & bh_mask) {
-		intr_count = 1;
-		do_bottom_half();
-		intr_count = 0;
-	}
-
-	run_task_queue(&tq_scheduler);
-
-	need_resched = 0;
+	BUG_ON(!current->active_mm);
+need_resched_back:
 	prev = current;
-	cli();
-	/* move an exhausted RR process to be last.. */
-	if (!prev->counter && prev->policy == SCHED_RR) {
-		prev->counter = prev->priority;
-		move_last_runqueue(prev);
+	this_cpu = prev->processor;
+
+	if (unlikely(in_interrupt())) {
+		printk("Scheduling in interrupt\n");
+		BUG();
 	}
+
+	release_kernel_lock(prev, this_cpu);
+
+	/*
+	 * 'sched_data' is protected by the fact that we can run
+	 * only one process per CPU.
+	 */
+	sched_data = & aligned_data[this_cpu].schedule_data;
+
+	spin_lock_irq(&runqueue_lock);
+
+	/* move an exhausted RR process to be last.. */
+	if (unlikely(prev->policy == SCHED_RR))
+		if (!prev->counter) {
+			prev->counter = NICE_TO_TICKS(prev->nice);
+			move_last_runqueue(prev);
+		}
+
 	switch (prev->state) {
 		case TASK_INTERRUPTIBLE:
-			if (prev->signal & ~prev->blocked)
-				goto makerunnable;
-			timeout = prev->timeout;
-			if (timeout && (timeout <= jiffies)) {
-				prev->timeout = 0;
-				timeout = 0;
-		makerunnable:
+			if (signal_pending(prev)) {
 				prev->state = TASK_RUNNING;
 				break;
 			}
 		default:
 			del_from_runqueue(prev);
-		case TASK_RUNNING:
+		case TASK_RUNNING:;
 	}
-	p = init_task.next_run;
-	sti();
-	
-#ifdef __SMP__
-	/*
-	 *	This is safe as we do not permit re-entry of schedule()
-	 */
-	prev->processor = NO_PROC_ID;
-#define idle_task (task[cpu_number_map[this_cpu]])
-#else
-#define idle_task (&init_task)
-#endif	
+	prev->need_resched = 0;
 
-/*
- * Note! there may appear new tasks on the run-queue during this, as
- * interrupts are enabled. However, they will be put on front of the
- * list, so our list starting at "p" is essentially fixed.
- */
-/* this is the scheduler proper: */
+	/*
+	 * this is the scheduler proper:
+	 */
+
+repeat_schedule:
+	/*
+	 * Default process to select..
+	 */
+	next = idle_task(this_cpu);
 	c = -1000;
-	next = idle_task;
-	while (p != &init_task) {
-		int weight = goodness(p, prev, this_cpu);
-		if (weight > c)
-			c = weight, next = p;
-		p = p->next_run;
-	}
-
-	/* if all runnable processes have "counter == 0", re-calculate counters */
-	if (!c) {
-		for_each_task(p)
-			p->counter = (p->counter >> 1) + p->priority;
-	}
-#ifdef __SMP__
-	/*
-	 *	Allocate process to CPU
-	 */
-	 
-	 next->processor = this_cpu;
-	 next->last_processor = this_cpu;
-#endif	 
-#ifdef __SMP_PROF__ 
-	/* mark processor running an idle thread */
-	if (0==next->pid)
-		set_bit(this_cpu,&smp_idle_map);
-	else
-		clear_bit(this_cpu,&smp_idle_map);
-#endif
-	if (prev != next) {
-		struct timer_list timer;
-
-		kstat.context_swtch++;
-		if (timeout) {
-			init_timer(&timer);
-			timer.expires = timeout;
-			timer.data = (unsigned long) prev;
-			timer.function = process_timeout;
-			add_timer(&timer);
+	list_for_each(tmp, &runqueue_head) {
+		p = list_entry(tmp, struct task_struct, run_list);
+		if (can_schedule(p, this_cpu)) {
+			int weight = goodness(p, this_cpu, prev->active_mm);
+			if (weight > c)
+				c = weight, next = p;
 		}
-		get_mmu_context(next);
-		switch_to(prev,next);
-		if (timeout)
-			del_timer(&timer);
-	}
-	return;
-
-scheduling_in_interrupt:
-	printk("Aiee: scheduling in interrupt %p\n",
-		__builtin_return_address(0));
-}
-
-#ifndef __alpha__
-
-/*
- * For backwards compatibility?  This can be done in libc so Alpha
- * and all newer ports shouldn't need it.
- */
-asmlinkage int sys_pause(void)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	return -ERESTARTNOHAND;
-}
-
-#endif
-
-/*
- * wake_up doesn't wake up stopped processes - they have to be awakened
- * with signals or similar.
- *
- * Note that this doesn't need cli-sti pairs: interrupts may not change
- * the wait-queue structures directly, but only call wake_up() to wake
- * a process. The process itself must remove the queue once it has woken.
- */
-void wake_up(struct wait_queue **q)
-{
-	struct wait_queue *next;
-	struct wait_queue *head;
-
-	if (!q || !(next = *q))
-		return;
-	head = WAIT_QUEUE_HEAD(q);
-	while (next != head) {
-		struct task_struct *p = next->task;
-		next = next->next;
-		if (p != NULL) {
-			if ((p->state == TASK_UNINTERRUPTIBLE) ||
-			    (p->state == TASK_INTERRUPTIBLE))
-				wake_up_process(p);
-		}
-		if (!next)
-			goto bad;
-	}
-	return;
-bad:
-	printk("wait_queue is bad (eip = %p)\n",
-		__builtin_return_address(0));
-	printk("        q = %p\n",q);
-	printk("       *q = %p\n",*q);
-}
-
-void wake_up_interruptible(struct wait_queue **q)
-{
-	struct wait_queue *next;
-	struct wait_queue *head;
-
-	if (!q || !(next = *q))
-		return;
-	head = WAIT_QUEUE_HEAD(q);
-	while (next != head) {
-		struct task_struct *p = next->task;
-		next = next->next;
-		if (p != NULL) {
-			if (p->state == TASK_INTERRUPTIBLE)
-				wake_up_process(p);
-		}
-		if (!next)
-			goto bad;
-	}
-	return;
-bad:
-	printk("wait_queue is bad (eip = %p)\n",
-		__builtin_return_address(0));
-	printk("        q = %p\n",q);
-	printk("       *q = %p\n",*q);
-}
-
-
-/*
- * Semaphores are implemented using a two-way counter:
- * The "count" variable is decremented for each process
- * that tries to sleep, while the "waking" variable is
- * incremented when the "up()" code goes to wake up waiting
- * processes.
- *
- * Notably, the inline "up()" and "down()" functions can
- * efficiently test if they need to do any extra work (up
- * needs to do something only if count was negative before
- * the increment operation.
- *
- * This routine must execute atomically.
- */
-static inline int waking_non_zero(struct semaphore *sem)
-{
-	int	ret ;
-	long	flags ;
-
-	get_buzz_lock(&sem->lock) ;
-	save_flags(flags) ;
-	cli() ;
-
-	if ((ret = (sem->waking > 0)))
-		sem->waking-- ;
-
-	restore_flags(flags) ;
-	give_buzz_lock(&sem->lock) ;
-	return(ret) ;
-}
-
-/*
- * When __up() is called, the count was negative before
- * incrementing it, and we need to wake up somebody.
- *
- * This routine adds one to the count of processes that need to
- * wake up and exit.  ALL waiting processes actually wake up but
- * only the one that gets to the "waking" field first will gate
- * through and acquire the semaphore.  The others will go back
- * to sleep.
- *
- * Note that these functions are only called when there is
- * contention on the lock, and as such all this is the
- * "non-critical" part of the whole semaphore business. The
- * critical part is the inline stuff in <asm/semaphore.h>
- * where we want to avoid any extra jumps and calls.
- */
-void __up(struct semaphore *sem)
-{
-	atomic_inc(&sem->waking) ;
-	wake_up(&sem->wait);
-}
-
-/*
- * Perform the "down" function.  Return zero for semaphore acquired,
- * return negative for signalled out of the function.
- *
- * If called from __down, the return is ignored and the wait loop is
- * not interruptible.  This means that a task waiting on a semaphore
- * using "down()" cannot be killed until someone does an "up()" on
- * the semaphore.
- *
- * If called from __down_interruptible, the return value gets checked
- * upon return.  If the return value is negative then the task continues
- * with the negative value in the return register (it can be tested by
- * the caller).
- *
- * Either form may be used in conjunction with "up()".
- *
- */
-int __do_down(struct semaphore * sem, int task_state)
-{
-	struct task_struct *tsk = current;
-	struct wait_queue wait = { tsk, NULL };
-	int		  ret = 0 ;
-
-	tsk->state = task_state;
-	add_wait_queue(&sem->wait, &wait);
-
-	/*
-	 * Ok, we're set up.  sem->count is known to be less than zero
-	 * so we must wait.
-	 *
-	 * We can let go the lock for purposes of waiting.
-	 * We re-acquire it after awaking so as to protect
-	 * all semaphore operations.
-	 *
-	 * If "up()" is called before we call waking_non_zero() then
-	 * we will catch it right away.  If it is called later then
-	 * we will have to go through a wakeup cycle to catch it.
-	 *
-	 * Multiple waiters contend for the semaphore lock to see
-	 * who gets to gate through and who has to wait some more.
-	 */
-	for (;;)
-	{
-		if (waking_non_zero(sem))	/* are we waking up?  */
-		    break ;			/* yes, exit loop */
-
-		if (   task_state == TASK_INTERRUPTIBLE
-		    && (tsk->signal & ~tsk->blocked)	/* signalled */
-		   )
-		{
-		    ret = -EINTR ;		/* interrupted */
-		    atomic_inc(&sem->count) ;	/* give up on down operation */
-		    break ;
-		}
-
-		schedule();
-		tsk->state = task_state;
 	}
 
-	tsk->state = TASK_RUNNING;
-	remove_wait_queue(&sem->wait, &wait);
-	return(ret) ;
-
-} /* __do_down */
-
-void __down(struct semaphore * sem)
-{
-	__do_down(sem,TASK_UNINTERRUPTIBLE) ; 
-}
-
-int __down_interruptible(struct semaphore * sem)
-{
-	return(__do_down(sem,TASK_INTERRUPTIBLE)) ; 
-}
-
-
-static inline void __sleep_on(struct wait_queue **p, int state)
-{
-	unsigned long flags;
-	struct wait_queue wait = { current, NULL };
-
-	if (!p)
-		return;
-	if (current == task[0])
-		panic("task[0] trying to sleep");
-	current->state = state;
-	save_flags(flags);
-	cli();
-	__add_wait_queue(p, &wait);
-	sti();
-	schedule();
-	cli();
-	__remove_wait_queue(p, &wait);
-	restore_flags(flags);
-}
-
-void interruptible_sleep_on(struct wait_queue **p)
-{
-	__sleep_on(p,TASK_INTERRUPTIBLE);
-}
-
-void sleep_on(struct wait_queue **p)
-{
-	__sleep_on(p,TASK_UNINTERRUPTIBLE);
-}
-
-#define TVN_BITS 6
-#define TVR_BITS 8
-#define TVN_SIZE (1 << TVN_BITS)
-#define TVR_SIZE (1 << TVR_BITS)
-#define TVN_MASK (TVN_SIZE - 1)
-#define TVR_MASK (TVR_SIZE - 1)
-
-#define SLOW_BUT_DEBUGGING_TIMERS 0
-
-struct timer_vec {
-        int index;
-        struct timer_list *vec[TVN_SIZE];
-};
-
-struct timer_vec_root {
-        int index;
-        struct timer_list *vec[TVR_SIZE];
-};
-
-static struct timer_vec tv5 = { 0 };
-static struct timer_vec tv4 = { 0 };
-static struct timer_vec tv3 = { 0 };
-static struct timer_vec tv2 = { 0 };
-static struct timer_vec_root tv1 = { 0 };
-
-static struct timer_vec * const tvecs[] = {
-	(struct timer_vec *)&tv1, &tv2, &tv3, &tv4, &tv5
-};
-
-#define NOOF_TVECS (sizeof(tvecs) / sizeof(tvecs[0]))
-
-static unsigned long timer_jiffies = 0;
-
-static inline void insert_timer(struct timer_list *timer,
-				struct timer_list **vec, int idx)
-{
-	if ((timer->next = vec[idx]))
-		vec[idx]->prev = timer;
-	vec[idx] = timer;
-	timer->prev = (struct timer_list *)&vec[idx];
-}
-
-static inline void internal_add_timer(struct timer_list *timer)
-{
-	/*
-	 * must be cli-ed when calling this
-	 */
-	unsigned long expires = timer->expires;
-	unsigned long idx = expires - timer_jiffies;
-
-	if (idx < TVR_SIZE) {
-		int i = expires & TVR_MASK;
-		insert_timer(timer, tv1.vec, i);
-	} else if (idx < 1 << (TVR_BITS + TVN_BITS)) {
-		int i = (expires >> TVR_BITS) & TVN_MASK;
-		insert_timer(timer, tv2.vec, i);
-	} else if (idx < 1 << (TVR_BITS + 2 * TVN_BITS)) {
-		int i = (expires >> (TVR_BITS + TVN_BITS)) & TVN_MASK;
-		insert_timer(timer, tv3.vec, i);
-	} else if (idx < 1 << (TVR_BITS + 3 * TVN_BITS)) {
-		int i = (expires >> (TVR_BITS + 2 * TVN_BITS)) & TVN_MASK;
-		insert_timer(timer, tv4.vec, i);
-	} else if (expires < timer_jiffies) {
-		/* can happen if you add a timer with expires == jiffies,
-		 * or you set a timer to go off in the past
-		 */
-		insert_timer(timer, tv1.vec, tv1.index);
-	} else if (idx < 0xffffffffUL) {
-		int i = (expires >> (TVR_BITS + 3 * TVN_BITS)) & TVN_MASK;
-		insert_timer(timer, tv5.vec, i);
-	} else {
-		/* Can only get here on architectures with 64-bit jiffies */
-		timer->next = timer->prev = timer;
-	}
-}
-
-void add_timer(struct timer_list *timer)
-{
-	unsigned long flags;
-	save_flags(flags);
-	cli();
-#if SLOW_BUT_DEBUGGING_TIMERS
-        if (timer->next || timer->prev) {
-                printk("add_timer() called with non-zero list from %p\n",
-		       __builtin_return_address(0));
-		goto out;
-        }
-#endif
-	internal_add_timer(timer);
-#if SLOW_BUT_DEBUGGING_TIMERS
-out:
-#endif
-	restore_flags(flags);
-}
-
-static inline int detach_timer(struct timer_list *timer)
-{
-	int ret = 0;
-	struct timer_list *next, *prev;
-	next = timer->next;
-	prev = timer->prev;
-	if (next) {
-		next->prev = prev;
-	}
-	if (prev) {
-		ret = 1;
-		prev->next = next;
-	}
-	return ret;
-}
-
-
-int del_timer(struct timer_list * timer)
-{
-	int ret;
-	unsigned long flags;
-	save_flags(flags);
-	cli();
-	ret = detach_timer(timer);
-	timer->next = timer->prev = 0;
-	restore_flags(flags);
-	return ret;
-}
-
-static inline void cascade_timers(struct timer_vec *tv)
-{
-        /* cascade all the timers from tv up one level */
-        struct timer_list *timer;
-        timer = tv->vec[tv->index];
-        /*
-         * We are removing _all_ timers from the list, so we don't  have to
-         * detach them individually, just clear the list afterwards.
-         */
-        while (timer) {
-                struct timer_list *tmp = timer;
-                timer = timer->next;
-                internal_add_timer(tmp);
-        }
-        tv->vec[tv->index] = NULL;
-        tv->index = (tv->index + 1) & TVN_MASK;
-}
-
-static inline void run_timer_list(void)
-{
-	cli();
-	while ((long)(jiffies - timer_jiffies) >= 0) {
-		struct timer_list *timer;
-		if (!tv1.index) {
-			int n = 1;
-			do {
-				cascade_timers(tvecs[n]);
-			} while (tvecs[n]->index == 1 && ++n < NOOF_TVECS);
-		}
-		while ((timer = tv1.vec[tv1.index])) {
-			void (*fn)(unsigned long) = timer->function;
-			unsigned long data = timer->data;
-			detach_timer(timer);
-			timer->next = timer->prev = NULL;
-			sti();
-			fn(data);
-			cli();
-		}
-		++timer_jiffies; 
-		tv1.index = (tv1.index + 1) & TVR_MASK;
-	}
-	sti();
-}
-
-static inline void run_old_timers(void)
-{
-	struct timer_struct *tp;
-	unsigned long mask;
-
-	for (mask = 1, tp = timer_table+0 ; mask ; tp++,mask += mask) {
-		if (mask > timer_active)
-			break;
-		if (!(mask & timer_active))
-			continue;
-		if (tp->expires > jiffies)
-			continue;
-		timer_active &= ~mask;
-		tp->fn();
-		sti();
-	}
-}
-
-void tqueue_bh(void)
-{
-	run_task_queue(&tq_timer);
-}
-
-void immediate_bh(void)
-{
-	run_task_queue(&tq_immediate);
-}
-
-unsigned long timer_active = 0;
-struct timer_struct timer_table[32];
-
-/*
- * Hmm.. Changed this, as the GNU make sources (load.c) seems to
- * imply that avenrun[] is the standard name for this kind of thing.
- * Nothing else seems to be standardized: the fractional size etc
- * all seem to differ on different machines.
- */
-unsigned long avenrun[3] = { 0,0,0 };
-
-/*
- * Nr of active tasks - counted in fixed-point numbers
- */
-static unsigned long count_active_tasks(void)
-{
-	struct task_struct **p;
-	unsigned long nr = 0;
-
-	for(p = &LAST_TASK; p > &FIRST_TASK; --p)
-		if (*p && ((*p)->state == TASK_RUNNING ||
-			   (*p)->state == TASK_UNINTERRUPTIBLE ||
-			   (*p)->state == TASK_SWAPPING))
-			nr += FIXED_1;
-#ifdef __SMP__
-	nr-=(smp_num_cpus-1)*FIXED_1;
-#endif			
-	return nr;
-}
-
-static inline void calc_load(unsigned long ticks)
-{
-	unsigned long active_tasks; /* fixed-point */
-	static int count = LOAD_FREQ;
-
-	count -= ticks;
-	if (count < 0) {
-		count += LOAD_FREQ;
-		active_tasks = count_active_tasks();
-		CALC_LOAD(avenrun[0], EXP_1, active_tasks);
-		CALC_LOAD(avenrun[1], EXP_5, active_tasks);
-		CALC_LOAD(avenrun[2], EXP_15, active_tasks);
-	}
-}
-
-/*
- * this routine handles the overflow of the microsecond field
- *
- * The tricky bits of code to handle the accurate clock support
- * were provided by Dave Mills (Mills@UDEL.EDU) of NTP fame.
- * They were originally developed for SUN and DEC kernels.
- * All the kudos should go to Dave for this stuff.
- *
- */
-static void second_overflow(void)
-{
-    long ltemp;
-
-    /* Bump the maxerror field */
-    time_maxerror += time_tolerance >> SHIFT_USEC;
-    if ( time_maxerror > NTP_PHASE_LIMIT ) {
-        time_maxerror = NTP_PHASE_LIMIT;
-	time_state = TIME_ERROR;	/* p. 17, sect. 4.3, (b) */
-	time_status |= STA_UNSYNC;
-    }
-
-    /*
-     * Leap second processing. If in leap-insert state at
-     * the end of the day, the system clock is set back one
-     * second; if in leap-delete state, the system clock is
-     * set ahead one second. The microtime() routine or
-     * external clock driver will insure that reported time
-     * is always monotonic. The ugly divides should be
-     * replaced.
-     */
-    switch (time_state) {
-
-    case TIME_OK:
-	if (time_status & STA_INS)
-	    time_state = TIME_INS;
-	else if (time_status & STA_DEL)
-	    time_state = TIME_DEL;
-	break;
-
-    case TIME_INS:
-	if (xtime.tv_sec % 86400 == 0) {
-	    xtime.tv_sec--;
-	    time_state = TIME_OOP;
-	    printk(KERN_NOTICE "Clock: inserting leap second 23:59:60 UTC\n");
-	}
-	break;
-
-    case TIME_DEL:
-	if ((xtime.tv_sec + 1) % 86400 == 0) {
-	    xtime.tv_sec++;
-	    time_state = TIME_WAIT;
-	    printk(KERN_NOTICE "Clock: deleting leap second 23:59:59 UTC\n");
-	}
-	break;
-
-    case TIME_OOP:
-	time_state = TIME_WAIT;
-	break;
-
-    case TIME_WAIT:
-	if (!(time_status & (STA_INS | STA_DEL)))
-	    time_state = TIME_OK;
-    }
-
-    /*
-     * Compute the phase adjustment for the next second. In
-     * PLL mode, the offset is reduced by a fixed factor
-     * times the time constant. In FLL mode the offset is
-     * used directly. In either mode, the maximum phase
-     * adjustment for each second is clamped so as to spread
-     * the adjustment over not more than the number of
-     * seconds between updates.
-     */
-    if (time_offset < 0) {
-	ltemp = -time_offset;
-	if (!(time_status & STA_FLL))
-	    ltemp >>= SHIFT_KG + time_constant;
-	if (ltemp > (MAXPHASE / MINSEC) << SHIFT_UPDATE)
-	    ltemp = (MAXPHASE / MINSEC) << SHIFT_UPDATE;
-	time_offset += ltemp;
-	time_adj = -ltemp << (SHIFT_SCALE - SHIFT_HZ - SHIFT_UPDATE);
-    } else {
-	ltemp = time_offset;
-	if (!(time_status & STA_FLL))
-	    ltemp >>= SHIFT_KG + time_constant;
-	if (ltemp > (MAXPHASE / MINSEC) << SHIFT_UPDATE)
-	    ltemp = (MAXPHASE / MINSEC) << SHIFT_UPDATE;
-	time_offset -= ltemp;
-	time_adj = ltemp << (SHIFT_SCALE - SHIFT_HZ - SHIFT_UPDATE);
-    }
-
-    /*
-     * Compute the frequency estimate and additional phase
-     * adjustment due to frequency error for the next
-     * second. When the PPS signal is engaged, gnaw on the
-     * watchdog counter and update the frequency computed by
-     * the pll and the PPS signal.
-     */
-    pps_valid++;
-    if (pps_valid == PPS_VALID) {	/* PPS signal lost */
-	pps_jitter = MAXTIME;
-	pps_stabil = MAXFREQ;
-	time_status &= ~(STA_PPSSIGNAL | STA_PPSJITTER |
-			 STA_PPSWANDER | STA_PPSERROR);
-    }
-    ltemp = time_freq + pps_freq;
-    if (ltemp < 0)
-	time_adj -= -ltemp >> (SHIFT_USEC + SHIFT_HZ - SHIFT_SCALE);
-    else
-	time_adj +=  ltemp >> (SHIFT_USEC + SHIFT_HZ - SHIFT_SCALE);
-
-#if HZ == 100
-    /* Compensate for (HZ==100) != (1 << SHIFT_HZ).
-     * Add 25% and 3.125% to get 128.125; => only 0.125% error (p. 14)
-     */
-    if (time_adj < 0)
-	time_adj -= (-time_adj >> 2) + (-time_adj >> 5);
-    else
-	time_adj += (time_adj >> 2) + (time_adj >> 5);
-#endif
-}
-
-/* in the NTP reference this is called "hardclock()" */
-static void update_wall_time_one_tick(void)
-{
-	if ( (time_adjust_step = time_adjust) != 0 ) {
-	    /* We are doing an adjtime thing. 
-	     *
-	     * Prepare time_adjust_step to be within bounds.
-	     * Note that a positive time_adjust means we want the clock
-	     * to run faster.
-	     *
-	     * Limit the amount of the step to be in the range
-	     * -tickadj .. +tickadj
-	     */
-	     if (time_adjust > tickadj)
-		time_adjust_step = tickadj;
-	     else if (time_adjust < -tickadj)
-		time_adjust_step = -tickadj;
-	     
-	    /* Reduce by this step the amount of time left  */
-	    time_adjust -= time_adjust_step;
-	}
-	xtime.tv_usec += tick + time_adjust_step;
-	/*
-	 * Advance the phase, once it gets to one microsecond, then
-	 * advance the tick more.
-	 */
-	time_phase += time_adj;
-	if (time_phase <= -FINEUSEC) {
-		long ltemp = -time_phase >> SHIFT_SCALE;
-		time_phase += ltemp << SHIFT_SCALE;
-		xtime.tv_usec -= ltemp;
-	}
-	else if (time_phase >= FINEUSEC) {
-		long ltemp = time_phase >> SHIFT_SCALE;
-		time_phase -= ltemp << SHIFT_SCALE;
-		xtime.tv_usec += ltemp;
-	}
-}
-
-/*
- * Using a loop looks inefficient, but "ticks" is
- * usually just one (we shouldn't be losing ticks,
- * we're doing this this way mainly for interrupt
- * latency reasons, not because we think we'll
- * have lots of lost timer ticks
- */
-static void update_wall_time(unsigned long ticks)
-{
-	do {
-		ticks--;
-		update_wall_time_one_tick();
-	} while (ticks);
-
-	if (xtime.tv_usec >= 1000000) {
-	    xtime.tv_usec -= 1000000;
-	    xtime.tv_sec++;
-	    second_overflow();
-	}
-}
-
-static inline void do_process_times(struct task_struct *p,
-	unsigned long user, unsigned long system)
-{
-	long psecs;
-
-	p->utime += user;
-	p->stime += system;
-
-	psecs = (p->stime + p->utime) / HZ;
-	if (psecs > p->rlim[RLIMIT_CPU].rlim_cur) {
-		/* Send SIGXCPU every second.. */
-		if (psecs * HZ == p->stime + p->utime)
-			send_sig(SIGXCPU, p, 1);
-		/* and SIGKILL when we go over max.. */
-		if (psecs > p->rlim[RLIMIT_CPU].rlim_max)
-			send_sig(SIGKILL, p, 1);
-	}
-}
-
-static inline void do_it_virt(struct task_struct * p, unsigned long ticks)
-{
-	unsigned long it_virt = p->it_virt_value;
-
-	if (it_virt) {
-		if (it_virt <= ticks) {
-			it_virt = ticks + p->it_virt_incr;
-			send_sig(SIGVTALRM, p, 1);
-		}
-		p->it_virt_value = it_virt - ticks;
-	}
-}
-
-static inline void do_it_prof(struct task_struct * p, unsigned long ticks)
-{
-	unsigned long it_prof = p->it_prof_value;
-
-	if (it_prof) {
-		if (it_prof <= ticks) {
-			it_prof = ticks + p->it_prof_incr;
-			send_sig(SIGPROF, p, 1);
-		}
-		p->it_prof_value = it_prof - ticks;
-	}
-}
-
-static __inline__ void update_one_process(struct task_struct *p,
-	unsigned long ticks, unsigned long user, unsigned long system)
-{
-	do_process_times(p, user, system);
-	do_it_virt(p, user);
-	do_it_prof(p, ticks);
-}	
-
-static void update_process_times(unsigned long ticks, unsigned long system)
-{
-#ifndef  __SMP__
-	struct task_struct * p = current;
-	unsigned long user = ticks - system;
-	if (p->pid) {
-		p->counter -= ticks;
-		if (p->counter < 0) {
-			p->counter = 0;
-			need_resched = 1;
-		}
-		if (p->priority < DEF_PRIORITY)
-			kstat.cpu_nice += user;
-		else
-			kstat.cpu_user += user;
-		kstat.cpu_system += system;
-	}
-	update_one_process(p, ticks, user, system);
-#else
-	int cpu,j;
-	cpu = smp_processor_id();
-	for (j=0;j<smp_num_cpus;j++)
-	{
-		int i = cpu_logical_map[j];
+	/* Do we need to re-calculate counters? */
+	if (unlikely(!c)) {
 		struct task_struct *p;
-		
-#ifdef __SMP_PROF__
-		if (test_bit(i,&smp_idle_map)) 
-			smp_idle_count[i]++;
-#endif
-		p = current_set[i];
-		/*
-		 * Do we have a real process?
-		 */
-		if (p->pid) {
-			/* assume user-mode process */
-			unsigned long utime = ticks;
-			unsigned long stime = 0;
-			if (cpu == i) {
-				utime = ticks-system;
-				stime = system;
-			} else if (smp_proc_in_lock[j]) {
-				utime = 0;
-				stime = ticks;
-			}
-			update_one_process(p, ticks, utime, stime);
 
-			if (p->priority < DEF_PRIORITY)
-				kstat.cpu_nice += utime;
-			else
-				kstat.cpu_user += utime;
-			kstat.cpu_system += stime;
+		spin_unlock_irq(&runqueue_lock);
+		read_lock(&tasklist_lock);
+		for_each_task(p)
+			p->counter = (p->counter >> 1) + NICE_TO_TICKS(p->nice);
+		read_unlock(&tasklist_lock);
+		spin_lock_irq(&runqueue_lock);
+		goto repeat_schedule;
+	}
 
-			p->counter -= ticks;
-			if (p->counter >= 0)
-				continue;
-			p->counter = 0;
+	/*
+	 * from this point on nothing can prevent us from
+	 * switching to the next task, save this fact in
+	 * sched_data.
+	 */
+	sched_data->curr = next;
+	task_set_cpu(next, this_cpu);
+	spin_unlock_irq(&runqueue_lock);
+
+	if (unlikely(prev == next)) {
+		/* We won't go through the normal tail, so do this by hand */
+		prev->policy &= ~SCHED_YIELD;
+		goto same_process;
+	}
+
+#ifdef CONFIG_SMP
+ 	/*
+ 	 * maintain the per-process 'last schedule' value.
+ 	 * (this has to be recalculated even if we reschedule to
+ 	 * the same process) Currently this is only used on SMP,
+	 * and it's approximate, so we do not have to maintain
+	 * it while holding the runqueue spinlock.
+ 	 */
+ 	sched_data->last_schedule = get_cycles();
+
+	/*
+	 * We drop the scheduler lock early (it's a global spinlock),
+	 * thus we have to lock the previous process from getting
+	 * rescheduled during switch_to().
+	 */
+
+#endif /* CONFIG_SMP */
+
+	kstat.context_swtch++;
+	/*
+	 * there are 3 processes which are affected by a context switch:
+	 *
+	 * prev == .... ==> (last => next)
+	 *
+	 * It's the 'much more previous' 'prev' that is on next's stack,
+	 * but prev is set to (the just run) 'last' process by switch_to().
+	 * This might sound slightly confusing but makes tons of sense.
+	 */
+	prepare_to_switch();
+	{
+		struct mm_struct *mm = next->mm;
+		struct mm_struct *oldmm = prev->active_mm;
+		if (!mm) {
+			BUG_ON(next->active_mm);
+			BUG_ON(!oldmm);
+			next->active_mm = oldmm;
+			atomic_inc(&oldmm->mm_count);
+			enter_lazy_tlb(oldmm, next, this_cpu);
 		} else {
-			/*
-			 * Idle processor found, do we have anything
-			 * we could run?
-			 */
-			if (!(0x7fffffff & smp_process_available))
-				continue;
+			BUG_ON(next->active_mm != mm);
+			switch_mm(oldmm, mm, next, this_cpu);
 		}
-		/* Ok, we should reschedule, do the magic */
-		if (i==cpu)
-			need_resched = 1;
-		else
-			smp_message_pass(i, MSG_RESCHEDULE, 0L, 0);
+
+		if (!prev->mm) {
+			prev->active_mm = NULL;
+			mmdrop(oldmm);
+		}
 	}
+
+	/*
+	 * This just switches the register state and the
+	 * stack.
+	 */
+#ifdef CONFIG_SYSCALLTIMER
+	timepeg_schedule_switchout();
 #endif
+	switch_to(prev, next, prev);
+#ifdef CONFIG_SYSCALLTIMER
+	timepeg_schedule_switchin();
+#endif
+	__schedule_tail(prev);
+
+same_process:
+	reacquire_kernel_lock(current);
+	if (current->need_resched)
+		goto need_resched_back;
+	return;
 }
 
-static unsigned long lost_ticks = 0;
-static unsigned long lost_ticks_system = 0;
-
-static inline void update_times(void)
+/*
+ * The core wakeup function.  Non-exclusive wakeups (nr_exclusive == 0) just wake everything
+ * up.  If it's an exclusive wakeup (nr_exclusive == small +ve number) then we wake all the
+ * non-exclusive tasks and one exclusive task.
+ *
+ * There are circumstances in which we can try to wake a task which has already
+ * started to run but is not in state TASK_RUNNING.  try_to_wake_up() returns zero
+ * in this (rare) case, and we handle it by contonuing to scan the queue.
+ */
+static inline void __wake_up_common (wait_queue_head_t *q, unsigned int mode,
+			 	     int nr_exclusive, const int sync)
 {
-	unsigned long ticks;
+	struct list_head *tmp;
+	struct task_struct *p;
 
-	ticks = xchg(&lost_ticks, 0);
+	CHECK_MAGIC_WQHEAD(q);
+	WQ_CHECK_LIST_HEAD(&q->task_list);
+	
+	list_for_each(tmp,&q->task_list) {
+		unsigned int state;
+                wait_queue_t *curr = list_entry(tmp, wait_queue_t, task_list);
 
-	if (ticks) {
-		unsigned long system;
-
-		system = xchg(&lost_ticks_system, 0);
-		calc_load(ticks);
-		update_wall_time(ticks);
-		update_process_times(ticks, system);
-	}
-}
-
-void timer_bh(void)
-{
-	update_times();
-	run_old_timers();
-	run_timer_list();
-}
-
-void do_timer(struct pt_regs * regs)
-{
-	(*(unsigned long *)&jiffies)++;
-	lost_ticks++;
-	mark_bh(TIMER_BH);
-	if (!user_mode(regs)) {
-		lost_ticks_system++;
-		if (prof_buffer && current->pid) {
-			extern int _stext;
-			unsigned long ip = instruction_pointer(regs);
-			ip -= (unsigned long) &_stext;
-			ip >>= prof_shift;
-			if (ip < prof_len)
-				prof_buffer[ip]++;
+		CHECK_MAGIC(curr->__magic);
+		p = curr->task;
+		state = p->state;
+		if (state & mode) {
+			WQ_NOTE_WAKER(curr);
+			if (try_to_wake_up(p, sync) && (curr->flags&WQ_FLAG_EXCLUSIVE) && !--nr_exclusive)
+				break;
 		}
 	}
-	if (tq_timer)
-		mark_bh(TQUEUE_BH);
 }
+
+void fastcall __wake_up(wait_queue_head_t *q, unsigned int mode, int nr)
+{
+	if (q) {
+		unsigned long flags;
+		wq_read_lock_irqsave(&q->lock, flags);
+		__wake_up_common(q, mode, nr, 0);
+		wq_read_unlock_irqrestore(&q->lock, flags);
+	}
+}
+
+void fastcall __wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr)
+{
+	if (q) {
+		unsigned long flags;
+		wq_read_lock_irqsave(&q->lock, flags);
+		__wake_up_common(q, mode, nr, 1);
+		wq_read_unlock_irqrestore(&q->lock, flags);
+	}
+}
+
+void fastcall complete(struct completion *x)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&x->wait.lock, flags);
+	x->done++;
+	__wake_up_common(&x->wait, TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 1, 0);
+	spin_unlock_irqrestore(&x->wait.lock, flags);
+}
+
+void fastcall wait_for_completion(struct completion *x)
+{
+	spin_lock_irq(&x->wait.lock);
+	if (!x->done) {
+		DECLARE_WAITQUEUE(wait, current);
+
+		wait.flags |= WQ_FLAG_EXCLUSIVE;
+		__add_wait_queue_tail(&x->wait, &wait);
+		do {
+			__set_current_state(TASK_UNINTERRUPTIBLE);
+			spin_unlock_irq(&x->wait.lock);
+			schedule();
+			spin_lock_irq(&x->wait.lock);
+		} while (!x->done);
+		__remove_wait_queue(&x->wait, &wait);
+	}
+	x->done--;
+	spin_unlock_irq(&x->wait.lock);
+}
+
+#define	SLEEP_ON_VAR				\
+	unsigned long flags;			\
+	wait_queue_t wait;			\
+	init_waitqueue_entry(&wait, current);
+
+#define	SLEEP_ON_HEAD					\
+	wq_write_lock_irqsave(&q->lock,flags);		\
+	__add_wait_queue(q, &wait);			\
+	wq_write_unlock(&q->lock);
+
+#define	SLEEP_ON_TAIL						\
+	wq_write_lock_irq(&q->lock);				\
+	__remove_wait_queue(q, &wait);				\
+	wq_write_unlock_irqrestore(&q->lock,flags);
+
+void fastcall interruptible_sleep_on(wait_queue_head_t *q)
+{
+	SLEEP_ON_VAR
+
+	current->state = TASK_INTERRUPTIBLE;
+
+	SLEEP_ON_HEAD
+	schedule();
+	SLEEP_ON_TAIL
+}
+
+long fastcall interruptible_sleep_on_timeout(wait_queue_head_t *q, long timeout)
+{
+	SLEEP_ON_VAR
+
+	current->state = TASK_INTERRUPTIBLE;
+
+	SLEEP_ON_HEAD
+	timeout = schedule_timeout(timeout);
+	SLEEP_ON_TAIL
+
+	return timeout;
+}
+
+void fastcall sleep_on(wait_queue_head_t *q)
+{
+	SLEEP_ON_VAR
+	
+	current->state = TASK_UNINTERRUPTIBLE;
+
+	SLEEP_ON_HEAD
+	schedule();
+	SLEEP_ON_TAIL
+}
+
+long fastcall sleep_on_timeout(wait_queue_head_t *q, long timeout)
+{
+	SLEEP_ON_VAR
+	
+	current->state = TASK_UNINTERRUPTIBLE;
+
+	SLEEP_ON_HEAD
+	timeout = schedule_timeout(timeout);
+	SLEEP_ON_TAIL
+
+	return timeout;
+}
+
+void scheduling_functions_end_here(void) { }
+
+#if CONFIG_SMP
+/**
+ * set_cpus_allowed() - change a given task's processor affinity
+ * @p: task to bind
+ * @new_mask: bitmask of allowed processors
+ *
+ * Upon return, the task is running on a legal processor.  Note the caller
+ * must have a valid reference to the task: it must not exit() prematurely.
+ * This call can sleep; do not hold locks on call.
+ */
+void set_cpus_allowed(struct task_struct *p, unsigned long new_mask)
+{
+	new_mask &= cpu_online_map;
+	BUG_ON(!new_mask);
+
+	p->cpus_allowed = new_mask;
+
+	/*
+	 * If the task is on a no-longer-allowed processor, we need to move
+	 * it.  If the task is not current, then set need_resched and send
+	 * its processor an IPI to reschedule.
+	 */
+	if (!(p->cpus_runnable & p->cpus_allowed)) {
+		if (p != current) {
+			p->need_resched = 1;
+			smp_send_reschedule(p->processor);
+		}
+		/*
+		 * Wait until we are on a legal processor.  If the task is
+		 * current, then we should be on a legal processor the next
+		 * time we reschedule.  Otherwise, we need to wait for the IPI.
+		 */
+		while (!(p->cpus_runnable & p->cpus_allowed))
+			schedule();
+	}
+}
+#endif /* CONFIG_SMP */
 
 #ifndef __alpha__
-
-/*
- * For backwards compatibility?  This can be done in libc so Alpha
- * and all newer ports shouldn't need it.
- */
-asmlinkage unsigned int sys_alarm(unsigned int seconds)
-{
-	struct itimerval it_new, it_old;
-	unsigned int oldalarm;
-
-	it_new.it_interval.tv_sec = it_new.it_interval.tv_usec = 0;
-	it_new.it_value.tv_sec = seconds;
-	it_new.it_value.tv_usec = 0;
-	_setitimer(ITIMER_REAL, &it_new, &it_old);
-	oldalarm = it_old.it_value.tv_sec;
-	/* ehhh.. We can't return 0 if we have an alarm pending.. */
-	/* And we'd better return too much than too little anyway */
-	if (it_old.it_value.tv_usec)
-		oldalarm++;
-	return oldalarm;
-}
-
-/*
- * The Alpha uses getxpid, getxuid, and getxgid instead.  Maybe this
- * should be moved into arch/i386 instead?
- */
-asmlinkage int sys_getpid(void)
-{
-	return current->pid;
-}
-
-asmlinkage int sys_getppid(void)
-{
-	return current->p_opptr->pid;
-}
-
-asmlinkage int sys_getuid(void)
-{
-	return current->uid;
-}
-
-asmlinkage int sys_geteuid(void)
-{
-	return current->euid;
-}
-
-asmlinkage int sys_getgid(void)
-{
-	return current->gid;
-}
-
-asmlinkage int sys_getegid(void)
-{
-	return current->egid;
-}
 
 /*
  * This has been replaced by sys_setpriority.  Maybe it should be
  * moved into the arch dependent tree for those ports that require
  * it for backward compatibility?
  */
-asmlinkage int sys_nice(int increment)
-{
-	unsigned long newprio;
-	int increase = 0;
 
-	newprio = increment;
-	if (increment < 0) {
-		if (!suser())
-			return -EPERM;
-		newprio = -increment;
-		increase = 1;
-	}
-	if (newprio > 40)
-		newprio = 40;
+asmlinkage long sys_nice(int increment)
+{
+	long newprio;
+
 	/*
-	 * do a "normalization" of the priority (traditionally
-	 * unix nice values are -20..20, linux doesn't really
-	 * use that kind of thing, but uses the length of the
-	 * timeslice instead (default 150 msec). The rounding is
-	 * why we want to avoid negative values.
+	 *	Setpriority might change our priority at the same moment.
+	 *	We don't have to worry. Conceptually one call occurs first
+	 *	and we have a single winner.
 	 */
-	newprio = (newprio * DEF_PRIORITY + 10) / 20;
-	increment = newprio;
-	if (increase)
-		increment = -increment;
-	newprio = current->priority - increment;
-	if ((signed) newprio < 1)
-		newprio = 1;
-	if (newprio > DEF_PRIORITY*2)
-		newprio = DEF_PRIORITY*2;
-	current->priority = newprio;
+	if (increment < 0) {
+		if (!capable(CAP_SYS_NICE))
+			return -EPERM;
+		if (increment < -40)
+			increment = -40;
+	}
+	if (increment > 40)
+		increment = 40;
+
+	newprio = current->nice + increment;
+	if (newprio < -20)
+		newprio = -20;
+	if (newprio > 19)
+		newprio = 19;
+	current->nice = newprio;
 	return 0;
 }
 
 #endif
 
-static struct task_struct *find_process_by_pid(pid_t pid) {
-	struct task_struct *p, *q;
+static inline struct task_struct *find_process_by_pid(pid_t pid)
+{
+	struct task_struct *tsk = current;
 
-	if (pid == 0)
-		p = current;
-	else {
-		p = 0;
-		for_each_task(q) {
-			if (q && q->pid == pid) {
-				p = q;
-				break;
-			}
-		}
-	}
-	return p;
+	if (pid)
+		tsk = find_task_by_pid(pid);
+	return tsk;
 }
 
 static int setscheduler(pid_t pid, int policy, 
 			struct sched_param *param)
 {
-	int error;
 	struct sched_param lp;
 	struct task_struct *p;
+	int retval;
 
+	retval = -EINVAL;
 	if (!param || pid < 0)
-		return -EINVAL;
+		goto out_nounlock;
 
-	error = verify_area(VERIFY_READ, param, sizeof(struct sched_param));
-	if (error)
-		return error;
-	memcpy_fromfs(&lp, param, sizeof(struct sched_param));
+	retval = -EFAULT;
+	if (copy_from_user(&lp, param, sizeof(struct sched_param)))
+		goto out_nounlock;
+
+	/*
+	 * We play safe to avoid deadlocks.
+	 */
+	read_lock_irq(&tasklist_lock);
+	spin_lock(&runqueue_lock);
 
 	p = find_process_by_pid(pid);
+
+	retval = -ESRCH;
 	if (!p)
-		return -ESRCH;
+		goto out_unlock;
 			
 	if (policy < 0)
 		policy = p->policy;
-	else if (policy != SCHED_FIFO && policy != SCHED_RR &&
-		 policy != SCHED_OTHER)
-		return -EINVAL;
+	else {
+		retval = -EINVAL;
+		if (policy != SCHED_FIFO && policy != SCHED_RR &&
+				policy != SCHED_OTHER)
+			goto out_unlock;
+	}
 	
 	/*
 	 * Valid priorities for SCHED_FIFO and SCHED_RR are 1..99, valid
 	 * priority for SCHED_OTHER is 0.
 	 */
+	retval = -EINVAL;
 	if (lp.sched_priority < 0 || lp.sched_priority > 99)
-		return -EINVAL;
+		goto out_unlock;
 	if ((policy == SCHED_OTHER) != (lp.sched_priority == 0))
-		return -EINVAL;
+		goto out_unlock;
 
-	if ((policy == SCHED_FIFO || policy == SCHED_RR) && !suser())
-		return -EPERM;
+	retval = -EPERM;
+	if ((policy == SCHED_FIFO || policy == SCHED_RR) && 
+	    !capable(CAP_SYS_NICE))
+		goto out_unlock;
 	if ((current->euid != p->euid) && (current->euid != p->uid) &&
-	    !suser())
-		return -EPERM;
+	    !capable(CAP_SYS_NICE))
+		goto out_unlock;
 
+	retval = 0;
 	p->policy = policy;
 	p->rt_priority = lp.sched_priority;
-	cli();
-	if (p->next_run)
-		move_last_runqueue(p);
-	sti();
-	need_resched = 1;
-	return 0;
+
+	current->need_resched = 1;
+
+out_unlock:
+	spin_unlock(&runqueue_lock);
+	read_unlock_irq(&tasklist_lock);
+
+out_nounlock:
+	return retval;
 }
 
-asmlinkage int sys_sched_setscheduler(pid_t pid, int policy, 
+asmlinkage long sys_sched_setscheduler(pid_t pid, int policy, 
 				      struct sched_param *param)
 {
 	return setscheduler(pid, policy, param);
 }
 
-asmlinkage int sys_sched_setparam(pid_t pid, struct sched_param *param)
+asmlinkage long sys_sched_setparam(pid_t pid, struct sched_param *param)
 {
 	return setscheduler(pid, -1, param);
 }
 
-asmlinkage int sys_sched_getscheduler(pid_t pid)
+asmlinkage long sys_sched_getscheduler(pid_t pid)
 {
 	struct task_struct *p;
+	int retval;
 
+	retval = -EINVAL;
 	if (pid < 0)
-		return -EINVAL;
+		goto out_nounlock;
 
+	retval = -ESRCH;
+	read_lock(&tasklist_lock);
 	p = find_process_by_pid(pid);
-	if (!p)
-		return -ESRCH;
-			
-	return p->policy;
+	if (p)
+		retval = p->policy & ~SCHED_YIELD;
+	read_unlock(&tasklist_lock);
+
+out_nounlock:
+	return retval;
 }
 
-asmlinkage int sys_sched_getparam(pid_t pid, struct sched_param *param)
+asmlinkage long sys_sched_getparam(pid_t pid, struct sched_param *param)
 {
-	int error;
 	struct task_struct *p;
 	struct sched_param lp;
+	int retval;
 
+	retval = -EINVAL;
 	if (!param || pid < 0)
-		return -EINVAL;
+		goto out_nounlock;
 
-	error = verify_area(VERIFY_WRITE, param, sizeof(struct sched_param));
-	if (error)
-		return error;
-
+	read_lock(&tasklist_lock);
 	p = find_process_by_pid(pid);
+	retval = -ESRCH;
 	if (!p)
-		return -ESRCH;
-
+		goto out_unlock;
 	lp.sched_priority = p->rt_priority;
-	memcpy_tofs(param, &lp, sizeof(struct sched_param));
+	read_unlock(&tasklist_lock);
 
-	return 0;
-}
-
-asmlinkage int sys_sched_yield(void)
-{
-	cli();
-	move_last_runqueue(current);
-	current->counter = 0;
-	need_resched = 1;
-	sti();
-	return 0;
-}
-
-asmlinkage int sys_sched_get_priority_max(int policy)
-{
-	switch (policy) {
-	      case SCHED_FIFO:
-	      case SCHED_RR:
-		return 99;
-	      case SCHED_OTHER:
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-asmlinkage int sys_sched_get_priority_min(int policy)
-{
-	switch (policy) {
-	      case SCHED_FIFO:
-	      case SCHED_RR:
-		return 1;
-	      case SCHED_OTHER:
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-asmlinkage int sys_sched_rr_get_interval(pid_t pid, struct timespec *interval)
-{
-	int error;
-	struct timespec t;
-
-	error = verify_area(VERIFY_WRITE, interval, sizeof(struct timespec));
-	if (error)
-		return error;
-
-	/* Values taken from 2.1.38 */	
-	t.tv_sec = 0;
-	t.tv_nsec = 150000;   /* is this right for non-intel architecture too?*/
-	memcpy_tofs(interval, &t, sizeof(struct timespec));
-
-	return 0;
-}
-
-/*
- * change timeval to jiffies, trying to avoid the 
- * most obvious overflows..
- */
-static unsigned long timespectojiffies(struct timespec *value)
-{
-	unsigned long sec = (unsigned) value->tv_sec;
-	long nsec = value->tv_nsec;
-
-	if (sec > (LONG_MAX / HZ))
-		return LONG_MAX;
-	nsec += 1000000000L / HZ - 1;
-	nsec /= 1000000000L / HZ;
-	return HZ * sec + nsec;
-}
-
-static void jiffiestotimespec(unsigned long jiffies, struct timespec *value)
-{
-	value->tv_nsec = (jiffies % HZ) * (1000000000L / HZ);
-	value->tv_sec = jiffies / HZ;
-	return;
-}
-
-asmlinkage int sys_nanosleep(struct timespec *rqtp, struct timespec *rmtp)
-{
-	int error;
-	struct timespec t;
-	unsigned long expire;
-
-	error = verify_area(VERIFY_READ, rqtp, sizeof(struct timespec));
-	if (error)
-		return error;
-	memcpy_fromfs(&t, rqtp, sizeof(struct timespec));
-	if (rmtp) {
-		error = verify_area(VERIFY_WRITE, rmtp,
-				    sizeof(struct timespec));
-		if (error)
-			return error;
-	}
-
-	if (t.tv_nsec >= 1000000000L || t.tv_nsec < 0 || t.tv_sec < 0)
-		return -EINVAL;
-
-	if (t.tv_sec == 0 && t.tv_nsec <= 2000000L &&
-	    current->policy != SCHED_OTHER) {
-		/*
-		 * Short delay requests up to 2 ms will be handled with
-		 * high precision by a busy wait for all real-time processes.
-		 */
-		udelay((t.tv_nsec + 999) / 1000);
-		return 0;
-	}
-
-	expire = timespectojiffies(&t) + (t.tv_sec || t.tv_nsec) + jiffies;
-	current->timeout = expire;
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-
-	if (expire > jiffies) {
-		if (rmtp) {
-			jiffiestotimespec(expire - jiffies -
-					  (expire > jiffies + 1), &t);
-			memcpy_tofs(rmtp, &t, sizeof(struct timespec));
-		}
-		return -EINTR;
-	}
-
-	return 0;
-}
-
-/* Used in fs/proc/array.c */
-unsigned long get_wchan(struct task_struct *p)
-{
-	if (!p || p == current || p->state == TASK_RUNNING)
-		return 0;
-#if defined(__i386__)
-	{
-		unsigned long ebp, eip;
-		unsigned long stack_page;
-		int count = 0;
-
-		stack_page = p->kernel_stack_page;
-		if (!stack_page)
-			return 0;
-		ebp = p->tss.ebp;
-		do {
-			if (ebp < stack_page || ebp >= 4092+stack_page)
-				return 0;
-			eip = *(unsigned long *) (ebp+4);
-			if (eip < (unsigned long) interruptible_sleep_on
-			    || eip >= (unsigned long) add_timer)
-				return eip;
-			ebp = *(unsigned long *) ebp;
-		} while (count++ < 16);
-	}
-#elif defined(__alpha__)
 	/*
-	 * This one depends on the frame size of schedule().  Do a
-	 * "disass schedule" in gdb to find the frame size.  Also, the
-	 * code assumes that sleep_on() follows immediately after
-	 * interruptible_sleep_on() and that add_timer() follows
-	 * immediately after interruptible_sleep().  Ugly, isn't it?
-	 * Maybe adding a wchan field to task_struct would be better,
-	 * after all...
+	 * This one might sleep, we cannot do it with a spinlock held ...
 	 */
-	{
-	    unsigned long schedule_frame;
-	    unsigned long pc;
+	retval = copy_to_user(param, &lp, sizeof(*param)) ? -EFAULT : 0;
 
-	    pc = thread_saved_pc(&p->tss);
-	    if (pc >= (unsigned long) interruptible_sleep_on && pc < (unsigned long) add_timer) {
-		schedule_frame = ((unsigned long *)p->tss.ksp)[6];
-		return ((unsigned long *)schedule_frame)[12];
-	    }
-	    return pc;
+out_nounlock:
+	return retval;
+
+out_unlock:
+	read_unlock(&tasklist_lock);
+	return retval;
+}
+
+asmlinkage long sys_sched_yield(void)
+{
+	/*
+	 * Trick. sched_yield() first counts the number of truly 
+	 * 'pending' runnable processes, then returns if it's
+	 * only the current processes. (This test does not have
+	 * to be atomic.) In threaded applications this optimization
+	 * gets triggered quite often.
+	 */
+
+	int nr_pending = nr_running;
+
+#if CONFIG_SMP
+	int i;
+
+	// Subtract non-idle processes running on other CPUs.
+	for (i = 0; i < smp_num_cpus; i++) {
+		int cpu = cpu_logical_map(i);
+		if (aligned_data[cpu].schedule_data.curr != idle_task(cpu))
+			nr_pending--;
 	}
+#else
+	// on UP this process is on the runqueue as well
+	nr_pending--;
 #endif
+	if (nr_pending) {
+		/*
+		 * This process can only be rescheduled by us,
+		 * so this is safe without any locking.
+		 */
+		if (current->policy == SCHED_OTHER)
+			current->policy |= SCHED_YIELD;
+		current->need_resched = 1;
+
+		spin_lock_irq(&runqueue_lock);
+		move_last_runqueue(current);
+		spin_unlock_irq(&runqueue_lock);
+	}
 	return 0;
 }
 
-static void show_task(int nr,struct task_struct * p)
+/**
+ * yield - yield the current processor to other threads.
+ *
+ * this is a shortcut for kernel-space yielding - it marks the
+ * thread runnable and calls sys_sched_yield().
+ */
+void yield(void)
 {
-	unsigned long free;
+	set_current_state(TASK_RUNNING);
+	sys_sched_yield();
+	schedule();
+}
+
+void __cond_resched(void)
+{
+	set_current_state(TASK_RUNNING);
+	schedule();
+}
+
+asmlinkage long sys_sched_get_priority_max(int policy)
+{
+	int ret = -EINVAL;
+
+	switch (policy) {
+	case SCHED_FIFO:
+	case SCHED_RR:
+		ret = 99;
+		break;
+	case SCHED_OTHER:
+		ret = 0;
+		break;
+	}
+	return ret;
+}
+
+asmlinkage long sys_sched_get_priority_min(int policy)
+{
+	int ret = -EINVAL;
+
+	switch (policy) {
+	case SCHED_FIFO:
+	case SCHED_RR:
+		ret = 1;
+		break;
+	case SCHED_OTHER:
+		ret = 0;
+	}
+	return ret;
+}
+
+asmlinkage long sys_sched_rr_get_interval(pid_t pid, struct timespec *interval)
+{
+	struct timespec t;
+	struct task_struct *p;
+	int retval = -EINVAL;
+
+	if (pid < 0)
+		goto out_nounlock;
+
+	retval = -ESRCH;
+	read_lock(&tasklist_lock);
+	p = find_process_by_pid(pid);
+	if (p)
+		jiffies_to_timespec(p->policy & SCHED_FIFO ? 0 : NICE_TO_TICKS(p->nice),
+				    &t);
+	read_unlock(&tasklist_lock);
+	if (p)
+		retval = copy_to_user(interval, &t, sizeof(t)) ? -EFAULT : 0;
+out_nounlock:
+	return retval;
+}
+
+static void show_task(struct task_struct * p)
+{
+	unsigned long free = 0;
+	int state;
 	static const char * stat_nam[] = { "R", "S", "D", "Z", "T", "W" };
 
-	printk("%-8s %3d ", p->comm, (p == current) ? -nr : nr);
-	if (((unsigned) p->state) < sizeof(stat_nam)/sizeof(char *))
-		printk(stat_nam[p->state]);
+	printk("%-13.13s ", p->comm);
+	state = p->state ? ffz(~p->state) + 1 : 0;
+	if (((unsigned) state) < sizeof(stat_nam)/sizeof(char *))
+		printk(stat_nam[state]);
 	else
 		printk(" ");
-#if ((~0UL) == 0xffffffff)
+#if (BITS_PER_LONG == 32)
 	if (p == current)
 		printk(" current  ");
 	else
-		printk(" %08lX ", thread_saved_pc(&p->tss));
-	printk("%08lX ", get_wchan(p));
+		printk(" %08lX ", thread_saved_pc(&p->thread));
 #else
 	if (p == current)
 		printk("   current task   ");
 	else
-		printk(" %016lx ", thread_saved_pc(&p->tss));
-	printk("%08lX ", get_wchan(p) & 0xffffffffL);
+		printk(" %016lx ", thread_saved_pc(&p->thread));
 #endif
-	if (((unsigned long *)p->kernel_stack_page)[0] != STACK_MAGIC)
-		printk(" bad-");
-	
-	for (free = 1; free < PAGE_SIZE/sizeof(long) ; free++) {
-		if (((unsigned long *)p->kernel_stack_page)[free] != STACK_UNTOUCHED_MAGIC)
-			break;
+	{
+		unsigned long * n = (unsigned long *) (p+1);
+		while (!*n)
+			n++;
+		free = (unsigned long) n - (unsigned long)(p+1);
 	}
-	printk("%5lu %5d %6d ", free*sizeof(long), p->pid, p->p_pptr->pid);
+	printk("%5lu %5d %6d ", free, p->pid, p->p_pptr->pid);
 	if (p->p_cptr)
 		printk("%5d ", p->p_cptr->pid);
 	else
@@ -1763,50 +1228,182 @@ static void show_task(int nr,struct task_struct * p)
 	else
 		printk("       ");
 	if (p->p_osptr)
-		printk(" %5d\n", p->p_osptr->pid);
+		printk(" %5d", p->p_osptr->pid);
 	else
-		printk("\n");
+		printk("      ");
+	if (!p->mm)
+		printk(" (L-TLB)\n");
+	else
+		printk(" (NOTLB)\n");
+
+	{
+		extern void show_trace_task(struct task_struct *tsk);
+		show_trace_task(p);
+	}
+}
+
+char * render_sigset_t(sigset_t *set, char *buffer)
+{
+	int i = _NSIG, x;
+	do {
+		i -= 4, x = 0;
+		if (sigismember(set, i+1)) x |= 1;
+		if (sigismember(set, i+2)) x |= 2;
+		if (sigismember(set, i+3)) x |= 4;
+		if (sigismember(set, i+4)) x |= 8;
+		*buffer++ = (x < 10 ? '0' : 'a' - 10) + x;
+	} while (i >= 4);
+	*buffer = 0;
+	return buffer;
 }
 
 void show_state(void)
 {
-	int i;
+	struct task_struct *p;
 
-#if ((~0UL) == 0xffffffff)
+#if (BITS_PER_LONG == 32)
 	printk("\n"
-	       "                                  free                        sibling\n");
-	printk("  task             PC     wchan   stack   pid father child younger older\n");
+	       "                         free                        sibling\n");
+	printk("  task             PC    stack   pid father child younger older\n");
 #else
 	printk("\n"
-	       "                                           free                        sibling\n");
-	printk("  task                 PC         wchan    stack   pid father child younger older\n");
+	       "                                 free                        sibling\n");
+	printk("  task                 PC        stack   pid father child younger older\n");
 #endif
-	for (i=0 ; i<NR_TASKS ; i++)
-		if (task[i])
-			show_task(i,task[i]);
+	read_lock(&tasklist_lock);
+	for_each_task(p) {
+		/*
+		 * reset the NMI-timeout, listing all files on a slow
+		 * console might take alot of time:
+		 */
+		touch_nmi_watchdog();
+		show_task(p);
+	}
+	read_unlock(&tasklist_lock);
 }
 
-void sched_init(void)
+/**
+ * reparent_to_init() - Reparent the calling kernel thread to the init task.
+ *
+ * If a kernel thread is launched as a result of a system call, or if
+ * it ever exits, it should generally reparent itself to init so that
+ * it is correctly cleaned up on exit.
+ *
+ * The various task state such as scheduling policy and priority may have
+ * been inherited fro a user process, so we reset them to sane values here.
+ *
+ * NOTE that reparent_to_init() gives the caller full capabilities.
+ */
+void reparent_to_init(void)
+{
+	struct task_struct *this_task = current;
+
+	write_lock_irq(&tasklist_lock);
+
+	/* Reparent to init */
+	REMOVE_LINKS(this_task);
+	this_task->p_pptr = child_reaper;
+	this_task->p_opptr = child_reaper;
+	SET_LINKS(this_task);
+
+	/* Set the exit signal to SIGCHLD so we signal init on exit */
+	this_task->exit_signal = SIGCHLD;
+
+	/* We also take the runqueue_lock while altering task fields
+	 * which affect scheduling decisions */
+	spin_lock(&runqueue_lock);
+
+	this_task->ptrace = 0;
+	this_task->nice = DEF_NICE;
+	this_task->policy = SCHED_OTHER;
+	/* cpus_allowed? */
+	/* rt_priority? */
+	/* signals? */
+	this_task->cap_effective = CAP_INIT_EFF_SET;
+	this_task->cap_inheritable = CAP_INIT_INH_SET;
+	this_task->cap_permitted = CAP_FULL_SET;
+	this_task->keep_capabilities = 0;
+	memcpy(this_task->rlim, init_task.rlim, sizeof(*(this_task->rlim)));
+	switch_uid(INIT_USER);
+
+	spin_unlock(&runqueue_lock);
+	write_unlock_irq(&tasklist_lock);
+}
+
+/*
+ *	Put all the gunge required to become a kernel thread without
+ *	attached user resources in one place where it belongs.
+ */
+
+void daemonize(void)
+{
+	struct fs_struct *fs;
+
+
+	/*
+	 * If we were started as result of loading a module, close all of the
+	 * user space pages.  We don't need them, and if we didn't close them
+	 * they would be locked into memory.
+	 */
+	exit_mm(current);
+
+	current->session = 1;
+	current->pgrp = 1;
+	current->tty = NULL;
+
+	/* Become as one with the init task */
+
+	exit_fs(current);	/* current->fs->count--; */
+	fs = init_task.fs;
+	current->fs = fs;
+	atomic_inc(&fs->count);
+ 	exit_files(current);
+	current->files = init_task.files;
+	atomic_inc(&current->files->count);
+}
+
+extern unsigned long wait_init_idle;
+
+void init_idle(void)
+{
+	struct schedule_data * sched_data;
+	sched_data = &aligned_data[smp_processor_id()].schedule_data;
+
+	if (current != &init_task && task_on_runqueue(current)) {
+		printk("UGH! (%d:%d) was on the runqueue, removing.\n",
+			smp_processor_id(), current->pid);
+		del_from_runqueue(current);
+	}
+	sched_data->curr = current;
+	sched_data->last_schedule = get_cycles();
+	clear_bit(current->processor, &wait_init_idle);
+}
+
+extern void init_timervecs (void);
+
+void __init sched_init(void)
 {
 	/*
-	 *	We have to do a little magic to get the first
-	 *	process right in SMP mode.
+	 * We have to do a little magic to get the first
+	 * process right in SMP mode.
 	 */
-	int cpu=smp_processor_id();
-	int i;
-#ifndef __SMP__	
-	current_set[cpu]=&init_task;
-#else
-	init_task.processor=cpu;
-	for(cpu = 0; cpu < NR_CPUS; cpu++)
-		current_set[cpu] = &init_task;
-#endif
+	int cpu = smp_processor_id();
+	int nr;
 
-	init_kernel_stack[0] = STACK_MAGIC;
-	for(i=1;i<1024;i++)
-		init_kernel_stack[i] = STACK_UNTOUCHED_MAGIC;
-		
+	init_task.processor = cpu;
+
+	for(nr = 0; nr < PIDHASH_SZ; nr++)
+		pidhash[nr] = NULL;
+
+	init_timervecs();
+
 	init_bh(TIMER_BH, timer_bh);
 	init_bh(TQUEUE_BH, tqueue_bh);
 	init_bh(IMMEDIATE_BH, immediate_bh);
+
+	/*
+	 * The boot idle thread does lazy MMU switching as well:
+	 */
+	atomic_inc(&init_mm.mm_count);
+	enter_lazy_tlb(&init_mm, current, cpu);
 }

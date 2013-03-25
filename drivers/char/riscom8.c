@@ -24,7 +24,11 @@
  *      along with this program; if not, write to the Free Software
  *      Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
- *	Revision 1.0 
+ *	Revision 1.1
+ *
+ *	ChangeLog:
+ *	Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 27-Jun-2001
+ *	- get rid of check_region and several cleanups
  */
 
 #include <linux/module.h>
@@ -40,6 +44,9 @@
 #include <linux/serial.h>
 #include <linux/fcntl.h>
 #include <linux/major.h>
+#include <linux/init.h>
+
+#include <asm/uaccess.h>
 
 #include "riscom8.h"
 #include "riscom8_reg.h"
@@ -72,19 +79,21 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif
 
-DECLARE_TASK_QUEUE(tq_riscom);
+#define RS_EVENT_WRITE_WAKEUP	0
+
+static DECLARE_TASK_QUEUE(tq_riscom);
 
 #define RISCOM_TYPE_NORMAL	1
 #define RISCOM_TYPE_CALLOUT	2
 
-static struct riscom_board * IRQ_to_board[16] = { NULL, } ;
+static struct riscom_board * IRQ_to_board[16];
 static struct tty_driver riscom_driver, riscom_callout_driver;
-static int    riscom_refcount = 0;
-static struct tty_struct * riscom_table[RC_NBOARD * RC_NPORT] = { NULL, };
-static struct termios * riscom_termios[RC_NBOARD * RC_NPORT] = { NULL, };
-static struct termios * riscom_termios_locked[RC_NBOARD * RC_NPORT] = { NULL, };
-static unsigned char * tmp_buf = NULL;
-static struct semaphore tmp_buf_sem = MUTEX;
+static int    riscom_refcount;
+static struct tty_struct * riscom_table[RC_NBOARD * RC_NPORT];
+static struct termios * riscom_termios[RC_NBOARD * RC_NPORT];
+static struct termios * riscom_termios_locked[RC_NBOARD * RC_NPORT];
+static unsigned char * tmp_buf;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static unsigned long baud_table[] =  {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
@@ -92,15 +101,21 @@ static unsigned long baud_table[] =  {
 };
 
 static struct riscom_board rc_board[RC_NBOARD] =  {
-	{ 0, RC_IOBASE1, 0, },
-	{ 0, RC_IOBASE2, 0, },
-	{ 0, RC_IOBASE3, 0, },
-	{ 0, RC_IOBASE4, 0, },
+	{
+		base:	RC_IOBASE1,
+	},
+	{
+		base:	RC_IOBASE2,
+	},
+	{
+		base:	RC_IOBASE3,
+	},
+	{
+		base:	RC_IOBASE4,
+	},
 };
 
-static struct riscom_port rc_port[RC_NBOARD * RC_NPORT] =  {
-	{ 0, },
-};
+static struct riscom_port rc_port[RC_NBOARD * RC_NPORT];
 		
 /* RISCom/8 I/O ports addresses (without address translation) */
 static unsigned short rc_ioport[] =  {
@@ -119,9 +134,9 @@ static inline int rc_paranoia_check(struct riscom_port const * port,
 				    kdev_t device, const char *routine)
 {
 #ifdef RISCOM_PARANOIA_CHECK
-	static const char *badmagic =
+	static const char badmagic[] = KERN_INFO
 		"rc: Warning: bad riscom port magic number for device %s in %s\n";
-	static const char *badinfo =
+	static const char badinfo[] = KERN_INFO
 		"rc: Warning: null riscom port for device %s in %s\n";
 
 	if (!port) {
@@ -143,38 +158,38 @@ static inline int rc_paranoia_check(struct riscom_port const * port,
  */
 
 /* Get board number from pointer */
-extern inline int board_No (struct riscom_board const * bp)
+static inline int board_No (struct riscom_board const * bp)
 {
 	return bp - rc_board;
 }
 
 /* Get port number from pointer */
-extern inline int port_No (struct riscom_port const * port)
+static inline int port_No (struct riscom_port const * port)
 {
 	return RC_PORT(port - rc_port); 
 }
 
 /* Get pointer to board from pointer to port */
-extern inline struct riscom_board * port_Board(struct riscom_port const * port)
+static inline struct riscom_board * port_Board(struct riscom_port const * port)
 {
 	return &rc_board[RC_BOARD(port - rc_port)];
 }
 
 /* Input Byte from CL CD180 register */
-extern inline unsigned char rc_in(struct riscom_board const * bp, unsigned short reg)
+static inline unsigned char rc_in(struct riscom_board const * bp, unsigned short reg)
 {
 	return inb(bp->base + RC_TO_ISA(reg));
 }
 
 /* Output Byte to CL CD180 register */
-extern inline void rc_out(struct riscom_board const * bp, unsigned short reg,
+static inline void rc_out(struct riscom_board const * bp, unsigned short reg,
 			  unsigned char val)
 {
 	outb(val, bp->base + RC_TO_ISA(reg));
 }
 
 /* Wait for Channel Command Register ready */
-extern inline void rc_wait_CCR(struct riscom_board const * bp)
+static inline void rc_wait_CCR(struct riscom_board const * bp)
 {
 	unsigned long delay;
 
@@ -183,53 +198,49 @@ extern inline void rc_wait_CCR(struct riscom_board const * bp)
 		if (!rc_in(bp, CD180_CCR))
 			return;
 	
-	printk("rc%d: Timeout waiting for CCR.\n", board_No(bp));
+	printk(KERN_INFO "rc%d: Timeout waiting for CCR.\n", board_No(bp));
 }
 
 /*
  *  RISCom/8 probe functions.
  */
 
-extern inline int rc_check_io_range(struct riscom_board * const bp)
+static inline int rc_request_io_range(struct riscom_board * const bp)
 {
 	int i;
 	
 	for (i = 0; i < RC_NIOPORT; i++)  
-		if (check_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1))  {
-			printk("rc%d: Skipping probe at 0x%03x. I/O address in use.\n",
-			       board_No(bp), bp->base);
-			return 1;
+		if (!request_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1,
+				   "RISCom/8"))  {
+			goto out_release;
 		}
 	return 0;
+out_release:
+	printk(KERN_INFO "rc%d: Skipping probe at 0x%03x. IO address in use.\n",
+			 board_No(bp), bp->base);
+	while(--i >= 0)
+		release_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1);
+	return 1;
 }
 
-extern inline void rc_request_io_range(struct riscom_board * const bp)
-{
-	int i;
-	
-	for (i = 0; i < RC_NIOPORT; i++) 
-		request_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1, "RISCom/8" );
-}
-
-extern inline void rc_release_io_range(struct riscom_board * const bp)
+static inline void rc_release_io_range(struct riscom_board * const bp)
 {
 	int i;
 	
 	for (i = 0; i < RC_NIOPORT; i++)  
 		release_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1);
 }
-
 	
 /* Must be called with enabled interrupts */
-extern inline void rc_long_delay(unsigned long delay)
+static inline void rc_long_delay(unsigned long delay)
 {
 	unsigned long i;
 	
-	for (i = jiffies + delay; i > jiffies; ) ;
+	for (i = jiffies + delay; time_after(i,jiffies); ) ;
 }
 
 /* Reset and setup CD180 chip */
-static void rc_init_CD180(struct riscom_board const * bp)
+static void __init rc_init_CD180(struct riscom_board const * bp)
 {
 	unsigned long flags;
 	
@@ -254,7 +265,7 @@ static void rc_init_CD180(struct riscom_board const * bp)
 }
 
 /* Main probing routine, also sets irq. */
-static int rc_probe(struct riscom_board *bp)
+static int __init rc_probe(struct riscom_board *bp)
 {
 	unsigned char val1, val2;
 	int irqs = 0;
@@ -262,7 +273,7 @@ static int rc_probe(struct riscom_board *bp)
 	
 	bp->irq = 0;
 
-	if (rc_check_io_range(bp)) 
+	if (rc_request_io_range(bp))
 		return 1;
 	
 	/* Are the I/O ports here ? */
@@ -274,9 +285,9 @@ static int rc_probe(struct riscom_board *bp)
 	val2 = rc_in(bp, CD180_PPRL);
 	
 	if ((val1 != 0x5a) || (val2 != 0xa5))  {
-		printk("rc%d: RISCom/8 Board at 0x%03x not found.\n",
+		printk(KERN_ERR "rc%d: RISCom/8 Board at 0x%03x not found.\n",
 		       board_No(bp), bp->base);
-		return 1;
+		goto out_release;
 	}
 	
 	/* It's time to find IRQ for this board */
@@ -294,27 +305,30 @@ static int rc_probe(struct riscom_board *bp)
 		rc_init_CD180(bp);	       		/* Reset CD180 again      */
 	
 		if ((val1 & RC_BSR_TINT) || (val2 != (RC_ID | GIVR_IT_TX)))  {
-			printk("rc%d: RISCom/8 Board at 0x%03x not found.\n",
-			       board_No(bp), bp->base);
-			return 1;
+			printk(KERN_ERR "rc%d: RISCom/8 Board at 0x%03x not "
+					"found.\n", board_No(bp), bp->base);
+			goto out_release;
 		}
 	}
 	
 	if (irqs <= 0)  {
-		printk("rc%d: Can't find IRQ for RISCom/8 board at 0x%03x.\n",
-		       board_No(bp), bp->base);
-		return 1;
+		printk(KERN_ERR "rc%d: Can't find IRQ for RISCom/8 board "
+				"at 0x%03x.\n", board_No(bp), bp->base);
+		goto out_release;
 	}
-	rc_request_io_range(bp);
 	bp->irq = irqs;
 	bp->flags |= RC_BOARD_PRESENT;
 	
-	printk("rc%d: RISCom/8 Rev. %c board detected at 0x%03x, IRQ %d.\n",
+	printk(KERN_INFO "rc%d: RISCom/8 Rev. %c board detected at "
+			 "0x%03x, IRQ %d.\n",
 	       board_No(bp),
 	       (rc_in(bp, CD180_GFRCR) & 0x0f) + 'A',   /* Board revision */
 	       bp->base, bp->irq);
 	
 	return 0;
+out_release:
+	rc_release_io_range(bp);
+	return 1;
 }
 
 /* 
@@ -323,7 +337,7 @@ static int rc_probe(struct riscom_board *bp)
  * 
  */
 
-extern inline void rc_mark_event(struct riscom_port * port, int event)
+static inline void rc_mark_event(struct riscom_port * port, int event)
 {
 	/* 
          * I'm not quite happy with current scheme all serial
@@ -334,11 +348,11 @@ extern inline void rc_mark_event(struct riscom_port * port, int event)
 	 * Still hope this will be changed in near future.
          */
 	set_bit(event, &port->event);
-	queue_task_irq_off(&port->tqueue, &tq_riscom);
+	queue_task(&port->tqueue, &tq_riscom);
 	mark_bh(RISCOM8_BH);
 }
 
-extern inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
+static inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
 					       unsigned char const * what)
 {
 	unsigned char channel;
@@ -351,12 +365,12 @@ extern inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
 			return port;
 		}
 	}
-	printk("rc%d: %s interrupt from invalid port %d\n", 
+	printk(KERN_ERR "rc%d: %s interrupt from invalid port %d\n", 
 	       board_No(bp), what, channel);
 	return NULL;
 }
 
-extern inline void rc_receive_exc(struct riscom_board const * bp)
+static inline void rc_receive_exc(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -368,7 +382,8 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 
 	tty = port->tty;
 	if (tty->flip.count >= TTY_FLIPBUF_SIZE)  {
-		printk("rc%d: port %d: Working around flip buffer overflow.\n",
+		printk(KERN_WARNING "rc%d: port %d: Working around flip "
+				    "buffer overflow.\n",
 		       board_No(bp), port_No(port));
 		return;
 	}
@@ -378,7 +393,7 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 	if (status & RCSR_OE)  {
 		port->overrun++;
 #if 0		
-		printk("rc%d: port %d: Overrun. Total %ld overruns.\n", 
+		printk(KERN_ERR "rc%d: port %d: Overrun. Total %ld overruns\n", 
 		       board_No(bp), port_No(port), port->overrun);
 #endif		
 	}
@@ -391,12 +406,13 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 		return;
 	}
 	if (status & RCSR_TOUT)  {
-		printk("rc%d: port %d: Receiver timeout. Hardware problems ?\n", 
+		printk(KERN_WARNING "rc%d: port %d: Receiver timeout. "
+				    "Hardware problems ?\n", 
 		       board_No(bp), port_No(port));
 		return;
 		
 	} else if (status & RCSR_BREAK)  {
-		printk("rc%d: port %d: Handling break...\n",
+		printk(KERN_INFO "rc%d: port %d: Handling break...\n",
 		       board_No(bp), port_No(port));
 		*tty->flip.flag_buf_ptr++ = TTY_BREAK;
 		if (port->flags & ASYNC_SAK)
@@ -416,10 +432,10 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 	
 	*tty->flip.char_buf_ptr++ = ch;
 	tty->flip.count++;
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-extern inline void rc_receive(struct riscom_board const * bp)
+static inline void rc_receive(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -438,7 +454,8 @@ extern inline void rc_receive(struct riscom_board const * bp)
 	
 	while (count--)  {
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE)  {
-			printk("rc%d: port %d: Working around flip buffer overflow.\n",
+			printk(KERN_WARNING "rc%d: port %d: Working around "
+					    "flip buffer overflow.\n",
 			       board_No(bp), port_No(port));
 			break;
 		}
@@ -446,10 +463,10 @@ extern inline void rc_receive(struct riscom_board const * bp)
 		*tty->flip.flag_buf_ptr++ = 0;
 		tty->flip.count++;
 	}
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-extern inline void rc_transmit(struct riscom_board const * bp)
+static inline void rc_transmit(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -518,7 +535,7 @@ extern inline void rc_transmit(struct riscom_board const * bp)
 		rc_mark_event(port, RS_EVENT_WRITE_WAKEUP);
 }
 
-extern inline void rc_check_modem(struct riscom_board const * bp)
+static inline void rc_check_modem(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -534,9 +551,11 @@ extern inline void rc_check_modem(struct riscom_board const * bp)
 		if (rc_in(bp, CD180_MSVR) & MSVR_CD) 
 			wake_up_interruptible(&port->open_wait);
 		else if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-			   (port->flags & ASYNC_CALLOUT_NOHUP)))
-			queue_task_irq_off(&port->tqueue_hangup,  
-					   &tq_scheduler);      
+			   (port->flags & ASYNC_CALLOUT_NOHUP))) {
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&port->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
+		}
 	}
 	
 #ifdef RISCOM_BRAIN_DAMAGED_CTS
@@ -589,7 +608,8 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 				  RC_BSR_MINT | RC_BSR_RINT))) {
 	
 		if (status & RC_BSR_TOUT) 
-			printk("rc%d: Got timeout. Hardware error ?\n", board_No(bp));
+			printk(KERN_WARNING "rc%d: Got timeout. Hardware "
+					    "error?\n", board_No(bp));
 		
 		else if (status & RC_BSR_RINT) {
 			ack = rc_in(bp, RC_ACK_RINT);
@@ -599,7 +619,8 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 			else if (ack == (RC_ID | GIVR_IT_REXC))
 				rc_receive_exc(bp);
 			else
-				printk("rc%d: Bad receive ack 0x%02x.\n",
+				printk(KERN_WARNING "rc%d: Bad receive ack "
+						    "0x%02x.\n",
 				       board_No(bp), ack);
 		
 		} else if (status & RC_BSR_TINT) {
@@ -608,7 +629,8 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 			if (ack == (RC_ID | GIVR_IT_TX))
 				rc_transmit(bp);
 			else
-				printk("rc%d: Bad transmit ack 0x%02x.\n",
+				printk(KERN_WARNING "rc%d: Bad transmit ack "
+						    "0x%02x.\n",
 				       board_No(bp), ack);
 		
 		} else /* if (status & RC_BSR_MINT) */ {
@@ -617,7 +639,8 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 			if (ack == (RC_ID | GIVR_IT_MODEM)) 
 				rc_check_modem(bp);
 			else
-				printk("rc%d: Bad modem ack 0x%02x.\n",
+				printk(KERN_WARNING "rc%d: Bad modem ack "
+						    "0x%02x.\n",
 				       board_No(bp), ack);
 		
 		} 
@@ -632,14 +655,15 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
  */
 
 /* Called with disabled interrupts */
-extern inline int rc_setup_board(struct riscom_board * bp)
+static inline int rc_setup_board(struct riscom_board * bp)
 {
 	int error;
 
 	if (bp->flags & RC_BOARD_ACTIVE) 
 		return 0;
 	
-	error = request_irq(bp->irq, rc_interrupt, SA_INTERRUPT, "RISCom/8", NULL);
+	error = request_irq(bp->irq, rc_interrupt, SA_INTERRUPT,
+			    "RISCom/8", NULL);
 	if (error) 
 		return error;
 	
@@ -655,7 +679,7 @@ extern inline int rc_setup_board(struct riscom_board * bp)
 }
 
 /* Called with disabled interrupts */
-extern inline void rc_shutdown_board(struct riscom_board *bp)
+static inline void rc_shutdown_board(struct riscom_board *bp)
 {
 	if (!(bp->flags & RC_BOARD_ACTIVE))
 		return;
@@ -887,14 +911,14 @@ static void rc_shutdown_port(struct riscom_board *bp, struct riscom_port *port)
 		return;
 	
 #ifdef RC_REPORT_OVERRUN
-	printk("rc%d: port %d: Total %ld overruns were detected.\n",
+	printk(KERN_INFO "rc%d: port %d: Total %ld overruns were detected.\n",
 	       board_No(bp), port_No(port), port->overrun);
 #endif	
 #ifdef RC_REPORT_FIFO
 	{
 		int i;
 		
-		printk("rc%d: port %d: FIFO hits [ ",
+		printk(KERN_INFO "rc%d: port %d: FIFO hits [ ",
 		       board_No(bp), port_No(port));
 		for (i = 0; i < 10; i++)  {
 			printk("%ld ", port->hits[i]);
@@ -927,7 +951,8 @@ static void rc_shutdown_port(struct riscom_board *bp, struct riscom_port *port)
 	port->flags &= ~ASYNC_INITIALIZED;
 	
 	if (--bp->count < 0)  {
-		printk("rc%d: rc_shutdown_port: bad board count: %d\n",
+		printk(KERN_INFO "rc%d: rc_shutdown_port: "
+				 "bad board count: %d\n",
 		       board_No(bp), bp->count);
 		bp->count = 0;
 	}
@@ -944,7 +969,7 @@ static void rc_shutdown_port(struct riscom_board *bp, struct riscom_port *port)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct riscom_port *port)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	struct riscom_board *bp = port_Board(port);
 	int    retval;
 	int    do_clocal = 0;
@@ -1025,7 +1050,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			rc_out(bp, RC_DTR, bp->DTR);
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(port->flags & ASYNC_INITIALIZED)) {
 			if (port->flags & ASYNC_HUP_NOTIFY)
@@ -1038,7 +1063,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		    !(port->flags & ASYNC_CLOSING) &&
 		    (do_clocal || CD))
 			break;
-		if (current->signal & ~current->blocked) {
+		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1113,27 +1138,24 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 		return;
 	
 	save_flags(flags); cli();
-	if (tty_hung_up_p(filp))  {
-		restore_flags(flags);
-		return;
-	}
+	if (tty_hung_up_p(filp))
+		goto out;
 	
 	bp = port_Board(port);
 	if ((tty->count == 1) && (port->count != 1))  {
-		printk("rc%d: rc_close: bad port count;"
+		printk(KERN_INFO "rc%d: rc_close: bad port count;"
 		       " tty->count is 1, port count is %d\n",
 		       board_No(bp), port->count);
 		port->count = 1;
 	}
 	if (--port->count < 0)  {
-		printk("rc%d: rc_close: bad port count for tty%d: %d\n",
+		printk(KERN_INFO "rc%d: rc_close: bad port count "
+				 "for tty%d: %d\n",
 		       board_No(bp), port_No(port), port->count);
 		port->count = 0;
 	}
-	if (port->count)  {
-		restore_flags(flags);
-		return;
-	}
+	if (port->count)
+		goto out;
 	port->flags |= ASYNC_CLOSING;
 	/*
 	 * Save the termios structure, since this port may have
@@ -1170,77 +1192,104 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 		timeout = jiffies+HZ;
 		while(port->IER & IER_TXEMPTY)  {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->timeout;
-			schedule();
-			if (jiffies > timeout)
+ 			schedule_timeout(port->timeout);
+			if (time_after(jiffies, timeout))
 				break;
 		}
 	}
 	rc_shutdown_port(bp, port);
 	if (tty->driver.flush_buffer)
 		tty->driver.flush_buffer(tty);
-	if (tty->ldisc.flush_buffer)
-		tty->ldisc.flush_buffer(tty);
+	tty_ldisc_flush(tty);
 	tty->closing = 0;
 	port->event = 0;
 	port->tty = 0;
 	if (port->blocked_open) {
 		if (port->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->close_delay;
-			schedule();
+			schedule_timeout(port->close_delay);
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
 	port->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE|
 			 ASYNC_CLOSING);
 	wake_up_interruptible(&port->close_wait);
-	restore_flags(flags);
+out:	restore_flags(flags);
 }
 
 static int rc_write(struct tty_struct * tty, int from_user, 
 		    const unsigned char *buf, int count)
 {
-	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
+	struct riscom_port *port;
 	struct riscom_board *bp;
 	int c, total = 0;
 	unsigned long flags;
+
+	if (!tty)
+		return 0;
+
+	port = (struct riscom_port *)tty->driver_data;
 				
 	if (rc_paranoia_check(port, tty->device, "rc_write"))
 		return 0;
 	
 	bp = port_Board(port);
 
-	if (!tty || !port->xmit_buf || !tmp_buf)
+	if (!port->xmit_buf || !tmp_buf)
 		return 0;
 
-	if (from_user)
-		down(&tmp_buf_sem);
-
 	save_flags(flags);
-	while (1) {
-		cli();		
-		c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
-				   SERIAL_XMIT_SIZE - port->xmit_head));
-		if (c <= 0)
-			break;
+	if (from_user) {
+		down(&tmp_buf_sem);
+		while (1) {
+			cli();		
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - port->xmit_head));
+			if (c <= 0)
+				break;
 
-		if (from_user) {
-			memcpy_fromfs(tmp_buf, buf, c);
+			c -= copy_from_user(tmp_buf, buf, c);
+			if (!c) {
+				if (!total)
+					total = -EFAULT;
+				break;
+			}
+
+			cli();
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - port->xmit_head));
 			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
-		} else
-			memcpy(port->xmit_buf + port->xmit_head, buf, c);
-		port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
-		port->xmit_cnt += c;
-		restore_flags(flags);
-		buf += c;
-		count -= c;
-		total += c;
-	}
-	if (from_user)
+			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+			port->xmit_cnt += c;
+			restore_flags(flags);
+
+			buf += c;
+			count -= c;
+			total += c;
+		}
 		up(&tmp_buf_sem);
+	} else {
+		while (1) {
+			cli();		
+			c = MIN(count, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
+					   SERIAL_XMIT_SIZE - port->xmit_head));
+			if (c <= 0) {
+				restore_flags(flags);
+				break;
+			}
+
+			memcpy(port->xmit_buf + port->xmit_head, buf, c);
+			port->xmit_head = (port->xmit_head + c) & (SERIAL_XMIT_SIZE-1);
+			port->xmit_cnt += c;
+			restore_flags(flags);
+
+			buf += c;
+			count -= c;
+			total += c;
+		}
+	}
+
+	cli();
 	if (port->xmit_cnt && !tty->stopped && !tty->hw_stopped &&
 	    !(port->IER & IER_TXRDY)) {
 		port->IER |= IER_TXRDY;
@@ -1248,31 +1297,35 @@ static int rc_write(struct tty_struct * tty, int from_user,
 		rc_out(bp, CD180_IER, port->IER);
 	}
 	restore_flags(flags);
+
 	return total;
 }
 
 static void rc_put_char(struct tty_struct * tty, unsigned char ch)
 {
-	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
+	struct riscom_port *port;
 	unsigned long flags;
+
+	if (!tty)
+		return;
+
+	port = (struct riscom_port *)tty->driver_data;
 
 	if (rc_paranoia_check(port, tty->device, "rc_put_char"))
 		return;
 
-	if (!tty || !port->xmit_buf)
+	if (!port->xmit_buf)
 		return;
 
 	save_flags(flags); cli();
 	
-	if (port->xmit_cnt >= SERIAL_XMIT_SIZE - 1) {
-		restore_flags(flags);
-		return;
-	}
+	if (port->xmit_cnt >= SERIAL_XMIT_SIZE - 1)
+		goto out;
 
 	port->xmit_buf[port->xmit_head++] = ch;
 	port->xmit_head &= SERIAL_XMIT_SIZE - 1;
 	port->xmit_cnt++;
-	restore_flags(flags);
+out:	restore_flags(flags);
 }
 
 static void rc_flush_chars(struct tty_struct * tty)
@@ -1331,9 +1384,7 @@ static void rc_flush_buffer(struct tty_struct *tty)
 	restore_flags(flags);
 	
 	wake_up_interruptible(&tty->write_wait);
-	if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-	    tty->ldisc.write_wakeup)
-		(tty->ldisc.write_wakeup)(tty);
+	tty_wakeup(tty);
 }
 
 static int rc_get_modem_info(struct riscom_port * port, unsigned int *value)
@@ -1354,22 +1405,18 @@ static int rc_get_modem_info(struct riscom_port * port, unsigned int *value)
 		| ((status & MSVR_CD)  ? TIOCM_CAR : 0)
 		| ((status & MSVR_DSR) ? TIOCM_DSR : 0)
 		| ((status & MSVR_CTS) ? TIOCM_CTS : 0);
-	put_user(result,(unsigned long *) value);
-	return 0;
+	return put_user(result, value);
 }
 
 static int rc_set_modem_info(struct riscom_port * port, unsigned int cmd,
 			     unsigned int *value)
 {
-	int error;
 	unsigned int arg;
 	unsigned long flags;
 	struct riscom_board *bp = port_Board(port);
 
-	error = verify_area(VERIFY_READ, value, sizeof(int));
-	if (error) 
-		return error;
-	arg = get_fs_long((unsigned long *) value);
+	if (get_user(arg, value))
+		return -EFAULT;
 	switch (cmd) {
 	 case TIOCMBIS: 
 		if (arg & TIOCM_RTS) 
@@ -1400,7 +1447,7 @@ static int rc_set_modem_info(struct riscom_port * port, unsigned int cmd,
 	return 0;
 }
 
-extern inline void rc_send_break(struct riscom_port * port, unsigned long length)
+static inline void rc_send_break(struct riscom_port * port, unsigned long length)
 {
 	struct riscom_board *bp = port_Board(port);
 	unsigned long flags;
@@ -1418,19 +1465,16 @@ extern inline void rc_send_break(struct riscom_port * port, unsigned long length
 	restore_flags(flags);
 }
 
-extern inline int rc_set_serial_info(struct riscom_port * port,
+static inline int rc_set_serial_info(struct riscom_port * port,
 				     struct serial_struct * newinfo)
 {
 	struct serial_struct tmp;
 	struct riscom_board *bp = port_Board(port);
 	int change_speed;
 	unsigned long flags;
-	int error;
 	
-	error = verify_area(VERIFY_READ, (void *) newinfo, sizeof(tmp));
-	if (error)
-		return error;
-	memcpy_fromfs(&tmp, newinfo, sizeof(tmp));
+	if (copy_from_user(&tmp, newinfo, sizeof(tmp)))
+		return -EFAULT;
 	
 #if 0	
 	if ((tmp.irq != bp->irq) ||
@@ -1446,7 +1490,7 @@ extern inline int rc_set_serial_info(struct riscom_port * port,
 	change_speed = ((port->flags & ASYNC_SPD_MASK) !=
 			(tmp.flags & ASYNC_SPD_MASK));
 	
-	if (!suser()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		if ((tmp.close_delay != port->close_delay) ||
 		    (tmp.closing_wait != port->closing_wait) ||
 		    ((tmp.flags & ~ASYNC_USR_MASK) !=
@@ -1468,16 +1512,11 @@ extern inline int rc_set_serial_info(struct riscom_port * port,
 	return 0;
 }
 
-extern inline int rc_get_serial_info(struct riscom_port * port,
+static inline int rc_get_serial_info(struct riscom_port * port,
 				     struct serial_struct * retinfo)
 {
 	struct serial_struct tmp;
 	struct riscom_board *bp = port_Board(port);
-	int error;
-	
-	error = verify_area(VERIFY_WRITE, (void *) retinfo, sizeof(tmp));
-	if (error)
-		return error;
 	
 	memset(&tmp, 0, sizeof(tmp));
 	tmp.type = PORT_CIRRUS;
@@ -1489,8 +1528,7 @@ extern inline int rc_get_serial_info(struct riscom_port * port,
 	tmp.close_delay = port->close_delay * HZ/100;
 	tmp.closing_wait = port->closing_wait * HZ/100;
 	tmp.xmit_fifo_size = CD180_NFIFO;
-	memcpy_tofs(retinfo, &tmp, sizeof(tmp));
-	return 0;
+	return copy_to_user(retinfo, &tmp, sizeof(tmp)) ? -EFAULT : 0;
 }
 
 static int rc_ioctl(struct tty_struct * tty, struct file * filp, 
@@ -1498,7 +1536,6 @@ static int rc_ioctl(struct tty_struct * tty, struct file * filp,
 		    
 {
 	struct riscom_port *port = (struct riscom_port *)tty->driver_data;
-	int error;
 	int retval;
 				
 	if (rc_paranoia_check(port, tty->device, "rc_ioctl"))
@@ -1512,32 +1549,24 @@ static int rc_ioctl(struct tty_struct * tty, struct file * filp,
 		tty_wait_until_sent(tty, 0);
 		if (!arg)
 			rc_send_break(port, HZ/4);	/* 1/4 second */
-		return 0;
+		break;
 	 case TCSBRKP:	/* support for POSIX tcsendbreak() */
 		retval = tty_check_change(tty);
 		if (retval)
 			return retval;
 		tty_wait_until_sent(tty, 0);
 		rc_send_break(port, arg ? arg*(HZ/10) : HZ/4);
-		return 0;
+		break;
 	 case TIOCGSOFTCAR:
-		error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(long));
-		if (error)
-			return error;
-		put_user(C_CLOCAL(tty) ? 1 : 0,
-			    (unsigned long *) arg);
-		return 0;
+		return put_user(C_CLOCAL(tty) ? 1 : 0, (unsigned int *) arg);
 	 case TIOCSSOFTCAR:
-		arg = get_user((unsigned long *) arg);
+		if (get_user(arg,(unsigned int *) arg))
+			return -EFAULT;
 		tty->termios->c_cflag =
 			((tty->termios->c_cflag & ~CLOCAL) |
 			(arg ? CLOCAL : 0));
-		return 0;
+		break;
 	 case TIOCMGET:
-		error = verify_area(VERIFY_WRITE, (void *) arg,
-				    sizeof(unsigned int));
-		if (error)
-			return error;
 		return rc_get_modem_info(port, (unsigned int *) arg);
 	 case TIOCMBIS:
 	 case TIOCMBIC:
@@ -1652,10 +1681,9 @@ static void do_rc_hangup(void *private_)
 	struct tty_struct	*tty;
 	
 	tty = port->tty;
-	if (!tty)
-		return;
-
-	tty_hangup(tty);
+	if (tty)
+		tty_hangup(tty);	/* FIXME: module removal race still here */
+	MOD_DEC_USE_COUNT;
 }
 
 static void rc_hangup(struct tty_struct * tty)
@@ -1712,22 +1740,19 @@ static void do_softint(void *private_)
 	if(!(tty = port->tty)) 
 		return;
 
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
-		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
-		    tty->ldisc.write_wakeup)
-			(tty->ldisc.write_wakeup)(tty);
-		wake_up_interruptible(&tty->write_wait);
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
+		tty_wakeup(tty);
 	}
 }
 
-static int rc_init_drivers(void)
+static inline int rc_init_drivers(void)
 {
 	int error;
 	int i;
 
 	
 	if (!(tmp_buf = (unsigned char *) get_free_page(GFP_KERNEL))) {
-		printk("rc: Couldn't get free page.\n");
+		printk(KERN_ERR "rc: Couldn't get free page.\n");
 		return 1;
 	}
 	init_bh(RISCOM8_BH, do_riscom_bh);
@@ -1771,14 +1796,16 @@ static int rc_init_drivers(void)
 	
 	if ((error = tty_register_driver(&riscom_driver)))  {
 		free_page((unsigned long)tmp_buf);
-		printk("rc: Couldn't register RISCom/8 driver, error = %d\n",
+		printk(KERN_ERR "rc: Couldn't register RISCom/8 driver, "
+				"error = %d\n",
 		       error);
 		return 1;
 	}
 	if ((error = tty_register_driver(&riscom_callout_driver)))  {
 		free_page((unsigned long)tmp_buf);
 		tty_unregister_driver(&riscom_driver);
-		printk("rc: Couldn't register RISCom/8 callout driver, error = %d\n",
+		printk(KERN_ERR "rc: Couldn't register RISCom/8 callout "
+				"driver, error = %d\n",
 		       error);
 		return 1;
 	}
@@ -1794,6 +1821,8 @@ static int rc_init_drivers(void)
 		rc_port[i].tqueue_hangup.data = &rc_port[i];
 		rc_port[i].close_delay = 50 * HZ/100;
 		rc_port[i].closing_wait = 3000 * HZ/100;
+		init_waitqueue_head(&rc_port[i].open_wait);
+		init_waitqueue_head(&rc_port[i].close_wait);
 	}
 	
 	return 0;
@@ -1801,9 +1830,15 @@ static int rc_init_drivers(void)
 
 static void rc_release_drivers(void)
 {
+	unsigned long flags;
+
+	save_flags(flags);
+	cli();
+	remove_bh(RISCOM8_BH);
 	free_page((unsigned long)tmp_buf);
 	tty_unregister_driver(&riscom_driver);
 	tty_unregister_driver(&riscom_callout_driver);
+	restore_flags(flags);
 }
 
 #ifndef MODULE
@@ -1816,9 +1851,12 @@ static void rc_release_drivers(void)
  * addresses in this case.
  *
  */ 
-void riscom8_setup(char *str, int * ints)
+static int __init riscom8_setup(char *str)
 {
+	int ints[RC_NBOARD];
 	int i;
+
+	str = get_options(str, ARRAY_SIZE(ints), ints);
 
 	for (i = 0; i < RC_NBOARD; i++) {
 		if (i < ints[0])
@@ -1826,18 +1864,27 @@ void riscom8_setup(char *str, int * ints)
 		else 
 			rc_board[i].base = 0;
 	}
+	return 1;
 }
+
+__setup("riscom8=", riscom8_setup);
 #endif
+
+static char banner[] __initdata =
+	KERN_INFO "rc: SDL RISCom/8 card driver v1.1, (c) D.Gorodchanin "
+		  "1994-1996.\n";
+static char no_boards_msg[] __initdata =
+	KERN_INFO "rc: No RISCom/8 boards detected.\n";
 
 /* 
  * This routine must be called by kernel at boot time 
  */
-int riscom8_init(void) 
+static int __init riscom8_init(void)
 {
 	int i;
 	int found = 0;
 
-	printk("rc: SDL RISCom/8 card driver v1.0, (c) D.Gorodchanin 1994-1996.\n");
+	printk(banner);
 
 	if (rc_init_drivers()) 
 		return -EIO;
@@ -1848,25 +1895,33 @@ int riscom8_init(void)
 	
 	if (!found)  {
 		rc_release_drivers();
-		printk("rc: No RISCom/8 boards detected.\n");
+		printk(no_boards_msg);
 		return -EIO;
 	}
 	return 0;
 }
 
 #ifdef MODULE
-int iobase  = 0;
-int iobase1 = 0;
-int iobase2 = 0;
-int iobase3 = 0;
+static int iobase;
+static int iobase1;
+static int iobase2;
+static int iobase3;
+MODULE_PARM(iobase, "i");
+MODULE_PARM(iobase1, "i");
+MODULE_PARM(iobase2, "i");
+MODULE_PARM(iobase3, "i");
+
+MODULE_LICENSE("GPL");
+#endif /* MODULE */
 
 /*
  * You can setup up to 4 boards (current value of RC_NBOARD)
  * by specifying "iobase=0xXXX iobase1=0xXXX ..." as insmod parameter.
  *
  */
-int init_module(void) 
+static int __init riscom8_init_module (void)
 {
+#ifdef MODULE
 	int i;
 
 	if (iobase || iobase1 || iobase2 || iobase3) {
@@ -1882,11 +1937,12 @@ int init_module(void)
 		rc_board[2].base = iobase2;
 	if (iobase3)
 		rc_board[3].base = iobase3;
-	
+#endif /* MODULE */
+
 	return riscom8_init();
 }
 	
-void cleanup_module(void)
+static void __exit riscom8_exit_module (void)
 {
 	int i;
 	
@@ -1896,4 +1952,7 @@ void cleanup_module(void)
 			rc_release_io_range(&rc_board[i]);
 	
 }
-#endif /* MODULE */
+
+module_init(riscom8_init_module);
+module_exit(riscom8_exit_module);
+

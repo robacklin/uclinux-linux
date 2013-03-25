@@ -21,15 +21,8 @@
 extern struct proto raw_prot;
 
 
-extern void	raw_err(int type, int code, unsigned char *header, __u32 daddr,
-			__u32 saddr, struct inet_protocol *protocol);
-extern int	raw_recvfrom(struct sock *sk, unsigned char *to,
-			int len, int noblock, unsigned flags,
-			struct sockaddr_in *sin, int *addr_len);
-extern int	raw_read(struct sock *sk, unsigned char *buff,
-			int len, int noblock, unsigned flags);
-extern int 	raw_rcv(struct sock *, struct sk_buff *, struct device *, 
-			__u32, __u32);
+extern void 	raw_err(struct sock *, struct sk_buff *, u32 info);
+extern int 	raw_rcv(struct sock *, struct sk_buff *);
 
 /* Note: v4 ICMP wants to get at this stuff, if you change the
  *       hashing mechanism, make sure you update icmp.c as well.
@@ -37,8 +30,13 @@ extern int 	raw_rcv(struct sock *, struct sk_buff *, struct device *,
 #define RAWV4_HTABLE_SIZE	MAX_INET_PROTOS
 extern struct sock *raw_v4_htable[RAWV4_HTABLE_SIZE];
 
+extern rwlock_t raw_v4_lock;
 
-extern struct sock *raw_v4_lookup(struct sock *sk, unsigned short num,
-				  unsigned long raddr, unsigned long laddr);
+
+extern struct sock *__raw_v4_lookup(struct sock *sk, unsigned short num,
+				    unsigned long raddr, unsigned long laddr,
+				    int dif);
+
+extern struct sock *raw_v4_input(struct sk_buff *skb, struct iphdr *iph, int hash);
 
 #endif	/* _RAW_H */

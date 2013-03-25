@@ -61,7 +61,6 @@ _ramend:
 .extern	initrd_start
 .extern initrd_end
 #endif
-
 /*****************************************************************************/
 
 .text
@@ -127,7 +126,7 @@ _start:
 	movec	%d0,%CACR
 	nop
 
-
+#ifdef CONFIG_ROMFS_FS
 	/*
 	 *	Move ROM filesystem above bss :-)
 	 */
@@ -142,12 +141,12 @@ _start:
 	move.l	%d2, %a1			/* Save result for later */
 #endif
 
-	move.l	8(%a0), %d0			/* Get size of ROMFS */
-	addq.l	#8, %d0				/* Allow for rounding */
-	and.l	#0xfffffffc, %d0		/* Whole words */
+	move.l	8(%a0), %d1			/* Get size of ROMFS */
+	addq.l	#8, %d1				/* Allow for rounding */
+	and.l	#0xfffffffc, %d1		/* Whole words */
 
-	add.l	%d0, %a0			/* Copy from end */
-	add.l	%d0, %a1			/* Copy from end */
+	add.l	%d1, %a0			/* Copy from end */
+	add.l	%d1, %a1			/* Copy from end */
 	move.l	%a1, _ramstart			/* Set start of ram */
 
 _copy_romfs:
@@ -155,6 +154,13 @@ _copy_romfs:
 	move.l	%d0, -(%a1)
 	cmp.l	%a0, %a2			/* Check if at end */
 	bne	_copy_romfs
+
+#else /* !CONFIG_ROMFS_FS */
+
+	lea.l	_ebss, %a1			/* Get end of bss segment */
+	move.l	%a1, _ramstart			/* Set start of ram */
+
+#endif /* !CONFIG_ROMFS_FS */
 
 	/*
 	 *	Zero out the bss region.
@@ -168,6 +174,7 @@ _clear_bss:
 	bne	_clear_bss
 
 #if CONFIG_BLK_DEV_INITRD
+# if CONFIG_ROMFS_FS
 	/*
 	 *	Setup up RAMdisk info if using it.
 	 *	(Must do this after clearing the bss :-)
@@ -175,8 +182,27 @@ _clear_bss:
 	move.l	%d2, initrd_start		/* Set up start of initrd */
 	add.l	%d1, %d2			/* Calculate end of initrd */
 	move.l	%d2, initrd_end
-#endif
 
+# else /* !CONFIG_ROMFS_FS */
+
+	/*
+	 * initrd support for Coldfire currently requires romfs.
+	 * Generic initrd support requires a bootloader protocol to
+	 * tell the kernel where the image is located.
+	 */
+	moveq.l	#0, %d2
+	move.l	%d2, initrd_start
+	move.l	%d2, initrd_end
+
+# endif /* !CONFIG_ROMFS_FS */
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 * load the current task pointer and stack
+	 */
+	lea		init_task_union,%a0
+	movel	%a0, _current_task
+	lea		0x2000(%a0),%sp
 	/*
 	 *	Assember start up done, start code proper.
 	 */

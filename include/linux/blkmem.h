@@ -23,9 +23,6 @@
 
 #define BMPROGRAM      6	/* program entire arena in one go */
 
-#define BMRELOCATE	7	/* change partition's physical addr */
-#define BMRESIZE	8	/* change partition's length */
-
 struct blkmem_program_t {
 	unsigned long magic1;
 	int	blocks;
@@ -48,5 +45,11 @@ struct blkmem_program_t {
 #if 0
 #define BMSSAUTOERASE  10	/* set auto-erase bits */
 #endif
+
+#define DEVICE_NAME "Blkmem"
+#define DEVICE_REQUEST do_blkmem_request
+#define DEVICE_NR(device) (MINOR(device))
+#define DEVICE_ON(device)
+#define DEVICE_OFF(device)
 
 #endif /* _LINUX_BLKMEM_H */

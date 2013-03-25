@@ -1,4 +1,4 @@
-/* $Id: rtrap.S,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: rtrap.S,v 1.57 2001/07/17 16:17:33 anton Exp $
  * rtrap.S: Return from Sparc trap low-level code.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -19,14 +19,14 @@
 #define t_npc     l2
 #define t_wim     l3
 #define twin_tmp1 l4
-#define twin_tmp2 l5
-#define twin_tmp3 l6
+#define glob_tmp  g4
+#define curptr    g6
 
 	/* 7 WINDOW SPARC PATCH INSTRUCTIONS */
 	.globl	rtrap_7win_patch1, rtrap_7win_patch2, rtrap_7win_patch3
 	.globl	rtrap_7win_patch4, rtrap_7win_patch5
-rtrap_7win_patch1:	srl	%t_wim, 0x6, %twin_tmp2
-rtrap_7win_patch2:	and	%twin_tmp2, 0x7f, %twin_tmp2
+rtrap_7win_patch1:	srl	%t_wim, 0x6, %glob_tmp
+rtrap_7win_patch2:	and	%glob_tmp, 0x7f, %glob_tmp
 rtrap_7win_patch3:	srl	%g1, 7, %g2
 rtrap_7win_patch4:	srl	%g2, 6, %g2
 rtrap_7win_patch5:	and	%g1, 0x7f, %g1
@@ -46,54 +46,46 @@ rtrap_7win_patch5:	and	%g1, 0x7f, %g1
 
 	.globl	ret_trap_entry, rtrap_patch1, rtrap_patch2
 	.globl	rtrap_patch3, rtrap_patch4, rtrap_patch5
+	.globl	C_LABEL(ret_trap_lockless_ipi)
 ret_trap_entry:
-	ld	[%sp + REGWIN_SZ + PT_PSR], %t_psr
+C_LABEL(ret_trap_lockless_ipi):
 	andcc	%t_psr, PSR_PS, %g0
-	bne	ret_trap_kernel
+	be	1f
 	 nop
 
-	sethi	%hi(C_LABEL(need_resched)), %twin_tmp1
-	ld	[%twin_tmp1 + %lo(C_LABEL(need_resched))], %twin_tmp2
+	wr	%t_psr, 0x0, %psr
+	b	ret_trap_kernel
+	 nop
 
-	cmp	%twin_tmp2, 0
+1:
+	ld	[%curptr + AOFF_task_need_resched], %g2
+	orcc	%g2, %g0, %g0
 	be	signal_p
-	 nop
+	 ld	[%curptr + AOFF_task_sigpending], %g2
 
 	call	C_LABEL(schedule)
 	 nop
 
-	/* Try to return again... We are a different process,
-	 * most likely so load and then check if going back
-	 * to user or kernel this time.
-	 */
-	b	ret_trap_entry
-	 nop
-
+	ld	[%curptr + AOFF_task_sigpending], %g2
 signal_p:
-	/* No signals for swapper. */
-	LOAD_CURRENT(twin_tmp1, twin_tmp3)
-	set	C_LABEL(init_task), %twin_tmp3
-	cmp	%twin_tmp3, %twin_tmp1
-	be	ret_trap_continue
-	 nop
+	cmp	%g2, 0
+	bz,a	ret_trap_continue
+	 ld	[%sp + STACKFRAME_SZ + PT_PSR], %t_psr
 
-	ld	[%twin_tmp1 + TASK_SIGNAL], %twin_tmp2
-	ld	[%twin_tmp1 + TASK_BLOCKED], %o0
-	andncc	%twin_tmp2, %o0, %g0
-	be	ret_trap_continue
-	 nop
-
+	clr	%o0
+	mov	%l5, %o2
+	mov	%l6, %o3
 	call	C_LABEL(do_signal)
-	 add	%sp, REGWIN_SZ, %o1	! pt_regs ptr
+	 add	%sp, STACKFRAME_SZ, %o1	! pt_regs ptr
 
-	/* Fall through... */
+	/* Fall through. */
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %t_psr
+	clr	%l6
 ret_trap_continue:
-	ld	[%sp + REGWIN_SZ + PT_PSR], %t_psr
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 
-	LOAD_CURRENT(twin_tmp2, twin_tmp1)
-	ld	[%twin_tmp2 + THREAD_W_SAVED], %twin_tmp1
+	ld	[%curptr + AOFF_task_thread + AOFF_thread_w_saved], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	be	ret_trap_nobufwins
 	 nop
@@ -103,10 +95,10 @@ ret_trap_continue:
 
 	mov	1, %o1
 	call	C_LABEL(try_to_clear_window_buffer)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	b	ret_trap_entry
-	 nop
+	b	signal_p
+	 ld	[%curptr + AOFF_task_sigpending], %g2
 
 ret_trap_nobufwins:
 	/* Load up the user's out registers so we can pull
@@ -117,7 +109,7 @@ ret_trap_nobufwins:
 	/* If there are already live user windows in the
 	 * set we can return from trap safely.
 	 */
-	ld	[%twin_tmp2 + THREAD_UMASK], %twin_tmp1
+	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	bne	ret_trap_userwins_ok
 	 nop
@@ -128,12 +120,11 @@ ret_trap_nobufwins:
 ret_trap_pull_one_window:
 		rd	%wim, %t_wim
 		sll	%t_wim, 0x1, %twin_tmp1
-rtrap_patch1:	srl	%t_wim, 0x7, %twin_tmp2
-		or	%twin_tmp2, %twin_tmp1, %twin_tmp2
-rtrap_patch2:	and	%twin_tmp2, 0xff, %twin_tmp2
+rtrap_patch1:	srl	%t_wim, 0x7, %glob_tmp
+		or	%glob_tmp, %twin_tmp1, %glob_tmp
+rtrap_patch2:	and	%glob_tmp, 0xff, %glob_tmp
 
-		wr	%twin_tmp2, 0x0, %wim
-		WRITE_PAUSE
+		wr	%glob_tmp, 0x0, %wim
 
 				/* Here comes the architecture specific 
 				 * branch to the user stack checking routine
@@ -147,13 +138,15 @@ ret_trap_userwins_ok:
 	LOAD_PT_PRIV(sp, t_psr, t_pc, t_npc)
 	or	%t_pc, %t_npc, %g2
 	andcc	%g2, 0x3, %g0
-	bne	ret_trap_unaligned_pc
+	be	1f
 	 nop
 
+	b	ret_trap_unaligned_pc
+	 add	%sp, STACKFRAME_SZ, %o0
+
+1:
 	LOAD_PT_YREG(sp, g1)
 	LOAD_PT_GLOBALS(sp)
-
-	LEAVE_SYSCALL
 
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
@@ -162,13 +155,11 @@ ret_trap_userwins_ok:
 	rett	%t_npc
 	
 ret_trap_unaligned_pc:
-	add	%sp, REGWIN_SZ, %o0
-	ld	[%sp + REGWIN_SZ + PT_PC], %o1
-	ld	[%sp + REGWIN_SZ + PT_NPC], %o2
-	ld	[%sp + REGWIN_SZ + PT_PSR], %o3
+	ld	[%sp + STACKFRAME_SZ + PT_PC], %o1
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %o2
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %o3
 
 	wr	%t_wim, 0x0, %wim		! or else...
-	WRITE_PAUSE
 
 	wr	%t_psr, PSR_ET, %psr
 	WRITE_PAUSE
@@ -176,14 +167,10 @@ ret_trap_unaligned_pc:
 	call	C_LABEL(do_memaccess_unaligned)
 	 nop
 
-	b	ret_trap_entry			! maybe signal posted
-	 nop
+	b	signal_p
+	 ld	[%curptr + AOFF_task_sigpending], %g2
 
 ret_trap_kernel:
-	ld	[%sp + REGWIN_SZ + PT_PSR], %t_psr
-	wr	%t_psr, 0x0, %psr
-	WRITE_PAUSE
-
 		/* Will the rett land us in the invalid window? */
 		mov	2, %g1
 		sll	%g1, %t_psr, %g1
@@ -192,29 +179,29 @@ rtrap_patch3:	srl	%g1, 8, %g2
 		rd	%wim, %g2
 		andcc	%g2, %g1, %g0
 		be	1f		! Nope, just return from the trap
-		 nop
+		 sll	%g2, 0x1, %g1
 
 		/* We have to grab a window before returning. */
-		sll	%g2, 0x1, %g1
 rtrap_patch4:	srl	%g2, 7,  %g2
 		or	%g1, %g2, %g1
 rtrap_patch5:	and	%g1, 0xff, %g1
 
 	wr	%g1, 0x0, %wim
-	WRITE_PAUSE
+
+	/* Grrr, make sure we load from the right %sp... */
+	LOAD_PT_ALL(sp, t_psr, t_pc, t_npc, g1)
 
 	restore	%g0, %g0, %g0
 	LOAD_WINDOW(sp)
-	save	%g0, %g0, %g0
+	b	2f
+	 save	%g0, %g0, %g0
 
 	/* Reload the entire frame in case this is from a
 	 * kernel system call or whatever...
 	 */
 1:
 	LOAD_PT_ALL(sp, t_psr, t_pc, t_npc, g1)
-
-	LEAVE_SYSCALL
-
+2:
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 
@@ -223,24 +210,23 @@ rtrap_patch5:	and	%g1, 0xff, %g1
 
 ret_trap_user_stack_is_bolixed:
 	wr	%t_wim, 0x0, %wim
-	WRITE_PAUSE
 
 	wr	%t_psr, PSR_ET, %psr
 	WRITE_PAUSE
 
 	call	C_LABEL(window_ret_fault)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
-	b	ret_trap_entry
-	 nop
+	b	signal_p
+	 ld	[%curptr + AOFF_task_sigpending], %g2
 
 	.globl	C_LABEL(sun4c_rett_stackchk)
 C_LABEL(sun4c_rett_stackchk):
 	be	1f
 	 and	%fp, 0xfff, %g1		! delay slot
 
-	b	ret_trap_user_stack_is_bolixed
-	 nop
+	b	ret_trap_user_stack_is_bolixed + 0x4
+	 wr	%t_wim, 0x0, %wim
 
 	/* See if we have to check the sanity of one page or two */
 1:
@@ -252,8 +238,8 @@ C_LABEL(sun4c_rett_stackchk):
 	 andncc	%g1, 0xff8, %g0
 
 	/* %sp is in vma hole, yuck */
-	b	ret_trap_user_stack_is_bolixed
-	 nop
+	b	ret_trap_user_stack_is_bolixed + 0x4
+	 wr	%t_wim, 0x0, %wim
 
 1:
 	be	sun4c_rett_onepage	/* Only one page to check */
@@ -268,8 +254,8 @@ sun4c_rett_twopages:
 	 lda	[%g1] ASI_PTE, %g2
 
 	/* Second page is in vma hole */
-	b	ret_trap_user_stack_is_bolixed
-	 nop
+	b	ret_trap_user_stack_is_bolixed + 0x4
+	 wr	%t_wim, 0x0, %wim
 
 1:
 	srl	%g2, 29, %g2
@@ -278,33 +264,30 @@ sun4c_rett_twopages:
 	 lda	[%fp] ASI_PTE, %g2
 
 	/* Second page has bad perms */
-	b	ret_trap_user_stack_is_bolixed
-	 nop
+	b	ret_trap_user_stack_is_bolixed + 0x4
+	 wr	%t_wim, 0x0, %wim
 
 sun4c_rett_onepage:
 	srl	%g2, 29, %g2
 	andcc	%g2, 0x4, %g0
-	bne	1f
-	 nop
+	bne,a	1f
+	 restore %g0, %g0, %g0
 
 	/* A page had bad page permissions, losing... */
-	b	ret_trap_user_stack_is_bolixed
-	 nop
+	b	ret_trap_user_stack_is_bolixed + 0x4
+	 wr	%t_wim, 0x0, %wim
 
 	/* Whee, things are ok, load the window and continue. */
 1:
-	restore	%g0, %g0, %g0
-
 	LOAD_WINDOW(sp)
 
-	save	%g0, %g0, %g0
 	b	ret_trap_userwins_ok
-	 nop
+	 save	%g0, %g0, %g0
 
 	.globl	C_LABEL(srmmu_rett_stackchk)
 C_LABEL(srmmu_rett_stackchk):
 	bne	ret_trap_user_stack_is_bolixed
-	 sethi	%hi(KERNBASE), %g1
+	 sethi   %hi(PAGE_OFFSET), %g1
 	cmp	%g1, %fp
 	bleu	ret_trap_user_stack_is_bolixed
 	 mov	AC_M_SFSR, %g1
@@ -329,8 +312,7 @@ C_LABEL(srmmu_rett_stackchk):
 	mov	AC_M_SFSR, %g1
 	lda	[%g1] ASI_M_MMUREGS, %g1
 	andcc	%g1, 0x2, %g0
-	bne	ret_trap_user_stack_is_bolixed
+	be	ret_trap_userwins_ok
 	 nop
 
-	b	ret_trap_userwins_ok
-	 nop
+	b,a	ret_trap_user_stack_is_bolixed

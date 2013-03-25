@@ -14,45 +14,17 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
     Adaptec Cards
     ----------------------------
     AHA-274x
-    AHA-274xT               
-    AHA-2842
-    AHA-2910B               
-    AHA-2920C
-    AHA-2930
-    AHA-2930U
-    AHA-2930U2
-    AHA-2940               
-    AHA-2940W              
-    AHA-2940U              
-    AHA-2940UW
-    AHA-2940AU 
-    AHA-2940U2W
-    AHA-2940U2
-    AHA-2940U2B
-    AHA-2940U2BOEM
-    AHA-2944D              
-    AHA-2944WD
-    AHA-2944UD
-    AHA-2944UWD
-    AHA-2950U2
-    AHA-2950U2W
-    AHA-2950U2B
-    AHA-3940
-    AHA-3940U
-    AHA-3940W
-    AHA-3940UW
-    AHA-3940AUW
-    AHA-3940U2W
-    AHA-3950U2B
-    AHA-3950U2D
-    AHA-3985
-    AHA-3985U
-    AHA-3985W
-    AHA-3985UW
+    AHA-274xT
+    AHA-274xW
+    AHA-284x
+    AHA-284xW
+    All PCI based cards using any of the chipsets listed under motherboard
+    chipsets.  In general, this means *all* of the Adaptec SCSI controllers
+    except the ones specifically excluded later on in this document.
 
     Motherboard Chipsets
     ----------------------------
-    AIC-777x   
+    AIC-777x
     AIC-785x
     AIC-786x
     AIC-787x
@@ -66,15 +38,14 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
         SCSI-1/SCSI-2 50pin devices, transfer rates up to 20MB/s.
     U - Ultra SCSI, transfer rates up to 40MB/s.
     U2- Ultra 2 SCSI, transfer rates up to 80MB/s.
+    U3- Ultra 3 SCSI, transfer rates up to 160MB/s.
     D - Differential SCSI.
     T - Twin Channel SCSI. Up to 14 SCSI devices.
 
     AHA-274x - EISA SCSI controller
     AHA-284x - VLB SCSI controller
     AHA-29xx - PCI SCSI controller
-    AHA-394x - PCI controllers with two separate SCSI controllers on-board.
-    AHA-398x - PCI RAID controllers with three separate SCSI controllers
-               on-board.
+    AHA-39xx - PCI controllers with multiple separate SCSI channels on-board.
 
   Not Supported Devices
   ------------------------------
@@ -88,7 +59,7 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
 
     Motherboard Chipsets
     ----------------------------
-    AIC-7810
+    AIC-781x
 
     Bus Types
     ----------------------------
@@ -159,6 +130,12 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
         on your controller.  This helps those people who have cards without
         a SEEPROM make sure that linux and all other operating systems think
         the same way about your hard drives.
+
+    "aic7xxx=scbram" - Some cards have external SCB RAM that can be used to
+        give the card more hardware SCB slots.  This allows the driver to use
+	that SCB RAM.  Without this option, the driver won't touch the SCB
+	RAM because it is known to cause problems on a few cards out there
+	(such as 3985 class cards).
 	
     "aic7xxx=irq_trigger:x" - Replace x with either 0 or 1 to force the kernel
         to use the correct IRQ type for your card.  This only applies to EISA
@@ -197,6 +174,19 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
 	will often result in the machine crashing or spontaneously rebooting
 	during startup.  Examples of machines that need this are the
 	Dell PowerEdge 6300 machines.
+
+    "aic7xxx=seltime:2" - This option controls how long the card waits
+        during a device selection sequence for the device to respond.
+	The original SCSI spec says that this "should be" 256ms.  This
+	is generally not required with modern devices.  However, some
+	very old SCSI I devices need the full 256ms.  Most modern devices
+	can run fine with only 64ms.  The default for this option is
+	64ms.  If you need to change this option, then use the following
+	table to set the proper value in the example above:
+	  0  -  256ms
+	  1  -  128ms
+	  2  -   64ms
+	  3  -   32ms
 	
     "aic7xxx=panic_on_abort" - This option is for debugging and will cause
         the driver to panic the linux kernel and freeze the system the first
@@ -454,20 +444,19 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
     information in the process.  Second, if you specify the option
     "aic7xxx=verbose:0x1ffff", the system will print out *SOOOO* much
     information as it runs that you won't be able to see anything.
-    However, this can actually be very usefull if your machine simply
+    However, this can actually be very useful if your machine simply
     locks up when trying to boot, since it will pin-point what was last
     happening (in regards to the aic7xxx driver) immediately prior to
-    the lockup.  This is really only usefull if your machine simply can
+    the lockup.  This is really only useful if your machine simply can
     not boot up successfully.  If you can get your machine to run, then
     this will produce far too much information.
 
   FTP sites
   ------------------------------
     ftp://ftp.redhat.com/pub/aic/
-      - Primary site for Doug Ledford developed driver releases
-    ftp://ftp.dialnet.net/pub/linux/aic7xxx
-      - Temporary mirror of the redhat.com ftp site while people
-        get used to the new address
+      - Out of date.  I used to keep stuff here, but too many people
+        complained about having a hard time getting into Red Hat's ftp
+	server.  So use the web site below instead.
     ftp://ftp.pcnet.com/users/eischen/Linux/
       - Dan Eischen's driver distribution area
     ftp://ekf2.vsb.cz/pub/linux/kernel/aic7xxx/ftp.teleport.com/
@@ -475,14 +464,14 @@ linux-1.1.x and fairly stable since linux-1.2.x, and are also in FreeBSD
 
   Web sites
   ------------------------------
-    http://developer.redhat.com/aic7xxx/
-      - Primary web site maintained by Doug Ledford.  I haven't actually
-        put anything up yet....but I'm planning on it.  This information
-	is put here as an add for the vapor page :)
+    http://people.redhat.com/dledford/
+      - My web site, also the primary aic7xxx site with several related
+        pages.
 
 Dean W. Gehnert
 deang@teleport.com
 
-$Revision: 1.1.1.1 $
+$Revision: 3.0 $
 
-Modified by Doug Ledford 1998-9
+Modified by Doug Ledford 1998-2000
+

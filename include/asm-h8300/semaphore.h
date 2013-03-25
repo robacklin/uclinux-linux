@@ -1,106 +1,180 @@
 #ifndef _H8300_SEMAPHORE_H
 #define _H8300_SEMAPHORE_H
 
+#define RW_LOCK_BIAS		 0x01000000
+
+#ifndef __ASSEMBLY__
+
 #include <linux/linkage.h>
+#include <linux/wait.h>
+#include <linux/spinlock.h>
+#include <linux/rwsem.h>
+
+#include <asm/system.h>
+#include <asm/atomic.h>
 
 /*
- * SMP- and interrupt-safe semaphores..
+ * Interrupt-safe semaphores..
  *
  * (C) Copyright 1996 Linus Torvalds
  *
- * H8/300H by Yoshinori Sato <qzb04471@nifty.ne.jp>
+ * H8/300 version by Yoshinori Sato
  */
 
+
 struct semaphore {
-	int count;
-	int waking;
-	int lock;			/* to make waking testing atomic */
-	struct wait_queue * wait;
+	atomic_t count;
+	int sleepers;
+	wait_queue_head_t wait;
+#if WAITQUEUE_DEBUG
+	long __magic;
+#endif
 };
 
-#define MUTEX ((struct semaphore) { 1, 0, 0, NULL })
-#define MUTEX_LOCKED ((struct semaphore) { 0, 0, 0, NULL })
+#if WAITQUEUE_DEBUG
+# define __SEM_DEBUG_INIT(name) \
+		, (long)&(name).__magic
+#else
+# define __SEM_DEBUG_INIT(name)
+#endif
+
+#define __SEMAPHORE_INITIALIZER(name,count) \
+{ ATOMIC_INIT(count), 0, __WAIT_QUEUE_HEAD_INITIALIZER((name).wait) \
+	__SEM_DEBUG_INIT(name) }
+
+#define __MUTEX_INITIALIZER(name) \
+	__SEMAPHORE_INITIALIZER(name,1)
+
+#define __DECLARE_SEMAPHORE_GENERIC(name,count) \
+	struct semaphore name = __SEMAPHORE_INITIALIZER(name,count)
+
+#define DECLARE_MUTEX(name) __DECLARE_SEMAPHORE_GENERIC(name,1)
+#define DECLARE_MUTEX_LOCKED(name) __DECLARE_SEMAPHORE_GENERIC(name,0)
+
+extern inline void sema_init (struct semaphore *sem, int val)
+{
+	*sem = (struct semaphore)__SEMAPHORE_INITIALIZER(*sem, val);
+}
+
+static inline void init_MUTEX (struct semaphore *sem)
+{
+	sema_init(sem, 1);
+}
+
+static inline void init_MUTEX_LOCKED (struct semaphore *sem)
+{
+	sema_init(sem, 0);
+}
 
 asmlinkage void __down_failed(void /* special register calling convention */);
-asmlinkage int  __down_failed_interruptible(void);  /* params in registers */
+asmlinkage int  __down_failed_interruptible(void  /* params in registers */);
+asmlinkage int  __down_failed_trylock(void  /* params in registers */);
 asmlinkage void __up_wakeup(void /* special register calling convention */);
 
-extern void __down(struct semaphore * sem);
-extern void __up(struct semaphore * sem);
+asmlinkage void __down(struct semaphore * sem);
+asmlinkage int  __down_interruptible(struct semaphore * sem);
+asmlinkage int  __down_trylock(struct semaphore * sem);
+asmlinkage void __up(struct semaphore * sem);
+
+extern spinlock_t semaphore_wake_lock;
 
 /*
  * This is ugly, but we want the default case to fall through.
  * "down_failed" is a special asm handler that calls the C
  * routine that actually waits. See arch/m68k/lib/semaphore.S
  */
-extern inline void down(struct semaphore * sem)
+static inline void down(struct semaphore * sem)
 {
-	register struct semaphore *sem1 __asm__ ("er1") = sem;
-	__asm__ __volatile__(
-		"stc ccr,@-sp\n\t"
-		"orc #0x80,ccr\n\t"
-		"mov.l @%0,er0\n\t"
-		"dec.l #1,er0\n\t"
-		"mov.l er0,@%0\n\t"
-		"ldc @sp+,ccr\n\t"
-		"mov.l er0,er0\n\t"
-		"bpl 1f\n\t"
-		"jsr " SYMBOL_NAME_STR(__down_failed) "\n"
-		"1:"
-		: /* no outputs */
-		: "r" (sem1)
-		: "er0", "memory");
-}
+	register atomic_t *count asm("er0");
 
+#if WAITQUEUE_DEBUG
+	CHECK_MAGIC(sem->__magic);
+#endif
 
-/*
- * This version waits in interruptible state so that the waiting
- * process can be killed.  The down_failed_interruptible routine
- * returns negative for signalled and zero for semaphore acquired.
- */
-extern inline int down_interruptible(struct semaphore * sem)
-{
-	register int ret __asm__ ("%er0");
-	register struct semaphore *sem1 __asm__ ("%er1") = sem;
+	count = &(sem->count);
 	__asm__ __volatile__(
-		"stc ccr,@-sp\n\t"
+		"stc ccr,r3l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%0,er0\n\t"
-		"dec.l #1,er0\n\t"
-		"mov.l er0,@%0\n\t"
-		"ldc @sp+,ccr\n\t"
-		"mov.l er0,er0\n\t"
+		"mov.l %2, er1\n\t"
+		"dec.l #1,er1\n\t"
+		"mov.l er1,%0\n\t"
 		"bpl 1f\n\t"
-		"jsr " SYMBOL_NAME_STR(__down_failed_interruptible) "\n\t"
+		"ldc r3l,ccr\n\t"
+		"mov.l %1,er0\n\t"
+		"jsr @_" SYMBOL_NAME_STR(__down) "\n\t"
 		"bra 2f\n"
 		"1:\n\t"
-		"sub.l %0,%0\n"
+		"ldc r3l,ccr\n"
 		"2:"
-		: "=d" (ret)
-		: "a" (sem1)
-		: "%er0", "memory");
-	return(ret);
+		: "=m"(*count)
+		: "g"(sem),"m"(*count)
+		: "cc",  "er1", "er2", "er3");
 }
 
-
-/*
- * Primitives to spin on a lock.  Needed only for SMP version ... so
- * somebody should start playing with one of those Sony NeWS stations.
- */
-extern inline void get_buzz_lock(int *lock_ptr)
+static inline int down_interruptible(struct semaphore * sem)
 {
-#ifdef __SMP__
-        while (xchg(lock_ptr,1) != 0) ;
+	register atomic_t *count asm("er0");
+
+#if WAITQUEUE_DEBUG
+	CHECK_MAGIC(sem->__magic);
 #endif
+
+	count = &(sem->count);
+	__asm__ __volatile__(
+		"stc ccr,r1l\n\t"
+		"orc #0x80,ccr\n\t"
+		"mov.l %3, er2\n\t"
+		"dec.l #1,er2\n\t"
+		"mov.l er2,%1\n\t"
+		"bpl 1f\n\t"
+		"ldc r1l,ccr\n\t"
+		"mov.l %2,er0\n\t"
+		"jsr @_" SYMBOL_NAME_STR(__down_interruptible) "\n\t"
+		"bra 2f\n"
+		"1:\n\t"
+		"ldc r1l,ccr\n\t"
+		"sub.l %0,%0\n\t"
+		"2:\n\t"
+		: "=r" (count),"=m" (*count)
+		: "g" (sem),"m" (*count)
+		: "cc", "er1", "er2", "er3");
+	return (int)count;
 }
 
-extern inline void give_buzz_lock(int *lock_ptr)
+static inline int down_trylock(struct semaphore * sem)
 {
-#ifdef __SMP__
-        *lock_ptr = 0 ;
-#endif
-}
+	register atomic_t *count asm("er0");
 
+#if WAITQUEUE_DEBUG
+	CHECK_MAGIC(sem->__magic);
+#endif
+
+	count = &(sem->count);
+	__asm__ __volatile__(
+		"stc ccr,r3l\n\t"
+		"orc #0x80,ccr\n\t"
+		"mov.l %3,er2\n\t"
+		"dec.l #1,er2\n\t"
+		"mov.l er2,%0\n\t"
+		"bpl 1f\n\t"
+		"ldc r3l,ccr\n\t"
+		"jmp @3f\n\t"
+		".section .text.lock,\"ax\"\n"
+		".align 2\n"
+		"3:\n\t"
+		"mov.l %2,er0\n\t"
+		"jsr @_" SYMBOL_NAME_STR(__down_trylock) "\n\t"
+		"jmp @2f\n\t"
+		".previous\n"
+		"1:\n\t"
+		"ldc r3l,ccr\n\t"
+		"sub.l %1,%1\n"
+		"2:"
+		: "=m" (*count),"=r"(count)
+		: "g" (sem),"m" (*count)
+		: "cc", "er1","er2", "er3");
+	return (int)count;
+}
 
 /*
  * Note! This is subtle. We jump to wake people up only if
@@ -108,23 +182,38 @@ extern inline void give_buzz_lock(int *lock_ptr)
  * The default case (no contention) will result in NO
  * jumps for both down() and up().
  */
-extern inline void up(struct semaphore * sem)
+static inline void up(struct semaphore * sem)
 {
-	register struct semaphore *sem1 __asm__ ("er1") = sem;
+	register atomic_t *count asm("er0");
+
+#if WAITQUEUE_DEBUG
+	CHECK_MAGIC(sem->__magic);
+#endif
+
+	count = &(sem->count);
 	__asm__ __volatile__(
-		"stc ccr,@-sp\n\t"
+		"stc ccr,r3l\n\t"
 		"orc #0x80,ccr\n\t"
-		"mov.l @%0,er0\n\t"
-		"inc.l #1,er0\n\t"
-		"mov.l er0,@%0\n\t"
-		"ldc @sp+,ccr\n\t"
-		"mov.l er0,er0\n\t"
-		"bmi 1f\n\t"
-		"jsr " SYMBOL_NAME_STR(__up_wakeup) "\n"
+		"mov.l %2,er1\n\t"
+		"inc.l #1,er1\n\t"
+		"mov.l er1,%0\n\t"
+		"ldc r3l,ccr\n\t"
+		"sub.l er2,er2\n\t"
+		"cmp.l er2,er1\n\t"
+		"bgt 1f\n\t"
+		"mov.l %1,er0\n\t"
+		"jsr @_" SYMBOL_NAME_STR(__up) "\n"
 		"1:"
-		: /* no outputs */
-		: "r" (sem1)
-		: "er0", "memory");
+		: "=m"(*count)
+		: "g" (sem),"m" (*count)
+		: "cc", "er1", "er2", "er3");
 }
+
+static inline int sem_getcount(struct semaphore *sem)
+{
+	return atomic_read(&sem->count);
+}
+
+#endif /* __ASSEMBLY__ */
 
 #endif

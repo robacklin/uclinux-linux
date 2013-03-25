@@ -12,16 +12,16 @@ codepage=###  -- Sets the codepage for converting to shortname characters
 		 on FAT and VFAT filesystems.  By default, codepage 437
 		 is used.  This is the default for the U.S. and some
 		 European countries.
-iocharset=name-- Character set to use for converting between 8 bit characters
+iocharset=name -- Character set to use for converting between 8 bit characters
 		 and 16 bit Unicode characters. Long filenames are stored on
 		 disk in Unicode format, but Unix for the most part doesn't
 		 know how to deal with Unicode. There is also an option of
 		 doing UTF8 translations with the utf8 option.
-utf8	      -- UTF8 is the filesystem safe version of Unicode that
-		 is used by the console.  It can be enabled for the
+utf8=<bool>   -- UTF8 is the filesystem safe version of Unicode that
+		 is used by the console.  It can be be enabled for the
 		 filesystem with this option. If 'uni_xlate' gets set,
 		 UTF8 gets disabled.
-uni_xlate     -- Translate unhandled Unicode characters to special
+uni_xlate=<bool> -- Translate unhandled Unicode characters to special
 		 escaped sequences.  This would let you backup and
 		 restore filenames that are created with any Unicode
 		 characters.  Until Linux supports Unicode for real,
@@ -29,13 +29,13 @@ uni_xlate     -- Translate unhandled Unicode characters to special
 		 a '?' is used when no translation is possible.  The
 		 escape character is ':' because it is otherwise
 		 illegal on the vfat filesystem.  The escape sequence
-		 that gets used, where u is the unicode character, is:
-			':', (u & 0x3f), ((u>>6) & 0x3f), (u>>12),
-posix         -- Allow names of same letters, different case such as
+		 that gets used is ':' and the four digits of hexadecimal
+		 unicode.
+posix=<bool>  -- Allow names of same letters, different case such as
                  'LongFileName' and 'longfilename' to coexist.  This has some
                  problems currently because 8.3 conflicts are not handled
-                 correctly for Posix filesystem compliance.
-nonumtail     -- When creating 8.3 aliases, normally the alias will
+                 correctly for POSIX filesystem compliance.
+nonumtail=<bool> -- When creating 8.3 aliases, normally the alias will
                  end in '~1' or tilde followed by some number.  If this
                  option is set, then if the filename is 
                  "longfilename.txt" and "longfile.txt" does not
@@ -43,62 +43,30 @@ nonumtail     -- When creating 8.3 aliases, normally the alias will
                  be the short alias instead of 'longfi~1.txt'. 
                   
 quiet         -- Stops printing certain warning messages.
+check=s|r|n   -- Case sensitivity checking setting.
+                 s: strict, case sensitive
+                 r: relaxed, case insensitive
+                 n: normal, default setting, currently case insensitive
 
-Explanation of Native Language Support in the VFAT Filesystem
-----------------------------------------------------------------------
-There are two different character sets are needed by the vfat
-filesystem.  The first is the codepage character set.  The codepage is
-the character set that is used to store short filenames on disk.  Its
-mount option is 'codepage=437' which 437 is the codepage number.
+shortname=lower|win95|winnt|mixed
+	      -- Shortname display/create setting.
+		 lower: convert to lowercase for display,
+			emulate the Windows 95 rule for create.
+		 win95: emulate the Windows 95 rule for display/create.
+		 winnt: emulate the Windows NT rule for display/create.
+		 mixed: emulate the Windows NT rule for display,
+			emulate the Windows 95 rule for create.
+		 Default setting is `lower'.
 
-Long filenames are stored in Unicode, but since the Linux filesystem
-doesn't deal with 16 bit characters, we need some way of converting
-characters.  There are a couple options of how to do this.  One is to
-use the 'utf8' mount option and I will cover that a bit later.  The
-other is to use the 'iocharset=iso8859-1' mount option where the
-iso8859-1 tells the filesystem which character set is used for input
-and output.  If you are in Russia, you might specify koi8-r here.
-If a Unicode character on disk cannot be mapped to anything in the
-iocharset, it is replaced with a '?'.
-
-The iocharset is used to convert long filenames to and from Unicode.
-It is currently implemented.  The codepage is used to convert short
-filenames to and from the iocharset.  This translation is not currently
-implemented.
-
-If no iocharset is specified and the default is unable to be loaded,
-the mount will succeed while falling back to doing no conversions at
-all.  If a charset is explicity specified and the charset cannot be
-loaded, the mount will fail.
-
-For the codepage, the default mount option is 'codepage=437'.  If a
-codepage is explicitly asked for and the load of the character set
-fails, the mount will fail.  Is no codepage is explicitly asked for
-and the load of the character set fails, the load will still succeed.
-
-UTF8 is an 8 bit, filesystem safe representation of Unicode.  It does
-not lose any information in the conversion.  However, you need to have
-a terminal or a program that knows how to deal with UTF8.  The Linux
-console can be put into a mode where it will correctly display UTF8
-characters.  I don't know if there is a similar mode for xterms, but
-I don't believe there is.  More information about UTF8 can be found
-at http://www.unicode.com
+<bool>: 0,1,yes,no,true,false
 
 TODO
 ----------------------------------------------------------------------
-* When only shortnames exist, translate them from the codepage character
-  set to the iocharset.  Currently, translations only occur when longnames
-  exist.  To translate, first convert from codepage to Unicode and then
-  to the output character set.
-
-* Need to add dcache_lookup code msdos filesystem.  This means the
-  directories need to be versioned like the vfat filesystem.
-
 * Need to get rid of the raw scanning stuff.  Instead, always use
   a get next directory entry approach.  The only thing left that uses
   raw scanning is the directory renaming code.
 
-* Fix the Posix filesystem support to work in 8.3 space.  This involves
+* Fix the POSIX filesystem support to work in 8.3 space.  This involves
   renaming aliases if a conflict occurs between a new filename and
   an old alias.  This is quite a mess.
 
@@ -108,13 +76,13 @@ POSSIBLE PROBLEMS
 * vfat_valid_longname does not properly checked reserved names.
 * When a volume name is the same as a directory name in the root
   directory of the filesystem, the directory name sometimes shows
-  up empty an empty file.
+  up as an empty file.
 * autoconv option does not work correctly.
 
 BUG REPORTS
 ----------------------------------------------------------------------
 If you have trouble with the VFAT filesystem, mail bug reports to
-chaffee@bugs-bunny.cs.berkeley.edu.  Please specify the filename
+chaffee@bmrc.cs.berkeley.edu.  Please specify the filename
 and the operation that gave you trouble.
 
 TEST SUITE
@@ -122,7 +90,7 @@ TEST SUITE
 If you plan to make any modifications to the vfat filesystem, please
 get the test suite that comes with the vfat distribution at
 
-  http://www-plateau.cs.berkeley.edu/people/chaffee/vfat.html
+  http://bmrc.berkeley.edu/people/chaffee/vfat.html
 
 This tests quite a few parts of the vfat filesystem and additional
 tests for new features or untested features would be appreciated.
@@ -140,7 +108,7 @@ but it appears to be so.
 The extended FAT file system is almost identical to the FAT
 file system used in DOS versions up to and including 6.223410239847
 :-).  The significant change has been the addition of long file names.
-Theses names support up to 255 characters including spaces and lower
+These names support up to 255 characters including spaces and lower
 case characters as opposed to the traditional 8.3 short names.
 
 Here is the description of the traditional FAT entry in the current
@@ -179,7 +147,7 @@ directory entries for any files with extended names.  (Any name which
 legally fits within the old 8.3 encoding scheme does not have extra
 entries.)  I call these extra entries slots.  Basically, a slot is a
 specially formatted directory entry which holds up to 13 characters of
-a files extended name.  Think of slots as additional labeling for the
+a file's extended name.  Think of slots as additional labeling for the
 directory entry of the file to which they correspond.  Microsoft
 prefers to refer to the 8.3 entry for a file as its alias and the
 extended slot directory entries as the file name. 
@@ -200,7 +168,7 @@ The C structure for a slot directory entry follows:
 If the layout of the slots looks a little odd, it's only
 because of Microsoft's efforts to maintain compatibility with old
 software.  The slots must be disguised to prevent old software from
-panicing.  To this end, a number of measures are taken:
+panicking.  To this end, a number of measures are taken:
 
         1) The attribute byte for a slot directory entry is always set
            to 0x0f.  This corresponds to an old directory entry with
@@ -214,7 +182,7 @@ panicing.  To this end, a number of measures are taken:
 
 Because the extended FAT system is backward compatible, it is
 possible for old software to modify directory entries.  Measures must
-be taken to insure the validity of slots.  An extended FAT system can
+be taken to ensure the validity of slots.  An extended FAT system can
 verify that a slot does in fact belong to an 8.3 directory entry by
 the following:
 
@@ -243,9 +211,9 @@ the following:
                         sum = (((sum&1)<<7)|((sum&0xfe)>>1)) + name[i]
                 }
 
-	3) If there is in the final slot, a Unicode NULL (0x0000) is stored
-           after the final character.  After that, all unused characters in
-           the final slot are set to Unicode 0xFFFF.
+	3) If there is free space in the final slot, a Unicode NULL (0x0000) 
+	   is stored after the final character.  After that, all unused 
+	   characters in the final slot are set to Unicode 0xFFFF.
 
 Finally, note that the extended name is stored in Unicode.  Each Unicode
 character takes two bytes.

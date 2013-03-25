@@ -6,8 +6,8 @@
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
-#ifndef __SPARC_CPREFIX_H
-#define __SPARC_CPREFIX_H
+#ifndef __NIOS_CPREFIX_H
+#define __NIOS_CPREFIX_H
 
 #define C_LABEL_PREFIX
 
@@ -16,4 +16,4 @@
 
 #define C_LABEL(name) CONCAT(C_LABEL_PREFIX, name)
 
-#endif /* !(__SPARC_CPREFIX_H) */
+#endif /* !(__NIOS_CPREFIX_H) */

@@ -1,9 +1,9 @@
 /****************************************************************************/
 
 /*
- *	semp3.h -- SecureEdge MP3 hardware platform support.
+ *	semp.h -- SecureEdge MP3 hardware platform support.
  *
- *	(C) Copyright 2001-2002, Greg Ungerer (gerg@snapgear.com).
+ *	(C) Copyright 2001-2003, Greg Ungerer (gerg@snapgear.com).
  */
 
 /****************************************************************************/
@@ -24,35 +24,39 @@
  *	The ColdFire UARTs do not have any support for DTR/DCD lines.
  *	We have wired them onto some of the parallel IO lines.
  */
-#define	MCFPP_DCD1	0x0004
-#define	MCFPP_DCD0	0x0000		/* No DCD line on port 0 */
-#define	MCFPP_DTR1	0x0080
-#define	MCFPP_DTR0	0x0000		/* No DTR line on port 0 */
-
+#define	MCF_HAVEDCD1
+#define	MCF_HAVEDTR1
 
 #ifndef __ASSEMBLY__
-
-extern volatile unsigned short ppdata;
-
-/*
- *	These functions defined to give quasi generic access to the
- *	PPIO bits used for DTR/DCD.
- */
-static __inline__ unsigned int mcf_getppdata(void)
+static __inline__ unsigned int mcf_getppdcd(unsigned int portnr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
-	return((unsigned int) *pp);
+	if (portnr == 1) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		return((*pp & 0x0004) ? 0 : 1);
+	}
+	return(0);
 }
 
-static __inline__ void mcf_setppdata(unsigned int mask, unsigned int bits)
+static __inline__ unsigned int mcf_getppdtr(unsigned int portnr)
 {
 	volatile unsigned short *pp;
-	pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
-	ppdata = (ppdata & ~mask) | bits;
-	*pp = ppdata;
+	if (portnr == 1) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		return((*pp & 0x0080) ? 0 : 1);
+	}
+	return(0);
 }
-#endif
+
+static __inline__ void mcf_setppdtr(unsigned int portnr, unsigned int dtr)
+{
+	volatile unsigned short *pp;
+	if (portnr == 1) {
+		pp = (volatile unsigned short *) (MCF_MBAR + MCFSIM_PADAT);
+		*pp = (*pp & ~0x0080) | (dtr ? 0 : 0x0080);
+	}
+}
+#endif /* __ASSEMBLY__ */
 
 /****************************************************************************/
 #endif /* CONFIG_SECUREEDGEMP3 */

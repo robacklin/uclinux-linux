@@ -1,7 +1,13 @@
 /*
- * linux/include/asm-arm/floppy.h
+ *  linux/include/asm-arm/floppy.h
  *
- * (C) 1996 Russell King
+ *  Copyright (C) 1996-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Note that we don't touch FLOPPY_DMA nor FLOPPY_IRQ here
  */
 #ifndef __ASM_ARM_FLOPPY_H
 #define __ASM_ARM_FLOPPY_H
@@ -9,7 +15,14 @@
 #include <asm/arch/floppy.h>
 #endif
 
-#define fd_outb(val,port)	outb((val),(port))
+#define fd_outb(val,port)			\
+	do {					\
+		if ((port) == FD_DOR)		\
+			fd_setdor((val));	\
+		else				\
+			outb((val),(port));	\
+	} while(0)
+
 #define fd_inb(port)		inb((port))
 #define fd_request_irq()	request_irq(IRQ_FLOPPYDISK,floppy_interrupt,\
 					SA_INTERRUPT|SA_SAMPLE_RANDOM,"floppy",NULL)
@@ -17,15 +30,18 @@
 #define fd_disable_irq()	disable_irq(IRQ_FLOPPYDISK)
 #define fd_enable_irq()		enable_irq(IRQ_FLOPPYDISK)
 
-#define fd_request_dma()	request_dma(FLOPPY_DMA,"floppy")
-#define fd_free_dma()		free_dma(FLOPPY_DMA)
-#define fd_disable_dma()	disable_dma(FLOPPY_DMA)
-#define fd_enable_dma()		enable_dma(FLOPPY_DMA)
-#define fd_clear_dma_ff()	clear_dma_ff(FLOPPY_DMA)
-#define fd_set_dma_mode(mode)	set_dma_mode(FLOPPY_DMA, (mode))
-#define fd_set_dma_addr(addr)	set_dma_addr(FLOPPY_DMA, (addr))
-#define fd_set_dma_count(len)	set_dma_count(FLOPPY_DMA, (len))
+#define fd_request_dma()	request_dma(DMA_FLOPPY,"floppy")
+#define fd_free_dma()		free_dma(DMA_FLOPPY)
+#define fd_disable_dma()	disable_dma(DMA_FLOPPY)
+#define fd_enable_dma()		enable_dma(DMA_FLOPPY)
+#define fd_clear_dma_ff()	clear_dma_ff(DMA_FLOPPY)
+#define fd_set_dma_mode(mode)	set_dma_mode(DMA_FLOPPY, (mode))
+#define fd_set_dma_addr(addr)	set_dma_addr(DMA_FLOPPY, virt_to_bus((addr)))
+#define fd_set_dma_count(len)	set_dma_count(DMA_FLOPPY, (len))
 #define fd_cacheflush(addr,sz)
+
+/* need to clean up dma.h */
+#define DMA_FLOPPYDISK		DMA_FLOPPY
 
 /* Floppy_selects is the list of DOR's to select drive fd
  *
@@ -40,13 +56,14 @@ static unsigned char floppy_selects[2][4] =
 	{ 0x10, 0x21, 0x23, 0x33 }
 };
 
-#define fd_setdor(dor)										\
-do {												\
-	int new_dor = (dor);									\
-	if (new_dor & 0xf0)									\
-		fd_outb((new_dor & 0x0c) | floppy_selects[fdc][new_dor & 3], FD_DOR);		\
-	else											\
-		fd_outb((new_dor & 0x0c), FD_DOR);						\
+#define fd_setdor(dor)								\
+do {										\
+	int new_dor = (dor);							\
+	if (new_dor & 0xf0)							\
+		new_dor = (new_dor & 0x0c) | floppy_selects[fdc][new_dor & 3];	\
+	else									\
+		new_dor &= 0x0c;						\
+	outb(new_dor, FD_DOR);							\
 } while (0)
 
 /*
@@ -98,16 +115,30 @@ extern __inline__ void fd_scandrives (void)
 }
 
 #define FDC1 (0x3f0)
-static int FDC2 = -1;
 
 #define FLOPPY0_TYPE 4
 #define FLOPPY1_TYPE 4
 
 #define N_FDC 1
-#define N_DRIVE 8
+#define N_DRIVE 4
 
 #define FLOPPY_MOTOR_MASK 0xf0
 
 #define CROSS_64KB(a,s) (0)
+
+/*
+ * This allows people to reverse the order of
+ * fd0 and fd1, in case their hardware is
+ * strangely connected (as some RiscPCs
+ * and A5000s seem to be).
+ */
+static void driveswap(int *ints, int dummy, int dummy2)
+{
+	floppy_selects[0][0] ^= floppy_selects[0][1];
+	floppy_selects[0][1] ^= floppy_selects[0][0];
+	floppy_selects[0][0] ^= floppy_selects[0][1];
+}
+
+#define EXTRA_FLOPPY_PARAMS ,{ "driveswap", &driveswap, NULL, 0, 0 }
 	
 #endif

@@ -1,10 +1,11 @@
 /*****************************************************************************/
 
 /*
- *	crt0_ram.S -- startup code for MCF5206e ColdFire based Netburner boards.
+ *	crt0_ram.S -- startup code for MCF5206e ColdFire based MOTOROLA boards.
  *
- *	(C) Copyright 1999, Greg Ungerer.
- *	Copyright (C) 1999 Rob Scott (rscott@mtrob.fdns.net)
+ *	(C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com)
+ *
+ * 	1999/02/24 Modified for the 5307 processor David W. Miller
  */
 
 /*****************************************************************************/
@@ -16,11 +17,10 @@
 /*****************************************************************************/
 
 /*
- *	Netburner M5206e ColdFire eval board, chip select and memory setup.
+ *	CFV240 ColdFire board, chip select and memory setup.
  */
 
 #define	MEM_BASE	0x02000000	/* Memory base at address 0x02000000 */
-#define	MEM_SIZE	0x02400000	/* Memory size 4Mb */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
 
 /*****************************************************************************/
@@ -84,10 +84,37 @@ _start:
 	move.l	%a7, _rambase			/* Set up base RAM addr */
 
 
-	/*
-	 *	Set to 4 meg for the Netburner board (m5206e).
-	 */
-	move.l	#MEM_SIZE, %a0
+  	/*
+	 *	SDRAM size for the Cadre III board (m5206e).
+  	 */
+#if defined(CONFIG_RAMAUTO)
+	movea.l	#0x00000000,%a0
+	move.l	MCF_MBAR+MCFSIM_DCMR0, %d0
+	and.l	#0x00fe0000, %d0
+	beq	noaddr1
+	add.l	#0x00020000, %d0
+	move.l	%d0, %a0
+noaddr1:
+	move.l	MCF_MBAR+MCFSIM_DCMR1, %d0
+	and.l	#0x00fe0000, %d0
+	beq	noaddr2
+	add.l	#0x00020000, %d0
+	add.l	%d0, %a0
+noaddr2:
+
+#else
+
+#if defined(CONFIG_RAM32MB)
+#define MEM_SIZE	0x02000000	/* Memory size 32Mb */
+#elif defined(CONFIG_RAM16MB)
+#define MEM_SIZE	0x01000000	/* Memory size 16Mb */
+#elif defined(CONFIG_RAM8MB)
+#define MEM_SIZE	0x00800000	/* Memory size 8Mb */
+#else
+#define MEM_SIZE	0x00400000	/* Memory size 4Mb */
+#endif
+  	move.l	#MEM_SIZE, %a0
+#endif
 
 	move.l	%a0, %d0			/* Mem end addr is in a0 */
 	move.l	%d0, %sp			/* Set up initial stack ptr */
@@ -103,6 +130,7 @@ _start:
 	movec	%d0, %CACR			/* Enable cache */
 
 
+#ifdef CONFIG_ROMFS_FS
 	/*
 	 *	Move ROM filesystem above bss :-)
 	 */
@@ -131,6 +159,13 @@ _copy_romfs:
 	cmp.l	%a0, %a2			/* Check if at end */
 	bne	_copy_romfs
 
+#else /* !CONFIG_ROMFS_FS */
+
+	lea.l	_ebss, %a1			/* Get end of bss segment */
+	move.l	%a1, _ramstart			/* Set start of ram */
+
+#endif /* !CONFIG_ROMFS_FS */
+
 	/*
 	 *	Zero out the bss region.
 	 */
@@ -143,6 +178,7 @@ _clear_bss:
 	bne	_clear_bss
 
 #if CONFIG_BLK_DEV_INITRD
+# if CONFIG_ROMFS_FS
 	/*
 	 *	Setup up RAMdisk info if using it.
 	 *	(Must do this after clearing the bss :-)
@@ -150,7 +186,27 @@ _clear_bss:
 	move.l	%d2, initrd_start		/* Set up start of initrd */
 	add.l	%d1, %d2			/* Calculate end of initrd */
 	move.l	%d2, initrd_end
-#endif
+
+# else /* !CONFIG_ROMFS_FS */
+
+	/*
+	 * initrd support for Coldfire currently requires romfs.
+	 * Generic initrd support requires a bootloader protocol to 
+	 * tell the kernel where the image is located.
+	 */
+	moveq.l	#0, %d2
+	move.l	%d2, initrd_start
+	move.l	%d2, initrd_end
+
+# endif /* !CONFIG_ROMFS_FS */
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 *	Load the current task pointer and stack.
+	 */
+	lea	init_task_union, %a0
+	movel	%a0, _current_task
+	lea	0x2000(%a0), %sp
 
 	/*
 	 *	Assember start up done, start code proper.

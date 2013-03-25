@@ -116,7 +116,7 @@ typedef char floppy_drive_name[16];
  * Drive parameters (user modifiable)
  */
 struct floppy_drive_params {
-	char cmos;			/* cmos type */
+	signed char cmos;		/* CMOS type */
 	
 	/* Spec2 is (HLD<<1 | ND), where HLD is head load time (1=2ms, 2=4 ms 
 	 * etc) and ND is set means no DMA. Hardcoded to 6 (HLD=6ms, use DMA).
@@ -153,7 +153,8 @@ struct floppy_drive_params {
 #define FD_BROKEN_DCL 0x20
 #define FD_DEBUG 0x02
 #define FD_SILENT_DCL_CLEAR 0x4
-#define FD_INVERTED_DCL 0x80
+#define FD_INVERTED_DCL 0x80 /* must be 0x80, because of hardware 
+				considerations */
 
 	char read_track;		/* use readtrack during probing? */
 
@@ -188,7 +189,7 @@ enum {
  * Current drive state (not directly modifiable by user, readonly)
  */
 struct floppy_drive_struct {
-	signed char flags;
+	unsigned long flags;
 /* values for these flags */
 #define FD_NEED_TWADDLE (1 << FD_NEED_TWADDLE_BIT)
 #define FD_VERIFY (1 << FD_VERIFY_BIT)
@@ -247,7 +248,7 @@ struct floppy_fdc_state {
 	int dtr;
 	unsigned char version;	/* FDC version code */
 	unsigned char dor;
-	int address;		/* io address */
+	unsigned long address;	/* io address */
 	unsigned int rawcmd:2;
 	unsigned int reset:1;
 	unsigned int need_configure:1;
@@ -367,11 +368,5 @@ struct floppy_raw_cmd {
 
 #define FDEJECT _IO(2, 0x5a)
 /* eject the disk */
-
-
-#ifdef __KERNEL__
-/* eject the boot floppy (if we need the drive for a different root floppy) */
-void floppy_eject(void);
-#endif
 
 #endif

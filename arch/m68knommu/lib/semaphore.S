@@ -10,6 +10,7 @@
 
 #include <linux/linkage.h>
 #include <linux/config.h>
+#include <asm/semaphore.h>
 
 /*
  * "down_failed" is called with the eventual return address
@@ -53,3 +54,14 @@ ENTRY(__up_wakeup)
 	movel (%sp)+,%d0
 	movel (%sp)+,%d1
 	rts
+
+ENTRY(__down_failed_trylock)
+	movel %a0,-(%sp)
+	movel %d1,-(%sp)
+	movel %a1,-(%sp)
+	jbsr SYMBOL_NAME(__down_trylock)
+	movel (%sp)+,%a1
+	movel (%sp)+,%d1
+	movel (%sp)+,%a0
+	rts
+

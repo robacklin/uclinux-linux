@@ -1,48 +1,29 @@
-/*
- * $Id: capiutil.c,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
+/* $Id: capiutil.c,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
  *
  * CAPI 2.0 convert capi message to capi message struct
  *
  * From CAPI 2.0 Development Kit AVM 1995 (msg.c)
- * Rewritten for Linux 1996 by Carsten Paeth (calle@calle.in-berlin.de)
+ * Rewritten for Linux 1996 by Carsten Paeth <calle@calle.de>
  *
- * $Log: capiutil.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.3.2.1  1998/08/03 15:52:21  paul
- * various changes from 2.0.3[45] kernel sources, as suggested by
- * Oliver.Lauer@coburg.baynet.de
- *
- * Revision 1.3  1997/05/18 09:24:18  calle
- * added verbose disconnect reason reporting to avmb1.
- * some fixes in capi20 interface.
- * changed info messages for B1-PCI
- *
- * Revision 1.2  1997/03/05 21:22:13  fritz
- * Fix: Symbols have to be exported unconditionally.
- *
- * Revision 1.1  1997/03/04 21:50:34  calle
- * Frirst version in isdn4linux
- *
- * Revision 2.2  1997/02/12 09:31:39  calle
- * new version
- *
- * Revision 1.1  1997/01/31 10:32:20  calle
- * Initial revision
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
-#include <linux/config.h> /* CONFIG_ISDN_DRV_AVMB1_VERBOSE_REASON */
+
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <asm/segment.h>
-
-#include "compat.h"
+#include <linux/config.h>
 #include "capiutil.h"
+
+MODULE_DESCRIPTION("CAPI4Linux: CAPI message conversion support");
+MODULE_AUTHOR("Carsten Paeth");
+MODULE_LICENSE("GPL");
 
 /* from CAPI2.0 DDK AVM Berlin GmbH */
 
@@ -68,7 +49,7 @@ char *capi_info2str(__u16 reason)
 	case 0x1001:
 	   return "Too many applications";
 	case 0x1002:
-	   return "Logical block size to small, must be at least 128 Bytes";
+	   return "Logical block size too small, must be at least 128 Bytes";
 	case 0x1003:
 	   return "Buffer exceeds 64 kByte";
 	case 0x1004:
@@ -763,7 +744,7 @@ static char *pnames[] =
     /*15 */ "Class",
     /*16 */ "ConnectedNumber",
     /*17 */ "ConnectedSubaddress",
-    /*18 */ "Data",
+    /*18 */ "Data32",
     /*19 */ "DataHandle",
     /*1a */ "DataLength",
     /*1b */ "FacilityConfirmationParameter",
@@ -861,13 +842,7 @@ static void protocol_message_2_pars(_cmsg * cmsg, int level)
 			cmsg->l += 2;
 			break;
 		case _CDWORD:
-			if (strcmp(NAME, "Data") == 0) {
-				bufprint("%-*s = ", slen, NAME);
-				printstructlen((__u8 *) * (__u32 *) (cmsg->m + cmsg->l),
-					       *(__u16 *) (cmsg->m + cmsg->l + sizeof(__u32)));
-				bufprint("\n");
-			} else
-				bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
+			bufprint("%-*s = 0x%lx\n", slen, NAME, *(__u32 *) (cmsg->m + cmsg->l));
 			cmsg->l += 4;
 			break;
 		case _CSTRUCT:
@@ -942,41 +917,22 @@ char *capi_cmsg2str(_cmsg * cmsg)
 	return buf;
 }
 
-
-#ifdef HAS_NEW_SYMTAB
 EXPORT_SYMBOL(capi_cmsg2message);
 EXPORT_SYMBOL(capi_message2cmsg);
 EXPORT_SYMBOL(capi_cmsg_header);
 EXPORT_SYMBOL(capi_cmd2str);
 EXPORT_SYMBOL(capi_cmsg2str);
 EXPORT_SYMBOL(capi_message2str);
-#else
-static struct symbol_table capifunc_syms =
-{
-#include <linux/symtab_begin.h>
-	X(capi_cmsg2message),
-	X(capi_message2cmsg),
-	X(capi_cmsg_header),
-	X(capi_cmd2str),
-	X(capi_cmsg2str),
-	X(capi_message2str),
-	X(capi_info2str),
-#include <linux/symtab_end.h>
-};
-#endif
+EXPORT_SYMBOL(capi_info2str);
 
-#ifdef MODULE
-
-int init_module(void)
-{
-#ifndef HAS_NEW_SYMTAB
-	register_symtab(&capifunc_syms);
-#endif
-	return 0;
+static int __init capiutil_init(void)
+{ 
+	return 0; 
 }
 
-void cleanup_module(void)
+static void __exit capiutil_exit(void)
 {
 }
 
-#endif
+module_init(capiutil_init);
+module_exit(capiutil_exit);

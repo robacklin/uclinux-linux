@@ -1,3 +1,4 @@
+#ifdef __KERNEL__
 #ifndef HEADER_OPENSSLV_H
 #define HEADER_OPENSSLV_H
 
@@ -83,3 +84,6 @@
 
 
 #endif /* HEADER_OPENSSLV_H */
+#else /* __KERNEL__ */
+#include_next <openssl/opensslv.h>
+#endif

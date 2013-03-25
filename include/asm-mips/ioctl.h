@@ -1,3 +1,12 @@
+/*
+ * Linux ioctl() stuff.
+ *
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1995, 1996, 2001 by Ralf Baechle
+ */
 #ifndef __ASM_MIPS_IOCTL_H
 #define __ASM_MIPS_IOCTL_H
 
@@ -11,7 +20,7 @@
  * the process. I'd like to clean it up for the i386 as well, but
  * it's so painful recognizing both the new and the old numbers..
  *
- * The same applies for the MIPS ABI; in fact even the macros
+ * The same applies for for the MIPS ABI; in fact even the macros
  * from Linux/Alpha fit almost perfectly.
  */
 
@@ -29,11 +38,6 @@
 #define _IOC_TYPESHIFT	(_IOC_NRSHIFT+_IOC_NRBITS)
 #define _IOC_SIZESHIFT	(_IOC_TYPESHIFT+_IOC_TYPEBITS)
 #define _IOC_DIRSHIFT	(_IOC_SIZESHIFT+_IOC_SIZEBITS)
-
-/*
- * We to additionally limit parameters to a maximum 255 bytes.
- */
-#define _IOC_SLMASK	0xff
 
 /*
  * Direction bits _IOC_NONE could be 0, but OSF/1 gives it a bit.
@@ -56,7 +60,7 @@
 	(((dir)  << _IOC_DIRSHIFT) | \
 	 ((type) << _IOC_TYPESHIFT) | \
 	 ((nr)   << _IOC_NRSHIFT) | \
-	 (((size) & _IOC_SLMASK) << _IOC_SIZESHIFT))
+	 ((size) << _IOC_SIZESHIFT))
 
 /* used to create numbers */
 #define _IO(type,nr)		_IOC(_IOC_NONE,(type),(nr),0)

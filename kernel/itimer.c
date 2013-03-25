@@ -6,14 +6,11 @@
 
 /* These are all the functions necessary to implement itimers */
 
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/string.h>
-#include <linux/errno.h>
-#include <linux/time.h>
 #include <linux/mm.h>
+#include <linux/smp_lock.h>
+#include <linux/interrupt.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 /*
  * change timeval to jiffies, trying to avoid the 
@@ -41,10 +38,9 @@ static void jiffiestotv(unsigned long jiffies, struct timeval *value)
 {
 	value->tv_usec = (jiffies % HZ) * (1000000 / HZ);
 	value->tv_sec = jiffies / HZ;
-	return;
 }
 
-static int _getitimer(int which, struct itimerval *value)
+int do_getitimer(int which, struct itimerval *value)
 {
 	register unsigned long val, interval;
 
@@ -52,14 +48,15 @@ static int _getitimer(int which, struct itimerval *value)
 	case ITIMER_REAL:
 		interval = current->it_real_incr;
 		val = 0;
-		if (del_timer(&current->real_timer)) {
-			unsigned long now = jiffies;
-			val = current->real_timer.expires;
-			add_timer(&current->real_timer);
+		/* 
+		 * FIXME! This needs to be atomic, in case the kernel timer happens!
+		 */
+		if (timer_pending(&current->real_timer)) {
+			val = current->real_timer.expires - jiffies;
+
 			/* look out for negative/zero itimer.. */
-			if (val <= now)
-				val = now+1;
-			val -= now;
+			if ((long) val <= 0)
+				val = 1;
 		}
 		break;
 	case ITIMER_VIRTUAL:
@@ -78,21 +75,19 @@ static int _getitimer(int which, struct itimerval *value)
 	return 0;
 }
 
-asmlinkage int sys_getitimer(int which, struct itimerval *value)
+/* SMP: Only we modify our itimer values. */
+asmlinkage long sys_getitimer(int which, struct itimerval *value)
 {
-	int error;
+	int error = -EFAULT;
 	struct itimerval get_buffer;
 
-	if (!value)
-		return -EFAULT;
-	error = _getitimer(which, &get_buffer);
-	if (error)
-		return error;
-	error = verify_area(VERIFY_WRITE, value, sizeof(struct itimerval));
-	if (error)
-		return error;
-	memcpy_tofs(value, &get_buffer, sizeof(get_buffer));
-	return 0;
+	if (value) {
+		error = do_getitimer(which, &get_buffer);
+		if (!error &&
+		    copy_to_user(value, &get_buffer, sizeof(get_buffer)))
+			error = -EFAULT;
+	}
+	return error;
 }
 
 void it_real_fn(unsigned long __data)
@@ -103,35 +98,32 @@ void it_real_fn(unsigned long __data)
 	send_sig(SIGALRM, p, 1);
 	interval = p->it_real_incr;
 	if (interval) {
-		unsigned long timeout = jiffies + interval;
-		/* check for overflow */
-		if (timeout < interval)
-			timeout = ULONG_MAX;
-		p->real_timer.expires = timeout;
+		if (interval > (unsigned long) LONG_MAX)
+			interval = LONG_MAX;
+		p->real_timer.expires = jiffies + interval;
 		add_timer(&p->real_timer);
 	}
 }
 
-int _setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
+int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 {
 	register unsigned long i, j;
 	int k;
 
 	i = tvtojiffies(&value->it_interval);
 	j = tvtojiffies(&value->it_value);
-	if (ovalue && (k = _getitimer(which, ovalue)) < 0)
+	if (ovalue && (k = do_getitimer(which, ovalue)) < 0)
 		return k;
 	switch (which) {
 		case ITIMER_REAL:
-			del_timer(&current->real_timer);
+			del_timer_sync(&current->real_timer);
 			current->it_real_value = j;
 			current->it_real_incr = i;
 			if (!j)
 				break;
+			if (j > (unsigned long) LONG_MAX)
+				j = LONG_MAX;
 			i = j + jiffies;
-			/* check for overflow.. */
-			if (i < j)
-				i = ULONG_MAX;
 			current->real_timer.expires = i;
 			add_timer(&current->real_timer);
 			break;
@@ -153,29 +145,26 @@ int _setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 	return 0;
 }
 
-asmlinkage int sys_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
+/* SMP: Again, only we play with our itimers, and signals are SMP safe
+ *      now so that is not an issue at all anymore.
+ */
+asmlinkage long sys_setitimer(int which, struct itimerval *value,
+			      struct itimerval *ovalue)
 {
-	int error;
 	struct itimerval set_buffer, get_buffer;
+	int error;
 
 	if (value) {
-		error = verify_area(VERIFY_READ, value, sizeof(*value));
-		if (error)
-			return error;
-		memcpy_fromfs(&set_buffer, value, sizeof(set_buffer));
+		if(copy_from_user(&set_buffer, value, sizeof(set_buffer)))
+			return -EFAULT;
 	} else
 		memset((char *) &set_buffer, 0, sizeof(set_buffer));
 
-	if (ovalue) {
-		error = verify_area(VERIFY_WRITE, ovalue, sizeof(struct itimerval));
-		if (error)
-			return error;
-	}
-
-	error = _setitimer(which, &set_buffer, ovalue ? &get_buffer : 0);
+	error = do_setitimer(which, &set_buffer, ovalue ? &get_buffer : 0);
 	if (error || !ovalue)
 		return error;
 
-	memcpy_tofs(ovalue, &get_buffer, sizeof(get_buffer));
-	return error;
+	if (copy_to_user(ovalue, &get_buffer, sizeof(get_buffer)))
+		return -EFAULT; 
+	return 0;
 }

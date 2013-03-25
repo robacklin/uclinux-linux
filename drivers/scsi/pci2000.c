@@ -1,24 +1,22 @@
-/*+M*************************************************************************
- * Perceptive Solutions, Inc. PCI-2000 device driver proc support for Linux.
+/****************************************************************************
+ * Perceptive Solutions, Inc. PCI-2000 device driver for Linux.
  *
- * Copyright (c) 1999 Perceptive Solutions, Inc.
+ * pci2000.c - Linux Host Driver for PCI-2000 IntelliCache SCSI Adapters
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
+ * Copyright (c) 1997-1999 Perceptive Solutions, Inc.
+ * All Rights Reserved.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that redistributions of source
+ * code retain the above copyright notice and this comment without
+ * modification.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; see the file COPYING.  If not, write to
- * the Free Software Foundation, 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Technical updates and product information at:
+ *  http://www.psidisk.com
  *
+ * Please send questions, comments, bug reports to:
+ *  tech@psidisk.com Technical Support
  *
- *	File Name:		pci2000i.c
  *
  *	Revisions	1.10	Jan-21-1999
  *		- Fixed sign on message to reflect proper controller name.
@@ -28,16 +26,20 @@
  *		- Fixed control timeout to not lock up the entire system if
  *		  controller goes offline completely.
  *
- *-M*************************************************************************/
-#define PCI2000_VERSION		"1.11"
+ *	Revisions 1.12		Mar-26-1999
+ *		- Fixed spinlock and PCI configuration.
+ *
+ *	Revisions 1.20		Mar-27-2000
+ *		- Added support for dynamic DMA
+ *
+ ****************************************************************************/
+#define PCI2000_VERSION		"1.20"
 
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/head.h>
 #include <linux/types.h>
 #include <linux/string.h>
-#include <linux/bios32.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -49,14 +51,12 @@
 #include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
+#include <linux/stat.h>
+#include <linux/spinlock.h>
 
 #include "pci2000.h"
 #include "psi_roy.h"
 
-#include<linux/stat.h>
-
-struct proc_dir_entry Proc_Scsi_Pci2000 =
-	{ PROC_SCSI_PCI2000, 7, "pci2000", S_IFDIR | S_IRUGO | S_IXUGO, 2 };
 
 //#define DEBUG 1
 
@@ -70,31 +70,37 @@ struct proc_dir_entry Proc_Scsi_Pci2000 =
 
 typedef struct
 	{
-	ULONG		address;
-	ULONG		length;
+	unsigned int	address;
+	unsigned int	length;
 	}	SCATGATH, *PSCATGATH;
 
 typedef struct
 	{
-	Scsi_Cmnd	*SCpnt;
-	SCATGATH	 scatGath[16];
-	UCHAR		 tag;
+	Scsi_Cmnd		*SCpnt;
+	PSCATGATH		 scatGath;
+	dma_addr_t		 scatGathDma;
+	UCHAR			*cdb;
+	dma_addr_t		 cdbDma; 
+	UCHAR			 tag;
 	}	DEV2000, *PDEV2000;
 
 typedef struct
 	{
-	USHORT		 basePort;
-	USHORT		 mb0;
-	USHORT		 mb1;
-	USHORT		 mb2;
-	USHORT		 mb3;
-	USHORT		 mb4;
-	USHORT		 cmd;
-	USHORT		 tag;
-	DEV2000	 	 dev[MAX_BUS][MAX_UNITS];
+	ULONG			 basePort;
+	ULONG			 mb0;
+	ULONG			 mb1;
+	ULONG			 mb2;
+	ULONG			 mb3;
+	ULONG			 mb4;
+	ULONG			 cmd;
+	ULONG			 tag;
+	ULONG			 irqOwned;
+	struct pci_dev	*pdev;
+	DEV2000	 		 dev[MAX_BUS][MAX_UNITS];
 	}	ADAPTER2000, *PADAPTER2000;
 
 #define HOSTDATA(host) ((PADAPTER2000)&host->hostdata)
+#define consistentLen (MAX_BUS * MAX_UNITS * (16 * sizeof (SCATGATH) + MAX_COMMAND_SIZE))
 
 
 static struct	Scsi_Host 	   *PsiHost[MAXADAPTER] = {NULL,};  // One for each adapter
@@ -114,6 +120,28 @@ static int WaitReady (PADAPTER2000 padapter)
 	ULONG	z;
 
 	for ( z = 0;  z < (TIMEOUT_COMMAND * 4);  z++ )
+		{
+		if ( !inb_p (padapter->cmd) )
+			return FALSE;
+		udelay (250);
+		};								
+	return TRUE;
+	}
+/****************************************************************
+ *	Name:			WaitReadyLong	:LOCAL
+ *
+ *	Description:	Wait for controller ready.
+ *
+ *	Parameters:		padapter - Pointer adapter data structure.
+ *
+ *	Returns:		TRUE on not ready.
+ *
+ ****************************************************************/
+static int WaitReadyLong (PADAPTER2000 padapter)
+	{
+	ULONG	z;
+
+	for ( z = 0;  z < (5000 * 4);  z++ )
 		{
 		if ( !inb_p (padapter->cmd) )
 			return FALSE;
@@ -173,20 +201,31 @@ static UCHAR Command (PADAPTER2000 padapter, UCHAR cmd)
  ****************************************************************/
 static int BuildSgList (Scsi_Cmnd *SCpnt, PADAPTER2000 padapter, PDEV2000 pdev)
 	{
-	int	z;
+	int					 z;
+	int					 zc;
+	struct scatterlist	*sg;
 
 	if ( SCpnt->use_sg )
 		{
-		for ( z = 0;  z < SCpnt->use_sg;  z++ )
+		sg = (struct scatterlist *)SCpnt->request_buffer;
+		zc = pci_map_sg (padapter->pdev, sg, SCpnt->use_sg, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
+		for ( z = 0;  z < zc;  z++ )
 			{
-			pdev->scatGath[z].address = virt_to_bus (((struct scatterlist *)SCpnt->request_buffer)[z].address);
-			pdev->scatGath[z].length = ((struct scatterlist *)SCpnt->request_buffer)[z].length;
+			pdev->scatGath[z].address = cpu_to_le32 (sg_dma_address (sg));
+			pdev->scatGath[z].length = cpu_to_le32 (sg_dma_len (sg++));
 			}
-		outl (virt_to_bus (pdev->scatGath), padapter->mb2);
-		outl ((SCpnt->use_sg << 24) | SCpnt->request_bufflen, padapter->mb3);
+		outl (pdev->scatGathDma, padapter->mb2);
+		outl ((zc << 24) | SCpnt->request_bufflen, padapter->mb3);
 		return FALSE;
 		}
-	outl (virt_to_bus (SCpnt->request_buffer), padapter->mb2);
+	if ( !SCpnt->request_bufflen)
+		{
+		outl (0, padapter->mb2);
+		outl (0, padapter->mb3);
+		return TRUE;
+		}
+	SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer, SCpnt->request_bufflen, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
+	outl (SCpnt->SCp.have_data_in, padapter->mb2);
 	outl (SCpnt->request_bufflen, padapter->mb3);
 	return TRUE;
 	}
@@ -206,7 +245,7 @@ static int PsiRaidCmd (PADAPTER2000 padapter, char cmd)
 	if ( WaitReady (padapter) )						// test for command register ready
 		return DID_TIME_OUT;
 	outb_p (cmd, padapter->cmd);					// issue command
-	if ( WaitReady (padapter) )						// wait for adapter ready
+	if ( WaitReadyLong (padapter) )					// wait for adapter ready
 		return DID_TIME_OUT;
 	return DID_OK;
 	}
@@ -234,8 +273,15 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	int					pun;
 	int					bus;
 	int					z;
+    unsigned long		flags;
 
-	DEB(printk ("\npci2000 recieved interrupt "));
+    /*
+     * Disable interrupts, if they aren't already disabled and acquire
+     * the I/O spinlock.
+     */
+    spin_lock_irqsave (&io_request_lock, flags);
+
+	DEB(printk ("\npci2000 received interrupt "));
 	for ( z = 0; z < NumAdapters;  z++ )										// scan for interrupt to process
 		{
 		if ( PsiHost[z]->irq == (UCHAR)(irq & 0xFF) )
@@ -252,7 +298,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	if ( !shost )
 		{
 		DEB (printk ("\npci2000: not my interrupt"));
-		return;
+		goto irq_return;
 		}
 
 	padapter = HOSTDATA(shost);
@@ -269,14 +315,39 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 				{
 				pdev->tag = 0;
 				SCpnt = pdev->SCpnt;
-				goto irqProceed;
+				goto unmapProceed;
     			}
 			}
     	}
 
 	outb_p (0xFF, padapter->tag);												// clear the op interrupt
 	outb_p (CMD_DONE, padapter->cmd);											// complete the op
-	return;																		// done, but, with what?
+	goto irq_return;;															// done, but, with what?
+
+unmapProceed:;
+	if ( !bus )
+		{
+		switch ( SCpnt->cmnd[0] )
+			{
+			case SCSIOP_TEST_UNIT_READY:
+				pci_unmap_single (padapter->pdev, SCpnt->SCp.have_data_in, sizeof (SCpnt->sense_buffer), PCI_DMA_FROMDEVICE);
+				goto irqProceed;
+			case SCSIOP_READ_CAPACITY:
+				pci_unmap_single (padapter->pdev, SCpnt->SCp.have_data_in, 8, PCI_DMA_FROMDEVICE);
+				goto irqProceed;
+			case SCSIOP_VERIFY:
+			case SCSIOP_START_STOP_UNIT:
+			case SCSIOP_MEDIUM_REMOVAL:
+				goto irqProceed;
+			}
+		}
+	if ( SCpnt->SCp.have_data_in )
+		pci_unmap_single (padapter->pdev, SCpnt->SCp.have_data_in, SCpnt->request_bufflen, scsi_to_pci_dma_dir(SCpnt->sc_data_direction));
+	else 
+		{
+		if ( SCpnt->use_sg )
+			pci_unmap_sg (padapter->pdev, (struct scatterlist *)SCpnt->request_buffer, SCpnt->use_sg, scsi_to_pci_dma_dir(SCpnt->sc_data_direction));
+		}
 
 irqProceed:;
 	if ( tag & ERR08_TAGGED )												// is there an error here?
@@ -284,7 +355,7 @@ irqProceed:;
 		if ( WaitReady (padapter) )
 			{
 			OpDone (SCpnt, DID_TIME_OUT << 16);
-			return;
+			goto irq_return;;
 			}
 
 		outb_p (tag0, padapter->mb0);										// get real error code
@@ -292,7 +363,7 @@ irqProceed:;
 		if ( WaitReady (padapter) )											// wait for controller to suck up the op
 			{
 			OpDone (SCpnt, DID_TIME_OUT << 16);
-			return;
+			goto irq_return;;
 			}
 
 		error = inl (padapter->mb0);										// get error data
@@ -305,21 +376,29 @@ irqProceed:;
 			if ( bus )														// are we doint SCSI commands?
 				{
 				OpDone (SCpnt, (DID_OK << 16) | 2);
-				return;
+				goto irq_return;;
 				}
 			if ( *SCpnt->cmnd == SCSIOP_TEST_UNIT_READY )
 				OpDone (SCpnt, (DRIVER_SENSE << 24) | (DID_OK << 16) | 2);	// test caller we have sense data too
 			else
 				OpDone (SCpnt, DID_ERROR << 16);
-			return;
+			goto irq_return;;
 			}
 		OpDone (SCpnt, DID_ERROR << 16);
-		return;
+		goto irq_return;;
 		}
 
 	outb_p (0xFF, padapter->tag);											// clear the op interrupt
 	outb_p (CMD_DONE, padapter->cmd);										// complete the op
 	OpDone (SCpnt, DID_OK << 16);
+
+irq_return:;
+    /*
+     * Release the I/O spinlock and restore the original flags
+     * which will enable interrupts if and only if they were
+     * enabled on entry.
+     */
+    spin_unlock_irqrestore (&io_request_lock, flags);
 	}
 /****************************************************************
  *	Name:	Pci2000_QueueCommand
@@ -350,6 +429,7 @@ int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 		}
 
 	SCpnt->scsi_done = done;
+	SCpnt->SCp.have_data_in = 0;
 	pdev->SCpnt = SCpnt;  									// Save this command data
 
 	if ( WaitReady (padapter) )
@@ -375,7 +455,9 @@ int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 
 		outw_p (pun | (lun << 8), padapter->mb0);
 		outw_p (SCpnt->cmd_len << 8, padapter->mb0 + 2);
-		outl (virt_to_bus (cdb), padapter->mb1);
+		memcpy (pdev->cdb, cdb, MAX_COMMAND_SIZE);
+
+		outl (pdev->cdbDma, padapter->mb1);
 		if ( BuildSgList (SCpnt, padapter, pdev) )
 			cmd = CMD_SCSI_THRU;
 		else
@@ -416,7 +498,11 @@ int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 							goto finished;
 							}
 						else
-							outl (virt_to_bus (SCpnt->request_buffer), padapter->mb2);
+							{
+							SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer, SCpnt->request_bufflen,
+													  scsi_to_pci_dma_dir(SCpnt->sc_data_direction));
+							outl (SCpnt->SCp.have_data_in, padapter->mb2);
+							}
 						outl (cdb[5], padapter->mb0);
 						outl (cdb[3], padapter->mb3);
 						cmd = CMD_DASD_RAID_RQ;
@@ -427,31 +513,35 @@ int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 			
 			if ( SCpnt->use_sg )
 				{
-				outl (virt_to_bus (((struct scatterlist *)(SCpnt->request_buffer))->address), padapter->mb2);
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, ((struct scatterlist *)SCpnt->request_buffer)->address, 
+										  SCpnt->request_bufflen, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
 				}
 			else
 				{
-				outl (virt_to_bus (SCpnt->request_buffer), padapter->mb2);
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer, 
+										  SCpnt->request_bufflen, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
 				}
+			outl (SCpnt->SCp.have_data_in, padapter->mb2);
 			outl (SCpnt->request_bufflen, padapter->mb3);
 			cmd = CMD_DASD_SCSI_INQ;
 			break;
 
 		case SCSIOP_TEST_UNIT_READY:			// test unit ready CDB
-			outl (virt_to_bus (SCpnt->sense_buffer), padapter->mb2);
+			SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->sense_buffer, sizeof (SCpnt->sense_buffer), PCI_DMA_FROMDEVICE);
+			outl (SCpnt->SCp.have_data_in, padapter->mb2);
 			outl (sizeof (SCpnt->sense_buffer), padapter->mb3);
 			cmd = CMD_TEST_READY;
 			break;
 
-		case SCSIOP_READ_CAPACITY:			  	// read capctiy CDB
+		case SCSIOP_READ_CAPACITY:			  	// read capacity CDB
 			if ( SCpnt->use_sg )
 				{
-				outl (virt_to_bus (((struct scatterlist *)(SCpnt->request_buffer))->address), padapter->mb2);
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, ((struct scatterlist *)(SCpnt->request_buffer))->address,
+										  8, PCI_DMA_FROMDEVICE);
 				}
 			else
-				{
-				outl (virt_to_bus (SCpnt->request_buffer), padapter->mb2);
-				}
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer, 8, PCI_DMA_FROMDEVICE);
+			outl (SCpnt->SCp.have_data_in, padapter->mb2);
 			outl (8, padapter->mb3);
 			cmd = CMD_DASD_CAP;
 			break;
@@ -565,81 +655,118 @@ int Pci2000_Command (Scsi_Cmnd *SCpnt)
  *
  *	Parameters:		tpnt - Pointer to SCSI host template structure.
  *
- *	Returns:		Number of adapters found.
+ *	Returns:		Number of adapters installed.
  *
  ****************************************************************/
 int Pci2000_Detect (Scsi_Host_Template *tpnt)
 	{
-	int					pci_index = 0;
+	int					found = 0;
+	int					installed = 0;
 	struct Scsi_Host   *pshost;
 	PADAPTER2000	    padapter;
 	int					z, zz;
 	int					setirq;
+	struct pci_dev	   *pdev = NULL;
+	UCHAR			   *consistent;
+	dma_addr_t			consistentDma;
 
-	if ( pcibios_present () )
+
+	if ( !pci_present () )
 		{
-		for ( pci_index = 0;  pci_index <= MAXADAPTER;  ++pci_index )
+		printk ("pci2000: PCI BIOS not present\n");
+		return 0;
+		}
+
+	while ( (pdev = pci_find_device (VENDOR_PSI, DEVICE_ROY_1, pdev)) != NULL )
+		{
+		if (pci_enable_device(pdev))
+			continue;
+		pshost = scsi_register (tpnt, sizeof(ADAPTER2000));
+		if(pshost == NULL)
+			continue;
+		padapter = HOSTDATA(pshost);
+
+		padapter->basePort = pci_resource_start (pdev, 1);
+		DEB (printk ("\nBase Regs = %#04X", padapter->basePort));			// get the base I/O port address
+		padapter->mb0	= padapter->basePort + RTR_MAILBOX;		   			// get the 32 bit mail boxes
+		padapter->mb1	= padapter->basePort + RTR_MAILBOX + 4;
+		padapter->mb2	= padapter->basePort + RTR_MAILBOX + 8;
+		padapter->mb3	= padapter->basePort + RTR_MAILBOX + 12;
+		padapter->mb4	= padapter->basePort + RTR_MAILBOX + 16;
+		padapter->cmd	= padapter->basePort + RTR_LOCAL_DOORBELL;			// command register
+		padapter->tag	= padapter->basePort + RTR_PCI_DOORBELL;			// tag/response register
+		padapter->pdev = pdev;
+
+		if ( WaitReady (padapter) )
+			goto unregister;
+		outb_p (0x84, padapter->mb0);
+		outb_p (CMD_SPECIFY, padapter->cmd);
+		if ( WaitReady (padapter) )
+			goto unregister;
+
+		consistent = pci_alloc_consistent (pdev, consistentLen, &consistentDma);
+		if ( !consistent )
 			{
-			UCHAR	pci_bus, pci_device_fn;
-
-			if ( pcibios_find_device (VENDOR_PSI, DEVICE_ROY_1, pci_index, &pci_bus, &pci_device_fn) != 0 )
-				break;
-
-			pshost = scsi_register (tpnt, sizeof(ADAPTER2000));
-			padapter = HOSTDATA(pshost);
-
-			pcibios_read_config_word (pci_bus, pci_device_fn, PCI_BASE_ADDRESS_1, &padapter->basePort);
-			padapter->basePort &= 0xFFFE;
-			DEB (printk ("\nBase Regs = %#04X", padapter->basePort));			// get the base I/O port address
-			padapter->mb0	= padapter->basePort + RTR_MAILBOX;		   			// get the 32 bit mail boxes
-			padapter->mb1	= padapter->basePort + RTR_MAILBOX + 4;
-			padapter->mb2	= padapter->basePort + RTR_MAILBOX + 8;
-			padapter->mb3	= padapter->basePort + RTR_MAILBOX + 12;
-			padapter->mb4	= padapter->basePort + RTR_MAILBOX + 16;
-			padapter->cmd	= padapter->basePort + RTR_LOCAL_DOORBELL;			// command register
-			padapter->tag	= padapter->basePort + RTR_PCI_DOORBELL;			// tag/response register
-
-			if ( WaitReady (padapter) )
-				goto unregister;
-			outb_p (0x84, padapter->mb0);
-			outb_p (CMD_SPECIFY, padapter->cmd);
-			if ( WaitReady (padapter) )
-				goto unregister;
-
-			pcibios_read_config_byte (pci_bus, pci_device_fn, PCI_INTERRUPT_LINE, &pshost->irq);
-			setirq = 1;
-			for ( z = 0;  z < pci_index;  z++ )									// scan for shared interrupts
+			printk ("Unable to allocate DMA memory for PCI-2000 controller.\n");
+			goto unregister;
+			}
+		
+		scsi_set_pci_device(pshost, pdev);
+		pshost->irq = pdev->irq;
+		setirq = 1;
+		padapter->irqOwned = 0;
+		for ( z = 0;  z < installed;  z++ )									// scan for shared interrupts
+			{
+			if ( PsiHost[z]->irq == pshost->irq )							// if shared then, don't posses
+				setirq = 0;
+			}
+		if ( setirq )												// if not shared, posses
+			{
+			if ( request_irq (pshost->irq, Irq_Handler, SA_SHIRQ, "pci2000", padapter) < 0 )
 				{
-				if ( PsiHost[z]->irq == pshost->irq )							// if shared then, don't posses
-					setirq = 0;
-				}
-			if ( setirq )														// if not shared, posses
-				{
-				if ( request_irq (pshost->irq, Irq_Handler, 0, "pci2000", NULL) )
+				if ( request_irq (pshost->irq, Irq_Handler, SA_INTERRUPT | SA_SHIRQ, "pci2000", padapter) < 0 )
 					{
-					printk ("Unable to allocate IRQ for PSI-2000 controller.\n");
+					printk ("Unable to allocate IRQ for PCI-2000 controller.\n");
+					pci_free_consistent (pdev, consistentLen, consistent, consistentDma);
 					goto unregister;
 					}
 				}
-			PsiHost[pci_index]	= pshost;										// save SCSI_HOST pointer
-
-			pshost->unique_id	= padapter->basePort;
-			pshost->max_id		= 16;
-			pshost->max_channel	= 1;
-
-			for ( zz = 0;  zz < MAX_BUS;  zz++ )
-				for ( z = 0; z < MAX_UNITS;  z++ )
-					padapter->dev[zz][z].tag = 0;
-			
-			printk("\nPSI-2000 Intelligent Storage SCSI CONTROLLER: at I/O = %X  IRQ = %d\n", padapter->basePort, pshost->irq);
-			printk("Version %s, Compiled %s %s\n\n", PCI2000_VERSION,  __DATE__, __TIME__);
-			continue;
-unregister:;
-			scsi_unregister (pshost);
+			padapter->irqOwned = pshost->irq;						// set IRQ as owned
 			}
+		PsiHost[installed]	= pshost;										// save SCSI_HOST pointer
+
+		pshost->io_port		= padapter->basePort;
+		pshost->n_io_port	= 0xFF;
+		pshost->unique_id	= padapter->basePort;
+		pshost->max_id		= 16;
+		pshost->max_channel	= 1;
+
+		for ( zz = 0;  zz < MAX_BUS;  zz++ )
+			for ( z = 0; z < MAX_UNITS;  z++ )
+				{
+				padapter->dev[zz][z].tag = 0;
+				padapter->dev[zz][z].scatGath = (PSCATGATH)consistent;
+				padapter->dev[zz][z].scatGathDma = consistentDma;
+				consistent += 16 * sizeof (SCATGATH);
+				consistentDma += 16 * sizeof (SCATGATH);
+				padapter->dev[zz][z].cdb = (UCHAR *)consistent;
+				padapter->dev[zz][z].cdbDma = consistentDma;
+				consistent += MAX_COMMAND_SIZE;
+				consistentDma += MAX_COMMAND_SIZE;
+				}
+			
+		printk("\nPSI-2000 Intelligent Storage SCSI CONTROLLER: at I/O = %lX  IRQ = %d\n", padapter->basePort, pshost->irq);
+		printk("Version %s, Compiled %s %s\n\n", PCI2000_VERSION,  __DATE__, __TIME__);
+		found++;
+		if ( ++installed < MAXADAPTER )
+			continue;
+		break;
+unregister:;
+		scsi_unregister (pshost);
+		found++;
 		}
-	NumAdapters = pci_index;
-	return pci_index;
+	NumAdapters = installed;
+	return installed;
 	}
 /****************************************************************
  *	Name:	Pci2000_Abort
@@ -675,9 +802,29 @@ int Pci2000_Reset (Scsi_Cmnd *SCpnt, unsigned int reset_flags)
 	{
 	return SCSI_RESET_PUNT;
 	}
+/****************************************************************
+ *	Name:	Pci2000_Release
+ *
+ *	Description:	Release resources allocated for a single each adapter.
+ *
+ *	Parameters:		pshost - Pointer to SCSI command structure.
+ *
+ *	Returns:		zero.
+ *
+ ****************************************************************/
+int Pci2000_Release (struct Scsi_Host *pshost)
+	{
+    PADAPTER2000	padapter = HOSTDATA (pshost);
+
+	if ( padapter->irqOwned )
+		free_irq (pshost->irq, padapter);
+	pci_free_consistent (padapter->pdev, consistentLen, padapter->dev[0][0].scatGath, padapter->dev[0][0].scatGathDma);
+	release_region (pshost->io_port, pshost->n_io_port);
+    scsi_unregister(pshost);
+    return 0;
+	}
 
 #include "sd.h"
-
 /****************************************************************
  *	Name:	Pci2000_BiosParam
  *
@@ -711,10 +858,8 @@ int Pci2000_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	}
 
 
-#ifdef MODULE
+MODULE_LICENSE("Dual BSD/GPL");
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = PCI2220I;
+static Scsi_Host_Template driver_template = PCI2000;
 
 #include "scsi_module.c"
-#endif
-

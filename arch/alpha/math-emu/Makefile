@@ -1,12 +1,22 @@
 #
-# Makefile for math-emulator files...
+# Makefile for the FPU instruction emulation.
 #
 
-OBJS  = fp-emul.o ieee-math.o
+CFLAGS += -I. -I$(TOPDIR)/include/math-emu -w
 
-math-emu.a: $(OBJS)
-	$(AR) rcs $@ $(OBJS)
+ifeq ($(CONFIG_MATHEMU),y)
 
-dep:
+O_TARGET	:= math-emu.o
+obj-y		:= math.o qrnnd.o
+
+else
+
+list-multi	:= math-emu.o
+math-emu-objs	:= math.o qrnnd.o
+obj-m		:= math-emu.o
+math-emu.o: $(math-emu-objs)
+	$(LD) -r -o $@ $(math-emu-objs)
+
+endif
 
 include $(TOPDIR)/Rules.make

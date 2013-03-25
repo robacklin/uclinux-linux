@@ -26,6 +26,7 @@ extern __inline__ unsigned long muldiv(unsigned long a, unsigned long b, unsigne
 	return a * b / c;
 }
 
+#define ndelay(nsecs) udelay((nsecs) * 5)
 	
 
 #endif /* defined(_ARM_DELAY_H) */

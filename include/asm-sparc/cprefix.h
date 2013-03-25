@@ -9,10 +9,12 @@
 #ifndef __SPARC_CPREFIX_H
 #define __SPARC_CPREFIX_H
 
-#ifndef __svr4__
-#define C_LABEL_PREFIX _
-#else
+#if defined(__svr4__) || defined(__ELF__)
 #define C_LABEL_PREFIX
+#define C_LABEL_STR(name) #name
+#else
+#define C_LABEL_PREFIX _
+#define C_LABEL_STR(name) "_" #name
 #endif
 
 #define CONCAT(a, b) CONCAT2(a, b)

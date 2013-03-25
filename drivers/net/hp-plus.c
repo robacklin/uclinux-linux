@@ -6,19 +6,19 @@
 	These cards are sold under several model numbers, usually 2724*.
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
-	The author may be reached as becker@CESDIS.gsfc.nasa.gov, or C/O
-
-	Center of Excellence in Space Data and Information Sciences
-		Code 930.5, Goddard Space Flight Center, Greenbelt MD 20771
+	The author may be reached as becker@scyld.com, or C/O
+	Scyld Computing Corporation
+	410 Severn Ave., Suite 210
+	Annapolis MD 21403
 
 	As is often the case, a great deal of credit is owed to Russ Nelson.
 	The Crynwr packet driver was my primary source of HP-specific
 	programming information.
 */
 
-static const char *version =
+static const char version[] =
 "hp-plus.c:v1.10 9/24/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
@@ -30,6 +30,8 @@ static const char *version =
 #include <linux/ioport.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/init.h>
+#include <linux/delay.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -38,7 +40,7 @@ static const char *version =
 #include "8390.h"
 
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int hpplus_portlist[] =
+static unsigned int hpplus_portlist[] __initdata =
 {0x200, 0x240, 0x280, 0x2C0, 0x300, 0x320, 0x340, 0};
 
 /*
@@ -67,7 +69,7 @@ static unsigned int hpplus_portlist[] =
 */
 
 #define HP_ID			0x00	/* ID register, always 0x4850. */
-#define HP_PAGING		0x02	/* Registers visible @ 8-f, see PageName. */ 
+#define HP_PAGING		0x02	/* Registers visible @ 8-f, see PageName. */
 #define HPP_OPTION		0x04	/* Bitmapped options, see HP_Option.	*/
 #define HPP_OUT_ADDR	0x08	/* I/O output location in Perf_Page.	*/
 #define HPP_IN_ADDR		0x0A	/* I/O input location in Perf_Page.		*/
@@ -84,7 +86,7 @@ enum PageName {
 	MAC_Page = 1,				/* The ethernet address (+checksum). */
 	HW_Page = 2,				/* EEPROM-loaded hardware parameters. */
 	LAN_Page = 4,				/* Transceiver selection, testing, etc. */
-	ID_Page = 6 }; 
+	ID_Page = 6 };
 
 /* The bit definitions for the HPP_OPTION register. */
 enum HP_Option {
@@ -92,75 +94,65 @@ enum HP_Option {
 	EnableIRQ = 4, FakeIntr = 8, BootROMEnb = 0x10, IOEnb = 0x20,
 	MemEnable = 0x40, ZeroWait = 0x80, MemDisable = 0x1000, };
 
-int hp_plus_probe(struct device *dev);
-int hpp_probe1(struct device *dev, int ioaddr);
+int hp_plus_probe(struct net_device *dev);
+static int hpp_probe1(struct net_device *dev, int ioaddr);
 
-static void hpp_reset_8390(struct device *dev);
-static int hpp_open(struct device *dev);
-static int hpp_close(struct device *dev);
-static void hpp_mem_block_input(struct device *dev, int count,
+static void hpp_reset_8390(struct net_device *dev);
+static int hpp_open(struct net_device *dev);
+static int hpp_close(struct net_device *dev);
+static void hpp_mem_block_input(struct net_device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
-static void hpp_mem_block_output(struct device *dev, int count,
-							const unsigned char *buf, const int start_page);
-static void hpp_mem_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void hpp_mem_block_output(struct net_device *dev, int count,
+							const unsigned char *buf, int start_page);
+static void hpp_mem_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						  int ring_page);
-static void hpp_io_block_input(struct device *dev, int count,
+static void hpp_io_block_input(struct net_device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
-static void hpp_io_block_output(struct device *dev, int count,
-							const unsigned char *buf, const int start_page);
-static void hpp_io_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void hpp_io_block_output(struct net_device *dev, int count,
+							const unsigned char *buf, int start_page);
+static void hpp_io_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 						  int ring_page);
 
 
 /*	Probe a list of addresses for an HP LAN+ adaptor.
 	This routine is almost boilerplate. */
-#ifdef HAVE_DEVLIST
-/* Support for a alternate probe manager, which will eliminate the
-   boilerplate below. */
-struct netdev_entry hpplus_drv =
-{"hpplus", hpp_probe1, HP_IO_EXTENT, hpplus_portlist};
-#else
 
-int hp_plus_probe(struct device *dev)
+int __init hp_plus_probe(struct net_device *dev)
 {
 	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hpp_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
-	for (i = 0; hpplus_portlist[i]; i++) {
-		int ioaddr = hpplus_portlist[i];
-		if (check_region(ioaddr, HP_IO_EXTENT))
-			continue;
-		if (hpp_probe1(dev, ioaddr) == 0)
+	for (i = 0; hpplus_portlist[i]; i++)
+		if (hpp_probe1(dev, hpplus_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
 /* Do the interesting part of the probe at a single address. */
-int hpp_probe1(struct device *dev, int ioaddr)
+static int __init hpp_probe1(struct net_device *dev, int ioaddr)
 {
-	int i;
+	int i, retval;
 	unsigned char checksum = 0;
-	const char *name = "HP-PC-LAN+";
+	const char name[] = "HP-PC-LAN+";
 	int mem_start;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
+
+	if (!request_region(ioaddr, HP_IO_EXTENT, dev->name))
+		return -EBUSY;
 
 	/* Check for the HP+ signature, 50 48 0x 53. */
 	if (inw(ioaddr + HP_ID) != 0x4850
-		|| (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300)
-		return ENODEV;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("hp-plus.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
+		|| (inw(ioaddr + HP_PAGING) & 0xfff0) != 0x5300) {
+		retval = -ENODEV;
+		goto out;
 	}
 
 	if (ei_debug  &&  version_printed++ == 0)
@@ -181,7 +173,8 @@ int hpp_probe1(struct device *dev, int ioaddr)
 
 	if (checksum != 0xff) {
 		printk(" bad checksum %2.2x.\n", checksum);
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	} else {
 		/* Point at the Software Configuration Flags. */
 		outw(ID_Page, ioaddr + HP_PAGING);
@@ -191,11 +184,9 @@ int hpp_probe1(struct device *dev, int ioaddr)
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk ("hp-plus.c: unable to allocate memory for dev->priv.\n");
-		return -ENOMEM;
+		retval = -ENOMEM;
+		goto out;
 	 }
-
-	/* Grab the region so we can find another board if something fails. */
-	request_region(ioaddr, HP_IO_EXTENT,"hp-plus");
 
 	/* Read the IRQ line. */
 	outw(HW_Page, ioaddr + HP_PAGING);
@@ -250,22 +241,26 @@ int hpp_probe1(struct device *dev, int ioaddr)
 	outw(inw(ioaddr + HPP_OPTION) & ~EnableIRQ, ioaddr + HPP_OPTION);
 
 	return 0;
+out:
+	release_region(ioaddr, HP_IO_EXTENT);
+	return retval;
 }
 
 static int
-hpp_open(struct device *dev)
+hpp_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg;
+	int retval;
 
-	if (request_irq(dev->irq, &ei_interrupt, 0, "hp-plus", NULL)) {
-	    return -EAGAIN;
+	if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
+	    return retval;
 	}
 
 	/* Reset the 8390 and HP chip. */
 	option_reg = inw(ioaddr + HPP_OPTION);
 	outw(option_reg & ~(NICReset + ChipReset), ioaddr + HPP_OPTION);
-	SLOW_DOWN_IO; SLOW_DOWN_IO;
+	udelay(5);
 	/* Unreset the board and enable interrupts. */
 	outw(option_reg | (EnableIRQ + NICReset + ChipReset), ioaddr + HPP_OPTION);
 
@@ -277,28 +272,25 @@ hpp_open(struct device *dev)
 	outw(Perf_Page, ioaddr + HP_PAGING);
 
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int
-hpp_close(struct device *dev)
+hpp_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg = inw(ioaddr + HPP_OPTION);
 
-	free_irq(dev->irq, NULL);
-	irq2dev_map[dev->irq] = NULL;
+	free_irq(dev->irq, dev);
 	ei_close(dev);
 	outw((option_reg & ~EnableIRQ) | MemDisable | NICReset | ChipReset,
 		 ioaddr + HPP_OPTION);
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static void
-hpp_reset_8390(struct device *dev)
+hpp_reset_8390(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg = inw(ioaddr + HPP_OPTION);
@@ -307,12 +299,11 @@ hpp_reset_8390(struct device *dev)
 
 	outw(option_reg & ~(NICReset + ChipReset), ioaddr + HPP_OPTION);
 	/* Pause a few cycles for the hardware reset to take place. */
-	SLOW_DOWN_IO;
-	SLOW_DOWN_IO;
+	udelay(5);
 	ei_status.txing = 0;
 	outw(option_reg | (EnableIRQ + NICReset + ChipReset), ioaddr + HPP_OPTION);
 
-	SLOW_DOWN_IO; SLOW_DOWN_IO;
+	udelay(5);
 
 
 	if ((inb_p(ioaddr+NIC_OFFSET+EN0_ISR) & ENISR_RESET) == 0)
@@ -326,7 +317,7 @@ hpp_reset_8390(struct device *dev)
    Note that transfer with the EtherTwist+ must be on word boundaries. */
 
 static void
-hpp_io_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+hpp_io_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 
@@ -337,7 +328,7 @@ hpp_io_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page
 /* Block input and output, similar to the Crynwr packet driver. */
 
 static void
-hpp_io_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+hpp_io_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	char *buf = skb->data;
@@ -351,20 +342,20 @@ hpp_io_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_
 /* The corresponding shared memory versions of the above 2 functions. */
 
 static void
-hpp_mem_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+hpp_mem_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg = inw(ioaddr + HPP_OPTION);
 
 	outw((ring_page<<8), ioaddr + HPP_IN_ADDR);
 	outw(option_reg & ~(MemDisable + BootROMEnb), ioaddr + HPP_OPTION);
-	memcpy_fromio(hdr, dev->mem_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, dev->mem_start, sizeof(struct e8390_pkt_hdr));
 	outw(option_reg, ioaddr + HPP_OPTION);
-	hdr->count = (hdr->count + 3) & ~3;	/* Round up allocation. */
+	hdr->count = (le16_to_cpu(hdr->count) + 3) & ~3;	/* Round up allocation. */
 }
 
 static void
-hpp_mem_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+hpp_mem_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg = inw(ioaddr + HPP_OPTION);
@@ -377,15 +368,15 @@ hpp_mem_block_input(struct device *dev, int count, struct sk_buff *skb, int ring
 	   Also note that we *can't* use eth_io_copy_and_sum() because
 	   it will not always copy "count" bytes (e.g. padded IP).  */
 
-	memcpy_fromio(skb->data, dev->mem_start, count);
+	isa_memcpy_fromio(skb->data, dev->mem_start, count);
 	outw(option_reg, ioaddr + HPP_OPTION);
 }
 
 /* A special note: we *must* always transfer >=16 bit words.
    It's always safe to round up, so we do. */
 static void
-hpp_io_block_output(struct device *dev, int count,
-					const unsigned char *buf, const int start_page)
+hpp_io_block_output(struct net_device *dev, int count,
+					const unsigned char *buf, int start_page)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	outw(start_page << 8, ioaddr + HPP_OUT_ADDR);
@@ -394,15 +385,15 @@ hpp_io_block_output(struct device *dev, int count,
 }
 
 static void
-hpp_mem_block_output(struct device *dev, int count,
-				const unsigned char *buf, const int start_page)
+hpp_mem_block_output(struct net_device *dev, int count,
+				const unsigned char *buf, int start_page)
 {
 	int ioaddr = dev->base_addr - NIC_OFFSET;
 	int option_reg = inw(ioaddr + HPP_OPTION);
 
 	outw(start_page << 8, ioaddr + HPP_OUT_ADDR);
 	outw(option_reg & ~(MemDisable + BootROMEnb), ioaddr + HPP_OPTION);
-	memcpy_toio(dev->mem_start, buf, (count + 3) & ~3);
+	isa_memcpy_toio(dev->mem_start, buf, (count + 3) & ~3);
 	outw(option_reg, ioaddr + HPP_OPTION);
 
 	return;
@@ -411,19 +402,16 @@ hpp_mem_block_output(struct device *dev, int count,
 
 #ifdef MODULE
 #define MAX_HPP_CARDS	4	/* Max number of HPP cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_HPP_CARDS] = { 0, };
-static struct device dev_hpp[MAX_HPP_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
+static struct net_device dev_hpp[MAX_HPP_CARDS];
+static int io[MAX_HPP_CARDS];
+static int irq[MAX_HPP_CARDS];
 
-static int io[MAX_HPP_CARDS] = { 0, };
-static int irq[MAX_HPP_CARDS]  = { 0, };
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HPP_CARDS) "i");
+MODULE_PARM_DESC(io, "I/O port address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s); ignored if properly detected");
+MODULE_DESCRIPTION("HP PC-LAN+ ISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -433,8 +421,7 @@ init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_HPP_CARDS; this_dev++) {
-		struct device *dev = &dev_hpp[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
+		struct net_device *dev = &dev_hpp[this_dev];
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->init = hp_plus_probe;
@@ -444,12 +431,13 @@ init_module(void)
 		}
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "hp-plus.c: No HP-Plus card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) return 0;	/* Got at least one. */
+			if (found != 0) {	/* Got at least one. */
+				return 0;
+			}
 			return -ENXIO;
 		}
 		found++;
 	}
-
 	return 0;
 }
 
@@ -459,18 +447,19 @@ cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_HPP_CARDS; this_dev++) {
-		struct device *dev = &dev_hpp[this_dev];
+		struct net_device *dev = &dev_hpp[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: hpp_close() handles free_irq + irq2dev map */
 			int ioaddr = dev->base_addr - NIC_OFFSET;
-			kfree(dev->priv);
-			dev->priv = NULL;
+			void *priv = dev->priv;
+			/* NB: hpp_close() handles free_irq */
 			release_region(ioaddr, HP_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
 		}
 	}
 }
 #endif /* MODULE */
+
 
 /*
  * Local variables:

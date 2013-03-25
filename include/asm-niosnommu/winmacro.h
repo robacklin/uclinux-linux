@@ -1,3 +1,4 @@
+//vic - change use of current_set to just current - needs verification
 /*
  * Feb 27, 2000 - Ken Hill
  *    Convert to Nios assembler. Note, most immediate values have to be word
@@ -5,7 +6,6 @@
  *    Convert most defines to .macro would not process them. this also allows for
  *    more offset size checking for required PFX instruction.
  *
- * $Id: winmacro.h,v 1.1 2003-02-26 04:13:07 gerg Exp $
  * winmacro.h: Window loading-unloading macros.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -174,19 +174,30 @@
 
 	.macro LOAD_CURRENT dest_reg
 
-	MOVIA	%\dest_reg,C_LABEL(current_set);
-        ld      %\dest_reg, [%\dest_reg];
+//vic	MOVIA	%\dest_reg,C_LABEL(current_set);
+//vic	MOVIA	%\dest_reg,C_LABEL(current);
+	MOVIA	%\dest_reg,C_LABEL(_current_task);
+	ld      %\dest_reg, [%\dest_reg];
 
 	.endm
 
 	.macro STORE_CURRENT new_task, scratch_reg
 
-	MOVIA	%\scratch_reg,C_LABEL(current_set);
-        st      [%\scratch_reg], %\new_task;
+//vic	MOVIA	%\scratch_reg,C_LABEL(current_set);
+//vic	MOVIA	%\scratch_reg,C_LABEL(current);
+	MOVIA	%\scratch_reg,C_LABEL(_current_task);
+	st      [%\scratch_reg], %\new_task;
 
 	.endm
 
+;;	As long as kernel sp is valid, the task struct can be accessed
+	.macro GET_CURRENT dest_reg
 
+	mov	%\dest_reg, %sp
+	lsri	%\dest_reg, 13
+	lsli	%\dest_reg, 13
+
+	.endm
 /* macro for flushing register from current CWP to HI_LIMIT into the stack windows */
 /* xwt: the caller is responsible for disabling interrupts for the following two macros */
 

@@ -137,8 +137,9 @@ unsigned short ip_compute_csum(const unsigned char * buff, int len)
  */
 
 unsigned int
-csum_partial_copy_fromuser(const char *src, char *dst, int len, int sum)
+csum_partial_copy_from_user(const char *src, char *dst, int len, int sum, int *csum_err)
 {
+	if (csum_err) *csum_err = 0;
 	memcpy(dst, src, len);
 	return csum_partial(dst, len, sum);
 }

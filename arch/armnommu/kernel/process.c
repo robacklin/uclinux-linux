@@ -1,37 +1,48 @@
 /*
  *  linux/arch/arm/kernel/process.c
  *
- *  Copyright (C) 1996 Russell King - Converted to ARM.
+ *  Copyright (C) 1996-2000 Russell King - Converted to ARM.
  *  Origional Copyright (C) 1995  Linus Torvalds
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
+#include <stdarg.h>
 
-/*
- * This file handles the architecture-dependent parts of process handling..
- */
-
-#include <linux/errno.h>
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
-#include <linux/malloc.h>
-#include <linux/ldt.h>
+#include <linux/slab.h>
 #include <linux/user.h>
-#include <linux/a.out.h>
+#include <linux/delay.h>
+#include <linux/reboot.h>
+#include <linux/interrupt.h>
+#include <linux/init.h>
 
-#include <asm/segment.h>
-#include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/leds.h>
+#include <asm/uaccess.h>
 
-extern void fpe_save(struct fp_soft_struct *);
-extern char *processor_modes[];
+/*
+ * Values for cpu_do_idle()
+ */
+#define IDLE_WAIT_SLOW	0
+#define IDLE_WAIT_FAST	1
+#define IDLE_CLOCK_SLOW	2
+#define IDLE_CLOCK_FAST	3
 
-asmlinkage void ret_from_sys_call(void) __asm__("_ret_from_sys_call");
+extern const char *processor_modes[];
+extern void setup_mm_for_reboot(char mode);
 
-static int hlt_counter = 0;
+static volatile int hlt_counter;
+
+#include <asm/arch/system.h>
 
 void disable_hlt(void)
 {
@@ -43,36 +54,102 @@ void enable_hlt(void)
 	hlt_counter--;
 }
 
-/*
- * The idle loop on an arm..
- */
-asmlinkage int sys_idle(void)
+static int __init nohlt_setup(char *__unused)
 {
-	if (current->pid != 0)
-		return -EPERM;
+	hlt_counter = 1;
+	return 1;
+}
 
+static int __init hlt_setup(char *__unused)
+{
+	hlt_counter = 0;
+	return 1;
+}
+
+__setup("nohlt", nohlt_setup);
+__setup("hlt", hlt_setup);
+
+/*
+ * The following aren't currently used.
+ */
+void (*pm_idle)(void);
+void (*pm_power_off)(void);
+
+/*
+ * The idle thread.  We try to conserve power, while trying to keep
+ * overall latency low.  The architecture specific idle is passed
+ * a value to indicate the level of "idleness" of the system.
+ */
+void cpu_idle(void)
+{
 	/* endless idle loop with no priority at all */
+	init_idle();
+	current->nice = 20;
 	current->counter = -100;
-	for (;;) {
-		if (!hlt_counter && !need_resched)
-			proc_idle ();
+ 
+	while (1) {
+		void (*idle)(void) = pm_idle;
+		if (!idle)
+			idle = arch_idle;
+		leds_event(led_idle_start);
+		while (!current->need_resched)
+			idle();
+		leds_event(led_idle_end);
 		schedule();
+#ifndef CONFIG_NO_PGT_CACHE
+		check_pgt_cache();
+#endif
 	}
 }
 
-void reboot_setup(char *str, int *ints)
+static char reboot_mode = 'h';
+
+int __init reboot_setup(char *str)
 {
+	reboot_mode = str[0];
+	return 1;
 }
 
-/*
- * This routine reboots the machine by resetting the expansion cards via
- * their loaders, turning off the processor cache (if ARM3), copying the
- * first instruction of the ROM to 0, and executing it there.
- */
-void hard_reset_now(void)
+__setup("reboot=", reboot_setup);
+
+void machine_halt(void)
 {
-	proc_hard_reset ();
-	arch_hard_reset ();
+	leds_event(led_halted);
+}
+
+void machine_power_off(void)
+{
+	leds_event(led_halted);
+	if (pm_power_off)
+		pm_power_off();
+}
+
+void machine_restart(char * __unused)
+{
+	/*
+	 * Clean and disable cache, and turn off interrupts
+	 */
+	cpu_proc_fin();
+
+	/*
+	 * Tell the mm system that we are going to reboot -
+	 * we may need it to insert some 1:1 mappings so that
+	 * soft boot works.
+	 */
+	setup_mm_for_reboot(reboot_mode);
+
+	/*
+	 * Now call the architecture specific reboot code.
+	 */
+	arch_reset(reboot_mode);
+
+	/*
+	 * Whoops - the architecture was unable to reboot.
+	 * Tell the user!
+	 */
+	mdelay(1000);
+	printk("Reboot failed -- System halted\n");
+	while (1);
 }
 
 void show_regs(struct pt_regs * regs)
@@ -81,83 +158,180 @@ void show_regs(struct pt_regs * regs)
 
 	flags = condition_codes(regs);
 
-	printk("\n"
-		"pc : [<%08lx>]\n"
-		"lr : [<%08lx>]\n"
-		"sp : %08lx  ip : %08lx  fp : %08lx\n",
+	printk("pc : [<%08lx>]    lr : [<%08lx>]    %s\n"
+	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
 		instruction_pointer(regs),
-		regs->ARM_lr,
-		regs->ARM_sp,
-		regs->ARM_ip,
-		regs->ARM_fp);
-	printk( "r10: %08lx  r9 : %08lx  r8 : %08lx\n",
-		regs->ARM_r10,
-		regs->ARM_r9,
+		regs->ARM_lr, print_tainted(), regs->ARM_sp,
+		regs->ARM_ip, regs->ARM_fp);
+	printk("r10: %08lx  r9 : %08lx  r8 : %08lx\n",
+		regs->ARM_r10, regs->ARM_r9,
 		regs->ARM_r8);
-	printk( "r7 : %08lx  r6 : %08lx  r5 : %08lx  r4 : %08lx\n",
-		regs->ARM_r7,
-		regs->ARM_r6,
-		regs->ARM_r5,
-		regs->ARM_r4);
-	printk( "r3 : %08lx  r2 : %08lx  r1 : %08lx  r0 : %08lx\n",
-		regs->ARM_r3,
-		regs->ARM_r2,
-		regs->ARM_r1,
-		regs->ARM_r0);
+	printk("r7 : %08lx  r6 : %08lx  r5 : %08lx  r4 : %08lx\n",
+		regs->ARM_r7, regs->ARM_r6,
+		regs->ARM_r5, regs->ARM_r4);
+	printk("r3 : %08lx  r2 : %08lx  r1 : %08lx  r0 : %08lx\n",
+		regs->ARM_r3, regs->ARM_r2,
+		regs->ARM_r1, regs->ARM_r0);
 	printk("Flags: %c%c%c%c",
 		flags & CC_N_BIT ? 'N' : 'n',
 		flags & CC_Z_BIT ? 'Z' : 'z',
 		flags & CC_C_BIT ? 'C' : 'c',
 		flags & CC_V_BIT ? 'V' : 'v');
-	printk("  IRQs %s  FIQs %s  Mode %s\n",
+	printk("  IRQs %s  FIQs %s  Mode %s%s  Segment %s\n",
 		interrupts_enabled(regs) ? "on" : "off",
 		fast_interrupts_enabled(regs) ? "on" : "off",
-		processor_modes[processor_mode(regs)]);
+		processor_modes[processor_mode(regs)],
+		thumb_mode(regs) ? " (T)" : "",
+		get_fs() == get_ds() ? "kernel" : "user");
+/* We are interested only if we have cache related or CPU Control info */
+#if defined(CONFIG_CPU_32)
+	{
+		int ctrl, transbase, dac;
+		  __asm__ (
+#ifdef CONFIG_CPU_WITH_MCR_INSTRUCTION				  
+		"	mrc p15, 0, %0, c1, c0\n"
+#else
+# warning		"FIXME: Get CPU control info if any without MCR Instruction"
+		"	mov %0, #0 @ Dummy for now\n"
+#endif
+#ifndef NO_MM
+		"	mrc p15, 0, %1, c2, c0\n"
+		"	mrc p15, 0, %2, c3, c0\n"
+		: "=r" (ctrl), "=r" (transbase), "=r" (dac));
+		printk("Control: %04X  Table: %08X  DAC: %08X\n",
+		  	ctrl, transbase, dac);
+#else
+		: "=r" (ctrl));
+		printk("Control: %X\n", ctrl);
+#endif		
+	}
+#endif
+}
+
+void show_fpregs(struct user_fp *regs)
+{
+	int i;
+
+	for (i = 0; i < 8; i++) {
+		unsigned long *p;
+		char type;
+
+		p = (unsigned long *)(regs->fpregs + i);
+
+		switch (regs->ftype[i]) {
+			case 1: type = 'f'; break;
+			case 2: type = 'd'; break;
+			case 3: type = 'e'; break;
+			default: type = '?'; break;
+		}
+		if (regs->init_flag)
+			type = '?';
+
+		printk("  f%d(%c): %08lx %08lx %08lx%c",
+			i, type, p[0], p[1], p[2], i & 1 ? '\n' : ' ');
+	}
+			
+
+	printk("FPSR: %08lx FPCR: %08lx\n",
+		(unsigned long)regs->fpsr,
+		(unsigned long)regs->fpcr);
+}
+
+/*
+ * Task structure and kernel stack allocation.
+ */
+static struct task_struct *task_struct_head;
+static unsigned int nr_task_struct;
+
+#ifdef CONFIG_CPU_32
+#define EXTRA_TASK_STRUCT	4
+#else
+#define EXTRA_TASK_STRUCT	0
+#endif
+
+struct task_struct *alloc_task_struct(void)
+{
+	struct task_struct *tsk;
+
+	if (EXTRA_TASK_STRUCT)
+		tsk = task_struct_head;
+	else
+		tsk = NULL;
+
+	if (tsk) {
+		task_struct_head = tsk->next_task;
+		nr_task_struct -= 1;
+	} else
+		tsk = ll_alloc_task_struct();
+
+#ifdef CONFIG_SYSRQ
+	/*
+	 * The stack must be cleared if you want SYSRQ-T to
+	 * give sensible stack usage information
+	 */
+	if (tsk) {
+		char *p = (char *)tsk;
+		memzero(p+KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
+	}
+#endif
+	return tsk;
+}
+
+void __free_task_struct(struct task_struct *p)
+{
+	if (EXTRA_TASK_STRUCT && nr_task_struct < EXTRA_TASK_STRUCT) {
+		p->next_task = task_struct_head;
+		task_struct_head = p;
+		nr_task_struct += 1;
+	} else
+		ll_free_task_struct(p);
 }
 
 /*
  * Free current thread data structures etc..
  */
-void exit_thread (void)
+void exit_thread(void)
 {
-	if (last_task_used_math == current)
-    		last_task_used_math = NULL;
 }
 
 void flush_thread(void)
 {
-	int i;
-
-	for (i = 0; i < 8; i++)
-		current->debugreg[i] = 0;
-	if (last_task_used_math == current)
-		last_task_used_math = NULL;
-	current->tss.fs = USER_DS;
+	memset(&current->thread.debug, 0, sizeof(struct debug_info));
+	memset(&current->thread.fpstate, 0, sizeof(union fp_state));
+	current->used_math = 0;
+	current->flags &= ~PF_USEDFPU;
 }
 
 void release_thread(struct task_struct *dead_task)
 {
 }
 
-void copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
+
+int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+	unsigned long unused,
 	struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
 	struct context_save_struct * save;
 
-	childregs = ((struct pt_regs *)(p->kernel_stack_page + 4096)) - 1;
+	atomic_set(&p->thread.refcount, 1);
+
+	childregs = ((struct pt_regs *)((unsigned long)p + 8192)) - 1;
 	*childregs = *regs;
 	childregs->ARM_r0 = 0;
+#ifdef NO_MM
 	if (esp) childregs->ARM_sp = esp;
-
+#else
+	childregs->ARM_sp = esp;
+#endif
 	save = ((struct context_save_struct *)(childregs)) - 1;
-	copy_thread_css (save);
-	p->tss.save = save;
-	/*
-	 * Save current math state in p->tss.fpe_save if not already there.
-	 */
-	if (last_task_used_math == current)
-		fpe_save (&p->tss.fpstate.soft);
+	*save = INIT_CSS;
+	save->pc |= (unsigned long)ret_from_fork;
+
+	p->thread.save = save;
+
+	return 0;
 }
 
 /*
@@ -165,16 +339,10 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
  */
 int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
 {
-	int fpvalid = 0;
+	if (current->used_math)
+		memcpy(fp, &current->thread.fpstate.soft, sizeof (*fp));
 
-	if (current->used_math) {
-		if (last_task_used_math == current)
-			fpe_save (&current->tss.fpstate.soft);
-
-		memcpy (fp, &current->tss.fpstate.soft, sizeof (fp));
-	}
-
-	return fpvalid;
+	return current->used_math;
 }
 
 /*
@@ -182,18 +350,21 @@ int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
  */
 void dump_thread(struct pt_regs * regs, struct user * dump)
 {
-	int i;
+	struct task_struct *tsk = current;
 
 	dump->magic = CMAGIC;
-	dump->start_code = current->mm->start_code;
+	dump->start_code = tsk->mm->start_code;
 	dump->start_stack = regs->ARM_sp & ~(PAGE_SIZE - 1);
 
-	dump->u_tsize = (current->mm->end_code - current->mm->start_code) >> PAGE_SHIFT;
-	dump->u_dsize = (current->mm->brk - current->mm->start_data + PAGE_SIZE - 1) >> PAGE_SHIFT;
+	dump->u_tsize = (tsk->mm->end_code - tsk->mm->start_code) >> PAGE_SHIFT;
+	dump->u_dsize = (tsk->mm->brk - tsk->mm->start_data + PAGE_SIZE - 1) >> PAGE_SHIFT;
 	dump->u_ssize = 0;
 
-	for (i = 0; i < 8; i++)
-		dump->u_debugreg[i] = current->debugreg[i];  
+	dump->u_debugreg[0] = tsk->thread.debug.bp[0].address;
+	dump->u_debugreg[1] = tsk->thread.debug.bp[1].address;
+	dump->u_debugreg[2] = tsk->thread.debug.bp[0].insn;
+	dump->u_debugreg[3] = tsk->thread.debug.bp[1].insn;
+	dump->u_debugreg[4] = tsk->thread.debug.nsaved;
 
 	if (dump->start_stack < 0x04000000)
 		dump->u_ssize = (0x04000000 - dump->start_stack) >> PAGE_SHIFT;
@@ -202,45 +373,61 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 	dump->u_fpvalid = dump_fpu (regs, &dump->u_fp);
 }
 
-asmlinkage int sys_fork(void)
+/*
+ * This is the mechanism for creating a new kernel thread.
+ *
+ * NOTE! Only a kernel-only process(ie the swapper or direct descendants
+ * who haven't done an "execve()") should use this: it will work within
+ * a system call from a "real" process, but the process memory space will
+ * not be free'd until both the parent and the child have exited.
+ */
+pid_t arch_kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
-	struct pt_regs *regs;
-	__asm__("mov\t%0, r9\n\t": "=r" (regs) );
+	pid_t __ret;
 
-	return do_fork(SIGCHLD|CLONE_WAIT, regs->ARM_sp, regs);
-}
-
-asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp)
-{
-	struct pt_regs *regs;
-	__asm__("mov\t%0, r9\n\t":"=r" (regs) );
-	if (!newsp)
-		newsp = regs->ARM_sp;
-
-	return do_fork(clone_flags, newsp, regs);
+	__asm__ __volatile__(					   
+	"orr	r0, %1, %2	@ kernel_thread sys_clone	   \n\
+	mov	r1, #0						   \n\
+	"__syscall(clone)"					   \n\
+	movs	%0, r0		@ if we are the child		   \n\
+	bne	1f						   \n\
+	mov	fp, #0		@ ensure that fp is zero	   \n\
+	mov	r0, %4						   \n\
+	mov	lr, pc						   \n\
+	mov	pc, %3						   \n\
+	b	sys_exit					   \n\
+1:	"							   
+        : "=r" (__ret)						   
+        : "Ir" (flags), "I" (CLONE_VM), "r" (fn), "r" (arg)	   
+	: "r0", "r1", "lr");
+	return __ret;
 }
 
 /*
- * sys_execve() executes a new program.
+ * These bracket the sleeping functions..
  */
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+#define first_sched	((unsigned long) scheduling_functions_start_here)
+#define last_sched	((unsigned long) scheduling_functions_end_here)
 
-asmlinkage int sys_execve(char *filenamei, char **argv, char **envp)
+unsigned long get_wchan(struct task_struct *p)
 {
-	int error;
-	char * filename;
-	struct pt_regs *regs;
-	/*
-	 * I hate this type of thing.  Oh well.
-	 * I can't guarantee any way of getting the registers efficiently
-	 */
-	__asm__("mov\t%0, r9\n\t": "=r" (regs));
-	error = getname(filenamei, &filename);
-	if (error)
-		return error;
-	error = do_execve(filename, argv, envp, regs);
-	putname(filename);
-	/* if execve is suceeding, we really want to return argc to the exec'd prcess */
-	if (0 == error) return regs->ARM_r0;
-	
-	return error;
+	unsigned long fp, lr;
+	unsigned long stack_page;
+	int count = 0;
+	if (!p || p == current || p->state == TASK_RUNNING)
+		return 0;
+
+	stack_page = 4096 + (unsigned long)p;
+	fp = get_css_fp(&p->thread);
+	do {
+		if (fp < stack_page || fp > 4092+stack_page)
+			return 0;
+		lr = pc_pointer (((unsigned long *)fp)[-1]);
+		if (lr < first_sched || lr > last_sched)
+			return lr;
+		fp = *(unsigned long *) (fp - 12);
+	} while (count ++ < 16);
+	return 0;
 }

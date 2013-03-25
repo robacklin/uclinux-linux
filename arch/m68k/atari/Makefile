@@ -7,11 +7,17 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
-EXTRA_CFLAGS := -Wa,-m68030
-
 O_TARGET := atari.o
-O_OBJS	 := config.o atakeyb.o ataints.o \
-            stdma.o atasound.o joystick.o stram.o atafb.o
-OX_OBJS = ksyms.o
+
+export-objs	:= atari_ksyms.o
+
+obj-y		:= config.o time.o debug.o ataints.o stdma.o \
+			atasound.o stram.o atari_ksyms.o
+
+obj-$(CONFIG_VT)	+= atakeyb.o joystick.o
+
+ifeq ($(CONFIG_PCI),y)
+obj-$(CONFIG_HADES)	+= hades-pci.o
+endif
 
 include $(TOPDIR)/Rules.make

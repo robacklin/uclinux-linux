@@ -1,47 +1,11 @@
-/* $Id: isdn_audio.h,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
-
+/* $Id: isdn_audio.h,v 1.1.4.1 2001/11/20 14:19:34 kai Exp $
+ *
  * Linux ISDN subsystem, audio conversion and compression (linklevel).
  *
- * Copyright 1994-1998 by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1994-1999 by Fritz Elfert (fritz@isdn4linux.de)
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: isdn_audio.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.5.2.2  1998/11/05 22:11:39  fritz
- * Changed mail-address.
- *
- * Revision 1.5.2.1  1998/08/22 16:43:06  armin
- * Added silence detection in audio receive mode (AT+VSD).
- *
- * Revision 1.5  1997/02/03 22:45:21  fritz
- * Reformatted according CodingStyle
- *
- * Revision 1.4  1996/06/06 14:43:32  fritz
- * Changed to support DTMF decoding on audio playback also.
- *
- * Revision 1.3  1996/06/05 02:24:09  fritz
- * Added DTMF decoder for audio mode.
- *
- * Revision 1.2  1996/05/10 08:48:32  fritz
- * Corrected adpcm bugs.
- *
- * Revision 1.1  1996/04/30 09:29:06  fritz
- * Taken under CVS control.
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
@@ -56,13 +20,14 @@ typedef struct adpcm_state {
 
 typedef struct dtmf_state {
 	char last;
+	char llast;
 	int idx;
 	int buf[DTMF_NPOINTS];
 } dtmf_state;
 
 typedef struct silence_state {
-        int state;
-        unsigned int idx;
+	int state;
+	unsigned int idx;
 } silence_state;
 
 extern void isdn_audio_ulaw2alaw(unsigned char *, unsigned long);
@@ -77,3 +42,4 @@ dtmf_state *isdn_audio_dtmf_init(dtmf_state *);
 extern void isdn_audio_calc_silence(modem_info *, unsigned char *, int, int);
 extern void isdn_audio_eval_silence(modem_info *);
 silence_state *isdn_audio_silence_init(silence_state *);
+extern void isdn_audio_put_dle_code(modem_info *, u_char);

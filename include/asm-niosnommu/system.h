@@ -20,16 +20,12 @@ struct task_struct;
  */
 extern void flush_user_windows(void);
 extern void synchronize_user_stack(void);
-extern void nios_switch_to(void *new_task);
+extern void nios_switch_to(void *old_task, void *new_task);
+#define prepare_to_switch()	do { } while(0)
 
-#define switch_to(prev, next) do { \
-			  flush_user_windows(); \
-			  prev->tss.current_ds = active_ds; \
-                          active_ds = next->tss.current_ds; \
-			  if(last_task_used_math != next) \
-			    next->tss.flags &= ~NIOS_FLAG_COPROC; \
-                          nios_switch_to(next); \
-                     } while(0)
+#define switch_to(prev,next,last) do {\
+			nios_switch_to(prev, next); \
+			} while(0)
 
 #define HARD_RESET_NOW() hard_reset_now();
 
@@ -90,12 +86,31 @@ extern inline int swpipl(int __new_ipl)
 	return retval;
 }
 
-#define cli()			setipl(3)    /* 3 = no int's except reg window over/underflow */
-#define sti()			setipl(63)   /* This will allow lower priority interrupts
+#define __cli()			setipl(3)    /* 3 = no int's except reg window over/underflow */
+#define __sti()			setipl(63)   /* This will allow lower priority interrupts
 					        to occur that should not if IE bit could have
 					        been used. */
-#define save_flags(flags)	do { flags = getipl(); } while (0)
-#define restore_flags(flags)	setipl(flags)
+#define __save_flags(flags)	do { flags = getipl(); } while (0)
+#define __restore_flags(flags)	setipl(flags)
+
+#define nop() __asm__ __volatile__ ("nop")
+
+#define DEBUG_TRAP5      0x7905  /* Nios Trap 5 instruction */
+#define NOP              0x3000  /* Nios nop instruction    */
+
+/* For spinlocks etc */
+#define local_irq_save(x)	do { __save_flags(x); __cli(); } while (0)
+#define local_irq_set(x)	do { __save_flags(x); __sti(); } while (0)
+#define local_irq_restore(x)	do { __restore_flags(x); } while (0)
+#define local_irq_disable()	__cli()
+#define local_irq_enable()	__sti()
+
+#define cli()			__cli()
+#define sti()			__sti()
+#define save_flags(x)		__save_flags(x)
+#define restore_flags(x)	__restore_flags(x)
+#define save_and_cli(x)	__save_and_cli(x)
+#define save_and_set(x)	__save_and_sti(x)
 
 /* These definitions for en/disabling interrupts can only be used when there
  * is no chance that the body of code between disable and enable does a call
@@ -181,7 +196,19 @@ extern inline int get_hi_limit(void)
 /* read cache so all processors see the same   */
 /* values in memory. But not today...          */
 /***********************************************/
-#define mb() __asm__ __volatile__ ("" : : : "memory")
+#define mb()	__asm__ __volatile__ ("" : : : "memory")
+#define rmb()	__asm__ __volatile__ ("" : : : "memory")
+#define wmb()	__asm__ __volatile__ ("" : : : "memory")
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	barrier()
+#define smp_rmb()	barrier()
+#define smp_wmb()	barrier()
+#endif
 
 #endif /* _NIOS_SYSTEM_H */
 

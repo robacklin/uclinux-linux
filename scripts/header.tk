@@ -110,6 +110,8 @@ proc load_configfile { w title func } {
 	wm geometry $w +$winx+$winy
 }
 
+bind all <Alt-q> {maybe_exit .maybe}
+
 proc maybe_exit { w } {
 	catch {destroy $w}
 	toplevel $w -class Dialog
@@ -128,6 +130,8 @@ proc maybe_exit { w } {
 		-width 20 -command "destroy $w; focus $oldFocus"
 	pack $w.f.back $w.f.canc -side left -pady 10 -padx 45
 	pack $w.f -pady 10 -side bottom -padx 10 -anchor w
+  	bind $w <Return> "exit"
+    	bind $w <Escape> "destroy $w; focus $oldFocus"
 	focus $w
 	global winx; global winy
 	set winx [expr [winfo x .]+30]; set winy [expr [winfo y .]+30]
@@ -272,7 +276,7 @@ proc write_tristate { file1 file2 varname variable deplist modset } {
 		then { puts $file1 "# $varname is not set"; \
 		       puts $file2 "#undef  $varname"} \
 	else { \
-	    puts stdout "ERROR - Attempting to write value for unconfigured variable ($varname=$variable)." \
+	    puts stdout "ERROR - Attempting to write value for unconfigured variable ($varname)." \
 	}
 }
 
@@ -392,7 +396,7 @@ proc istring { w mnum line text variable } {
 
 proc minimenu { w mnum line text variable helpidx } {
 	frame $w.x$line
-	menubutton $w.x$line.x -width 17 -textvariable $variable -menu \
+	menubutton $w.x$line.x -textvariable $variable -menu \
 		$w.x$line.x.menu -relief raised \
 		-anchor w
 	option_name $w $mnum $line $text $helpidx
@@ -402,6 +406,7 @@ proc minimenu { w mnum line text variable helpidx } {
 
 proc menusplit {w m n} {
 	if { $n > 2 } then {
+		update idletasks
 		set menuoptsize [expr [$m yposition 2] - [$m yposition 1]]   
 		set maxsize [winfo screenheight $w]
 		set splitpoint [expr $maxsize * 4 / 5 / $menuoptsize - 1]
@@ -409,6 +414,10 @@ proc menusplit {w m n} {
 			$m entryconfigure $i -columnbreak 1
 		}
 	}
+}
+
+proc menutitle {text menu w} {
+	wm title $w "$text"
 }
 
 proc submenu { w mnum line text subnum } {
@@ -444,12 +453,7 @@ proc dohelp {w var parent}  {
 	set found 0
 	set lineno 0
 
-	global help_file
-	if { "$help_file" == "" } {
-		set help_file "Documentation/Configure.help"
-	}
-
-	if { [file readable $help_file] == 1} then {
+	if { [file readable Documentation/Configure.help] == 1} then {
 		set filefound 1
 		# First escape sed regexp special characters in var:
 		set var [exec echo "$var" | sed s/\[\]\[\/.^$*\]/\\\\&/g]
@@ -462,9 +466,10 @@ ${var}:\\
 				/^#/b
 				/^\[^ 	\]/q
 				s/^  //
+				/<file:\\(\[^>\]*\\)>/s//\\1/g
 				p
 			}
-			" $help_file]
+			" Documentation/Configure.help]
 		set found [expr [string length "$message"] > 0]
 	}
 
@@ -491,7 +496,7 @@ ${var}:\\
 	if { $found == 0 } then {
 		if { $filefound == 0 } then {
 		message $w.f1.f.m -width 750 -aspect 300 -relief flat -text \
-			"No help available - unable to open file $help_file.  This file should have come with your kernel."
+			"No help available - unable to open file Documentation/Configure.help.  This file should have come with your kernel."
 		} else {
 		message $w.f1.f.m -width 400 -aspect 300 -relief flat -text \
 			"No help available for $var"
@@ -536,6 +541,9 @@ ${var}:\\
 	wm maxsize $w [winfo width $w] $sizy
 }
 
+bind all <Alt-s> { catch {exec cp -f .config .config.old}; \
+		writeconfig .config include/linux/autoconf.h; wrapup .wrap }
+
 proc wrapup {w }  {
 	catch {destroy $w}
 	toplevel $w -class Dialog
@@ -559,6 +567,7 @@ proc wrapup {w }  {
 	pack $w.f.back -side bottom -pady 10 -anchor s
 	pack $w.f -pady 10 -side top -padx 10 -anchor s
 	focus $w
+        bind $w <Return> "exit"
 	global winx; global winy
 	set winx [expr [winfo x .]+30]; set winy [expr [winfo y .]+30]
 	wm geometry $w +$winx+$winy
@@ -626,4 +635,3 @@ frame .f0.right
 
 set active_menus [list]
 set processed_top_level 0
-set help_file ""

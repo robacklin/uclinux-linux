@@ -1,4 +1,4 @@
-/*  $Id: aha1740.c,v 1.1.1.1 1999-11-22 03:47:21 christ Exp $
+/*  $Id$
  *  1993/03/31
  *  linux/kernel/aha1740.c
  *
@@ -22,12 +22,8 @@
  * if it doesn't work for your devices, take a look.
  */
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif
-
 #include <linux/kernel.h>
-#include <linux/head.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -45,11 +41,6 @@
 #include "aha1740.h"
 #include<linux/stat.h>
 
-struct proc_dir_entry proc_scsi_aha1740 = {
-    PROC_SCSI_AHA1740, 7, "aha1740",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 /* IF YOU ARE HAVING PROBLEMS WITH THIS DRIVER, AND WANT TO WATCH
    IT WORK, THEN:
 #define DEBUG
@@ -61,7 +52,7 @@ struct proc_dir_entry proc_scsi_aha1740 = {
 #endif
 
 /*
-static const char RCSid[] = "$Header: /cvs/sw/linux-2.0.x/drivers/scsi/aha1740.c,v 1.1.1.1 1999-11-22 03:47:21 christ Exp $";
+static const char RCSid[] = "$Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/aha1740.c,v 1.1 1992/07/24 06:27:38 root Exp root $";
 */
 
 struct aha1740_hostdata {
@@ -93,7 +84,7 @@ int aha1740_proc_info(char *buffer, char **start, off_t offset,
     }
     host = HOSTDATA(shpnt);
 
-    len = sprintf(buffer, "aha174x at IO:%x, IRQ %d, SLOT %d.\n"
+    len = sprintf(buffer, "aha174x at IO:%lx, IRQ %d, SLOT %d.\n"
 		  "Extended translation %sabled.\n",
 		  shpnt->io_port, shpnt->irq, host->slot,
 		  host->translation ? "en" : "dis");
@@ -228,6 +219,9 @@ void aha1740_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
     struct ecb *ecbptr;
     Scsi_Cmnd *SCtmp;
     unsigned int base;
+    unsigned long flags;
+
+    spin_lock_irqsave(&io_request_lock, flags);
 
     if (!aha_host[irq - 9])
 	panic("aha1740.c: Irq from unknown host!\n");
@@ -304,6 +298,8 @@ void aha1740_intr_handle(int irq, void *dev_id, struct pt_regs * regs)
 	}
 	number_serviced++;
     }
+
+    spin_unlock_irqrestore(&io_request_lock, flags);
 }
 
 int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
@@ -320,11 +316,16 @@ int aha1740_queuecommand(Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 
     if(*cmd == REQUEST_SENSE)
     {
+#if 0
+	/* scsi_request_sense() provides a buffer of size 256,
+	   so there is no reason to expect equality */
+
 	if (bufflen != sizeof(SCpnt->sense_buffer))
 	{
 	    printk("Wrong buffer length supplied for request sense (%d)\n",
 		   bufflen);
 	}
+#endif	
 	SCpnt->result = 0;
 	done(SCpnt); 
 	return 0;
@@ -522,10 +523,10 @@ int aha1740_detect(Scsi_Host_Template * tpnt)
 	 * check/allocate region code, but this may change at some point,
 	 * so we go through the motions.
 	 */
-	if (check_region(slotbase, SLOTSIZE))  /* See if in use */
+	if (!request_region(slotbase, SLOTSIZE, "aha1740"))  /* See if in use */
 	    continue;
 	if (!aha1740_test_port(slotbase))
-	    continue;
+	    goto err_release;
 	aha1740_getconfig(slotbase,&irq_level,&translation);
 	if ((inb(G2STAT(slotbase)) &
 	     (G2STAT_MBXOUT|G2STAT_BUSY)) != G2STAT_MBXOUT)
@@ -539,10 +540,12 @@ int aha1740_detect(Scsi_Host_Template * tpnt)
 	DEB(printk("aha1740_detect: enable interrupt channel %d\n",irq_level));
 	if (request_irq(irq_level,aha1740_intr_handle,0,"aha1740",NULL)) {
 	    printk("Unable to allocate IRQ for adaptec controller.\n");
-	    continue;
+	    goto err_release;
 	}
 	shpnt = scsi_register(tpnt, sizeof(struct aha1740_hostdata));
-	request_region(slotbase, SLOTSIZE, "aha1740");
+	if(shpnt == NULL)
+		goto err_free_irq;
+
 	shpnt->base = 0;
 	shpnt->io_port = slotbase;
 	shpnt->n_io_port = SLOTSIZE;
@@ -553,6 +556,12 @@ int aha1740_detect(Scsi_Host_Template * tpnt)
 	host->translation = translation;
 	aha_host[irq_level - 9] = shpnt;
 	count++;
+	continue;
+
+    err_free_irq:
+	free_irq(irq_level, aha1740_intr_handle);
+    err_release:
+	release_region(slotbase, SLOTSIZE);
     }
     return count;
 }
@@ -602,12 +611,12 @@ int aha1740_biosparam(Disk * disk, kdev_t dev, int* ip)
     return 0;
 }
 
-#ifdef MODULE
+MODULE_LICENSE("GPL");
+
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = AHA1740;
+static Scsi_Host_Template driver_template = AHA1740;
 
 #include "scsi_module.c"
-#endif
 
 /* Okay, you made it all the way through.  As of this writing, 3/31/93, I'm
 brad@saturn.gaylord.com or brad@bradpc.gaylord.com.  I'll try to help as time

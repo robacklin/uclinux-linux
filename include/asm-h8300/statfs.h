@@ -1,5 +1,5 @@
-#ifndef _H8300H_STATFS_H
-#define _H8300H_STATFS_H
+#ifndef _H8300_STATFS_H
+#define _H8300_STATFS_H
 
 #ifndef __KERNEL_STRICT_NAMES
 
@@ -22,4 +22,4 @@ struct statfs {
 	long f_spare[6];
 };
 
-#endif /* _H8300H_STATFS_H */
+#endif /* _H8300_STATFS_H */

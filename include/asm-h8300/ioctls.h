@@ -1,5 +1,5 @@
-#ifndef __ARCH_H8300H_IOCTLS_H__
-#define __ARCH_H8300H_IOCTLS_H__
+#ifndef __ARCH_H8300_IOCTLS_H__
+#define __ARCH_H8300_IOCTLS_H__
 
 #include <asm/ioctl.h>
 
@@ -44,8 +44,12 @@
 #define TIOCGETD	0x5424
 #define TCSBRKP		0x5425	/* Needed for POSIX tcsendbreak() */
 #define TIOCTTYGSTRUCT	0x5426  /* For debugging only */
-#define TIOCSBRK        0x5427  /* BSD compatibility */
-#define TIOCCBRK        0x5428  /* BSD compatibility */
+#define TIOCSBRK	0x5427  /* BSD compatibility */
+#define TIOCCBRK	0x5428  /* BSD compatibility */
+#define TIOCGSID	0x5429  /* Return the session ID of FD */
+#define TIOCGPTN	_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
+#define TIOCSPTLCK	_IOW('T',0x31, int)  /* Lock/unlock Pty */
+
 #define FIONCLEX	0x5450  /* these numbers need to be adjusted. */
 #define FIOCLEX		0x5451
 #define FIOASYNC	0x5452
@@ -62,6 +66,8 @@
 #define TIOCMIWAIT	0x545C	/* wait for a change on serial input line(s) */
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
 
+#define	FIOQSIZE	0x545E
+
 /* Used for packet mode */
 #define TIOCPKT_DATA		 0
 #define TIOCPKT_FLUSHREAD	 1
@@ -73,4 +79,4 @@
 
 #define TIOCSER_TEMT    0x01	/* Transmitter physically empty */
 
-#endif /* __ARCH_H8300H_IOCTLS_H__ */
+#endif /* __ARCH_H8300_IOCTLS_H__ */

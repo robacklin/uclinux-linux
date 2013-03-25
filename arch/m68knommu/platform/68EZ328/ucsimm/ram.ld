@@ -24,7 +24,7 @@ SECTIONS
 	} > eflash
 	.realvec :
 	{
-	_ramvec = . ;
+	__ramvec = . ;
 	} > ramvec
 	.romvec :
 	{
@@ -33,9 +33,23 @@ SECTIONS
         .text :
 	{
 	__ram_start = . ;
+	_stext = . ;
 	text_start = . ;
-        *(.text)
-        *(.rodata)
+        	*(.text)
+		*(.text.*)
+		*(.rodata)
+		*(.rodata.str1.1)
+	. = ALIGN(0x4) ;
+		*(.kstrtab)
+	. = ALIGN(16);          /* Exception table              */
+	__start___ex_table = .;
+		*(__ex_table)
+	__stop___ex_table = .;
+
+        __start___ksymtab = .;  /* Kernel symbol table          */
+		 *(__ksymtab)
+	__stop___ksymtab = .;
+
 	_etext = . ;
 	__data_rom_start = ALIGN ( 4 ) ;
         } > ram
@@ -43,7 +57,29 @@ SECTIONS
 	{
 	_sdata = . ;
 	__data_start = . ;
+
+        . = ALIGN(0x2000) ;
+        *(.data.init_task)
+        . = ALIGN(0x2000) ;
+
         *(.data)
+        *(.data.*)      
+        *(.exitcall.exit)               
+
+        . = ALIGN(4096) ;
+        __init_begin = .;
+        *(.text.init)
+        *(.data.init)
+        . = ALIGN(16);
+        __setup_start = .;
+        *(.setup.init)
+        __setup_end = .;
+        __initcall_start = .;
+        *(.initcall.init)
+        . = ALIGN(4) ;
+        __initcall_end = .;
+        __init_end = .;
+
 	_edata = . ;
 	edata = ALIGN( 0x10 ) ;
         } > ram
@@ -61,6 +97,6 @@ SECTIONS
 	} > ram
 	.eram :
 	{
-	_ramend = . ;
+	__ramend = . ;
 	} > eram
 }

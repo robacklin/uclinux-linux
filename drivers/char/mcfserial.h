@@ -1,14 +1,16 @@
 /*
- * mcfserial.h -- Definitions for the ColdFire serial driver.
+ * mcfserial.c -- serial driver for ColdFire internal UARTS.
  *
- * Copyright (C) 1999, Greg Ungerer (gerg@snapgear.com)
- * (C) Copyright 2000, Lineo Inc. (www.lineo.com) 
+ * Copyright (c) 1999 Greg Ungerer <gerg@snapgear.com>
+ * Copyright (c) 2000-2001 Lineo, Inc. <www.lineo.com>
+ * Copyright (c) 2002 SnapGear Inc., <www.snapgear.com>
  *
- * Based on 68332serial.h, which was:
+ * Based on code from 68332serial.c which was:
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  * Copyright (C) 1998 TSHG
- */
+ * Copyright (c) 1999 Rt-Control Inc. <jeff@uclinux.org>
+ */ 
 #ifndef _MCF_SERIAL_H
 #define _MCF_SERIAL_H
 
@@ -67,8 +69,14 @@ struct mcf_serial {
 	struct tq_struct	tqueue_hangup;
 	struct termios		normal_termios;
 	struct termios		callout_termios;
+#if LINUX_VERSION_CODE <= 0x020100
 	struct wait_queue	*open_wait;
 	struct wait_queue	*close_wait;
+#else
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
+#endif
+
 };
 
 #endif /* __KERNEL__ */

@@ -1,84 +1,228 @@
 /*
- * uclinux/include/asm-armnommu/arch-atmel/hardware.h
- *
+ * linux/include/asm-arm/arch-atmel/hardware.h
+ * for Atmel AT91 series
+ * 2001 Erwin Authried
  */
+
 #ifndef __ASM_ARCH_HARDWARE_H
 #define __ASM_ARCH_HARDWARE_H
 
-#include <linux/config.h>
+/* 0=TC0, 1=TC1, 2=TC2 */
+#define KERNEL_TIMER 1	
 
-#ifndef __ASSEMBLER__
-
-typedef unsigned long u_32;
-
-typedef volatile unsigned long at91_reg ;
-
-/* ARM asynchronous clock */
-#define ARM_CLK ((u_32)(CONFIG_ARM_CLK))	/*(24000000))*/
-#else
-#define ARM_CLK CONFIG_ARM_CLK
-#endif
-
-#ifndef __ASSEMBLER__
+#ifdef CONFIG_CPU_AT91X40
 /*
- * RAM definitions
+ ******************* AT91x40xxx ********************
  */
-#define MAPTOPHYS(a)      ((unsigned long)a)
-#define KERNTOPHYS(a)     ((unsigned long)(&a))
-#define GET_MEMORY_END(p) ((p->u1.s.page_size) * (p->u1.s.nr_pages))
 
-#define PARAMS_BASE       0x7000
+#define ARM_CLK	CONFIG_ARM_CLK
 
-#define HARD_RESET_NOW()  { arch_hard_reset(); }
+#define AT91_USART_CNT 2
+#define AT91_USART0_BASE	(0xfffd0000)
+#define AT91_USART1_BASE	(0xfffcc000)
+#define AT91_TC_BASE		(0xfffe0000)
+#define AIC_BASE		(0xfffff000)	
+#define AT91_PIOA_BASE		(0xffff0000)
+#define AT91_SF_CIDR		(0xfff00000)
 
+#define HARD_RESET_NOW()
+
+#define HW_AT91_TIMER_INIT(timer)	/* no PMC */
+
+/* use TC0 as hardware timer to create high resolution timestamps for debugging.
+ *  Timer 0 must be set up as a free running counter, e.g. in the bootloader
+ */
+#define HW_COUNTER  (((struct at91_timers *)AT91_TC_BASE)->chans[0].ch.cv)
+
+/* enable US0,US1 */
+#define HW_AT91_USART_INIT ((volatile struct pio_regs *)AT91_PIOA_BASE)->pdr = \
+				PIOA_RXD0|PIOA_TXD0|PIOA_RXD1|PIOA_TXD1; 
+/* PIOA bit allocation */
+#define PIOA_TCLK0	(1<<0)					
+#define PIOA_TI0A0	(1<<1)					
+#define PIOA_TI0B0	(1<<2)					
+#define PIOA_TCLK1	(1<<3)					
+#define PIOA_TIOA1	(1<<4)				
+#define PIOA_TIOB1	(1<<5)				
+#define PIOA_TCLK2	(1<<6)					
+#define PIOA_TIOA2	(1<<7)				
+#define PIOA_TIOB2	(1<<8)				
+#define PIOA_IRQ0	(1<<9)				
+#define PIOA_IRQ1	(1<<10)				
+#define PIOA_IRQ2	(1<<11)				
+#define PIOA_FIQ	(1<<12)					
+#define PIOA_SCK0	(1<<13)					
+#define PIOA_TXD0	(1<<14)					
+#define PIOA_RXD0	(1<<15)
+
+#define PIOA_SCK1	(1<<20)					
+#define PIOA_TXD1	(1<<21)					
+#define PIOA_RXD1	(1<<22)
+
+#define PIOA_MCK0	(1<<25)	
+#define PIOA_NCS2	(1<<26)
+#define PIOA_NCS3	(1<<27)	
+
+#define PIOA_A20_CS7	(1<<28)
+#define PIOA_A21_CS6	(1<<29)	
+#define PIOA_A22_CS5	(1<<30)
+#define PIOA_A23_CS4	(1<<31)
+
+#elif CONFIG_CPU_AT91X63
+/*
+ ******************* AT91x63xxx ********************
+ */
+
+#define ARM_CLK		CONFIG_ARM_CLK
+
+#define AT91_USART_CNT 2
+#define AT91_USART0_BASE	(0xfffc0000)
+#define AT91_USART1_BASE	(0xfffc4000)
+#define AT91_TC_BASE		(0xfffd0000)
+#define AIC_BASE		(0xfffff000)
+#define AT91_PIOA_BASE 		(0xfffec000)
+#define AT91_PIOB_BASE 		(0xffff0000)
+#define AT91_PMC_BASE		(0xffff4000)
+
+#define HARD_RESET_NOW()
+
+/* enable US0,US1 */
+#define HW_AT91_USART_INIT ((volatile struct pmc_regs *)AT91_PMC_BASE)->pcer = \
+				(1<<2) | (1<<3) | (1<<13); \
+			   ((volatile struct pio_regs *)AT91_PIOA_BASE)->pdr = \
+				PIOA_RXD0|PIOA_TXD0|PIOA_RXD1|PIOA_TXD1; 
+
+#define HW_AT91_TIMER_INIT(timer) ((volatile struct pmc_regs *)AT91_PMC_BASE)->pcer = \
+				1<<(timer+6);
+
+/* PIOA bit allocation */
+#define PIOA_TCLK3	(1<<0)					
+#define PIOA_TI0A3	(1<<1)					
+#define PIOA_TI0B3	(1<<2)					
+#define PIOA_TCLK4	(1<<3)					
+#define PIOA_TI0A4	(1<<4)					
+#define PIOA_TI0B4	(1<<5)					
+#define PIOA_TCLK5	(1<<6)					
+#define PIOA_TI0A5	(1<<7)					
+#define PIOA_TI0B5	(1<<8)					
+#define PIOA_IRQ0	(1<<9)
+#define PIOA_IRQ1	(1<<10)
+#define PIOA_IRQ2	(1<<11)
+#define PIOA_IRQ3	(1<<12)
+#define PIOA_FIQ	(1<<13)
+#define PIOA_SCK0	(1<<14)	
+#define PIOA_TXD0	(1<<15)
+#define PIOA_RXD0	(1<<16)
+#define PIOA_SCK1	(1<<17)	
+#define PIOA_TXD1	(1<<18)
+#define PIOA_RXD1	(1<<19)
+#define PIOA_SCK2	(1<<20)	
+#define PIOA_TXD2	(1<<21)
+#define PIOA_RXD2	(1<<22)
+#define PIOA_SPCK	(1<<23)					
+#define PIOA_MISO	(1<<24)					
+#define PIOA_MOSI	(1<<25)					
+#define PIOA_NPCS0	(1<<26)					
+#define PIOA_NPCS1	(1<<27)					
+#define PIOA_NPCS2	(1<<28)					
+#define PIOA_NPCS3	(1<<29)					
+
+/* PIOB bit allocation */
+#define PIOB_MPI_NOE	(1<<0)					
+#define PIOB_MPI_NLB	(1<<1)				
+#define PIOB_MPI_NUB	(1<<2)				
+
+#define PIOB_MCK0	(1<<17)				
+#define PIOB_BMS	(1<<18)				
+#define PIOB_TCLK0	(1<<19)				
+#define PIOB_TIOA0	(1<<20)				
+#define PIOB_TIOB0	(1<<21)				
+#define PIOB_TCLK1	(1<<22)				
+#define PIOB_TIOA1	(1<<23)				
+#define PIOB_TIOB1	(1<<24)				
+#define PIOB_TCLK2	(1<<25)				
+#define PIOB_TIOA2	(1<<26)				
+#define PIOB_TIOB2	(1<<27)		
+#else 
+  #error "Configuration error: No CPU defined"
 #endif
 
-#define IO_BASE  0
+/*
+ ******************* COMMON PART ********************
+ */
+#define AIC_SMR(i)  (AIC_BASE+i*4)
+#define AIC_IVR	    (AIC_BASE+0x100)
+#define AIC_FVR	    (AIC_BASE+0x104)
+#define AIC_ISR	    (AIC_BASE+0x108)
+#define AIC_IPR	    (AIC_BASE+0x10C)
+#define AIC_IMR	    (AIC_BASE+0x110)
+#define AIC_CISR	(AIC_BASE+0x114)
+#define AIC_IECR	(AIC_BASE+0x120)
+#define AIC_IDCR	(AIC_BASE+0x124)
+#define AIC_ICCR	(AIC_BASE+0x128)
+#define AIC_ISCR	(AIC_BASE+0x12C)
+#define AIC_EOICR   (AIC_BASE+0x130)
 
-/* EBI -- the External Bus Interface */
-#define EBI_BASE 0xFFE00000
-
-#define EBI_CSR0 (EBI_BASE + 0x00) /* Chip Select Register 0 */
-#define EBI_CSR1 (EBI_BASE + 0x04) /* Chip Select Register 1 */
-#define EBI_RCR  (EBI_BASE + 0x20) /* Remap Control Register */
-#define EBI_MCR  (EBI_BASE + 0x24) /* Memory Control Register */
-
-/* USART0/1 */
-
-#ifdef CONFIG_ARCH_ATMEL_EB55
-#define USART0_BASE 0XFFFC0000
-#define USART1_BASE 0XFFFC4000
-#else
-/* USART0_BASE and USART1_BASE are set in .config
- *
-#define USART0_BASE 0xFFFD0000
-#define USART1_BASE 0xFFFCC000
-*/
-#endif
 
 #ifndef __ASSEMBLER__
-/*
-	Atmel USART registers
-*/
-struct atmel_usart_regs{
-	at91_reg cr;		// control 
-	at91_reg mr;		// mode
-	at91_reg ier;		// interrupt enable
-	at91_reg idr;		// interrupt disable
-	at91_reg imr;		// interrupt mask
-	at91_reg csr;		// channel status
-	at91_reg rhr;		// receive holding 
-	at91_reg thr;		// tramsmit holding		
-	at91_reg brgr;		// baud rate generator		
-	at91_reg rtor;		// rx time-out
-	at91_reg ttgr;		// tx time-guard
-	at91_reg res1;
-	at91_reg rpr;		// rx pointer
-	at91_reg rcr;		// rx counter
-	at91_reg tpr;		// tx pointer
-	at91_reg tcr;		// tx counter
+struct at91_timer_channel
+{
+	unsigned long ccr;				// channel control register		(WO)
+	unsigned long cmr;				// channel mode register		(RW)
+	unsigned long reserved[2];		
+	unsigned long cv;				// counter value				(RW)
+	unsigned long ra;				// register A					(RW)
+	unsigned long rb;				// register B					(RW)
+	unsigned long rc;				// register C					(RW)
+	unsigned long sr;				// status register				(RO)
+	unsigned long ier;				// interrupt enable register	(WO)
+	unsigned long idr;				// interrupt disable register	(WO)
+	unsigned long imr;				// interrupt mask register		(RO)
+};
+
+struct at91_timers
+{
+	struct {
+		struct at91_timer_channel ch;
+		unsigned char padding[0x40-sizeof(struct at91_timer_channel)];
+	} chans[3];
+	unsigned  long bcr;				// block control register		(WO)
+	unsigned  long bmr;				// block mode	 register		(RW)
 };
 #endif
+
+/*  TC control register */
+#define TC_SYNC	(1)
+
+/*  TC mode register */
+#define TC2XC2S(x)	(x & 0x3)
+#define TC1XC1S(x)	(x<<2 & 0xc)
+#define TC0XC0S(x)	(x<<4 & 0x30)
+#define TCNXCNS(timer,v) ((v) << (timer<<1))
+
+/* TC channel control */
+#define TC_CLKEN	(1)			
+#define TC_CLKDIS	(1<<1)			
+#define TC_SWTRG	(1<<2)			
+
+/* TC interrupts enable/disable/mask and status registers */
+#define TC_MTIOB	(1<<18)
+#define TC_MTIOA	(1<<17)
+#define TC_CLKSTA	(1<<16)
+
+#define TC_ETRGS	(1<<7)
+#define TC_LDRBS	(1<<6)
+#define TC_LDRAS	(1<<5)
+#define TC_CPCS		(1<<4)
+#define TC_CPBS		(1<<3)
+#define TC_CPAS		(1<<2)
+#define TC_LOVRS	(1<<1)
+#define TC_COVFS	(1)
+
+/*
+ *	USART registers
+ */
+
 
 /*  US control register */
 #define US_SENDA	(1<<12)
@@ -118,331 +262,103 @@ struct atmel_usart_regs{
 
 #define US_ALL_INTS (US_DMSI|US_TXEMPTY|US_TIMEOUT|US_PARE|US_FRAME|US_OVRE|US_ENDTX|US_ENDRX|US_RXBRK|US_TXRDY|US_RXRDY)
 
-/* US modem control register */
-#define US_FCM	(1<<5)
-#define US_RTS	(1<<1)
-#define US_DTR	(1)
-
-/* US modem status register */
-#define US_FCMS	(1<<8)
-#define US_DCD	(1<<7)
-#define US_RI	(1<<6)
-#define US_DSR	(1<<5)
-#define US_CTS	(1<<4)
-#define US_DDCD	(1<<3)
-#define US_TERI	(1<<2)
-#define US_DDSR	(1<<1)
-#define US_DCTS	(1)
-
-/* PIO -- Parallel IO controller */
-
-#ifndef CONFIG_ARCH_ATMEL_EB55
-
-#define PIO_BASE                       0xffff0000
-
-#define PIO_ENABLE_REGISTER            (PIO_BASE+0x00)
-#define PIO_DISABLE_REGISTER           (PIO_BASE+0x04)
-#define PIO_OUTPUT_ENABLE_REGISTER     (PIO_BASE+0x10)
-#define PIO_SET_OUTPUT_DATA_REGISTER   (PIO_BASE+0x30)
-#define PIO_CLEAR_OUTPUT_DATA_REGISTER (PIO_BASE+0x34)
-
-#define LED_OUTPUT_PIN                 (PIO_BASE+0x01)  /* LED is attached to PIO pin 1 */
-#endif
-
-#ifdef CONFIG_ARCH_ATMEL_EB55
-
 #ifndef __ASSEMBLER__
-typedef struct
-{
-    at91_reg        PIO_PER ;           /* PIO Enable Register */
-    at91_reg        PIO_PDR ;           /* PIO Disable Register */
-    at91_reg        PIO_PSR ;           /* PIO Status Register */
-    at91_reg        Reserved0 ;
-    at91_reg        PIO_OER ;           /* Output Enable Register */
-    at91_reg        PIO_ODR ;           /* Output Disable Register */
-    at91_reg        PIO_OSR ;           /* Output Status Register */
-    at91_reg        Reserved1 ;
-    at91_reg        PIO_IFER ;          /* Input Filter Enable Register */
-    at91_reg        PIO_IFDR ;          /* Input Filter Disable Register */
-    at91_reg        PIO_IFSR ;          /* Input Filter Status Register */
-    at91_reg        Reserved2 ;
-    at91_reg        PIO_SODR ;          /* Set Output Data Register */
-    at91_reg        PIO_CODR ;          /* Clear Output Data Register */
-    at91_reg        PIO_ODSR ;          /* Output Data Status Register */
-    at91_reg        PIO_PDSR ;          /* Pin Data Status Register */
-    at91_reg        PIO_IER ;           /* Interrupt Enable Register */
-    at91_reg        PIO_IDR ;           /* Interrupt Disable Register */
-    at91_reg        PIO_IMR ;           /* Interrupt Mask Register */
-    at91_reg        PIO_ISR ;           /* Interrupt Status Register */
-    at91_reg        PIO_MDER ;          /* Multi Driver Enable Register */
-    at91_reg        PIO_MDDR ;          /* Multi Driver Disable Register */
-    at91_reg        PIO_MDSR ;          /* Multi Driver Status Register */
-} StructPIO ;
-
-#define PIOA_BASE                       (( StructPIO *) 0xfffec000)
-#define PIOB_BASE                       (( StructPIO *) 0xffff0000)
-
-#else
-
-#define PIOA_BASE                       (0xfffec000)
-#define PIOB_BASE                       (0xffff0000)
-
-#endif
-
-#define PIOB_ENABLE_REGISTER            (PIOB_BASE+0x00)
-#define PIOB_DISABLE_REGISTER           (PIOB_BASE+0x04)
-#define PIOB_OUTPUT_ENABLE_REGISTER     (PIOB_BASE+0x10)
-#define PIOB_SET_OUTPUT_DATA_REGISTER   (PIOB_BASE+0x30)
-#define PIOB_CLEAR_OUTPUT_DATA_REGISTER (PIOB_BASE+0x34)
-
-#define PIOB_ENABLE_REGISTER            (PIOB_BASE+0x00)
-#define PIOB_DISABLE_REGISTER           (PIOB_BASE+0x04)
-#define PIOB_OUTPUT_ENABLE_REGISTER     (PIOB_BASE+0x10)
-#define PIOB_SET_OUTPUT_DATA_REGISTER   (PIOB_BASE+0x30)
-#define PIOB_CLEAR_OUTPUT_DATA_REGISTER (PIOB_BASE+0x34)
-
-#define PIOTXD0       15            /* USART 0 transmit data */
-#define PIORXD0       16            /* USART 0 receive data  */
-
-#endif
-
-/* SF -- the special function stuff */
-#define SF_BASE 0xFFF00000
-
-#define SF_CHIP_ID			(SF_BASE+0x00)
-#define SF_CHIP_ID_EXT			(SF_BASE+0x00)
-#define SF_CHIP_ID_EXT			(SF_BASE+0x00)
-#define SF_PROTEXT_MODE			(SF_BASE+0x00)
-
-/* Timer */
-#ifdef CONFIG_ARCH_ATMEL_EB55
-#define TIMER_BASE 0xFFFD0000
-#else
-#define TIMER_BASE 0xFFFE0000
-#endif
-
-/* The Atmel CPUs have 3 internel timers, TC0, TC1, and TC2.
- * One of these muct be used to drive the kernel's internal
- * timer (the thing that updates jiffies).  Pick a timer channel
- * here.  */
-#define	KERNEL_TIMER	1
-
-#define CH0_OFFSET		0x00
-#define CH1_OFFSET		0x40
-#define CH2_OFFSET		0x80
-#define BLOCK_CONTROL_OFFSET	0xC0
-#define BLOCK_MODE_OFFSET	0xC4
-
-#define TIMER_CONTROL_CH0		(TIMER_BASE+CH0_OFFSET)
-#define TIMER_CONTROL_CH1		(TIMER_BASE+CH1_OFFSET)
-#define TIMER_CONTROL_CH2		(TIMER_BASE+CH2_OFFSET)
-#define TIMER_CONTROL_BLOCK_CONTROL	(TIMER_BASE+BLOCK_CONTROL_OFFSET)
-#define TIMER_CONTROL_BLOCK_MODE	(TIMER_BASE+BLOCK_MODE_OFFSET)
-
-/*  Timer control registers */
-#define TC_CCR(x)   (x + 0x00)
-#define TC_CMR(x)   (x + 0x04)
-#define TC_CV(x)    (x + 0x10)
-#define TC_RA(x)    (x + 0x14)
-#define TC_RB(x)    (x + 0x18)
-#define TC_RC(x)    (x + 0x1C)
-#define TC_SR(x)    (x + 0x20)
-#define TC_IER(x)   (x + 0x24)
-#define TC_IDR(x)   (x + 0x28)
-#define TC_IMR(x)   (x + 0x2C)
-
-/*  TC mode register */
-#define TC2XC2S(x) (x & 0x3)
-#define TC1XC1S(x) (x<<2 & 0xc)
-#define TC0XC0S(x) (x<<4 & 0x30)
-
-/* TC channel control */
-#define TC_CLKEN  (1)      
-#define TC_CLKDIS (1<<1)      
-#define TC_SWTRG  (1<<2)      
-
-/* TC interrupts enable/disable/mask and status registers */
-#define TC_MTIOB  (1<<18)
-#define TC_MTIOA  (1<<17)
-#define TC_CLKSTA (1<<16)
-
-#define TC_ETRGS  (1<<7)
-#define TC_LDRBS  (1<<6)
-#define TC_LDRAS  (1<<5)
-#define TC_CPCS   (1<<4)
-#define TC_CPBS   (1<<3)
-#define TC_CPAS   (1<<2)
-#define TC_LOVRS  (1<<1)
-#define TC_COVFS  (1)
-
-#ifndef __ASSEMBLER__
-struct atmel_timer_channel
-{
-  at91_reg ccr;        // channel control register   (WO)
-  at91_reg cmr;        // channel mode register      (RW)
-  at91_reg reserved[2];    
-  at91_reg cv;         // counter value              (RW)
-  at91_reg ra;         // register A                 (RW)
-  at91_reg rb;         // register B                 (RW)
-  at91_reg rc;         // register C                 (RW)
-  at91_reg sr;         // status register            (RO)
-  at91_reg ier;        // interrupt enable register  (WO)
-  at91_reg idr;        // interrupt disable register (WO)
-  at91_reg imr;        // interrupt mask register    (RO)
-  at91_reg reserved1[4];    
+struct atmel_usart_regs{
+	unsigned long cr;		// control 
+	unsigned long mr;		// mode
+	unsigned long ier;		// interrupt enable
+	unsigned long idr;		// interrupt disable
+	unsigned long imr;		// interrupt mask
+	unsigned long csr;		// channel status
+	unsigned long rhr;		// receive holding 
+	unsigned long thr;		// tramsmit holding		
+	unsigned long brgr;		// baud rate generator		
+	unsigned long rtor;		// rx time-out
+	unsigned long ttgr;		// tx time-guard
+	unsigned long res1;
+	unsigned long rpr;		// rx pointer
+	unsigned long rcr;		// rx counter
+	unsigned long tpr;		// tx pointer
+	unsigned long tcr;		// tx counter
 };
 
-struct atmel_timers
+static inline void at91_usart_init(volatile struct atmel_usart_regs *uart, int baudrate)
 {
-  struct {
-    struct atmel_timer_channel ch;
-  } chans[3];
-  at91_reg bcr;        // block control register   (WO)
-  at91_reg bmr;        // block mode   register    (RW)
-};
 
+        uart->cr = US_TXDIS | US_RXDIS | US_RSTTX | US_RSTRX;
+        /* clear Rx receive and Tx sent counters */
+        uart->rcr = 0;
+        uart->tcr = 0;
+
+	uart->idr = US_TXEMPTY;		/* tx disable */
+	uart->idr = US_ENDRX | US_TIMEOUT; /* rx disable */
+	
+        /* Set the serial port into a safe sane state */
+        uart->mr = US_USCLKS(0) | US_CLK0 | US_CHMODE(0) | US_NBSTOP(0) |
+                    US_PAR(4) | US_CHRL(3);
+
+        uart->brgr = ARM_CLK/16/baudrate;
+
+        uart->rtor = 20;                        // timeout = value * 4 *bit period
+        uart->ttgr = 0;                         // no guard time
+        uart->rcr = 0;
+        uart->rpr = 0;
+        uart->tcr = 0;
+        uart->tpr = 0;
+#ifdef US_RTS
+        uart->mc = 0;
 #endif
+}
 
-/* Advanced Interrupt Controller */
-#define AIC_BASE 0xFFFFF000
-
-#define AIC_SMR(i) (AIC_BASE+i*4)      /* Source Mode Register */
-#define AIC_IVR    (AIC_BASE+0x100)    /* IRQ Vector Register */
-#define AIC_FVR    (AIC_BASE+0x104)    /* FIQ Vector Register */
-#define AIC_ISR    (AIC_BASE+0x108)    /* Interrupt Status Register */
-#define AIC_IPR    (AIC_BASE+0x10C)    /* Interrupt Pending Register */
-#define AIC_IMR    (AIC_BASE+0x110)    /* Interrupt Mask Register */
-#define AIC_CISR   (AIC_BASE+0x114)    /* Core Interrupt Status Register */
-#define AIC_IECR   (AIC_BASE+0x120)    /* Interrupt Enable Command Register */
-#define AIC_IDCR   (AIC_BASE+0x124)    /* Interrupt Disable Command Register */
-#define AIC_ICCR   (AIC_BASE+0x128)    /* Interrupt Clear Command Register */
-#define AIC_ISCR   (AIC_BASE+0x12C)    /* Interrupt Set Command Register */
-#define AIC_EOICR  (AIC_BASE+0x130)    /* End of Interrupt Command Register */
-#define AIC_SPU    (AIC_BASE+0x134)    /* Spurious Vector Register */
-
-#define AIC_SVR(i) (AIC_BASE+0x80+i*4) /* Source Vector Register */
-
-#ifdef CONFIG_ARCH_ATMEL_EB55
-
-#define AIC_FIQ  (1<<0)
-#define AIC_SW   (1<<1)
-#define AIC_URT0 (1<<2)
-#define AIC_URT1 (1<<3)
-#define AIC_URT2 (1<<4)
-#define AIC_SPI  (1<<5)
-#define AIC_TC0  (1<<6)
-#define AIC_TC1  (1<<7)
-#define AIC_TC2  (1<<8)
-#define AIC_TC3  (1<<9)
-#define AIC_TC4  (1<<10)
-#define AIC_TC5  (1<<11)
-#define AIC_WD   (1<<12)
-#define AIC_PIOA (1<<13)
-#define AIC_PIOB (1<<14)
-#define AIC_AD0  (1<<15)
-#define AIC_AD1  (1<<16)
-#define AIC_DA0  (1<<17)
-#define AIC_DA1  (1<<18)
-#define AIC_RTC  (1<<19)
-#define AIC_APMC (1<<20)
-
-#define AIC_IRQ6 (1<<23)
-#define AIC_IRQ5 (1<<24)
-#define AIC_IRQ4 (1<<25)
-#define AIC_IRQ3 (1<<26)
-#define AIC_IRQ2 (1<<27)
-#define AIC_IRQ1 (1<<28)
-#define AIC_IRQ0 (1<<29)
-
-#else
-
-#define AIC_FIQ  (1<<0)
-#define AIC_SW   (1<<1)
-#define AIC_URT0 (1<<2)
-#define AIC_URT1 (1<<3)
-#define AIC_TC0  (1<<4)
-#define AIC_TC1  (1<<5)
-#define AIC_TC2  (1<<6)
-#define AIC_WD   (1<<7)
-#define AIC_PIO  (1<<8)
-#define AIC_IRQ0 (1<<16)
-#define AIC_IRQ1 (1<<17)
-#define AIC_IRQ2 (1<<18)
-
+static inline void at91_usart_putc(volatile struct atmel_usart_regs *uart, unsigned char c)
+{
+       uart->cr=US_TXEN;
+       uart->thr=c;
+       while(1) {
+                if (uart->csr & US_TXEMPTY) break;
+       }
+}
 #endif
-
-#ifdef CONFIG_ARCH_ATMEL_EB55
+		
+#define PIO(i)		(1<<i)
 
 #ifndef __ASSEMBLER__
-typedef struct
-{
-    at91_reg    APMC_SCER ;             /* System Clock Enable  Register */
-    at91_reg    APMC_SCDR ;             /* System Clock Disable Register */
-    at91_reg    APMC_SCSR ;             /* System Clock Status  Register */
-    at91_reg    Reserved0 ;
-    at91_reg    APMC_PCER ;             /* Peripheral Clock Enable  Register */
-    at91_reg    APMC_PCDR ;             /* Peripheral Clock Disable Register */
-    at91_reg    APMC_PCSR ;             /* Peripheral Clock Status  Register */
-        at91_reg    Reserved1 ;
-        at91_reg    APMC_CGMR ;                 /* Clock Generator Mode Register */
-        at91_reg    Reserved2 ;
-        at91_reg    APMC_PCR ;                  /* Power Control Register */
-        at91_reg    APMC_PMR ;                  /* Power Mode Register */
-        at91_reg    APMC_SR ;                   /* Status Register */
-        at91_reg    APMC_IER ;                  /* Interrupt Enable Register */
-        at91_reg    APMC_IDR ;                  /* Interrupt Disable Register */
-        at91_reg    APMC_IMR ;                  /* Interrupt Mask Register */   
-} StructAPMC ;
-
-#define APMC_BASE        (( StructAPMC *) 0xFFFF4000)
-
+struct pio_regs{
+	unsigned long per;
+	unsigned long pdr;
+	unsigned long psr;
+	unsigned long res1;
+	unsigned long oer;
+	unsigned long odr;
+	unsigned long osr;
+	unsigned long res2;
+	unsigned long ifer;
+	unsigned long ifdr;
+	unsigned long ifsr;
+	unsigned long res3;
+	unsigned long sodr;
+	unsigned long codr;
+	unsigned long odsr;
+	unsigned long pdsr;
+	unsigned long ier;
+	unsigned long idr;
+	unsigned long imr;
+	unsigned long isr;
+};
 #endif
 
-#define FIQ_ID      0       /* Fast Interrupt */
-
-#define SW_ID       1       /* Soft Interrupt (generated by the AIC) */
-
-#define US0_ID      2       /* USART Channel 0 */
-#define US1_ID      3       /* USART Channel 1 */
-#define US2_ID      4       /* USART Channel 2 */
-
-#define SPI_ID      5       /* SPI Channel */
-
-#define TC0_ID      6       /* Timer Channel 0 */
-#define TC1_ID      7       /* Timer Channel 1 */
-#define TC2_ID      8       /* Timer Channel 2 */
-#define TC3_ID      9       /* Timer Channel 3 */
-#define TC4_ID      10      /* Timer Channel 4 */
-#define TC5_ID      11      /* Timer Channel 5 */
-
-#define WD_ID       12      /* Watchdog interrupt */
-
-#define PIOA_ID     13      /* Parallel I/O Controller A interrupt */
-#define PIOB_ID     14      /* Parallel I/O Controller B interrupt */
-
-#define AD0_ID      15      /* Analog to Digital Converter Channel 0 interrupt */
-#define AD1_ID      16      /* Analog to Digital Converter Channel 1 interrupt */
-
-#define DAC0_ID     17      /* Digital to Analog Converter Channel 0 interrupt */
-#define DAC1_ID     18      /* Digital to Analog Converter Channel 1 interrupt */
-
-#define RTC_ID      19      /* Real Time Clock interrupt */
-
-#define APMC_ID     20      /* Advanced Power Management Controller interrupt */
-
-#define IRQ6_ID     23      /* External interrupt 6 */
-#define IRQ5_ID     24      /* External interrupt 5 */
-#define IRQ4_ID     25      /* External interrupt 4 */
-#define IRQ3_ID     26      /* External interrupt 3 */
-#define IRQ2_ID     27      /* External interrupt 2 */
-#define IRQ1_ID     28      /* External interrupt 1 */
-#define IRQ0_ID     29      /* External interrupt 0 */
-
-#define COMMRX_ID   30      /* RX Debug Communication Channel interrupt */
-#define COMMTX_ID   31      /* TX Debug Communication Channel interrupt */
-
+#ifndef __ASSEMBLER__
+struct pmc_regs{
+	unsigned long scer;
+	unsigned long scdr;
+	unsigned long scsr;
+	unsigned long reserved;
+	unsigned long pcer;
+	unsigned long pcdr;
+	unsigned long pcsr;
+};
 #endif
 
+#endif  /* _ASM_ARCH_HARDWARE_H */
 
-#endif
 

@@ -1,4 +1,4 @@
-/* $Id: sparc-stub.c,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: sparc-stub.c,v 1.28 2001/10/30 04:54:21 davem Exp $
  * sparc-stub.c:  KGDB support for the Linux kernel.
  *
  * Modifications to run under Linux
@@ -97,15 +97,17 @@
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 
 #include <asm/system.h>
 #include <asm/signal.h>
 #include <asm/oplib.h>
 #include <asm/head.h>
 #include <asm/traps.h>
-#include <asm/system.h>
 #include <asm/vac-ops.h>
 #include <asm/kgdb.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 /*
  *
@@ -121,7 +123,7 @@ extern char getDebugChar(void);   /* read and return a single char */
  */
 #define BUFMAX 2048
 
-static int initialized = 0;	/* !0 means we've been initialized */
+static int initialized;	/* !0 means we've been initialized */
 
 static const char hexchars[]="0123456789abcdef";
 
@@ -163,9 +165,10 @@ unsigned long get_sun4csegmap(unsigned long addr)
 	return entry;
 }
 
-static void flush_cache_all_nop(void)
-{
-}
+#if 0
+/* Have to sort this out. This cannot be done after initialization. */
+static void flush_cache_all_nop(void) {}
+#endif
 
 /* Place where we save old trap entries for restoration */
 struct tt_entry kgdb_savettable[256];
@@ -185,7 +188,7 @@ static void eh_init(void)
 {
 	int i, flags;
 
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	for(i=0; i < 256; i++)
 		copy_ttentry(&sparc_ttable[i], &kgdb_savettable[i]);
 	restore_flags(flags);
@@ -198,7 +201,7 @@ static void exceptionHandler(int tnum, trapfunc_t trap_entry)
 	int flags;
 
 	/* We are dorking with a live trap table, all irqs off */
-	save_flags(flags); cli();
+	save_and_cli(flags);
 
 	/* Make new vector */
 	sparc_ttable[tnum].inst_one =
@@ -321,7 +324,25 @@ mem2hex(char *mem, char *buf, int count)
 	unsigned char ch;
 
 	while (count-- > 0) {
-		ch = *mem++;
+		/* This assembler code is basically:  ch = *mem++;
+		 * except that we use the SPARC/Linux exception table
+		 * mechanism (see how "fixup" works in kernel_mna_trap_fault)
+		 * to arrange for a "return 0" upon a memory fault
+		 */
+		__asm__(
+			"\n1:\n\t"
+			"ldub [%0], %1\n\t"
+			"inc %0\n\t"
+			".section .fixup,#alloc,#execinstr\n\t"
+			".align 4\n"
+			"2:\n\t"
+			"retl\n\t"
+			" mov 0, %%o0\n\t"
+			".section __ex_table, #alloc\n\t"
+			".align 4\n\t"
+			".word 1b, 2b\n\t"
+			".text\n"
+			: "=r" (mem), "=r" (ch) : "0" (mem));
 		*buf++ = hexchars[ch >> 4];
 		*buf++ = hexchars[ch & 0xf];
 	}
@@ -343,7 +364,21 @@ hex2mem(char *buf, char *mem, int count)
 
 		ch = hex(*buf++) << 4;
 		ch |= hex(*buf++);
-		*mem++ = ch;
+		/* Assembler code is   *mem++ = ch;   with return 0 on fault */
+		__asm__(
+			"\n1:\n\t"
+			"stb %1, [%0]\n\t"
+			"inc %0\n\t"
+			".section .fixup,#alloc,#execinstr\n\t"
+			".align 4\n"
+			"2:\n\t"
+			"retl\n\t"
+			" mov 0, %%o0\n\t"
+			".section __ex_table, #alloc\n\t"
+			".align 4\n\t"
+			".word 1b, 2b\n\t"
+			".text\n"
+			: "=r" (mem) : "r" (ch) , "0" (mem));
 	}
 	return mem;
 }
@@ -368,10 +403,12 @@ set_debug_traps(void)
 {
 	struct hard_trap_info *ht;
 	unsigned long flags;
-	unsigned char c;
 
-	save_flags(flags); cli();
-	flush_cache_all = flush_cache_all_nop;
+	save_and_cli(flags);
+#if 0	
+/* Have to sort this out. This cannot be done after initialization. */
+	BTFIXUPSET_CALL(flush_cache_all, flush_cache_all_nop, BTFIXUPCALL_NOP);
+#endif
 
 	/* Initialize our copy of the Linux Sparc trap table */
 	eh_init();
@@ -385,13 +422,18 @@ set_debug_traps(void)
 
 	/* In case GDB is started before us, ack any packets (presumably
 	 * "$?#xx") sitting there.
+	 *
+	 * I've found this code causes more problems than it solves,
+	 * so that's why it's commented out.  GDB seems to work fine
+	 * now starting either before or after the kernel   -bwb
 	 */
-
+#if 0
 	while((c = getDebugChar()) != '$');
 	while((c = getDebugChar()) != '#');
 	c = getDebugChar(); /* eat first csum byte */
 	c = getDebugChar(); /* eat second csum byte */
 	putDebugChar('+'); /* ack it */
+#endif
 
 	initialized = 1; /* connect! */
 	restore_flags(flags);
@@ -475,6 +517,7 @@ handle_exception (unsigned long *registers)
 	    "restore\n\t"
 	    "restore\n\t");
 
+	lock_kernel();
 	if (registers[PC] == (unsigned long)breakinst) {
 		/* Skip over breakpoint trap insn */
 		registers[PC] = registers[NPC];
@@ -646,6 +689,7 @@ handle_exception (unsigned long *registers)
  * some location may have changed something that is in the instruction cache.
  */
 			flush_cache_all();
+			unlock_kernel();
 			return;
 
 			/* kill the program */
@@ -673,16 +717,14 @@ breakpoint(void)
 	if (!initialized)
 		return;
 
-	/* Again, watch those c-prefixes for solaris/elf kernels */
-#ifndef __svr4__
-	asm("	.globl _breakinst
-
-	     _breakinst: ta 1
-            ");
+	/* Again, watch those c-prefixes for ELF kernels */
+#if defined(__svr4__) || defined(__ELF__)
+	asm(".globl breakinst\n"
+	    "breakinst:\n\t"
+	    "ta 1\n");
 #else
-	asm("	.globl breakinst
-
-	     breakinst: ta 1
-            ");
+	asm(".globl _breakinst\n"
+	    "_breakinst:\n\t"
+	    "ta 1\n");
 #endif
 }

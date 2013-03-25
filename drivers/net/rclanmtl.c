@@ -2,7 +2,7 @@
 ** *************************************************************************
 **
 **
-**     R C L A N M T L . C             $Revision: 1.1.1.1 $
+**     R C L A N M T L . C             $Revision: 6 $
 **
 **
 **  RedCreek I2O LAN Message Transport Layer program module.
@@ -36,20 +36,15 @@
 ** *************************************************************************
 */
 
-#undef DEBUG
+#define DEBUG 1
 
 #define RC_LINUX_MODULE
 #include "rclanmtl.h"
 
-#define dprintf kprintf
-
-extern int printk(const char * fmt, ...);
-
  /* RedCreek LAN device Target ID */
-#define RC_LAN_TARGET_ID  0x10 
+#define RC_LAN_TARGET_ID  0x10
  /* RedCreek's OSM default LAN receive Initiator */
-#define DEFAULT_RECV_INIT_CONTEXT  0xA17  
-
+#define DEFAULT_RECV_INIT_CONTEXT  0xA17
 
 /*
 ** I2O message structures
@@ -106,16 +101,13 @@ extern int printk(const char * fmt, ...);
 #define    I2O_EXEC_SYS_QUIESCE                        0xC3
 #define    I2O_EXEC_SYS_TAB_SET                        0xA3
 
-
  /* Init Outbound Q status */
 #define    I2O_EXEC_OUTBOUND_INIT_IN_PROGRESS          0x01
 #define    I2O_EXEC_OUTBOUND_INIT_REJECTED             0x02
 #define    I2O_EXEC_OUTBOUND_INIT_FAILED               0x03
 #define    I2O_EXEC_OUTBOUND_INIT_COMPLETE             0x04
 
-
 #define    I2O_UTIL_NOP                                0x00
-
 
 /* I2O Get Status State values */
 
@@ -126,7 +118,6 @@ extern int printk(const char * fmt, ...);
 #define    I2O_IOP_STATE_OPERATIONAL                   0x08
 #define    I2O_IOP_STATE_FAILED                        0x10
 #define    I2O_IOP_STATE_FAULTED                       0x11
-
 
 /* Defines for Request Status Codes:  Table 3-1 Reply Status Codes.  */
 
@@ -142,7 +133,6 @@ extern int printk(const char * fmt, ...);
 #define    I2O_REPLY_STATUS_PROCESS_ABORT_PARTIAL_TRANSFER   0x09
 #define    I2O_REPLY_STATUS_TRANSACTION_ERROR          0x0A
 #define    I2O_REPLY_STATUS_PROGRESS_REPORT            0x80
-
 
 /* DetailedStatusCode defines for ALL messages: Table 3-2 Detailed Status Codes.*/
 
@@ -207,17 +197,17 @@ extern int printk(const char * fmt, ...);
 #define I2O_HOST_TID  0xB91
 
  /* RedCreek I2O private message codes */
-#define RC_PRIVATE_GET_MAC_ADDR     0x0001/**/ /* OBSOLETE */
+#define RC_PRIVATE_GET_MAC_ADDR     0x0001/**/	/* OBSOLETE */
 #define RC_PRIVATE_SET_MAC_ADDR     0x0002
 #define RC_PRIVATE_GET_NIC_STATS    0x0003
 #define RC_PRIVATE_GET_LINK_STATUS  0x0004
 #define RC_PRIVATE_SET_LINK_SPEED   0x0005
 #define RC_PRIVATE_SET_IP_AND_MASK  0x0006
-/* #define RC_PRIVATE_GET_IP_AND_MASK  0x0007 */ /* OBSOLETE */
+/* #define RC_PRIVATE_GET_IP_AND_MASK  0x0007 *//* OBSOLETE */
 #define RC_PRIVATE_GET_LINK_SPEED   0x0008
 #define RC_PRIVATE_GET_FIRMWARE_REV 0x0009
-/* #define RC_PRIVATE_GET_MAC_ADDR     0x000A *//**/
-#define RC_PRIVATE_GET_IP_AND_MASK  0x000B /**/
+/* #define RC_PRIVATE_GET_MAC_ADDR     0x000A */
+#define RC_PRIVATE_GET_IP_AND_MASK  0x000B
 #define RC_PRIVATE_DEBUG_MSG        0x000C
 #define RC_PRIVATE_REPORT_DRIVER_CAPABILITY  0x000D
 #define RC_PRIVATE_SET_PROMISCUOUS_MODE  0x000e
@@ -227,98 +217,26 @@ extern int printk(const char * fmt, ...);
 
 #define RC_PRIVATE_REBOOT           0x00FF
 
-
 /* I2O message header */
-typedef struct _I2O_MESSAGE_FRAME 
-{
-    U8                          VersionOffset;
-    U8                          MsgFlags;
-    U16                         MessageSize;
-    BF                          TargetAddress:I2O_TID_SZ;
-    BF                          InitiatorAddress:I2O_TID_SZ;
-    BF                          Function:I2O_FUNCTION_SZ;
-    U32                         InitiatorContext;
-    /* SGL[] */ 
-}
-I2O_MESSAGE_FRAME, *PI2O_MESSAGE_FRAME;
-
+typedef struct _I2O_MESSAGE_FRAME {
+	U8 VersionOffset;
+	U8 MsgFlags;
+	U16 MessageSize;
+	BF TargetAddress:I2O_TID_SZ;
+	BF InitiatorAddress:I2O_TID_SZ;
+	BF Function:I2O_FUNCTION_SZ;
+	U32 InitiatorContext;
+	/* SGL[] */
+} I2O_MESSAGE_FRAME, *PI2O_MESSAGE_FRAME;
 
  /* assumed a 16K minus 256 byte space for outbound queue message frames */
 #define MSG_FRAME_SIZE  512
 #define NMBR_MSG_FRAMES 30
 
-/*
-**  Message Unit CSR definitions for RedCreek PCI45 board
-*/
-typedef struct tag_rcatu 
-{
-    volatile unsigned long APICRegSel;  /* APIC Register Select */
-    volatile unsigned long reserved0;
-    volatile unsigned long APICWinReg;  /* APIC Window Register */
-    volatile unsigned long reserved1;
-    volatile unsigned long InMsgReg0;   /* inbound message register 0 */
-    volatile unsigned long InMsgReg1;   /* inbound message register 1 */
-    volatile unsigned long OutMsgReg0;  /* outbound message register 0 */
-    volatile unsigned long OutMsgReg1;  /* outbound message register 1 */
-    volatile unsigned long InDoorReg;   /* inbound doorbell register */
-    volatile unsigned long InIntStat;   /* inbound interrupt status register */
-    volatile unsigned long InIntMask;   /* inbound interrupt mask register */
-    volatile unsigned long OutDoorReg;  /* outbound doorbell register */
-    volatile unsigned long OutIntStat;  /* outbound interrupt status register */
-    volatile unsigned long OutIntMask;  /* outbound interrupt mask register */
-    volatile unsigned long reserved2;
-    volatile unsigned long reserved3;
-    volatile unsigned long InQueue;     /* inbound queue port */
-    volatile unsigned long OutQueue;    /* outbound queue port */
-    volatile unsigned long reserved4;
-    volatile unsigned long reserver5;
-    /* RedCreek extension */
-    volatile unsigned long EtherMacLow;
-    volatile unsigned long EtherMacHi;
-    volatile unsigned long IPaddr;
-    volatile unsigned long IPmask;
-}
-ATU, *PATU;
-
  /* 
- ** typedef PAB
- **
- ** PCI Adapter Block - holds instance specific information and is located
- ** in a reserved space at the start of the message buffer allocated by user.
- */
-typedef struct
-{
-    PATU             p_atu;                /* ptr to  ATU register block */
-    PU8              pPci45LinBaseAddr;
-    PU8              pLinOutMsgBlock;
-    U32              outMsgBlockPhyAddr; 
-    PFNTXCALLBACK    pTransCallbackFunc;
-    PFNRXCALLBACK    pRecvCallbackFunc;
-    PFNCALLBACK      pRebootCallbackFunc;
-    PFNCALLBACK      pCallbackFunc;
-    U16              IOPState;
-    U16              InboundMFrameSize;
-}
-PAB, *PPAB;
-
- /* 
- ** in reserved space right after PAB in host memory is area for returning
- ** values from card 
- */
-
- /* 
- ** Array of pointers to PCI Adapter Blocks.
- ** Indexed by a zero based (0-31) interface number.
- */ 
-#define MAX_ADAPTERS 32
-static PPAB  PCIAdapterBlock[MAX_ADAPTERS] = 
-{
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
-
+    ** in reserved space right after PAB in host memory is area for returning
+    ** values from card 
+  */
 
 /*
 ** typedef NICSTAT
@@ -326,46 +244,37 @@ static PPAB  PCIAdapterBlock[MAX_ADAPTERS] =
 ** Data structure for NIC statistics retruned from PCI card.  Data copied from
 ** here to user allocated RCLINKSTATS (see rclanmtl.h) structure.
 */
-typedef struct tag_NicStat 
-{
-    unsigned long   TX_good; 
-    unsigned long   TX_maxcol;
-    unsigned long   TX_latecol;
-    unsigned long   TX_urun;
-    unsigned long   TX_crs;         /* lost carrier sense */
-    unsigned long   TX_def;         /* transmit deferred */
-    unsigned long   TX_singlecol;   /* single collisions */
-    unsigned long   TX_multcol;
-    unsigned long   TX_totcol;
-    unsigned long   Rcv_good;
-    unsigned long   Rcv_CRCerr;
-    unsigned long   Rcv_alignerr;
-    unsigned long   Rcv_reserr;     /* rnr'd pkts */
-    unsigned long   Rcv_orun;
-    unsigned long   Rcv_cdt;
-    unsigned long   Rcv_runt;
-    unsigned long   dump_status;    /* last field directly from the chip */
-} 
-NICSTAT, *P_NICSTAT;
- 
+typedef struct tag_NicStat {
+	unsigned long TX_good;
+	unsigned long TX_maxcol;
+	unsigned long TX_latecol;
+	unsigned long TX_urun;
+	unsigned long TX_crs;	/* lost carrier sense */
+	unsigned long TX_def;	/* transmit deferred */
+	unsigned long TX_singlecol;	/* single collisions */
+	unsigned long TX_multcol;
+	unsigned long TX_totcol;
+	unsigned long Rcv_good;
+	unsigned long Rcv_CRCerr;
+	unsigned long Rcv_alignerr;
+	unsigned long Rcv_reserr;	/* rnr'd pkts */
+	unsigned long Rcv_orun;
+	unsigned long Rcv_cdt;
+	unsigned long Rcv_runt;
+	unsigned long dump_status;	/* last field directly from the chip */
+} NICSTAT, *P_NICSTAT;
 
-#define DUMP_DONE   0x0000A005      /* completed statistical dump */
-#define DUMP_CLEAR  0x0000A007      /* completed stat dump and clear counters */
-
+#define DUMP_DONE   0x0000A005	/* completed statistical dump */
+#define DUMP_CLEAR  0x0000A007	/* completed stat dump and clear counters */
 
 static volatile int msgFlag;
 
-
 /* local function prototypes */
-static void ProcessOutboundI2OMsg(PPAB pPab, U32 phyMsgAddr);
-static int FillI2OMsgSGLFromTCB(PU32 pMsg, PRCTCB pXmitCntrlBlock);
-static int GetI2OStatus(PPAB pPab);
-static int SendI2OOutboundQInitMsg(PPAB pPab);
-static int SendEnableSysMsg(PPAB pPab);
-
-
-/* 1st 100h bytes of message block is reserved for messenger instance */
-#define ADAPTER_BLOCK_RESERVED_SPACE 0x100
+static void ProcessOutboundI2OMsg (PPAB pPab, U32 phyMsgAddr);
+static int FillI2OMsgSGLFromTCB (PU32 pMsg, PRCTCB pXmitCntrlBlock);
+static int GetI2OStatus (PPAB pPab);
+static int SendI2OOutboundQInitMsg (PPAB pPab);
+static int SendEnableSysMsg (PPAB pPab);
 
 /*
 ** =========================================================================
@@ -373,10 +282,7 @@ static int SendEnableSysMsg(PPAB pPab);
 **
 ** Initialize the RedCreek I2O Module and adapter.
 **
-** Inputs:  AdapterID - interface number from 0 to 15
-**          pciBaseAddr - virual base address of PCI (set by BIOS)
-**          p_msgbuf - virual address to private message block (min. 16K)
-**          p_phymsgbuf - physical address of private message block
+** Inputs:  dev - the devices net_device struct
 **          TransmitCallbackFunction - address of transmit callback function
 **          ReceiveCallbackFunction  - address of receive  callback function
 **
@@ -386,75 +292,88 @@ static int SendEnableSysMsg(PPAB pPab);
 ** =========================================================================
 */
 RC_RETURN
-RCInitI2OMsgLayer(U16 AdapterID, U32 pciBaseAddr, 
-                  PU8 p_msgbuf,  PU8 p_phymsgbuf,
-                  PFNTXCALLBACK  TransmitCallbackFunction,
-                  PFNRXCALLBACK  ReceiveCallbackFunction,
-                  PFNCALLBACK    RebootCallbackFunction)
+RCInitI2OMsgLayer (struct net_device *dev,
+		   PFNTXCALLBACK TransmitCallbackFunction,
+		   PFNRXCALLBACK ReceiveCallbackFunction,
+		   PFNCALLBACK RebootCallbackFunction)
 {
-    int result;
-    PPAB pPab; 
-    
-#ifdef DEBUG
-    kprintf("InitI2O: Adapter:0x%04.4ux ATU:0x%08.8ulx msgbuf:0x%08.8ulx phymsgbuf:0x%08.8ulx\n"
-            "TransmitCallbackFunction:0x%08.8ulx  ReceiveCallbackFunction:0x%08.8ulx\n",
-            AdapterID, pciBaseAddr, p_msgbuf, p_phymsgbuf, TransmitCallbackFunction, ReceiveCallbackFunction);
-#endif /* DEBUG */
+	int result;
+	PPAB pPab;
+	PDPA pDpa = dev->priv;
+	U32 pciBaseAddr = dev->base_addr;
+	PU8 p_msgbuf = pDpa->PLanApiPA;
+	PU8 p_phymsgbuf = (PU8) virt_to_bus ((void *) p_msgbuf);
 
-    
-    /* Check if this interface already initialized - if so, shut it down */
-    if (PCIAdapterBlock[AdapterID] != NULL)
-    {
-        printk("PCIAdapterBlock[%d]!=NULL\n", AdapterID);
-//        RCResetLANCard(AdapterID, 0, (PU32)NULL, (PFNCALLBACK)NULL);
-        PCIAdapterBlock[AdapterID] = NULL;
-    }
+	dprintk
+	    ("InitI2O: Adapter:0x%x ATU:0x%x msgbuf:0x%x phymsgbuf:0x%x\n"
+	     "TransmitCallbackFunction:0x%x  ReceiveCallbackFunction:0x%x\n",
+	     pDpa->id, pciBaseAddr, (u32) p_msgbuf, (u32) p_phymsgbuf,
+	     (u32) TransmitCallbackFunction, (u32) ReceiveCallbackFunction);
 
-    /* 
-    ** store adapter instance values in adapter block.
-    ** Adapter block is at beginning of message buffer
-    */  
-    pPab = (PPAB)p_msgbuf;
-    
-    pPab->p_atu = (PATU)pciBaseAddr;
-    pPab->pPci45LinBaseAddr =  (PU8)pciBaseAddr;
-    
-    /* Set outbound message frame addr - skip over Adapter Block */
-    pPab->outMsgBlockPhyAddr = (U32)(p_phymsgbuf + ADAPTER_BLOCK_RESERVED_SPACE);
-    pPab->pLinOutMsgBlock    = (PU8)(p_msgbuf + ADAPTER_BLOCK_RESERVED_SPACE);
+	/* Check if this interface already initialized - if so, shut it down */
+	if (pDpa->pPab != NULL) {
+		dprintk (KERN_WARNING
+			"pDpa->pPab [%d] != NULL\n",
+			pDpa->id);
+/*          RCResetLANCard(pDpa->id, 0, (PU32)NULL, (PFNCALLBACK)NULL); */
+		pDpa->pPab = NULL;
+	}
 
-    /* store callback function addresses */
-    pPab->pTransCallbackFunc = TransmitCallbackFunction;
-    pPab->pRecvCallbackFunc  = ReceiveCallbackFunction;
-    pPab->pRebootCallbackFunc  = RebootCallbackFunction;
-    pPab->pCallbackFunc  = (PFNCALLBACK)NULL;
+	/* store adapter instance values in adapter block.
+	 * Adapter block is at beginning of message buffer */
 
-    /*
-    ** Initialize I2O IOP
-    */
-    result = GetI2OStatus(pPab);
-    
-    if (result != RC_RTN_NO_ERROR)
-        return result;
+	pPab = kmalloc (sizeof (*pPab), GFP_KERNEL);
+	if (!pPab) {
+		dprintk (KERN_ERR 
+				"RCInitI2OMsgLayer: Could not allocate memory for PAB struct!\n");
+		result = RC_RTN_MALLOC_ERROR;
+		goto err_out;
+	}
 
-    if (pPab->IOPState == I2O_IOP_STATE_OPERATIONAL)
-    {
-        printk("pPab->IOPState == op: resetting adapter\n");
-        RCResetLANCard(AdapterID, 0, (PU32)NULL, (PFNCALLBACK)NULL);
-    }
-        
-    result = SendI2OOutboundQInitMsg(pPab);
-    
-    if (result != RC_RTN_NO_ERROR)
-        return result;
+	memset (pPab, 0, sizeof (*pPab));
+	pDpa->pPab = pPab;
+	pPab->p_atu = (PATU) pciBaseAddr;
+	pPab->pPci45LinBaseAddr = (PU8) pciBaseAddr;
 
-    result = SendEnableSysMsg(pPab);
-   
-    if (result != RC_RTN_NO_ERROR)
-        return result;
-   
-    PCIAdapterBlock[AdapterID] = pPab;
-    return RC_RTN_NO_ERROR;
+	/* Set outbound message frame addr */
+	pPab->outMsgBlockPhyAddr = (U32) p_phymsgbuf;
+	pPab->pLinOutMsgBlock = (PU8) p_msgbuf;
+
+	/* store callback function addresses */
+	pPab->pTransCallbackFunc = TransmitCallbackFunction;
+	pPab->pRecvCallbackFunc = ReceiveCallbackFunction;
+	pPab->pRebootCallbackFunc = RebootCallbackFunction;
+	pPab->pCallbackFunc = (PFNCALLBACK) NULL;
+
+	/*
+	   ** Initialize I2O IOP
+	 */
+	result = GetI2OStatus (pPab);
+
+	if (result != RC_RTN_NO_ERROR)
+		goto err_out_dealloc;
+
+	if (pPab->IOPState == I2O_IOP_STATE_OPERATIONAL) {
+		dprintk (KERN_INFO "pPab->IOPState == op: resetting adapter\n");
+		RCResetLANCard (dev, 0, (PU32) NULL, (PFNCALLBACK) NULL);
+	}
+
+	result = SendI2OOutboundQInitMsg (pPab);
+
+	if (result != RC_RTN_NO_ERROR)
+		goto err_out_dealloc;
+
+	result = SendEnableSysMsg (pPab);
+
+	if (result != RC_RTN_NO_ERROR)
+		goto err_out_dealloc;
+
+	return RC_RTN_NO_ERROR;
+
+      err_out_dealloc:
+	kfree (pPab);
+      err_out:
+	return result;
 }
 
 /*
@@ -467,38 +386,34 @@ RCInitI2OMsgLayer(U16 AdapterID, U32 pciBaseAddr,
 ** queue is not emtpy.
 ** =========================================================================
 */
-#define i960_OUT_POST_Q_INT_BIT        0x0008 /* bit set masks interrupts */
+#define i960_OUT_POST_Q_INT_BIT        0x0008	/* bit set masks interrupts */
 
-RC_RETURN RCDisableI2OInterrupts(U16 AdapterID)
+RC_RETURN
+RCDisableI2OInterrupts (struct net_device * dev)
 {
-    PPAB pPab;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-        
-    pPab->p_atu->OutIntMask |= i960_OUT_POST_Q_INT_BIT;
+	pPab->p_atu->OutIntMask |= i960_OUT_POST_Q_INT_BIT;
 
-    return RC_RTN_NO_ERROR;
+	return RC_RTN_NO_ERROR;
 }
 
-RC_RETURN RCEnableI2OInterrupts(U16 AdapterID)
+RC_RETURN
+RCEnableI2OInterrupts (struct net_device * dev)
 {
-    PPAB pPab;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    pPab->p_atu->OutIntMask &= ~i960_OUT_POST_Q_INT_BIT;
-    
-    return RC_RTN_NO_ERROR;
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
+
+	pPab->p_atu->OutIntMask &= ~i960_OUT_POST_Q_INT_BIT;
+
+	return RC_RTN_NO_ERROR;
 
 }
-
 
 /*
 ** =========================================================================
@@ -506,61 +421,53 @@ RC_RETURN RCEnableI2OInterrupts(U16 AdapterID)
 ** =========================================================================
 */
 RC_RETURN
-RCI2OSendPacket(U16 AdapterID, U32 InitiatorContext, PRCTCB pTransCtrlBlock)
+RCI2OSendPacket (struct net_device * dev, U32 InitiatorContext,
+		 PRCTCB pTransCtrlBlock)
 {
-    U32 msgOffset;
-    PU32 pMsg;
-    int size;
-    PPAB pPab;
+	U32 msgOffset;
+	PU32 pMsg;
+	int size;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-#ifdef DEBUG
-    kprintf("RCI2OSendPacket()...\n");
-#endif /* DEBUG */
-    
-    pPab = PCIAdapterBlock[AdapterID];
+	dprintk ("RCI2OSendPacket()...\n");
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    /* get Inbound free Q entry - reading from In Q gets free Q entry */
-    /* offset to Msg Frame in PCI msg block */
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    msgOffset = pPab->p_atu->InQueue; 
+	/* get Inbound free Q entry - reading from In Q gets free Q entry */
+	/* offset to Msg Frame in PCI msg block */
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("RCI2OSendPacket(): Inbound Free Q empty!\n");
-#endif /* DEBUG */
-        return RC_RTN_FREE_Q_EMPTY;
-    }
-        
-    /* calc virual address of msg - virual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	msgOffset = pPab->p_atu->InQueue;
 
-    size = FillI2OMsgSGLFromTCB(pMsg + 4, pTransCtrlBlock);
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("RCI2OSendPacket(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    if (size == -1) /* error processing TCB - send NOP msg */
-    {
-#ifdef DEBUG
-        kprintf("RCI2OSendPacket(): Error Rrocess TCB!\n");
-#endif /* DEBUG */
-        pMsg[0] = THREE_WORD_MSG_SIZE | SGL_OFFSET_0;
-        pMsg[1] = I2O_UTIL_NOP << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-        return RC_RTN_TCB_ERROR;
-    }
-    else /* send over msg header */
-    {    
-        pMsg[0] = (size + 4) << 16 | LAN_MSG_REQST; /* send over message size and flags */
-        pMsg[1] = I2O_LAN_PACKET_SEND << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-        pMsg[2] = InitiatorContext;
-        pMsg[3] = 0;  /* batch reply */
-        /* post to Inbound Post Q */   
-        pPab->p_atu->InQueue = msgOffset;
-        return RC_RTN_NO_ERROR;
-    }
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
+
+	size = FillI2OMsgSGLFromTCB (pMsg + 4, pTransCtrlBlock);
+
+	if (size == -1) {	/* error processing TCB - send NOP msg */
+		dprintk ("RCI2OSendPacket(): Error Rrocess TCB!\n");
+		pMsg[0] = THREE_WORD_MSG_SIZE | SGL_OFFSET_0;
+		pMsg[1] =
+		    I2O_UTIL_NOP << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+		return RC_RTN_TCB_ERROR;
+	} else {		/* send over msg header */
+
+		pMsg[0] = (size + 4) << 16 | LAN_MSG_REQST;	/* send over message size and flags */
+		pMsg[1] =
+		    I2O_LAN_PACKET_SEND << 24 | I2O_HOST_TID << 12 |
+		    RC_LAN_TARGET_ID;
+		pMsg[2] = InitiatorContext;
+		pMsg[3] = 0;	/* batch reply */
+		/* post to Inbound Post Q */
+		pPab->p_atu->InQueue = msgOffset;
+		return RC_RTN_NO_ERROR;
+	}
 }
- 
 
 /*
 ** =========================================================================
@@ -572,64 +479,56 @@ RCI2OSendPacket(U16 AdapterID, U32 InitiatorContext, PRCTCB pTransCtrlBlock)
 ** =========================================================================
 */
 RC_RETURN
-RCPostRecvBuffers(U16 AdapterID, PRCTCB pTransCtrlBlock)
+RCPostRecvBuffers (struct net_device * dev, PRCTCB pTransCtrlBlock)
 {
-    U32 msgOffset;
-    PU32 pMsg;
-    int size;
-    PPAB pPab;
+	U32 msgOffset;
+	PU32 pMsg;
+	int size;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-#ifdef DEBUG
-    kprintf("RCPostRecvBuffers()...\n");
-#endif /* DEBUG */
-    
-    /* search for DeviceHandle */
-    pPab = PCIAdapterBlock[AdapterID];
+	dprintk ("RCPostRecvBuffers()...\n");
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
+	/* search for DeviceHandle */
 
-    /* get Inbound free Q entry - reading from In Q gets free Q entry */
-    /* offset to Msg Frame in PCI msg block */
-    msgOffset = pPab->p_atu->InQueue; 
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("RCPostRecvBuffers(): Inbound Free Q empty!\n");
-#endif /* DEBUG */
-        return RC_RTN_FREE_Q_EMPTY;
-   
-    }
-    /* calc virual address of msg - virual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* get Inbound free Q entry - reading from In Q gets free Q entry */
+	/* offset to Msg Frame in PCI msg block */
+	msgOffset = pPab->p_atu->InQueue;
 
-    size = FillI2OMsgSGLFromTCB(pMsg + 4, pTransCtrlBlock);
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("RCPostRecvBuffers(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-    if (size == -1) /* error prcessing TCB - send 3 DWORD private msg == NOP */
-    {
-#ifdef DEBUG
-        kprintf("RCPostRecvBuffers(): Error Processing TCB! size = %d\n", size);
-#endif /* DEBUG */
-        pMsg[0] = THREE_WORD_MSG_SIZE | SGL_OFFSET_0;
-        pMsg[1] = I2O_UTIL_NOP << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-        /* post to Post Q */   
-        pPab->p_atu->InQueue = msgOffset;
-        return RC_RTN_TCB_ERROR;
-    }
-    else /* send over size msg header */
-    {    
-        pMsg[0] = (size + 4) << 16 | LAN_MSG_REQST; /* send over message size and flags */
-        pMsg[1] = I2O_LAN_RECEIVE_POST << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-        pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-        pMsg[3] = *(PU32)pTransCtrlBlock; /* number of packet buffers */
-        /* post to Post Q */   
-        pPab->p_atu->InQueue = msgOffset;
-        return RC_RTN_NO_ERROR;
-    }
+	size = FillI2OMsgSGLFromTCB (pMsg + 4, pTransCtrlBlock);
+
+	if (size == -1) {	/* error prcessing TCB - send 3 DWORD private msg == NOP */
+		dprintk
+		    ("RCPostRecvBuffers(): Error Processing TCB! size = %d\n",
+		     size);
+		pMsg[0] = THREE_WORD_MSG_SIZE | SGL_OFFSET_0;
+		pMsg[1] =
+		    I2O_UTIL_NOP << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+		/* post to Post Q */
+		pPab->p_atu->InQueue = msgOffset;
+		return RC_RTN_TCB_ERROR;
+	} else {		/* send over size msg header */
+
+		pMsg[0] = (size + 4) << 16 | LAN_MSG_REQST;	/* send over message size and flags */
+		pMsg[1] =
+		    I2O_LAN_RECEIVE_POST << 24 | I2O_HOST_TID << 12 |
+		    RC_LAN_TARGET_ID;
+		pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+		pMsg[3] = *(PU32) pTransCtrlBlock;	/* number of packet buffers */
+		/* post to Post Q */
+		pPab->p_atu->InQueue = msgOffset;
+		return RC_RTN_NO_ERROR;
+	}
 }
-
 
 /*
 ** =========================================================================
@@ -638,131 +537,111 @@ RCPostRecvBuffers(U16 AdapterID, PRCTCB pTransCtrlBlock)
 ** Process I2O outbound message queue until empty.
 ** =========================================================================
 */
-void 
-RCProcI2OMsgQ(U16 AdapterID)
+void
+RCProcI2OMsgQ (struct net_device *dev)
 {
-    U32 phyAddrMsg;
-    PU8 p8Msg;
-    PU32 p32;
-    U16 count;
-    PPAB pPab;
-    unsigned char debug_msg[20];
-    
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return;
-    
-    phyAddrMsg = pPab->p_atu->OutQueue;
+	U32 phyAddrMsg;
+	PU8 p8Msg;
+	PU32 p32;
+	U16 count;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	unsigned char debug_msg[20];
 
-    while (phyAddrMsg != 0xFFFFFFFF)
-    {
-        p8Msg = pPab->pLinOutMsgBlock + (phyAddrMsg - pPab->outMsgBlockPhyAddr);
-        p32 = (PU32)p8Msg;
-        
-        //printk(" msg: 0x%x  0x%x \n", p8Msg[7], p32[5]);
+	if (pPab == NULL)
+		return;
 
-        /* 
-        ** Send Packet Reply Msg
-        */
-        if (I2O_LAN_PACKET_SEND == p8Msg[7])  /* function code byte */
-        {
-            count = *(PU16)(p8Msg+2);
-            count -= p8Msg[0] >> 4;
-            /* status, count, context[], adapter */
-            (*pPab->pTransCallbackFunc)(p8Msg[19], count, p32+5, AdapterID);
-        }             
-        /* 
-        ** Receive Packet Reply Msg */
-        else if (I2O_LAN_RECEIVE_POST == p8Msg[7])
-        {
-#ifdef DEBUG    
-            kprintf("I2O_RECV_REPLY pPab:0x%08.8ulx p8Msg:0x%08.8ulx p32:0x%08.8ulx\n", pPab, p8Msg, p32);
-            kprintf("msg: 0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n",
-                    p32[0], p32[1], p32[2], p32[3]);
-            kprintf("     0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n",
-                    p32[4], p32[5], p32[6], p32[7]);
-            kprintf("     0x%08.8ulx:0X%08.8ulx:0x%08.8ulx:0x%08.8ulx\n",
-                    p32[8], p32[9], p32[10], p32[11]);
-#endif
-            /*  status, count, buckets remaining, packetParmBlock, adapter */
-            (*pPab->pRecvCallbackFunc)(p8Msg[19], p8Msg[12], p32[5], p32+6, AdapterID);
-      
-      
-        }
-        else if (I2O_LAN_RESET == p8Msg[7] || I2O_LAN_SHUTDOWN == p8Msg[7])
-        {
-            if (pPab->pCallbackFunc)
-            {
-                (*pPab->pCallbackFunc)(p8Msg[19],0,0,AdapterID);
-            }
-            else
-            {
-                pPab->pCallbackFunc = (PFNCALLBACK) 1;
-            }
-            //PCIAdapterBlock[AdapterID] = 0;
-        }
-        else if (I2O_PRIVATE == p8Msg[7])
-        {
-            //printk("i2o private 0x%x, 0x%x \n", p8Msg[7], p32[5]);
-            switch (p32[5])
-            {
-            case RC_PRIVATE_DEBUG_MSG:
-                msgFlag = 1;
-                /*printk("Received I2O_PRIVATE msg\n");*/
-                debug_msg[15]  = (p32[6]&0xff000000) >> 24;
-                debug_msg[14]  = (p32[6]&0x00ff0000) >> 16;
-                debug_msg[13]  = (p32[6]&0x0000ff00) >> 8;
-                debug_msg[12]  = (p32[6]&0x000000ff);
+	phyAddrMsg = pPab->p_atu->OutQueue;
 
-                debug_msg[11]  = (p32[7]&0xff000000) >> 24;
-                debug_msg[10]  = (p32[7]&0x00ff0000) >> 16;
-                debug_msg[ 9]  = (p32[7]&0x0000ff00) >> 8;
-                debug_msg[ 8]  = (p32[7]&0x000000ff);
+	while (phyAddrMsg != 0xFFFFFFFF) {
+		p8Msg =
+		    pPab->pLinOutMsgBlock + (phyAddrMsg -
+					     pPab->outMsgBlockPhyAddr);
+		p32 = (PU32) p8Msg;
 
-                debug_msg[ 7]  = (p32[8]&0xff000000) >> 24;
-                debug_msg[ 6]  = (p32[8]&0x00ff0000) >> 16;
-                debug_msg[ 5] = (p32[8]&0x0000ff00) >> 8;
-                debug_msg[ 4] = (p32[8]&0x000000ff);
+		dprintk ("msg: 0x%x  0x%x \n", p8Msg[7], p32[5]);
 
-                debug_msg[ 3] = (p32[9]&0xff000000) >> 24;
-                debug_msg[ 2] = (p32[9]&0x00ff0000) >> 16;
-                debug_msg[ 1] = (p32[9]&0x0000ff00) >> 8;
-                debug_msg[ 0] = (p32[9]&0x000000ff);
+		/* Send Packet Reply Msg */
+		if (I2O_LAN_PACKET_SEND == p8Msg[7]) {	/* function code byte */
+			count = *(PU16) (p8Msg + 2);
+			count -= p8Msg[0] >> 4;
+			/* status, count, context[], adapter */
+			(*pPab->pTransCallbackFunc) (p8Msg[19], count, p32 + 5,
+						     dev);
+		} else if (I2O_LAN_RECEIVE_POST == p8Msg[7]) {	/* Receive Packet Reply Msg */
+			dprintk
+			    ("I2O_RECV_REPLY pPab:0x%x p8Msg:0x%x p32:0x%x\n",
+			     (u32) pPab, (u32) p8Msg, (u32) p32);
+			dprintk ("msg: 0x%x:0x%x:0x%x:0x%x\n",
+				 p32[0], p32[1], p32[2], p32[3]);
+			dprintk ("     0x%x:0x%x:0x%x:0x%x\n",
+				 p32[4], p32[5], p32[6], p32[7]);
+			dprintk ("     0x%x:0X%x:0x%x:0x%x\n",
+				 p32[8], p32[9], p32[10], p32[11]);
+			/*  status, count, buckets remaining, packetParmBlock, adapter */
+			(*pPab->pRecvCallbackFunc) (p8Msg[19], p8Msg[12],
+						    p32[5], p32 + 6, dev);
+		} else if (I2O_LAN_RESET == p8Msg[7]
+			   || I2O_LAN_SHUTDOWN == p8Msg[7])
+			if (pPab->pCallbackFunc)
+				(*pPab->pCallbackFunc) (p8Msg[19], 0, 0, dev);
+			else
+				pPab->pCallbackFunc = (PFNCALLBACK) 1;
+		else if (I2O_PRIVATE == p8Msg[7]) {
+			dprintk ("i2o private 0x%x, 0x%x \n", p8Msg[7], p32[5]);
+			switch (p32[5]) {
+			case RC_PRIVATE_DEBUG_MSG:
+				msgFlag = 1;
+				dprintk ("Received I2O_PRIVATE msg\n");
+				debug_msg[15] = (p32[6] & 0xff000000) >> 24;
+				debug_msg[14] = (p32[6] & 0x00ff0000) >> 16;
+				debug_msg[13] = (p32[6] & 0x0000ff00) >> 8;
+				debug_msg[12] = (p32[6] & 0x000000ff);
 
-                debug_msg[16] = '\0';
-                printk (debug_msg);
-                break;
-            case RC_PRIVATE_REBOOT:
-                printk("Adapter reboot initiated...\n");
-                if (pPab->pRebootCallbackFunc)
-                {
-                    (*pPab->pRebootCallbackFunc)(0,0,0,AdapterID);
-                }
-                break;
-            default:
-                printk("Unknown private I2O msg received: 0x%x\n",
-                       p32[5]);
-                break;
-            }
-        }
+				debug_msg[11] = (p32[7] & 0xff000000) >> 24;
+				debug_msg[10] = (p32[7] & 0x00ff0000) >> 16;
+				debug_msg[9] = (p32[7] & 0x0000ff00) >> 8;
+				debug_msg[8] = (p32[7] & 0x000000ff);
 
-        /* 
-        ** Process other Msg's
-        */
-        else
-        {
-            ProcessOutboundI2OMsg(pPab, phyAddrMsg);
-        }
-        
-        /* return MFA to outbound free Q*/
-        pPab->p_atu->OutQueue = phyAddrMsg;
-    
-        /* any more msgs? */
-        phyAddrMsg = pPab->p_atu->OutQueue;
-    }
+				debug_msg[7] = (p32[8] & 0xff000000) >> 24;
+				debug_msg[6] = (p32[8] & 0x00ff0000) >> 16;
+				debug_msg[5] = (p32[8] & 0x0000ff00) >> 8;
+				debug_msg[4] = (p32[8] & 0x000000ff);
+
+				debug_msg[3] = (p32[9] & 0xff000000) >> 24;
+				debug_msg[2] = (p32[9] & 0x00ff0000) >> 16;
+				debug_msg[1] = (p32[9] & 0x0000ff00) >> 8;
+				debug_msg[0] = (p32[9] & 0x000000ff);
+
+				debug_msg[16] = '\0';
+				dprintk ("%s", debug_msg);
+				break;
+			case RC_PRIVATE_REBOOT:
+				dprintk ("Adapter reboot initiated...\n");
+				if (pPab->pRebootCallbackFunc)
+					(*pPab->pRebootCallbackFunc) (0, 0, 0,
+								      dev);
+				break;
+			default:
+				dprintk (KERN_WARNING
+					"Unknown private I2O msg received: 0x%x\n",
+					p32[5]);
+				break;
+			}
+		}
+
+		/* 
+		   ** Process other Msg's
+		 */
+		else
+			ProcessOutboundI2OMsg (pPab, phyAddrMsg);
+
+		/* return MFA to outbound free Q */
+		pPab->p_atu->OutQueue = phyAddrMsg;
+
+		/* any more msgs? */
+		phyAddrMsg = pPab->p_atu->OutQueue;
+	}
 }
-
 
 /*
 ** =========================================================================
@@ -773,86 +652,66 @@ RCProcI2OMsgQ(U16 AdapterID)
 ** =========================================================================
 */
 RC_RETURN
-RCGetLinkStatistics(U16 AdapterID, 
-                    P_RCLINKSTATS StatsReturnAddr,
-                    PFNWAITCALLBACK WaitCallback)
+RCGetLinkStatistics (struct net_device *dev,
+		     P_RCLINKSTATS StatsReturnAddr,
+		     PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset;
-    volatile U32 timeout;
-    volatile PU32 pMsg;
-    volatile PU32 p32, pReturnAddr;
-    P_NICSTAT pStats;
-    int i;
-    PPAB pPab;
+	U32 msgOffset;
+	volatile PU32 pMsg;
+	volatile PU32 p32, pReturnAddr;
+	P_NICSTAT pStats;
+	int i;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-/*kprintf("Get82558Stats() StatsReturnAddr:0x%08.8ulx\n", StatsReturnAddr);*/
+/*dprintk("Get82558Stats() StatsReturnAddr:0x%x\n", StatsReturnAddr); */
 
-    pPab = PCIAdapterBlock[AdapterID];
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    msgOffset = pPab->p_atu->InQueue;
+	msgOffset = pPab->p_atu->InQueue;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("Get8255XStats(): Inbound Free Q empty!\n");
-#endif
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("Get8255XStats(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    /* calc virual address of msg - virual already mapped to physical */
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-/*dprintf("Get82558Stats - pMsg = 0x%08ulx, InQ msgOffset = 0x%08ulx\n", pMsg, msgOffset);*/
-/*dprintf("Get82558Stats - pMsg = 0x%08X, InQ msgOffset = 0x%08X\n", pMsg, msgOffset);*/
+/*dprintk("Get82558Stats - pMsg = 0x%x, InQ msgOffset = 0x%x\n", pMsg, msgOffset);*/
+/*dprintk("Get82558Stats - pMsg = 0x%08X, InQ msgOffset = 0x%08X\n", pMsg, msgOffset);*/
 
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = 0x112; /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_NIC_STATS;
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = 0x112;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_NIC_STATS;
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    p32 = (PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
+//	p32 = (PU32) pPab->outMsgBlockPhyAddr;
+	p32 = (PU32)pPab->pLinOutMsgBlock;
+	pStats = (P_NICSTAT) pPab->pLinOutMsgBlock;
+	pStats->dump_status = 0xFFFFFFFF;
 
-    pStats = (P_NICSTAT)p32;
-    pStats->dump_status = 0xFFFFFFFF;
+	/* post to Inbound Post Q */
+	pPab->p_atu->InQueue = msgOffset;
 
-    /* post to Inbound Post Q */
-    pPab->p_atu->InQueue = msgOffset;
+	i = 0;
+	while (pStats->dump_status == 0xFFFFFFFF) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for NIC statistics\n");
+			return RC_RTN_MSG_REPLY_TIMEOUT;
+		}
+		udelay(50);
+	}
+	pReturnAddr = (PU32) StatsReturnAddr;
 
-    timeout = 100000;
-    while (1)
-    {
-        if (WaitCallback)
-            (*WaitCallback)();
-        
-        for (i = 0; i < 1000; i++)
-            ;
+	/* copy Nic stats to user's structure */
+	for (i = 0; i < (int) sizeof (RCLINKSTATS) / 4; i++)
+		pReturnAddr[i] = p32[i];
 
-        if (pStats->dump_status != 0xFFFFFFFF)
-            break;
-
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("RCGet82558Stats() Timeout waiting for NIC statistics\n");
-#endif
-            return RC_RTN_MSG_REPLY_TIMEOUT;
-        }
-    }
-    
-    pReturnAddr = (PU32)StatsReturnAddr;
-    
-    /* copy Nic stats to user's structure */
-    for (i = 0; i < (int) sizeof(RCLINKSTATS) / 4; i++)
-        pReturnAddr[i] = p32[i];
-   
-    return RC_RTN_NO_ERROR;     
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
@@ -860,76 +719,59 @@ RCGetLinkStatistics(U16 AdapterID,
 ** =========================================================================
 */
 RC_RETURN
-RCGetLinkStatus(U16 AdapterID, PU32 ReturnAddr, PFNWAITCALLBACK WaitCallback)
+RCGetLinkStatus (struct net_device * dev, PU32 ReturnAddr,
+		 PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset;
-    volatile U32 timeout;
-    volatile PU32 pMsg;
-    volatile PU32 p32;
-    PPAB pPab;
+	int i;
+	U32 msgOffset;
+	volatile PU32 pMsg;
+	volatile PU32 p32;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-/*kprintf("Get82558LinkStatus() ReturnPhysAddr:0x%08.8ulx\n", ReturnAddr);*/
+	dprintk ("Get82558LinkStatus() ReturnPhysAddr:0x%x\n",
+		 (u32) ReturnAddr);
 
-    pPab = PCIAdapterBlock[AdapterID];
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    msgOffset = pPab->p_atu->InQueue;
+	msgOffset = pPab->p_atu->InQueue;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        dprintf("Get82558LinkStatus(): Inbound Free Q empty!\n");
-#endif
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("Get82558LinkStatus(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    /* calc virual address of msg - virual already mapped to physical */
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
-/*dprintf("Get82558LinkStatus - pMsg = 0x%08ulx, InQ msgOffset = 0x%08ulx\n", pMsg, msgOffset);*/
-/*dprintf("Get82558LinkStatus - pMsg = 0x%08X, InQ msgOffset = 0x%08X\n", pMsg, msgOffset);*/
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
+/*dprintk("Get82558LinkStatus - pMsg = 0x%x, InQ msgOffset = 0x%x\n", pMsg, msgOffset);*/
+/*dprintk("Get82558LinkStatus - pMsg = 0x%08X, InQ msgOffset = 0x%08X\n", pMsg, msgOffset);*/
 
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = 0x112; /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_LINK_STATUS;
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = 0x112;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_LINK_STATUS;
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    p32 = (PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    *p32 = 0xFFFFFFFF;
-    
-    /* post to Inbound Post Q */
-    pPab->p_atu->InQueue = msgOffset;
+	p32 = (PU32) pPab->pLinOutMsgBlock;
+	*p32 = 0xFFFFFFFF;
 
-    timeout = 100000;
-    while (1)
-    {
-        U32 i;
+	/* post to Inbound Post Q */
+	pPab->p_atu->InQueue = msgOffset;
 
-        if (WaitCallback)
-            (*WaitCallback)();
-        
-        for (i = 0; i < 1000; i++)
-            ;
+	i = 0;
+	while (*p32 == 0xFFFFFFFF) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for link status\n");
+			return RC_RTN_MSG_REPLY_TIMEOUT;
+		}
+		udelay(50);
+	}
 
-        if (*p32 != 0xFFFFFFFF)
-            break;
+	*ReturnAddr = *p32;	/* 1 = up 0 = down */
 
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("Timeout waiting for link status\n");
-#endif    
-            return RC_RTN_MSG_REPLY_TIMEOUT;
-        }
-    }
-    
-    *ReturnAddr = *p32; /* 1 = up 0 = down */
-    
-    return RC_RTN_NO_ERROR;
-    
+	return RC_RTN_NO_ERROR;
+
 }
 
 /*
@@ -941,81 +783,63 @@ RCGetLinkStatus(U16 AdapterID, PU32 ReturnAddr, PFNWAITCALLBACK WaitCallback)
 ** =========================================================================
 */
 RC_RETURN
-RCGetMAC(U16 AdapterID, PU8 mac, PFNWAITCALLBACK WaitCallback)
+RCGetMAC (struct net_device * dev, PFNWAITCALLBACK WaitCallback)
 {
-    unsigned i, timeout;
-    U32      off;
-    PU32     p;
-    U32      temp[2];
-    PPAB     pPab;
-    PATU     p_atu;
-    
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    p_atu = pPab->p_atu;
+	U32 off, i;
+	PU8 mac = dev->dev_addr;
+	PU32 p;
+	U32 temp[2];
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	PATU p_atu;
 
-    p_atu->EtherMacLow = 0;     /* first zero return data */
-    p_atu->EtherMacHi = 0;
-    
-    off = p_atu->InQueue;   /* get addresss of message */
- 
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    p = (PU32)(pPab->pPci45LinBaseAddr + off);
+	p_atu = pPab->p_atu;
 
-#ifdef RCDEBUG
-    printk("RCGetMAC: p_atu 0x%08x, off 0x%08x, p 0x%08x\n", 
-           (uint)p_atu, (uint)off, (uint)p);
-#endif /* RCDEBUG */
-    /* setup private message */
-    p[0] = FIVE_WORD_MSG_SIZE | SGL_OFFSET_0;
-    p[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    p[2] = 0;               /* initiator context */
-    p[3] = 0x218;           /* transaction context */
-    p[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_MAC_ADDR;
+	p_atu->EtherMacLow = 0;	/* first zero return data */
+	p_atu->EtherMacHi = 0;
 
+	off = p_atu->InQueue;	/* get addresss of message */
 
-    p_atu->InQueue = off;   /* send it to the I2O device */
-#ifdef RCDEBUG
-    printk("RCGetMAC: p_atu 0x%08x, off 0x%08x, p 0x%08x\n", 
-           (uint)p_atu, (uint)off, (uint)p);
-#endif /* RCDEBUG */
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    /* wait for the rcpci45 board to update the info */
-    timeout = 1000000;
-    while (0 == p_atu->EtherMacLow) 
-    {
-        if (WaitCallback)
-            (*WaitCallback)();
-    
-        for (i = 0; i < 1000; i++)
-            ;
+	p = (PU32) (pPab->pPci45LinBaseAddr + off);
 
-        if (!timeout--)
-        {
-            printk("rc_getmac: Timeout\n");
-            return RC_RTN_MSG_REPLY_TIMEOUT;
-        }
-    }
-    
-    /* read the mac address  */
-    temp[0] = p_atu->EtherMacLow;
-    temp[1] = p_atu->EtherMacHi;
-    memcpy((char *)mac, (char *)temp, 6);
+	dprintk ("RCGetMAC: p_atu 0x%08x, off 0x%08x, p 0x%08x\n",
+		 (uint) p_atu, (uint) off, (uint) p);
+	/* setup private message */
+	p[0] = FIVE_WORD_MSG_SIZE | SGL_OFFSET_0;
+	p[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	p[2] = 0;		/* initiator context */
+	p[3] = 0x218;		/* transaction context */
+	p[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_MAC_ADDR;
 
+	p_atu->InQueue = off;	/* send it to the I2O device */
+	dprintk ("RCGetMAC: p_atu 0x%08x, off 0x%08x, p 0x%08x\n",
+		 (uint) p_atu, (uint) off, (uint) p);
 
-#ifdef RCDEBUG
-//    printk("rc_getmac: 0x%X\n", ptr);
-#endif /* RCDEBUG */
+	/* wait for the rcpci45 board to update the info */
+	i = 0;
+	while (0 == p_atu->EtherMacLow) {
+		if (i++ > 0xff) {
+			dprintk ("rc_getmac: Timeout\n");
+			return RC_RTN_MSG_REPLY_TIMEOUT;
+		}	
+		udelay(50);
+	}
 
-    return RC_RTN_NO_ERROR;
+	/* read the mac address  */
+	temp[0] = p_atu->EtherMacLow;
+	temp[1] = p_atu->EtherMacHi;
+	memcpy ((char *) mac, (char *) temp, 6);
+
+	dprintk ("rc_getmac: 0x%x\n", (u32) mac);
+
+	return RC_RTN_NO_ERROR;
 }
 
- 
 /*
 ** =========================================================================
 ** RCSetMAC()
@@ -1025,39 +849,35 @@ RCGetMAC(U16 AdapterID, PU8 mac, PFNWAITCALLBACK WaitCallback)
 ** =========================================================================
 */
 RC_RETURN
-RCSetMAC(U16 AdapterID, PU8 mac)
+RCSetMAC (struct net_device * dev, PU8 mac)
 {
-    U32  off;
-    PU32 pMsg;
-    PPAB pPab;
+	U32 off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    /* setup private message */
-    pMsg[0] = SEVEN_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_MAC_ADDR;
-    pMsg[5] = *(unsigned *)mac;  /* first four bytes */
-    pMsg[6] = *(unsigned *)(mac + 4); /* last two bytes */
-    
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    return RC_RTN_NO_ERROR ;
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
+
+	/* setup private message */
+	pMsg[0] = SEVEN_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_MAC_ADDR;
+	pMsg[5] = *(unsigned *) mac;	/* first four bytes */
+	pMsg[6] = *(unsigned *) (mac + 4);	/* last two bytes */
+
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
@@ -1074,37 +894,35 @@ RCSetMAC(U16 AdapterID, PU8 mac)
 ** =========================================================================
 */
 RC_RETURN
-RCSetLinkSpeed(U16 AdapterID, U16 LinkSpeedCode)
+RCSetLinkSpeed (struct net_device * dev, U16 LinkSpeedCode)
 {
-    U32  off;
-    PU32 pMsg;
-    PPAB pPab;
+	U32 off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    
-    pPab =PCIAdapterBlock[AdapterID];
-     
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_LINK_SPEED;
-    pMsg[5] = LinkSpeedCode;     /* link speed code */
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    return RC_RTN_NO_ERROR ;
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
+
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_LINK_SPEED;
+	pMsg[5] = LinkSpeedCode;	/* link speed code */
+
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+
+	return RC_RTN_NO_ERROR;
 }
+
 /*
 ** =========================================================================
 ** RCSetPromiscuousMode()
@@ -1116,36 +934,35 @@ RCSetLinkSpeed(U16 AdapterID, U16 LinkSpeedCode)
 ** =========================================================================
 */
 RC_RETURN
-RCSetPromiscuousMode(U16 AdapterID, U16 Mode)
+RCSetPromiscuousMode (struct net_device * dev, U16 Mode)
 {
-    U32  off;
-    PU32 pMsg;
-    PPAB pPab;
-    
-    pPab =PCIAdapterBlock[AdapterID];
-     
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	U32 off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_PROMISCUOUS_MODE;
-    pMsg[5] = Mode;     /* promiscuous mode setting */
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    pPab->p_atu->InQueue = off;   /* send it to the device */
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    return RC_RTN_NO_ERROR ;
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
+
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
+
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_PROMISCUOUS_MODE;
+	pMsg[5] = Mode;		/* promiscuous mode setting */
+
+	pPab->p_atu->InQueue = off;	/* send it to the device */
+
+	return RC_RTN_NO_ERROR;
 }
+
 /*
 ** =========================================================================
 ** RCGetPromiscuousMode()
@@ -1159,73 +976,59 @@ RCSetPromiscuousMode(U16 AdapterID, U16 Mode)
 ** =========================================================================
 */
 RC_RETURN
-RCGetPromiscuousMode(U16 AdapterID, PU32 pMode, PFNWAITCALLBACK WaitCallback)
+RCGetPromiscuousMode (struct net_device * dev, PU32 pMode,
+		      PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    volatile PU32 p32;
-    PPAB pPab;
+	PU32 pMsg;
+	volatile PU32 p32;
+	U32 msgOffset, i;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab =PCIAdapterBlock[AdapterID];
+	msgOffset = pPab->p_atu->InQueue;
 
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk (KERN_WARNING
+			"RCGetLinkSpeed(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    msgOffset = pPab->p_atu->InQueue;
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0xff;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-        kprintf("RCGetLinkSpeed(): Inbound Free Q empty!\n");
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_PROMISCUOUS_MODE;
+	/* phys address to return status - area right after PAB */
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    /* calc virtual address of msg - virtual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* post to Inbound Post Q */
 
-    /* virtual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0xff;
+	pPab->p_atu->InQueue = msgOffset;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_PROMISCUOUS_MODE;
-    /* phys address to return status - area right after PAB */
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-   
-    /* post to Inbound Post Q */   
+	i = 0;
 
-    pPab->p_atu->InQueue = msgOffset;
+	/* wait for response */
+	while (p32[0] == 0xff) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for promiscuous mode\n");
+			return RC_RTN_NO_LINK_SPEED;
+		}
+		udelay(50);
+	}
 
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        if (WaitCallback)
-            (*WaitCallback)();
+	/* get mode */
+	*pMode = (U8) ((volatile PU8) p32)[0] & 0x0f;
 
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] != 0xff)
-            break;
-            
-        if (!timeout--)
-        {
-            kprintf("Timeout waiting for promiscuous mode from adapter\n");
-            kprintf("0x%08.8ulx\n", p32[0]);
-            return RC_RTN_NO_LINK_SPEED;
-        }
-    }
-
-    /* get mode */
-    *pMode = (U8)((volatile PU8)p32)[0] & 0x0f;
-
-    return RC_RTN_NO_ERROR;
+	return RC_RTN_NO_ERROR;
 }
+
 /*
 ** =========================================================================
 ** RCSetBroadcastMode()
@@ -1237,36 +1040,35 @@ RCGetPromiscuousMode(U16 AdapterID, PU32 pMode, PFNWAITCALLBACK WaitCallback)
 ** =========================================================================
 */
 RC_RETURN
-RCSetBroadcastMode(U16 AdapterID, U16 Mode)
+RCSetBroadcastMode (struct net_device * dev, U16 Mode)
 {
-    U32  off;
-    PU32 pMsg;
-    PPAB pPab;
-    
-    pPab =PCIAdapterBlock[AdapterID];
-     
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	U32 off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_BROADCAST_MODE;
-    pMsg[5] = Mode;     /* promiscuous mode setting */
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    pPab->p_atu->InQueue = off;   /* send it to the device */
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    return RC_RTN_NO_ERROR ;
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
+
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
+
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_BROADCAST_MODE;
+	pMsg[5] = Mode;		/* promiscuous mode setting */
+
+	pPab->p_atu->InQueue = off;	/* send it to the device */
+
+	return RC_RTN_NO_ERROR;
 }
+
 /*
 ** =========================================================================
 ** RCGetBroadcastMode()
@@ -1280,72 +1082,53 @@ RCSetBroadcastMode(U16 AdapterID, U16 Mode)
 ** =========================================================================
 */
 RC_RETURN
-RCGetBroadcastMode(U16 AdapterID, PU32 pMode, PFNWAITCALLBACK WaitCallback)
+RCGetBroadcastMode (struct net_device * dev, PU32 pMode,
+		    PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    volatile PU32 p32;
-    PPAB pPab;
+	U32 msgOffset;
+	PU32 pMsg;
+	volatile PU32 p32;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab =PCIAdapterBlock[AdapterID];
+	msgOffset = pPab->p_atu->InQueue;
 
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk (KERN_WARNING
+			"RCGetLinkSpeed(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    msgOffset = pPab->p_atu->InQueue;
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0xff;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-        kprintf("RCGetLinkSpeed(): Inbound Free Q empty!\n");
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_BROADCAST_MODE;
+	/* phys address to return status - area right after PAB */
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    /* calc virtual address of msg - virtual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* post to Inbound Post Q */
 
-    /* virtual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0xff;
+	pPab->p_atu->InQueue = msgOffset;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_BROADCAST_MODE;
-    /* phys address to return status - area right after PAB */
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-   
-    /* post to Inbound Post Q */   
+	/* wait for response */
+	if (p32[0] == 0xff) {
+		dprintk (KERN_WARNING
+			"Timeout waiting for promiscuous mode\n");
+		return RC_RTN_NO_LINK_SPEED;
+	}
 
-    pPab->p_atu->InQueue = msgOffset;
+	/* get mode */
+	*pMode = (U8) ((volatile PU8) p32)[0] & 0x0f;
 
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        if (WaitCallback)
-            (*WaitCallback)();
-
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] != 0xff)
-            break;
-            
-        if (!timeout--)
-        {
-            kprintf("Timeout waiting for promiscuous mode from adapter\n");
-            kprintf("0x%08.8ulx\n", p32[0]);
-            return RC_RTN_NO_LINK_SPEED;
-        }
-    }
-
-    /* get mode */
-    *pMode = (U8)((volatile PU8)p32)[0] & 0x0f;
-
-    return RC_RTN_NO_ERROR;
+	return RC_RTN_NO_ERROR;
 }
 
 /*
@@ -1363,80 +1146,62 @@ RCGetBroadcastMode(U16 AdapterID, PU32 pMode, PFNWAITCALLBACK WaitCallback)
 ** =========================================================================
 */
 RC_RETURN
-RCGetLinkSpeed(U16 AdapterID, PU32 pLinkSpeedCode, PFNWAITCALLBACK WaitCallback)
+RCGetLinkSpeed (struct net_device * dev, PU32 pLinkSpeedCode,
+		PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    volatile PU32 p32;
-    U8 IOPLinkSpeed;
-    PPAB pPab;
+	U32 msgOffset, i;
+	PU32 pMsg;
+	volatile PU32 p32;
+	U8 IOPLinkSpeed;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab =PCIAdapterBlock[AdapterID];
+	msgOffset = pPab->p_atu->InQueue;
 
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk (KERN_WARNING
+			"RCGetLinkSpeed(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    msgOffset = pPab->p_atu->InQueue;
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0xff;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-        kprintf("RCGetLinkSpeed(): Inbound Free Q empty!\n");
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_LINK_SPEED;
+	/* phys address to return status - area right after PAB */
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    /* calc virtual address of msg - virtual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* post to Inbound Post Q */
 
-    /* virtual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0xff;
+	pPab->p_atu->InQueue = msgOffset;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_LINK_SPEED;
-    /* phys address to return status - area right after PAB */
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-   
-    /* post to Inbound Post Q */   
+	/* wait for response */
+	i = 0;
+	while (p32[0] == 0xff) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for link speed\n");
+			return RC_RTN_NO_LINK_SPEED;
+		}
+		udelay(50);
+	}
+	/* get Link speed */
+	IOPLinkSpeed = (U8) ((volatile PU8) p32)[0] & 0x0f;
+	*pLinkSpeedCode = IOPLinkSpeed;
 
-    pPab->p_atu->InQueue = msgOffset;
-
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        if (WaitCallback)
-            (*WaitCallback)();
-
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] != 0xff)
-            break;
-            
-        if (!timeout--)
-        {
-            kprintf("Timeout waiting for link speed from IOP\n");
-            kprintf("0x%08.8ulx\n", p32[0]);
-            return RC_RTN_NO_LINK_SPEED;
-        }
-    }
-
-    /* get Link speed */
-    IOPLinkSpeed = (U8)((volatile PU8)p32)[0] & 0x0f;
-
-    *pLinkSpeedCode= IOPLinkSpeed;
-
-    return RC_RTN_NO_ERROR;
+	return RC_RTN_NO_ERROR;
 }
 
 /*
 ** =========================================================================
-** RCReportDriverCapability(U16 AdapterID, U32 capability)
+** RCReportDriverCapability(struct net_device *dev, U32 capability)
 **
 ** Currently defined bits:
 ** WARM_REBOOT_CAPABLE   0x01
@@ -1444,35 +1209,34 @@ RCGetLinkSpeed(U16 AdapterID, PU32 pLinkSpeedCode, PFNWAITCALLBACK WaitCallback)
 ** =========================================================================
 */
 RC_RETURN
-RCReportDriverCapability(U16 AdapterID, U32 capability)
+RCReportDriverCapability (struct net_device * dev, U32 capability)
 {
-    U32  off;
-    PU32 pMsg;
-    PPAB pPab;
+	U32 off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab =PCIAdapterBlock[AdapterID];
-     
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_REPORT_DRIVER_CAPABILITY;
-    pMsg[5] = capability;
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    return RC_RTN_NO_ERROR ;
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
+
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] =
+	    RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_REPORT_DRIVER_CAPABILITY;
+	pMsg[5] = capability;
+
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+
+	return RC_RTN_NO_ERROR;
 }
 
 /*
@@ -1484,71 +1248,51 @@ RCReportDriverCapability(U16 AdapterID, U32 capability)
 ** =========================================================================
 */
 RC_RETURN
-RCGetFirmwareVer(U16 AdapterID, PU8 pFirmString, PFNWAITCALLBACK WaitCallback)
+RCGetFirmwareVer (struct net_device * dev, PU8 pFirmString,
+		  PFNWAITCALLBACK WaitCallback)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    volatile PU32 p32;
-    PPAB pPab;
+	U32 msgOffset, i;
+	PU32 pMsg;
+	volatile PU32 p32;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab =PCIAdapterBlock[AdapterID];
+	msgOffset = pPab->p_atu->InQueue;
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("RCGetFirmwareVer(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    msgOffset = pPab->p_atu->InQueue;
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0xff;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-        kprintf("RCGetFirmwareVer(): Inbound Free Q empty!\n");
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	/* setup private message */
+	pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_FIRMWARE_REV;
+	/* phys address to return status - area right after PAB */
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-    /* calc virtual address of msg - virtual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* post to Inbound Post Q */
 
-    /* virtual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0xff;
+	pPab->p_atu->InQueue = msgOffset;
 
-    /* setup private message */
-    pMsg[0] = SIX_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_FIRMWARE_REV;
-    /* phys address to return status - area right after PAB */
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-
-
-   
-    /* post to Inbound Post Q */   
-
-    pPab->p_atu->InQueue = msgOffset;
-
-    
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        if (WaitCallback)
-            (*WaitCallback)();
-            
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-
-        if (p32[0] != 0xff)
-            break;
-            
-        if (!timeout--)
-        {
-            kprintf("Timeout waiting for link speed from IOP\n");
-            return RC_RTN_NO_FIRM_VER;
-        }
-    }
-
-    strcpy(pFirmString, (PU8)p32);
-    return RC_RTN_NO_ERROR;
+	/* wait for response */
+	i = 0;
+	while (p32[0] == 0xff) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for link speed\n");
+			return RC_RTN_NO_FIRM_VER;
+		}
+		udelay(50);
+	}
+	strcpy (pFirmString, (PU8) p32);
+	return RC_RTN_NO_ERROR;
 }
 
 /*
@@ -1564,59 +1308,53 @@ RCGetFirmwareVer(U16 AdapterID, PU8 pFirmString, PFNWAITCALLBACK WaitCallback)
 **
 ** =========================================================================
 */
-RC_RETURN 
-RCResetLANCard(U16 AdapterID, U16 ResourceFlags, PU32 ReturnAddr, PFNCALLBACK CallbackFunction)
+RC_RETURN
+RCResetLANCard (struct net_device * dev, U16 ResourceFlags, PU32 ReturnAddr,
+		PFNCALLBACK CallbackFunction)
 {
-    unsigned long off;
-    unsigned long *pMsg;
-    PPAB pPab;
-    int i;
-    long timeout = 0;
+	unsigned long off;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	long timeout = 0;
 
-    
-    pPab =PCIAdapterBlock[AdapterID];
-     
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pPab->pCallbackFunc = CallbackFunction;
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    /* setup message */
-    pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_LAN_RESET << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = ResourceFlags << 16;   /* resource flags */
+	pPab->pCallbackFunc = CallbackFunction;
 
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
 
-    if (CallbackFunction == (PFNCALLBACK)NULL)
-    {
-        /* call RCProcI2OMsgQ() until something in pPab->pCallbackFunc
-           or until timer goes off */
-        while (pPab->pCallbackFunc == (PFNCALLBACK)NULL)
-        {
-            RCProcI2OMsgQ(AdapterID);
-            for (i = 0; i < 100000; i++)     /* please don't hog the bus!!! */
-                ;
-            timeout++;
-            if (timeout > 10000)
-            {
-                break;
-            }
-        }
-        if (ReturnAddr != (PU32)NULL)
-            *ReturnAddr = (U32)pPab->pCallbackFunc;
-    }
+	/* setup message */
+	pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_LAN_RESET << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = ResourceFlags << 16;	/* resource flags */
 
-    return RC_RTN_NO_ERROR ;
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+
+	if (CallbackFunction == (PFNCALLBACK) NULL) {
+		/* call RCProcI2OMsgQ() until something in pPab->pCallbackFunc
+		   or until timer goes off */
+		while (pPab->pCallbackFunc == (PFNCALLBACK) NULL) {
+			RCProcI2OMsgQ (dev);
+			mdelay (1);
+			timeout++;
+			if (timeout > 200) {
+				break;
+			}
+		}
+		if (ReturnAddr != (PU32) NULL)
+			*ReturnAddr = (U32) pPab->pCallbackFunc;
+	}
+
+	return RC_RTN_NO_ERROR;
 }
+
 /*
 ** =========================================================================
 ** RCResetIOP()
@@ -1625,64 +1363,53 @@ RCResetLANCard(U16 AdapterID, U16 ResourceFlags, PU32 ReturnAddr, PFNCALLBACK Ca
 **
 ** =========================================================================
 */
-RC_RETURN 
-RCResetIOP(U16 AdapterID)
+RC_RETURN
+RCResetIOP (struct net_device * dev)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    PPAB pPab;
-    volatile PU32 p32;
-    
-    pPab = PCIAdapterBlock[AdapterID];
-    msgOffset = pPab->p_atu->InQueue;
+	U32 msgOffset, i;
+	PU32 pMsg;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	volatile PU32 p32;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	msgOffset = pPab->p_atu->InQueue;
 
-    /* calc virtual address of msg - virtual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	if (msgOffset == 0xFFFFFFFF) {
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    pMsg[0] = NINE_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_EXEC_IOP_RESET << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
-    pMsg[2] = 0; /* universal context */
-    pMsg[3] = 0; /* universal context */
-    pMsg[4] = 0; /* universal context */
-    pMsg[5] = 0; /* universal context */
-    /* phys address to return status - area right after PAB */
-    pMsg[6] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-    pMsg[7] = 0;
-    pMsg[8] = 1;  /*  return 1 byte */
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-    /* virual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0;
-    p32[1] = 0;
+	pMsg[0] = NINE_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_EXEC_IOP_RESET << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
+	pMsg[2] = 0;		/* universal context */
+	pMsg[3] = 0;		/* universal context */
+	pMsg[4] = 0;		/* universal context */
+	pMsg[5] = 0;		/* universal context */
+	/* phys address to return status - area right after PAB */
+	pMsg[6] = pPab->outMsgBlockPhyAddr;
+	pMsg[7] = 0;
+	pMsg[8] = 1;		/*  return 1 byte */
 
-    /* post to Inbound Post Q */   
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0;
+	p32[1] = 0;
 
-    pPab->p_atu->InQueue = msgOffset;
+	/* post to Inbound Post Q */
 
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] || p32[1])
-            break;
-            
-        if (!timeout--)
-        {
-            printk("RCResetIOP timeout\n");
-            return RC_RTN_MSG_REPLY_TIMEOUT;
-        }
-    }
-    return RC_RTN_NO_ERROR;
+	pPab->p_atu->InQueue = msgOffset;
+
+	/* wait for response */
+	i = 0;
+	while (!p32[0] && !p32[1]) {
+		if (i++ > 0xff) {
+			dprintk ("RCResetIOP timeout\n");
+			return RC_RTN_MSG_REPLY_TIMEOUT;
+		}
+		udelay(100);
+	}
+	return RC_RTN_NO_ERROR;
 }
 
 /*
@@ -1698,59 +1425,54 @@ RCResetIOP(U16 AdapterID)
 **
 ** =========================================================================
 */
-RC_RETURN 
-RCShutdownLANCard(U16 AdapterID, U16 ResourceFlags, PU32 ReturnAddr, PFNCALLBACK CallbackFunction)
+RC_RETURN
+RCShutdownLANCard (struct net_device * dev, U16 ResourceFlags,
+		   PU32 ReturnAddr, PFNCALLBACK CallbackFunction)
 {
-    volatile PU32 pMsg;
-    U32 off;
-    PPAB pPab;
-    int i;
-    long timeout = 0;
+	volatile PU32 pMsg;
+	U32 off;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	long timeout = 0;
 
-    pPab = PCIAdapterBlock[AdapterID];
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    pPab->pCallbackFunc = CallbackFunction;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	pPab->pCallbackFunc = CallbackFunction;
 
-    /* setup message */
-    pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_LAN_SHUTDOWN << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = ResourceFlags << 16;   /* resource flags */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
 
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
+	/* setup message */
+	pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] =
+	    I2O_LAN_SHUTDOWN << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = ResourceFlags << 16;	/* resource flags */
 
-    if (CallbackFunction == (PFNCALLBACK)NULL)
-    {
-        /* call RCProcI2OMsgQ() until something in pPab->pCallbackFunc
-           or until timer goes off */
-        while (pPab->pCallbackFunc == (PFNCALLBACK)NULL)
-        {
-            RCProcI2OMsgQ(AdapterID);
-            for (i = 0; i < 100000; i++)     /* please don't hog the bus!!! */
-                ;
-            timeout++;
-            if (timeout > 10000)
-            {
-				printk("RCShutdownLANCard(): timeout\n");
-                break;
-            }
-        }
-        if (ReturnAddr != (PU32)NULL)
-            *ReturnAddr = (U32)pPab->pCallbackFunc;
-    }
-    return RC_RTN_NO_ERROR ;
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+
+	if (CallbackFunction == (PFNCALLBACK) NULL) {
+		/* call RCProcI2OMsgQ() until something in pPab->pCallbackFunc
+		   or until timer goes off */
+		while (pPab->pCallbackFunc == (PFNCALLBACK) NULL) {
+			RCProcI2OMsgQ (dev);
+			mdelay (1);
+			timeout++;
+			if (timeout > 200) {
+				dprintk (KERN_WARNING
+					"RCShutdownLANCard(): timeout\n");
+				break;
+			}
+		}
+		if (ReturnAddr != (PU32) NULL)
+			*ReturnAddr = (U32) pPab->pCallbackFunc;
+	}
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
@@ -1765,36 +1487,33 @@ RCShutdownLANCard(U16 AdapterID, U16 ResourceFlags, PU32 ReturnAddr, PFNCALLBACK
 ** =========================================================================
 */
 RC_RETURN
-RCSetRavlinIPandMask(U16 AdapterID, U32 ipAddr, U32 netMask)
+RCSetRavlinIPandMask (struct net_device * dev, U32 ipAddr, U32 netMask)
 {
-    volatile PU32 pMsg;
-    U32 off;
-    PPAB pPab;
+	volatile PU32 pMsg;
+	U32 off;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
 
-    pPab = PCIAdapterBlock[AdapterID];
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
+	off = pPab->p_atu->InQueue;	/* get addresss of message */
 
-    off = pPab->p_atu->InQueue; /* get addresss of message */
-    
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
-    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    /* setup private message */
-    pMsg[0] = SEVEN_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;                 /* initiator context */
-    pMsg[3] = 0x219;             /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_IP_AND_MASK;
-    pMsg[5] = ipAddr; 
-    pMsg[6] = netMask;
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
 
+	/* setup private message */
+	pMsg[0] = SEVEN_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x219;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_SET_IP_AND_MASK;
+	pMsg[5] = ipAddr;
+	pMsg[6] = netMask;
 
-    pPab->p_atu->InQueue = off;   /* send it to the I2O device */
-    return RC_RTN_NO_ERROR ;
+	pPab->p_atu->InQueue = off;	/* send it to the I2O device */
+	return RC_RTN_NO_ERROR;
 
 }
 
@@ -1807,85 +1526,71 @@ RCSetRavlinIPandMask(U16 AdapterID, U32 ipAddr, U32 netMask)
 ** =========================================================================
 */
 RC_RETURN
-RCGetRavlinIPandMask(U16 AdapterID, PU32 pIpAddr, PU32 pNetMask, 
-                     PFNWAITCALLBACK WaitCallback)
+RCGetRavlinIPandMask (struct net_device * dev, PU32 pIpAddr, PU32 pNetMask,
+		      PFNWAITCALLBACK WaitCallback)
 {
-    unsigned i, timeout;
-    U32      off;
-    PU32     pMsg, p32;
-    PPAB     pPab;
-    PATU     p_atu;
-    
-#ifdef DEBUG
-    kprintf("RCGetRavlinIPandMask: pIpAddr is 0x%08.8ulx, *IpAddr is 0x%08.8ulx\n", pIpAddr, *pIpAddr);
-#endif /* DEBUG */
+	U32 off, i;
+	PU32 pMsg, p32;
+	PPAB pPab = ((PDPA) dev->priv)->pPab;
+	PATU p_atu;
 
-    pPab = PCIAdapterBlock[AdapterID];
-    
-    if (pPab == NULL)
-        return RC_RTN_ADPTR_NOT_REGISTERED;
-    
-    p_atu = pPab->p_atu;
-    off = p_atu->InQueue;   /* get addresss of message */
- 
-    if (0xFFFFFFFF == off)
-        return RC_RTN_FREE_Q_EMPTY;
+	dprintk
+	    ("RCGetRavlinIPandMask: pIpAddr is 0x%x, *IpAddr is 0x%x\n",
+	     (u32) pIpAddr, *pIpAddr);
 
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    *p32 = 0xFFFFFFFF;
+	if (pPab == NULL)
+		return RC_RTN_ADPTR_NOT_REGISTERED;
 
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + off);
+	p_atu = pPab->p_atu;
+	off = p_atu->InQueue;	/* get addresss of message */
 
-#ifdef DEBUG
-    kprintf("RCGetRavlinIPandMask: p_atu 0x%08.8ulx, off 0x%08.8ulx, p32 0x%08.8ulx\n", p_atu, off, p32);
-#endif /* DEBUG */
-    /* setup private message */
-    pMsg[0] = FIVE_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
-    pMsg[2] = 0;               /* initiator context */
-    pMsg[3] = 0x218;           /* transaction context */
-    pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_IP_AND_MASK;
-    pMsg[5] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
+	if (0xFFFFFFFF == off)
+		return RC_RTN_FREE_Q_EMPTY;
 
-    p_atu->InQueue = off;   /* send it to the I2O device */
-#ifdef DEBUG
-    kprintf("RCGetRavlinIPandMask: p_atu 0x%08.8ulx, off 0x%08.8ulx, p32 0x%08.8ulx\n", p_atu, off, p32);
-#endif /* DEBUG */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	*p32 = 0xFFFFFFFF;
 
-    /* wait for the rcpci45 board to update the info */
-    timeout = 100000;
-    while (0xffffffff == *p32)
-    {
-        if (WaitCallback)
-            (*WaitCallback)();
-    
-        for (i = 0; i < 1000; i++)
-            ;
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + off);
 
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("RCGetRavlinIPandMask: Timeout\n");
-#endif /* DEBUG */
-            return RC_RTN_MSG_REPLY_TIMEOUT;
-        }
-    }
+	dprintk
+	    ("RCGetRavlinIPandMask: p_atu 0x%x, off 0x%x, p32 0x%x\n",
+	     (u32) p_atu, off, (u32) p32);
+	/* setup private message */
+	pMsg[0] = FIVE_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_PRIVATE << 24 | I2O_HOST_TID << 12 | RC_LAN_TARGET_ID;
+	pMsg[2] = 0;		/* initiator context */
+	pMsg[3] = 0x218;	/* transaction context */
+	pMsg[4] = RC_PCI45_VENDOR_ID << 16 | RC_PRIVATE_GET_IP_AND_MASK;
+	pMsg[5] = pPab->outMsgBlockPhyAddr;
 
-#ifdef DEBUG
-    kprintf("RCGetRavlinIPandMask: after time out\n", \
-            "p32[0] (IpAddr) 0x%08.8ulx, p32[1] (IPmask) 0x%08.8ulx\n", p32[0], p32[1]);
-#endif /* DEBUG */
-    
-    /* send IP and mask to user's space  */
-    *pIpAddr  = p32[0];
-    *pNetMask = p32[1];
+	p_atu->InQueue = off;	/* send it to the I2O device */
+	dprintk
+	    ("RCGetRavlinIPandMask: p_atu 0x%x, off 0x%x, p32 0x%x\n",
+	     (u32) p_atu, off, (u32) p32);
 
+	/* wait for the rcpci45 board to update the info */
+	i = 0;
+	while (0xffffffff == *p32) {
+		if (i++ > 0xff) {
+			dprintk ("RCGetRavlinIPandMask: Timeout\n");
+			return RC_RTN_MSG_REPLY_TIMEOUT;
+		}
+		udelay(50);
+	}
 
-#ifdef DEBUG
-    kprintf("RCGetRavlinIPandMask: pIpAddr is 0x%08.8ulx, *IpAddr is 0x%08.8ulx\n", pIpAddr, *pIpAddr);
-#endif /* DEBUG */
+	dprintk
+	    ("RCGetRavlinIPandMask: after time out\np32[0] (IpAddr) 0x%x, p32[1] (IPmask) 0x%x\n",
+	     p32[0], p32[1]);
 
-    return RC_RTN_NO_ERROR;
+	/* send IP and mask to user's space  */
+	*pIpAddr = p32[0];
+	*pNetMask = p32[1];
+
+	dprintk
+	    ("RCGetRavlinIPandMask: pIpAddr is 0x%x, *IpAddr is 0x%x\n",
+	     (u32) pIpAddr, *pIpAddr);
+
+	return RC_RTN_NO_ERROR;
 }
 
 /* 
@@ -1904,99 +1609,68 @@ RCGetRavlinIPandMask(U16 AdapterID, PU32 pIpAddr, PU32 pNetMask,
 **
 ** =========================================================================
 */
-static int 
-SendI2OOutboundQInitMsg(PPAB pPab)
+static int
+SendI2OOutboundQInitMsg (PPAB pPab)
 {
-    U32 msgOffset, timeout, phyOutQFrames, i;
-    volatile PU32 pMsg;
-    volatile PU32 p32;
-    
-    
-    
-    msgOffset = pPab->p_atu->InQueue;
+	U32 msgOffset, phyOutQFrames, i;
+	volatile PU32 pMsg;
+	volatile PU32 p32;
 
-    
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("SendI2OOutboundQInitMsg(): Inbound Free Q empty!\n");
-#endif /* DEBUG */
-        return RC_RTN_FREE_Q_EMPTY;
-    }
-    
-    
-    /* calc virual address of msg - virual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	msgOffset = pPab->p_atu->InQueue;
 
-#ifdef DEBUG
-    kprintf("SendI2OOutboundQInitMsg - pMsg = 0x%08.8ulx, InQ msgOffset = 0x%08.8ulx\n", pMsg, msgOffset);
-#endif /* DEBUG */
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("SendI2OOutboundQInitMsg(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    pMsg[0] = EIGHT_WORD_MSG_SIZE | TRL_OFFSET_6;
-    pMsg[1] = I2O_EXEC_OUTBOUND_INIT << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = 0x106; /* transaction context */
-    pMsg[4] = 4096; /* Host page frame size */
-    pMsg[5] = MSG_FRAME_SIZE  << 16 | 0x80; /* outbound msg frame size and Initcode */
-    pMsg[6] = 0xD0000004;       /* simple sgl element LE, EOB */
-    /* phys address to return status - area right after PAB */
-    pMsg[7] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-    /* virual pointer to return buffer - clear first two dwords */
-    p32 = (PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0;
-    
-    /* post to Inbound Post Q */   
-    pPab->p_atu->InQueue = msgOffset;
-    
-    /* wait for response */
-    timeout = 100000;
-    while(1)
-    {
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0])
-            break;
-            
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("Timeout wait for InitOutQ InPrgress status from IOP\n");
-#endif /* DEBUG */
-            return RC_RTN_NO_I2O_STATUS;
-        }
-    }
+	dprintk
+	    ("SendI2OOutboundQInitMsg - pMsg = 0x%x, InQ msgOffset = 0x%x\n",
+	     (u32) pMsg, msgOffset);
 
-    timeout = 100000;
-    while(1)
-    {
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] == I2O_EXEC_OUTBOUND_INIT_COMPLETE)
-            break;
+	pMsg[0] = EIGHT_WORD_MSG_SIZE | TRL_OFFSET_6;
+	pMsg[1] =
+	    I2O_EXEC_OUTBOUND_INIT << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = 0x106;	/* transaction context */
+	pMsg[4] = 4096;		/* Host page frame size */
+	pMsg[5] = MSG_FRAME_SIZE << 16 | 0x80;	/* outbound msg frame size and Initcode */
+	pMsg[6] = 0xD0000004;	/* simple sgl element LE, EOB */
+	/* phys address to return status - area right after PAB */
+	pMsg[7] = pPab->outMsgBlockPhyAddr;
 
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("Timeout wait for InitOutQ Complete status from IOP\n");
-#endif /* DEBUG */
-            return RC_RTN_NO_I2O_STATUS;
-        }
-    }
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0;
 
-    /* load PCI outbound free Q with MF physical addresses */
-    phyOutQFrames = pPab->outMsgBlockPhyAddr;
+	/* post to Inbound Post Q */
+	pPab->p_atu->InQueue = msgOffset;
 
-    for (i = 0; i < NMBR_MSG_FRAMES; i++)
-    {
-        pPab->p_atu->OutQueue = phyOutQFrames;
-        phyOutQFrames += MSG_FRAME_SIZE;
-    }
-    return RC_RTN_NO_ERROR;
+	/* wait for response */
+	i = 0;
+	while (!p32[0]) {
+		if (i++ > 0xff) {
+			printk("rc: InitOutQ timeout\n");
+			return RC_RTN_NO_I2O_STATUS;
+		}
+		udelay(50);
+	}
+	if (p32[0] != I2O_EXEC_OUTBOUND_INIT_COMPLETE) {
+		printk("rc: exec outbound init failed (%x)\n",
+				p32[0]);
+		return RC_RTN_NO_I2O_STATUS;
+	}
+	/* load PCI outbound free Q with MF physical addresses */
+	phyOutQFrames = pPab->outMsgBlockPhyAddr;
+
+	for (i = 0; i < NMBR_MSG_FRAMES; i++) {
+		pPab->p_atu->OutQueue = phyOutQFrames;
+		phyOutQFrames += MSG_FRAME_SIZE;
+	}
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
@@ -2006,97 +1680,72 @@ SendI2OOutboundQInitMsg(PPAB pPab)
 **
 ** =========================================================================
 */
-static int 
-GetI2OStatus(PPAB pPab)
+static int
+GetI2OStatus (PPAB pPab)
 {
-    U32 msgOffset, timeout;
-    PU32 pMsg;
-    volatile PU32 p32;
-    
-    
-    msgOffset = pPab->p_atu->InQueue; 
-#ifdef DEBUG
-    printk("GetI2OStatus: msg offset = 0x%x\n", msgOffset);
-#endif /* DEBUG */
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("GetI2OStatus(): Inbound Free Q empty!\n");
-#endif /* DEBUG */
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	U32 msgOffset, i;
+	PU32 pMsg;
+	volatile PU32 p32;
 
-    /* calc virual address of msg - virual already mapped to physical */    
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	msgOffset = pPab->p_atu->InQueue;
+	dprintk ("GetI2OStatus: msg offset = 0x%x\n", msgOffset);
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("GetI2OStatus(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    pMsg[0] = NINE_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_EXEC_STATUS_GET << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
-    pMsg[2] = 0; /* universal context */
-    pMsg[3] = 0; /* universal context */
-    pMsg[4] = 0; /* universal context */
-    pMsg[5] = 0; /* universal context */
-    /* phys address to return status - area right after PAB */
-    pMsg[6] = pPab->outMsgBlockPhyAddr - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB); 
-    pMsg[7] = 0;
-    pMsg[8] = 88;  /*  return 88 bytes */
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-    /* virual pointer to return buffer - clear first two dwords */
-    p32 = (volatile PU32)(pPab->pLinOutMsgBlock - ADAPTER_BLOCK_RESERVED_SPACE + sizeof(PAB));
-    p32[0] = 0;
-    p32[1] = 0;
+	pMsg[0] = NINE_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_EXEC_STATUS_GET << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
+	pMsg[2] = 0;		/* universal context */
+	pMsg[3] = 0;		/* universal context */
+	pMsg[4] = 0;		/* universal context */
+	pMsg[5] = 0;		/* universal context */
+	/* phys address to return status - area right after PAB */
+	pMsg[6] = pPab->outMsgBlockPhyAddr;
+	pMsg[7] = 0;
+	pMsg[8] = 88;		/*  return 88 bytes */
 
-#ifdef DEBUG
-    kprintf("GetI2OStatus - pMsg:0x%08.8ulx, msgOffset:0x%08.8ulx, [1]:0x%08.8ulx, [6]:0x%08.8ulx\n",
-            pMsg, msgOffset, pMsg[1], pMsg[6]);
-#endif /* DEBUG */
-   
-    /* post to Inbound Post Q */   
-    pPab->p_atu->InQueue = msgOffset;
-    
-#ifdef DEBUG
-    kprintf("Return status to p32 = 0x%08.8ulx\n", p32);
-#endif /* DEBUG */
-    
-    /* wait for response */
-    timeout = 1000000;
-    while(1)
-    {
-        int i;
-        
-        for (i = 0; i < 1000; i++)      /* please don't hog the bus!!! */
-            ;
-            
-        if (p32[0] && p32[1])
-            break;
-            
-        if (!timeout--)
-        {
-#ifdef DEBUG
-            kprintf("Timeout waiting for status from IOP\n");
-            kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[0], p32[1], p32[2], p32[3]);
-            kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[4], p32[5], p32[6], p32[7]);
-            kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[8], p32[9], p32[10], p32[11]);
-#endif /* DEBUG */
-            return RC_RTN_NO_I2O_STATUS;
-        }
-    }
-            
-#ifdef DEBUG
-    kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[0], p32[1], p32[2], p32[3]);
-    kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[4], p32[5], p32[6], p32[7]);
-    kprintf("0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[8], p32[9], p32[10], p32[11]);
-#endif /* DEBUG */
-    /* get IOP state */
-    pPab->IOPState = ((volatile PU8)p32)[10];
-    pPab->InboundMFrameSize  = ((volatile PU16)p32)[6];
-    
-#ifdef DEBUG
-    kprintf("IOP state 0x%02.2x InFrameSize = 0x%04.4x\n", 
-            pPab->IOPState, pPab->InboundMFrameSize);
-#endif /* DEBUG */
-    return RC_RTN_NO_ERROR;
+	/* virtual pointer to return buffer - clear first two dwords */
+	p32 = (volatile PU32) pPab->pLinOutMsgBlock;
+	p32[0] = 0;
+	p32[1] = 0;
+
+	dprintk
+	    ("GetI2OStatus - pMsg:0x%x, msgOffset:0x%x, [1]:0x%x, [6]:0x%x\n",
+	     (u32) pMsg, msgOffset, pMsg[1], pMsg[6]);
+
+	/* post to Inbound Post Q */
+	pPab->p_atu->InQueue = msgOffset;
+
+	dprintk ("Return status to p32 = 0x%x\n", (u32) p32);
+
+	/* wait for response */
+	i = 0;
+	while (!p32[0] || !p32[1]) {
+		if (i++ > 0xff) {
+			dprintk ("Timeout waiting for status from IOP\n");
+			return RC_RTN_NO_I2O_STATUS;
+		}
+		udelay(50);
+	}
+
+	dprintk ("0x%x:0x%x:0x%x:0x%x\n", p32[0], p32[1],
+		 p32[2], p32[3]);
+	dprintk ("0x%x:0x%x:0x%x:0x%x\n", p32[4], p32[5],
+		 p32[6], p32[7]);
+	dprintk ("0x%x:0x%x:0x%x:0x%x\n", p32[8], p32[9],
+		 p32[10], p32[11]);
+	/* get IOP state */
+	pPab->IOPState = ((volatile PU8) p32)[10];
+	pPab->InboundMFrameSize = ((volatile PU16) p32)[6];
+
+	dprintk ("IOP state 0x%x InFrameSize = 0x%x\n",
+		 pPab->IOPState, pPab->InboundMFrameSize);
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
@@ -2105,139 +1754,124 @@ GetI2OStatus(PPAB pPab)
 **
 ** =========================================================================
 */
-static int 
-SendEnableSysMsg(PPAB pPab)
+static int
+SendEnableSysMsg (PPAB pPab)
 {
-    U32 msgOffset; // timeout;
-    volatile PU32 pMsg;
+	U32 msgOffset;
+	volatile PU32 pMsg;
 
-    msgOffset = pPab->p_atu->InQueue;
+	msgOffset = pPab->p_atu->InQueue;
 
-    if (msgOffset == 0xFFFFFFFF)
-    {
-#ifdef DEBUG
-        kprintf("SendEnableSysMsg(): Inbound Free Q empty!\n");
-#endif /* DEBUG */
-        return RC_RTN_FREE_Q_EMPTY;
-    }
+	if (msgOffset == 0xFFFFFFFF) {
+		dprintk ("SendEnableSysMsg(): Inbound Free Q empty!\n");
+		return RC_RTN_FREE_Q_EMPTY;
+	}
 
-    /* calc virual address of msg - virual already mapped to physical */
-    pMsg = (PU32)(pPab->pPci45LinBaseAddr + msgOffset);
+	/* calc virtual address of msg - virtual already mapped to physical */
+	pMsg = (PU32) (pPab->pPci45LinBaseAddr + msgOffset);
 
-#ifdef DEBUG
-    kprintf("SendEnableSysMsg - pMsg = 0x%08.8ulx, InQ msgOffset = 0x%08.8ulx\n", pMsg, msgOffset);
-#endif /* DEBUG */
+	dprintk
+	    ("SendEnableSysMsg - pMsg = 0x%x, InQ msgOffset = 0x%x\n",
+	     (u32) pMsg, msgOffset);
 
-    pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
-    pMsg[1] = I2O_EXEC_SYS_ENABLE << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
-    pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
-    pMsg[3] = 0x110; /* transaction context */
-    pMsg[4] = 0x50657465; /*  RedCreek Private */
+	pMsg[0] = FOUR_WORD_MSG_SIZE | SGL_OFFSET_0;
+	pMsg[1] = I2O_EXEC_SYS_ENABLE << 24 | I2O_HOST_TID << 12 | I2O_IOP_TID;
+	pMsg[2] = DEFAULT_RECV_INIT_CONTEXT;
+	pMsg[3] = 0x110;	/* transaction context */
+	pMsg[4] = 0x50657465;	/*  RedCreek Private */
 
-    /* post to Inbound Post Q */
-    pPab->p_atu->InQueue = msgOffset;
+	/* post to Inbound Post Q */
+	pPab->p_atu->InQueue = msgOffset;
 
-    return RC_RTN_NO_ERROR;
+	return RC_RTN_NO_ERROR;
 }
-
 
 /*
 ** =========================================================================
 ** FillI2OMsgFromTCB()
 **
-** inputs   pMsgU32 - virual pointer (mapped to physical) of message frame
+** inputs   pMsgU32 - virtual pointer (mapped to physical) of message frame
 **          pXmitCntrlBlock - pointer to caller buffer control block.
 **
 ** fills in LAN SGL after Transaction Control Word or Bucket Count.
 ** =========================================================================
 */
-static int 
-FillI2OMsgSGLFromTCB(PU32 pMsgFrame, PRCTCB pTransCtrlBlock)
+static int
+FillI2OMsgSGLFromTCB (PU32 pMsgFrame, PRCTCB pTransCtrlBlock)
 {
-    unsigned int nmbrBuffers, nmbrSeg, nmbrDwords, context, flags;
-    PU32 pTCB, pMsg;
+	unsigned int nmbrBuffers, nmbrSeg, nmbrDwords, context, flags;
+	PU32 pTCB, pMsg;
 
-    /* SGL element flags */   
+	/* SGL element flags */
 #define EOB        0x40000000
 #define LE         0x80000000
 #define SIMPLE_SGL 0x10000000
 #define BC_PRESENT 0x01000000
 
-    pTCB = (PU32)pTransCtrlBlock;
-    pMsg = pMsgFrame;
-    nmbrDwords = 0;
+	pTCB = (PU32) pTransCtrlBlock;
+	pMsg = pMsgFrame;
+	nmbrDwords = 0;
 
-#ifdef DEBUG
-    kprintf("FillI2OMsgSGLFromTCBX\n");
-    kprintf("TCB  0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n",
-            pTCB[0], pTCB[1], pTCB[2], pTCB[3], pTCB[4]);
-    kprintf("pTCB 0x%08.8ulx, pMsg 0x%08.8ulx\n", pTCB, pMsg);
-#endif /* DEBUG */
-    
-    nmbrBuffers = *pTCB++;
-    
-    if (!nmbrBuffers)
-    {
-        return -1;
-    }
+	dprintk ("FillI2OMsgSGLFromTCBX\n");
+	dprintk ("TCB  0x%x:0x%x:0x%x:0x%x:0x%x\n",
+		 pTCB[0], pTCB[1], pTCB[2], pTCB[3], pTCB[4]);
+	dprintk ("pTCB 0x%x, pMsg 0x%x\n", (u32) pTCB, (u32) pMsg);
 
-    do
-    {
-        context = *pTCB++; /* buffer tag (context) */
-        nmbrSeg = *pTCB++; /* number of segments */
+	nmbrBuffers = *pTCB++;
 
-        if (!nmbrSeg)
-        {
-            return -1;
-        }
-        
-        flags = SIMPLE_SGL | BC_PRESENT;
+	if (!nmbrBuffers) {
+		return -1;
+	}
 
-        if (1 == nmbrSeg)
-        {
-            flags |= EOB;
-        
-            if (1 == nmbrBuffers)
-                flags |= LE;
-        }    
+	do {
+		context = *pTCB++;	/* buffer tag (context) */
+		nmbrSeg = *pTCB++;	/* number of segments */
 
-        /* 1st SGL buffer element has context */
-        pMsg[0] = pTCB[0] | flags ; /* send over count (segment size) */
-        pMsg[1] = context;
-        pMsg[2] = pTCB[1]; /* send buffer segment physical address */
-        nmbrDwords += 3;
-        pMsg += 3;
-        pTCB += 2;
+		if (!nmbrSeg) {
+			return -1;
+		}
 
-        
-        if (--nmbrSeg)
-        {
-            do
-            {
-                flags = SIMPLE_SGL;
-                
-                if (1 == nmbrSeg)
-                {
-                    flags |= EOB;
-                
-                    if (1 == nmbrBuffers)
-                        flags |= LE;
-                }    
-                
-                pMsg[0] = pTCB[0] | flags;  /* send over count */
-                pMsg[1] = pTCB[1];   /* send buffer segment physical address */
-                nmbrDwords += 2;
-                pTCB += 2;
-                pMsg += 2;
-        
-            } while (--nmbrSeg);
-        }
-        
-    } while (--nmbrBuffers);
-    
-    return nmbrDwords;
+		flags = SIMPLE_SGL | BC_PRESENT;
+
+		if (1 == nmbrSeg) {
+			flags |= EOB;
+
+			if (1 == nmbrBuffers)
+				flags |= LE;
+		}
+
+		/* 1st SGL buffer element has context */
+		pMsg[0] = pTCB[0] | flags;	/* send over count (segment size) */
+		pMsg[1] = context;
+		pMsg[2] = pTCB[1];	/* send buffer segment physical address */
+		nmbrDwords += 3;
+		pMsg += 3;
+		pTCB += 2;
+
+		if (--nmbrSeg) {
+			do {
+				flags = SIMPLE_SGL;
+
+				if (1 == nmbrSeg) {
+					flags |= EOB;
+
+					if (1 == nmbrBuffers)
+						flags |= LE;
+				}
+
+				pMsg[0] = pTCB[0] | flags;	/* send over count */
+				pMsg[1] = pTCB[1];	/* send buffer segment physical address */
+				nmbrDwords += 2;
+				pTCB += 2;
+				pMsg += 2;
+
+			} while (--nmbrSeg);
+		}
+
+	} while (--nmbrBuffers);
+
+	return nmbrDwords;
 }
-
 
 /*
 ** =========================================================================
@@ -2247,65 +1881,52 @@ FillI2OMsgSGLFromTCB(PU32 pMsgFrame, PRCTCB pTransCtrlBlock)
 ** * change to msg structure *
 ** =========================================================================
 */
-static void 
-ProcessOutboundI2OMsg(PPAB pPab, U32 phyAddrMsg)
+static void
+ProcessOutboundI2OMsg (PPAB pPab, U32 phyAddrMsg)
 {
-    PU8 p8Msg;
-    PU32 p32;
-    //  U16 count;
-    
-    
-    p8Msg = pPab->pLinOutMsgBlock + (phyAddrMsg - pPab->outMsgBlockPhyAddr);
-    p32 = (PU32)p8Msg;
-    
-#ifdef DEBUG
-    kprintf("VXD: ProcessOutboundI2OMsg - pPab 0x%08.8ulx, phyAdr 0x%08.8ulx, linAdr 0x%08.8ulx\n", pPab, phyAddrMsg, p8Msg);
-    kprintf("msg :0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[0], p32[1], p32[2], p32[3]);
-    kprintf("msg :0x%08.8ulx:0x%08.8ulx:0x%08.8ulx:0x%08.8ulx\n", p32[4], p32[5], p32[6], p32[7]);
-#endif /* DEBUG */
+	PU8 p8Msg;
+	PU32 p32;
+/*      U16 count; */
 
-    if (p32[4] >> 24 != I2O_REPLY_STATUS_SUCCESS)
-    {
-#ifdef DEBUG
-        kprintf("Message reply status not success\n");
-#endif /* DEBUG */
-        return;
-    }
-    
-    switch (p8Msg[7] )  /* function code byte */
-    {
-    case I2O_EXEC_SYS_TAB_SET:
-        msgFlag = 1;
-#ifdef DEBUG
-        kprintf("Received I2O_EXEC_SYS_TAB_SET reply\n");
-#endif /* DEBUG */
-        break;
+	p8Msg = pPab->pLinOutMsgBlock + (phyAddrMsg - pPab->outMsgBlockPhyAddr);
+	p32 = (PU32) p8Msg;
 
-    case I2O_EXEC_HRT_GET:
-        msgFlag = 1;
-#ifdef DEBUG
-        kprintf("Received I2O_EXEC_HRT_GET reply\n");
-#endif /* DEBUG */
-        break;
-        
-    case I2O_EXEC_LCT_NOTIFY:
-        msgFlag = 1;
-#ifdef DEBUG
-        kprintf("Received I2O_EXEC_LCT_NOTIFY reply\n");
-#endif /* DEBUG */
-        break;
-        
-    case I2O_EXEC_SYS_ENABLE:
-        msgFlag = 1;
-#ifdef DEBUG
-        kprintf("Received I2O_EXEC_SYS_ENABLE reply\n");
-#endif /* DEBUG */
-        break;
+	dprintk
+	    ("VXD: ProcessOutboundI2OMsg - pPab 0x%x, phyAdr 0x%x, linAdr 0x%x\n",
+	     (u32) pPab, phyAddrMsg, (u32) p8Msg);
+	dprintk ("msg :0x%x:0x%x:0x%x:0x%x\n", p32[0], p32[1],
+		 p32[2], p32[3]);
+	dprintk ("msg :0x%x:0x%x:0x%x:0x%x\n", p32[4], p32[5],
+		 p32[6], p32[7]);
 
-    default:    
-#ifdef DEBUG
-        kprintf("Received UNKNOWN reply\n");
-#endif /* DEBUG */
-        break;
-    }
+	if (p32[4] >> 24 != I2O_REPLY_STATUS_SUCCESS) {
+		dprintk ("Message reply status not success\n");
+		return;
+	}
+
+	switch (p8Msg[7]) {	/* function code byte */
+	case I2O_EXEC_SYS_TAB_SET:
+		msgFlag = 1;
+		dprintk ("Received I2O_EXEC_SYS_TAB_SET reply\n");
+		break;
+
+	case I2O_EXEC_HRT_GET:
+		msgFlag = 1;
+		dprintk ("Received I2O_EXEC_HRT_GET reply\n");
+		break;
+
+	case I2O_EXEC_LCT_NOTIFY:
+		msgFlag = 1;
+		dprintk ("Received I2O_EXEC_LCT_NOTIFY reply\n");
+		break;
+
+	case I2O_EXEC_SYS_ENABLE:
+		msgFlag = 1;
+		dprintk ("Received I2O_EXEC_SYS_ENABLE reply\n");
+		break;
+
+	default:
+		dprintk ("Received UNKNOWN reply\n");
+		break;
+	}
 }

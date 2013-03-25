@@ -8,17 +8,19 @@
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
+#include <linux/sys.h>
 #include <linux/config.h>
 #include <linux/errno.h>
+
+#include "nios_defs.h"
 
 #include <asm/niosasm.h>
 #include <asm/ptrace.h>
 #include <asm/cprefix.h>
 #include <asm/winmacro.h>
-#include <asm/signal.h>
 #include <asm/asmmacro.h>
 
-#define NR_SYSCALLS 255      /* Each OS is different... */
+
 
 	.macro	SAVE_LAST_WINDOW
 
@@ -36,8 +38,8 @@
 	lsri	%g4, 1			; get HI_LIMIT into CWP position
 	ANDIP	%g4, PSR_CWP	; isolate it
 
-	LOAD_CURRENT	g6
-	ADDIP %g6, THREAD_SPARE_W_SAVED
+	GET_CURRENT	g6
+	ADDIP %g6, TASK_THREAD+THREAD_SPARE_W_SAVED
 	st [%g6], %fp			; save sp for parent
 
 	SUBIP %g6, THREAD_SPARE_W_SAVED-THREAD_SPARE_REG_WINDOW
@@ -90,8 +92,8 @@
 	; copy back the registers from thread_struct to user stack
 
 
-	LOAD_CURRENT	g6
-	ADDIP %g6, THREAD_SPARE_W_SAVED
+	GET_CURRENT	g6
+	ADDIP %g6, TASK_THREAD+THREAD_SPARE_W_SAVED
 	ld %fp, [%g6]			; get the saved sp
 	SUBIP %g6, THREAD_SPARE_W_SAVED-THREAD_SPARE_REG_WINDOW
 
@@ -137,7 +139,7 @@
 /* define a macro for calling syscall_trace */
 	.macro	SYS_CALL_TRACE
 #if 0
-	LOAD_CURRENT	l3
+	GET_CURRENT	l3
 	ldp	%l3, [%l3, TASK_FLAGS/4]
 	skp1	%l3, 5				; 0x20 = bit 5
 	br	ret\@
@@ -182,7 +184,7 @@ binfmt_flat_debug_handler:
 	 *          here!  The bpt trap will stomp the ISTATUS.
 	 */
 	LOAD_CURRENT	l3
-	ADDIP	%l3, THREAD_FLAGS
+	ADDIP	%l3, TASK_THREAD+THREAD_FLAGS
 	ld	%l2, [%l3]
 	ORIP	%l2, NIOS_FLAG_DEBUG
 	st	[%l3], %l2
@@ -235,13 +237,6 @@ real_irq_entry:
 	 */
 	SAVE_ALL			; common interrupt setup
 
-	/* start atomic operation with respect to software interrupts */
-
-	MOVIA	%l4, C_LABEL(intr_count)
-	ld	%l5, [%l4]
-	addi	%l5, 1
-	st	[%l4], %l5
-
 	/* Enable under/over traps w/IRQs off, so we can call c-code properly. */
 ;;;	pfx	0			;
 	rdctl	%g0			; get status
@@ -260,41 +255,6 @@ real_irq_entry:
 	call	%l5
 	 lsri	%o0, 9			; arg0 = vector/irq #
 
-rie_checkbh:
-
-#if 0
-	/* disable other interrupts */
-;;;	pfx	0			;
-	rdctl	%g0			; get status
-	ANDNIP	%g0, PSR_IPRI		; remove old IPRI
-	ORIP	%g0, PSR_IE | PSR_IPRI_3
-;;;	pfx	0			;
-	wrctl	%g0			; reset to allow only o/u/flow traps
-	 nop
-	 nop
-#endif
-
-	MOVIA	%l4, C_LABEL(intr_count)
-	ld	%l5, [%l4]		; get intr_count
-	subi	%l5, 1
-	BNE	2f		/* IRQ within IRQ, get out of here... */
-	 nop
-
-	MOVIA	%l3, C_LABEL(bh_active)
-	ld	%g2, [%l3]
-	MOVIA	%l3, C_LABEL(bh_mask)
-	ld	%g3, [%l3]
-	and	%g2, %g3
-	BEQ	2f
-	 nop
-	MOVIA	%l5, C_LABEL(do_bottom_half)@h
-	call	%l5
-	 nop
-	/* Try again... */
-	br	rie_checkbh
-	 nop
-2:
-	st	[%l4], %l5		; update intr_count
 	RESTORE_ALL
 
 
@@ -357,7 +317,7 @@ C_LABEL(system_call):
 	pfx	9				; 
 	wrctl	%g0				; enable interrupts
 
-	CMPIP	%g1, NR_SYSCALLS		; syscall # in range ?
+	CMPIP	%g1, NR_syscalls		; syscall # in range ?
 	ifs	cc_lt
 	br	1f
 	 lsli	%g1,2				;  (delay slot) index * 4
@@ -368,7 +328,8 @@ C_LABEL(system_call):
 1:
 	MOVIA	%l7,sys_call_table		; Yes, get ptr to syscall table
 	add	%l7, %g1			; get table entry
-	ld	%l7, [%l7]
+	ld	%l7, [%l7] 
+	sts	[%sp, (REGWIN_SZ + PT_SYSC_NO)/4], %g1	; save syscall # (checked by do_signal)
 2:
 	SYS_CALL_TRACE
 
@@ -379,7 +340,7 @@ C_LABEL(system_call):
 	lds	%o4, [%sp, (REGWIN_SZ + PT_I4)/4]
 	lds	%o5, [%sp, (REGWIN_SZ + PT_I5)/4]
 
-	sts	[%sp, (REGWIN_SZ + PT_SPARE)/4], %o0	; save first arg for restarting syscalls
+	sts	[%sp, (REGWIN_SZ + PT_ORIG_I0)/4], %o0	; save first arg for restarting syscalls
 
 	call	%l7					; call syscall handler
 	 nop
@@ -391,15 +352,6 @@ C_LABEL(system_call):
 C_LABEL(ret_sys_call):
 	lds	%o0, [%sp, (REGWIN_SZ + PT_I0)/4]	; retrieve returned arg
 	SYS_CALL_TRACE
-/* Done system call, check and set (if necessary) the Carry condition code.  */
-	addi	%o0, 0
-	ifs	cc_ge					; check if the returned is negative
-	br	3f
-	 nop
-	lds	%l0, [%sp, (REGWIN_SZ + PT_PSR)/4]
-	ORIP	%l0, PSR_C				; set the PSR_C bit in the process status reg
-	sts	[%sp, (REGWIN_SZ + PT_PSR)/4], %l0
-3:
 	RESTORE_ALL
 
 
@@ -447,11 +399,17 @@ C_LABEL(trap_setup):
 	br	1f				; yes, from kernel
 	 mov	%sp, %fp			; assume from kernel: get kernel stack ptr
 	LOAD_CURRENT	l0			; from user: get kernel stack pointer
-	ldp	%sp, [%l0, TASK_SAVED_KSTACK/4]
+	ADDIP	%l0,THREAD_SIZE			;vic; start from the top of stack again ?
+	mov	%sp, %l0			;vic;
+
 1:
 	SUBIP	%sp, REGWIN_SZ+TRACEREG_SZ	; allocate more stack
 	STORE_PT_ALL	l1, o7			; save interruptee's %g's, %o's, STATUS, return address
 
+	bgen	%g0, 0
+	neg	%g0				; -1 -> g0
+	sts	[%sp, (REGWIN_SZ + PT_SYSC_NO)/4], %g0	; init the place of saved syscall no by -1
+	
 	/* See if we are in the last window (LO_LIMIT-1). */
 ;;;	pfx	0
 	rdctl	%g0				; read STATUS (interrupt psr)
@@ -531,8 +489,8 @@ ret_trap_entry:
 	br	ret_trap_kernel			; Yes
 	 nop
 	
-	MOVIA	%l3, C_LABEL(need_resched)	; from user - check scheduling
-	ld	%l4, [%l3]
+	GET_CURRENT	l3			; from user - check scheduling
+	ldp	%l4, [%l3, TASK_NEED_RESCHED/4]
 	skprnz	%l4
 	br	signal_p
 	 nop
@@ -549,28 +507,22 @@ ret_trap_entry:
 
 signal_p:
 	/* No signals for swapper. */
-	LOAD_CURRENT	l3
-	MOVIA	%l5, C_LABEL(init_task)
+	GET_CURRENT	l3
+
+	MOVIA	%l5, C_LABEL(init_task_union)
 	cmp	%l5, %l3		; task 0 ?
 	BEQ	ret_trap_continue	; Yes
 	 nop
 
-	ldp	%l4, [%l3, TASK_SIGNAL/4]
-	ldp	%o0, [%l3, TASK_BLOCKED/4]
-	andn	%l4, %o0
-	BEQ	ret_trap_continue
-	 nop
+	ldp	%l4, [%l3, TASK_SIGPENDING/4]
+	skprnz	%l4
+	 br	ret_trap_continue
+	 xor  %o0, %o0			; oldset shall be NULL when called from here
 	mov	%o1, %sp
 	ADDIP	%o1, REGWIN_SZ		; pt_regs ptr
 	MOVIA	%l6, C_LABEL(do_signal)@h
-#if 1
-	SUBIP	%sp, 0x40		; clobber
-#endif
 	call	%l6
 	 nop
-#if 1
-	ADDIP	%sp, 0x40		; unclobber
-#endif
 	/* Fall through... */
 
 ret_trap_continue:
@@ -793,11 +745,40 @@ C_LABEL(sys_execve):
 
 
 	.align	2
+	.globl	C_LABEL(sys_sigaltstack)
+C_LABEL(sys_sigaltstack):
+	/* Note: %o0, %o1 (arg0, arg1) already have correct value... */
+//vic FIXME  is this right ?
+	lds	%o2, [%sp, (REGWIN_SZ + PT_I6)/4] ; arg2 = user's stack (fp)
+	MOVIA	%l7, C_LABEL(do_sigaltstack)@h
+	call	%l7
+	 nop
+	SYS_CALL_TRACE
+	/* We are returning to a signal handler. */
+	RESTORE_ALL
+
+
+	.align	2
 	.globl	C_LABEL(sys_sigsuspend)
 C_LABEL(sys_sigsuspend):
-	mov	%o0, %sp
-	ADDIP	%o0, REGWIN_SZ			; pt_regs *regs arg
+	/* Note: %o0 (arg0) already has correct value... */
+	mov	%o1, %sp
+	ADDIP	%o1, REGWIN_SZ			; arg1 = pt_regs *regs arg
 	MOVIA	%l7, C_LABEL(do_sigsuspend)@h
+	call	%l7
+	 nop
+	SYS_CALL_TRACE
+	/* We are returning to a signal handler. */
+	RESTORE_ALL
+
+
+	.align	2
+	.globl	C_LABEL(sys_rt_sigsuspend)
+C_LABEL(sys_rt_sigsuspend):
+	/* Note: %o0, %o1 (arg0, arg1) already have correct value... */
+	mov	%o2, %sp
+	ADDIP	%o2, REGWIN_SZ			; arg 2 = pt_regs *regs arg
+	MOVIA	%l7, C_LABEL(do_rt_sigsuspend)@h
 	call	%l7
 	 nop
 	SYS_CALL_TRACE
@@ -820,13 +801,26 @@ C_LABEL(sys_sigreturn):
 	RESTORE_ALL
 
 
-	/* Now that we have a real sys_clone, sys_fork() is
-	 * implemented in terms of it.  Our _real_ implementation
-	 * of vfork() will use sys_clone() instead.
+	.align	2
+	.globl	C_LABEL(sys_rt_sigreturn)
+C_LABEL(sys_rt_sigreturn):
+	mov	%o0, %sp
+	ADDIP	%o0, REGWIN_SZ			; pt_regs *regs arg
+	MOVIA	%l7, C_LABEL(do_rt_sigreturn)@h
+	call	%l7
+	 nop
+	SYS_CALL_TRACE
+	/* We don't want to muck with user registers like a
+	 * normal syscall, just return.
 	 */
+	RESTORE_ALL
+
+
 	.align	2
 	.globl	C_LABEL(sys_fork)
 C_LABEL(sys_fork):
+	.globl	C_LABEL(sys_vfork)
+C_LABEL(sys_vfork):
 	
 	SAVE_LAST_WINDOW
 ;;;	pfx	0
@@ -845,33 +839,27 @@ C_LABEL(sys_fork):
 	ANDNIP	%l2, 0xffff			; clear lower stuff
 	or	%g4, %l2			;
 
-	LOAD_CURRENT	g6
-	pfx	THREAD_FORK_KPSR/4
+	GET_CURRENT	g6
+	ADDIP %g6, TASK_THREAD+THREAD_FORK_KPSR
 	st	[%g6], %g4
 #if 1
 	pfx	9
 	wrctl	%g0				; enable interrupts
 #endif
-//vic	MOVIA	%o0, SIGCHLD | CLONE_WAIT		; arg0:	clone flags
-	MOVIA	%o0, SIGCHLD | 0x2000			; arg0:	clone flags
+	MOVIA	%o0, SIGCHLD | CLONE_VM | CLONE_VFORK	; arg0:	clone flags
 	lds	%o1, [%sp, (REGWIN_SZ + PT_FP)/4]	; arg1:	usp
 	mov	%o2, %sp
 	ADDIP	%o2, REGWIN_SZ				; arg2:	pt_regs ptr
+	movi	%o3, 0					; arg3: stack size (not used)
 	MOVIA	%g5, C_LABEL(do_fork)@h
-#if 1
-	SUBIP	%sp, 0x40			; clobber
-#endif
 	call	%g5
 	 nop
-#if 1
-	ADDIP	%sp, 0x40			; unclobber
-#endif
 	sts	[%sp, (REGWIN_SZ + PT_I0)/4], %o0	; save the returned arg
 	LOAD_LAST_WINDOW
 	br	ret_sys_call				;
 	 nop
 	
-	/* Whee, kernel threads! */
+
 	.align	2
 	.globl	C_LABEL(sys_clone)
 C_LABEL(sys_clone):
@@ -884,17 +872,15 @@ C_LABEL(sys_clone):
 	wrctl	%g0				; disable interrupts
 	 nop
 	 nop
-
 	FLUSH_WINDOWS
-
 #endif
 	MOVIA	%l2, nios_status		; add STATUS extension
 	ld	%l2, [%l2]			; 
 	ANDNIP	%l2, 0xffff			; clear lower stuff
 	or	%g4, %l2			; 
 
-	LOAD_CURRENT	g6
-	pfx	THREAD_FORK_KPSR/4
+	GET_CURRENT	g6
+	ADDIP %g6, TASK_THREAD+THREAD_FORK_KPSR
 	st	[%g6], %g4
 #if 1
 	pfx	9
@@ -907,16 +893,11 @@ C_LABEL(sys_clone):
 	lds	%o1, [%sp, (REGWIN_SZ + PT_FP)/4]	; yes, use current usp
 	mov	%o2, %sp
 	ADDIP	%o2, REGWIN_SZ				; arg2:	pt_regs ptr
+	movi	%o3, 0					; arg3: stack size (not used)
 
 	MOVIA	%g5, C_LABEL(do_fork)@h
-#if 1
-	SUBIP	%sp, 0x40			; clobber
-#endif
 	call	%g5
 	 nop
-#if 1
-	ADDIP	%sp, 0x40			; unclobber
-#endif
 	sts	[%sp, (REGWIN_SZ + PT_I0)/4], %o0	; save the returned arg
 	br	ret_sys_call				;
 	 nop
@@ -926,7 +907,7 @@ C_LABEL(sys_clone):
 	.align	2
 	.globl C_LABEL(sys_call_table)
 C_LABEL(sys_call_table):
-	.long C_LABEL(sys_setup)@h		/* 0 */
+	.long C_LABEL(sys_ni_syscall)@h		/* 0  -  old "setup()" system call*/
 	.long C_LABEL(sys_exit)@h
 	.long C_LABEL(sys_fork)@h
 	.long C_LABEL(sys_read)@h
@@ -943,7 +924,7 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_mknod)@h
 	.long C_LABEL(sys_chmod)@h		/* 15 */
 	.long C_LABEL(sys_chown)@h
-	.long C_LABEL(sys_break)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old break syscall holder */
 	.long C_LABEL(sys_stat)@h
 	.long C_LABEL(sys_lseek)@h
 	.long C_LABEL(sys_getpid)@h		/* 20 */
@@ -957,11 +938,11 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_fstat)@h
 	.long C_LABEL(sys_pause)@h
 	.long C_LABEL(sys_utime)@h		/* 30 */
-	.long C_LABEL(sys_stty)@h
-	.long C_LABEL(sys_gtty)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old stty syscall holder */
+	.long C_LABEL(sys_ni_syscall)@h				/* old gtty syscall holder */
 	.long C_LABEL(sys_access)@h
 	.long C_LABEL(sys_nice)@h
-	.long C_LABEL(sys_ftime)@h		/* 35 */
+	.long C_LABEL(sys_ni_syscall)@h		/* 35 */	/* old ftime syscall holder */
 	.long C_LABEL(sys_sync)@h
 	.long C_LABEL(sys_kill)@h
 	.long C_LABEL(sys_rename)@h
@@ -970,7 +951,7 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_dup)@h
 	.long C_LABEL(sys_pipe)@h
 	.long C_LABEL(sys_times)@h
-	.long C_LABEL(sys_prof)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old prof syscall holder */
 	.long C_LABEL(sys_brk)@h		/* 45 */
 	.long C_LABEL(sys_setgid)@h
 	.long C_LABEL(sys_getgid)@h
@@ -978,14 +959,14 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_geteuid)@h
 	.long C_LABEL(sys_getegid)@h		/* 50 */
 	.long C_LABEL(sys_acct)@h
-	.long C_LABEL(sys_phys)@h
-	.long C_LABEL(sys_lock)@h
+	.long C_LABEL(sys_umount)@h				/* recycled never used phys() */
+	.long C_LABEL(sys_ni_syscall)@h				/* old lock syscall holder */
 	.long C_LABEL(sys_ioctl)@h
 	.long C_LABEL(sys_fcntl)@h		/* 55 */
-	.long C_LABEL(sys_mpx)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old mpx syscall holder */
 	.long C_LABEL(sys_setpgid)@h
-	.long C_LABEL(sys_ulimit)@h
-	.long C_LABEL(sys_olduname)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old ulimit syscall holder */
+	.long C_LABEL(sys_ni_syscall)@h
 	.long C_LABEL(sys_umask)@h		/* 60 */
 	.long C_LABEL(sys_chroot)@h
 	.long C_LABEL(sys_ustat)@h
@@ -1002,7 +983,7 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_sigpending)@h
 	.long C_LABEL(sys_sethostname)@h
 	.long C_LABEL(sys_setrlimit)@h		/* 75 */
-	.long C_LABEL(sys_getrlimit)@h
+	.long C_LABEL(sys_old_getrlimit)@h
 	.long C_LABEL(sys_getrusage)@h
 	.long C_LABEL(sys_gettimeofday)@h
 	.long C_LABEL(sys_settimeofday)@h
@@ -1024,7 +1005,7 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_fchown)@h		/* 95 */
 	.long C_LABEL(sys_getpriority)@h
 	.long C_LABEL(sys_setpriority)@h
-	.long C_LABEL(sys_profil)@h
+	.long C_LABEL(sys_ni_syscall)@h				/* old profil syscall holder */
 	.long C_LABEL(sys_statfs)@h
 	.long C_LABEL(sys_fstatfs)@h		/* 100 */
 	.long C_LABEL(sys_ioperm)@h
@@ -1035,10 +1016,10 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_newstat)@h
 	.long C_LABEL(sys_newlstat)@h
 	.long C_LABEL(sys_newfstat)@h
-	.long C_LABEL(sys_uname)@h
+	.long C_LABEL(sys_ni_syscall)@h		//vic old sys_uname
 	.long C_LABEL(sys_ni_syscall)@h		/* iopl for i386 */ /* 110 */
 	.long C_LABEL(sys_vhangup)@h
-	.long C_LABEL(sys_idle)@h
+	.long C_LABEL(sys_ni_syscall)@h		/* obsolete idle() syscall */
 	.long C_LABEL(sys_ni_syscall)@h		/* vm86 for i386 */
 	.long C_LABEL(sys_wait4)@h
 	.long C_LABEL(sys_swapoff)@h		/* 115 */
@@ -1090,9 +1071,63 @@ C_LABEL(sys_call_table):
 	.long C_LABEL(sys_sched_rr_get_interval)@h
 	.long C_LABEL(sys_nanosleep)@h
 	.long C_LABEL(sys_mremap)@h
+//vic - add new syscalls
+	.long C_LABEL(sys_setresuid16)@h
+	.long C_LABEL(sys_getresuid16)@h	/* 165 */
+	.long C_LABEL(sys_ni_syscall)@h		/* for vm86 */
+	.long C_LABEL(sys_query_module)@h
+	.long C_LABEL(sys_poll)@h
+	.long C_LABEL(sys_nfsservctl)@h
+	.long C_LABEL(sys_setresgid16)@h	/* 170 */
+	.long C_LABEL(sys_getresgid16)@h
+	.long C_LABEL(sys_prctl)@h
+	.long C_LABEL(sys_rt_sigreturn)@h
+	.long C_LABEL(sys_rt_sigaction)@h
+	.long C_LABEL(sys_rt_sigprocmask)@h	/* 175 */
+	.long C_LABEL(sys_rt_sigpending)@h
+	.long C_LABEL(sys_rt_sigtimedwait)@h
+	.long C_LABEL(sys_rt_sigqueueinfo)@h
+	.long C_LABEL(sys_rt_sigsuspend)@h
+	.long C_LABEL(sys_pread)@h		/* 180 */
+	.long C_LABEL(sys_pwrite)@h
+	.long C_LABEL(sys_lchown16)@h
+	.long C_LABEL(sys_getcwd)@h
+	.long C_LABEL(sys_capget)@h
+	.long C_LABEL(sys_capset)@h           	/* 185 */
+	.long C_LABEL(sys_sigaltstack)@h
+	.long C_LABEL(sys_sendfile)@h
+	.long C_LABEL(sys_ni_syscall)@h		/* streams1 */
+	.long C_LABEL(sys_ni_syscall)@h		/* streams2 */
+	.long C_LABEL(sys_vfork)@h            	/* 190 */
+	.long C_LABEL(sys_getrlimit)@h
+	.long C_LABEL(sys_mmap2)@h
+	.long C_LABEL(sys_truncate64)@h
+	.long C_LABEL(sys_ftruncate64)@h
+	.long C_LABEL(sys_stat64)@h		/* 195 */
+	.long C_LABEL(sys_lstat64)@h
+	.long C_LABEL(sys_fstat64)@h
+	.long C_LABEL(sys_chown)@h
+	.long C_LABEL(sys_getuid)@h
+	.long C_LABEL(sys_getgid)@h		/* 200 */
+	.long C_LABEL(sys_geteuid)@h
+	.long C_LABEL(sys_getegid)@h
+	.long C_LABEL(sys_setreuid)@h
+	.long C_LABEL(sys_setregid)@h
+	.long C_LABEL(sys_getgroups)@h		/* 205 */
+	.long C_LABEL(sys_setgroups)@h
+	.long C_LABEL(sys_fchown)@h
+	.long C_LABEL(sys_setresuid)@h
+	.long C_LABEL(sys_getresuid)@h
+	.long C_LABEL(sys_setresgid)@h		/* 210 */
+	.long C_LABEL(sys_getresgid)@h
+	.long C_LABEL(sys_lchown)@h
+	.long C_LABEL(sys_setuid)@h
+	.long C_LABEL(sys_setgid)@h
+	.long C_LABEL(sys_setfsuid)@h		/* 215 */
+	.long C_LABEL(sys_setfsgid)@h
 
-//vic	.rept	NR_syscalls-163			/* 163 - 255 */
-	.rept	256-163			/* 163 - 255 */
+//vic	.rept	NR_syscalls-216			/* 216 - 255 */
+	.rept	256-216			/* 216 - 255 */
 	.long C_LABEL(sys_ni_syscall)@h
 	.endr
 

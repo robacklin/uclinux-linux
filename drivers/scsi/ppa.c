@@ -4,286 +4,193 @@
  * (The PPA3 is the embedded controller in the ZIP drive.)
  * 
  * (c) 1995,1996 Grant R. Guenther, grant@torque.net,
- * under the terms of the GNU Public License.
- *
- * Current Maintainer: David Campbell (Perth, Western Australia)
- *                     campbell@gear.torque.net
- *                     dcampbel@p01.as17.honeywell.com.au
- *
- * My unoffical company acronym list is 21 pages long:
- *      FLA:    Four letter acronym with built in facility for
- *              future expansion to five letters.
+ * under the terms of the GNU General Public License.
+ * 
+ * Current Maintainer: David Campbell (Perth, Western Australia, GMT+0800)
+ *                     campbell@torque.net
  */
 
 #include <linux/config.h>
 
 /* The following #define is to avoid a clash with hosts.c */
 #define PPA_CODE 1
-#ifndef HAVE_PC87332
-#define HAVE_PC87332    0
-#endif
-#define PPA_PROBE_SPP   0x0001
-#define PPA_PROBE_PS2   0x0002
-#define PPA_PROBE_ECR   0x0010
-#define PPA_PROBE_EPP17 0x0100
-#define PPA_PROBE_EPP19 0x0200
-int port_probe(unsigned short);
 
 #include <linux/blk.h>
+#include <asm/io.h>
+#include <linux/parport.h>
 #include "sd.h"
 #include "hosts.h"
+int ppa_release(struct Scsi_Host *);
+static void ppa_reset_pulse(unsigned int base);
+
 typedef struct {
+    struct pardevice *dev;	/* Parport device entry         */
     int base;			/* Actual port address          */
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
-    struct tq_struct ppa_tq;	/* Polling interupt stuff       */
+    struct tq_struct ppa_tq;	/* Polling interrupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
-    unsigned failed:1;		/* Failure flag                 */
+    unsigned long recon_tmo;    /* How many usecs to wait for reconnection (6th bit) */
+    unsigned int failed:1;	/* Failure flag                 */
+    unsigned int p_busy:1;	/* Parport sharing busy flag    */
 } ppa_struct;
 
-#define PPA_EMPTY \
-{-1,            /* base */      \
-PPA_AUTODETECT, /* mode */      \
--1,             /* host */      \
-NULL,           /* cur_cmd */   \
-{0, 0, ppa_interrupt, NULL},    \
-0,              /* jstart */    \
-0               /* failed */    \
+#define PPA_EMPTY	\
+{	dev:		NULL,		\
+	base:		-1,		\
+	mode:		PPA_AUTODETECT,	\
+	host:		-1,		\
+	cur_cmd:	NULL,		\
+	ppa_tq:		{ routine: ppa_interrupt },	\
+	jstart:		0,		\
+	recon_tmo:      PPA_RECON_TMO,	\
+	failed:		0,		\
+	p_busy:		0		\
 }
 
-#include "ppa.h"
-#undef CONFIG_PARPORT
+#include  "ppa.h"
+
 #define NO_HOSTS 4
 static ppa_struct ppa_hosts[NO_HOSTS] =
 {PPA_EMPTY, PPA_EMPTY, PPA_EMPTY, PPA_EMPTY};
 
 #define PPA_BASE(x)	ppa_hosts[(x)].base
 
-int base[NO_HOSTS] =
-{0x03bc, 0x0378, 0x0278, 0x0000};
-#define parbus_base	base
-#define parbus_no	NO_HOSTS
-
-static inline int ppa_pb_claim(int host_no)
+void ppa_wakeup(void *ref)
 {
+    ppa_struct *ppa_dev = (ppa_struct *) ref;
+
+    if (!ppa_dev->p_busy)
+	return;
+
+    if (parport_claim(ppa_dev->dev)) {
+	printk("ppa: bug in ppa_wakeup\n");
+	return;
+    }
+    ppa_dev->p_busy = 0;
+    ppa_dev->base = ppa_dev->dev->port->base;
+    if (ppa_dev->cur_cmd)
+	ppa_dev->cur_cmd->SCp.phase++;
+    return;
+}
+
+int ppa_release(struct Scsi_Host *host)
+{
+    int host_no = host->unique_id;
+
+    printk("Releasing ppa%i\n", host_no);
+    parport_unregister_device(ppa_hosts[host_no].dev);
+    return 0;
+}
+
+static int ppa_pb_claim(int host_no)
+{
+    if (parport_claim(ppa_hosts[host_no].dev)) {
+	ppa_hosts[host_no].p_busy = 1;
+	return 1;
+    }
     if (ppa_hosts[host_no].cur_cmd)
 	ppa_hosts[host_no].cur_cmd->SCp.phase++;
     return 0;
 }
 
+#define ppa_pb_release(x) parport_release(ppa_hosts[(x)].dev)
+
 /***************************************************************************
  *                   Parallel port probing routines                        *
  ***************************************************************************/
-  
-#ifndef MODULE
-/*
- * Command line parameters (for built-in driver):
- *
- * Syntax:  ppa=base[,mode[,use_sg]]
- *
- * For example:  ppa=0x378   or   ppa=0x378,0,3
- *
- */
 
-void ppa_setup(char *str, int *ints)
-{
-    static int x = 0;
-
-    if (x == 0) {		/* Disable ALL known ports */
-	int i;
-
-	for (i = 0; i < NO_HOSTS; i++)
-	    parbus_base[i] = 0x0000;
-    }
-    switch (ints[0]) {
-    case 3:
-	ppa_sg = ints[3];
-    case 2:
-	ppa_hosts[x].mode = ints[2];
-	parbus_base[x] = ints[1];
-	break;
-    default:
-	printk("PPA: I only use between 2 to 3 parameters.\n");
-	break;
-    }
-    x++;
-  }
-#else
-Scsi_Host_Template driver_template = PPA;
+static Scsi_Host_Template driver_template = PPA;
 #include  "scsi_module.c"
-#endif
-  
+
 /*
  * Start of Chipset kludges
  */
-
-#if HAVE_PC87332 > 0
-#warning PC87332 Kludge code included
-static inline int pc87332_port(int host_no)
-{
-    /* A routine to detect and kludge pc87332 chipsets into the
-     * "optimum" mode for parallel port data transfer.
-     * This assumes EPP is better than ECP...
-     * (Which it is for disk drives but not printers and scanners)
-     */
-    int base = ppa_hosts[host_no].base;
-
-    /* This is where an pc87332 can hide */
-    unsigned short index_addr[4] =
-    {
-	0x0398, 0x026e, 0x015c, 0x002e
-    };
-
-    /* Bits 0&1 of FAR (Function Address Register) which specify where
-     * the LPT port will show up at.
-     */
-    unsigned short port_ref[4] =
-    {
-	0x378, 0x3bc, 0x278, 0xffff
-    };
-
-    unsigned char a;
-    int loop;
-
-    for (loop = 0; loop < 4; loop++) {
-	/* Clear the "wax" out of the pc87332, only needed after hard
-	 * reset.
-	 */
-	inb(index_addr[loop]);
-	inb(index_addr[loop]);
-	inb(index_addr[loop]);
-	inb(index_addr[loop]);
-
-	/* Anyone home ?? */
-	outb(0xff, index_addr[loop]);
-	a = inb(index_addr[loop]);
-	switch (a) {
-	case (0x0f):		/* PC87732 */
-	    break;
-	case (0x1f):		/* PC87306 */
-	    break;
-	case (0x7f):		/* PC87??? */
-	    break;
-	default:
-	    continue;
-	}			/* Is this pc87332 on the desired port */
-	outb(0x01, index_addr[loop]);
-	a = inb(index_addr[loop] + 1);
-	if (port_ref[a & 0x03] != base)
-	    continue;
-
-	/* Found a pc87332 */
-	printk("NatSemi PC87332 (or variant) at 0x%04x\n", base);
-
-	/* Try to enable EPP modes
-	 * with hardware data direction
-	 */
-	if (base != 0x3bc) {
-	    /* EPP 1.9 */
-	    outb(0x04, index_addr[loop]);
-	    a = inb(index_addr[loop] + 1);
-	    printk("Old reg1 = %02x\n", a);
-	    /* 0x01 for EPP 1.7, 0x03 for EPP 1.9, 0x0c for ECP */
-	    a = (a & 0xf0) | 0x03;
-	    outb(a, index_addr[loop] + 1);
-	    outb(a, index_addr[loop] + 1);
-
-	    /* Software data direction selection */
-	    outb(0x02, index_addr[loop]);
-	    a = inb(index_addr[loop] + 1);
-	    printk("Old reg2 = %02x\n", a);
-	    /* 0x80 for software, 0x00 for hardware */
-	    a = (a & 0x7f) | 0x80;
-	    outb(a, index_addr[loop] + 1);
-	    outb(a, index_addr[loop] + 1);
-	    ppa_hosts[host_no].mode = PPA_EPP_32;
-	} else {
-	    /* There is not enough address space for the 0x3bc port
-	     * to have EPP registers so we will kludge it into an
-	     * ECP
-	     * port to allow bi-directional byte mode...
-	     */
-	    /* ECP */
-	    outb(0x04, index_addr[loop]);
-	    a = inb(index_addr[loop] + 1);
-	    a = (a & 0xfb) | 0x06;
-	    outb(a, index_addr[loop] + 1);
-	    outb(a, index_addr[loop] + 1);
-	    ppa_hosts[host_no].mode = PPA_PS2;
-	}
-
-	outb(0x04, index_addr[loop]);
-	a = inb(index_addr[loop] + 1);
-	return ppa_hosts[host_no].mode;
-    }
-    return 0;
-  }
-#else
-#define pc87332_port(x)
-#endif				/* HAVE_PC87332 */
-  
-static inline int generic_port(int host_no)
-{
-    /* Generic parallel port detection
-     * This will try to discover if the port is
-     * EPP, ECP, PS/2 or NIBBLE (In that order, approx....)
-     */
-    unsigned int save_ctr, save_ecr, r;
-    int ppb = PPA_BASE(host_no);
-
-    save_ctr = r_ctr(ppb);
-    save_ecr = r_ecr(ppb);
-    r = port_probe(ppb);
-    w_ecr(ppb, save_ecr);
-    w_ctr(ppb, save_ctr);
-
-    if (r & PPA_PROBE_SPP)
-	ppa_hosts[host_no].mode = PPA_NIBBLE;
-
-    if (r & PPA_PROBE_PS2) {
-	ppa_hosts[host_no].mode = PPA_PS2;
-	if (r & PPA_PROBE_ECR)
-	    w_ecr(ppb, 0x20);
-    }
-    if ((r & PPA_PROBE_EPP17) || (r & PPA_PROBE_EPP19)) {
-	/* ppa_hosts[host_no].mode = PPA_EPP_32; */
-	if (r & PPA_PROBE_ECR)
-	    w_ecr(ppb, 0x80);
-    }
-    return ppa_hosts[host_no].mode;
-}
 
 int ppa_detect(Scsi_Host_Template * host)
 {
     struct Scsi_Host *hreg;
     int ports;
-    int i, nhosts;
-    unsigned short ppb;
+    int i, nhosts, try_again;
+    struct parport *pb;
+
+    /*
+     * unlock to allow the lowlevel parport driver to probe
+     * the irqs
+     */
+    spin_unlock_irq(&io_request_lock);
+    pb = parport_enumerate();
 
     printk("ppa: Version %s\n", PPA_VERSION);
     nhosts = 0;
+    try_again = 0;
 
-    for (i = 0; i < parbus_no; i++) {
-	if (parbus_base[i] == 0x0000)
+    if (!pb) {
+	printk("ppa: parport reports no devices.\n");
+	spin_lock_irq(&io_request_lock);
+	return 0;
+    }
+  retry_entry:
+    for (i = 0; pb; i++, pb = pb->next) {
+	int modes, ppb, ppb_hi;
+
+	ppa_hosts[i].dev =
+	    parport_register_device(pb, "ppa", NULL, ppa_wakeup,
+				    NULL, 0, (void *) &ppa_hosts[i]);
+
+	if (!ppa_hosts[i].dev)
 	    continue;
-	ppb = ppa_hosts[i].base = parbus_base[i];
 
-	/* sanity checks */
-	if (check_region(parbus_base[i],
-			 (parbus_base[i] == 0x03bc) ? 3 : 8))
+	/* Claim the bus so it remembers what we do to the control
+	 * registers. [ CTR and ECP ]
+	 */
+	if (ppa_pb_claim(i)) {
+	    unsigned long now = jiffies;
+	    while (ppa_hosts[i].p_busy) {
+		schedule();	/* We are safe to schedule here */
+		if (time_after(jiffies, now + 3 * HZ)) {
+		    printk(KERN_ERR "ppa%d: failed to claim parport because a "
+		      "pardevice is owning the port for too longtime!\n",
+			   i);
+		    parport_unregister_device(ppa_hosts[i].dev);
+		    spin_lock_irq(&io_request_lock);
+		    return 0;
+		}
+	    }
+	}
+	ppb = PPA_BASE(i) = ppa_hosts[i].dev->port->base;
+	ppb_hi =  ppa_hosts[i].dev->port->base_hi;
+	w_ctr(ppb, 0x0c);
+	modes = ppa_hosts[i].dev->port->modes;
+
+	/* Mode detection works up the chain of speed
+	 * This avoids a nasty if-then-else-if-... tree
+	 */
+	ppa_hosts[i].mode = PPA_NIBBLE;
+
+	if (modes & PARPORT_MODE_TRISTATE)
+	    ppa_hosts[i].mode = PPA_PS2;
+
+	if (modes & PARPORT_MODE_ECP) {
+	    w_ecr(ppb_hi, 0x20);
+	    ppa_hosts[i].mode = PPA_PS2;
+	}
+	if ((modes & PARPORT_MODE_EPP) && (modes & PARPORT_MODE_ECP))
+	    w_ecr(ppb_hi, 0x80);
+
+	/* Done configuration */
+	ppa_pb_release(i);
+
+	if (ppa_init(i)) {
+	    parport_unregister_device(ppa_hosts[i].dev);
 	    continue;
-
-	pc87332_port(i);
-	if (!generic_port(i))
-	    continue;
-
-	if (ppa_init(i))
-	    continue;
-
+	}
 	/* now the glue ... */
 	switch (ppa_hosts[i].mode) {
 	case PPA_NIBBLE:
+	    ports = 3;
+	    break;
 	case PPA_PS2:
 	    ports = 3;
 	    break;
@@ -295,21 +202,36 @@ int ppa_detect(Scsi_Host_Template * host)
 	default:		/* Never gets here */
 	    continue;
 	}
-	request_region(ppa_hosts[i].base, ports, "ppa");
+
 	host->can_queue = PPA_CAN_QUEUE;
 	host->sg_tablesize = ppa_sg;
 	hreg = scsi_register(host, 0);
-	hreg->io_port = ppa_hosts[i].base;
+	if(hreg == NULL)
+		continue;
+	hreg->io_port = pb->base;
 	hreg->n_io_port = ports;
 	hreg->dma_channel = -1;
 	hreg->unique_id = i;
 	ppa_hosts[i].host = hreg->host_no;
 	nhosts++;
     }
-    if (nhosts == 0)
-	return 0;
-    else
+    if (nhosts == 0) {
+	if (try_again == 1) {
+	    printk("WARNING - no ppa compatible devices found.\n");
+	    printk("  As of 31/Aug/1998 Iomega started shipping parallel\n");
+	    printk("  port ZIP drives with a different interface which is\n");
+	    printk("  supported by the imm (ZIP Plus) driver. If the\n");
+	    printk("  cable is marked with \"AutoDetect\", this is what has\n");
+	    printk("  happened.\n");
+	    spin_lock_irq(&io_request_lock);
+	    return 0;
+	}
+	try_again = 1;
+	goto retry_entry;
+    } else {
+	spin_lock_irq(&io_request_lock);
 	return 1;		/* return number of hosts detected */
+    }
 }
 
 /* This is to give the ppa driver a way to modify the timings (and other
@@ -320,22 +242,19 @@ int ppa_detect(Scsi_Host_Template * host)
  * Also gives a method to use a script to obtain optimum timings (TODO)
  */
 
-static inline int ppa_strncmp(const char *a, const char *b, int len)
-{
-    int loop;
-    for (loop = 0; loop < len; loop++)
-	if (a[loop] != b[loop])
-	    return 1;
-
-    return 0;
-}
 static inline int ppa_proc_write(int hostno, char *buffer, int length)
 {
     unsigned long x;
 
-    if ((length > 5) && (ppa_strncmp(buffer, "mode=", 5) == 0)) {
+    if ((length > 5) && (strncmp(buffer, "mode=", 5) == 0)) {
 	x = simple_strtoul(buffer + 5, NULL, 0);
 	ppa_hosts[hostno].mode = x;
+	return length;
+    }
+    if ((length > 10) && (strncmp(buffer, "recon_tmo=", 10) == 0)) {
+	x = simple_strtoul(buffer + 10, NULL, 0);
+	ppa_hosts[hostno].recon_tmo = x;
+        printk("ppa: recon_tmo set to %ld\n", x);
 	return length;
     }
     printk("ppa /proc: invalid variable\n");
@@ -356,11 +275,14 @@ int ppa_proc_info(char *buffer, char **start, off_t offset,
 	return ppa_proc_write(i, buffer, length);
 
     len += sprintf(buffer + len, "Version : %s\n", PPA_VERSION);
-    len += sprintf(buffer + len, "Port    : 0x%04x\n", ppa_hosts[i].base);
+    len += sprintf(buffer + len, "Parport : %s\n", ppa_hosts[i].dev->port->name);
     len += sprintf(buffer + len, "Mode    : %s\n", PPA_MODE_STRING[ppa_hosts[i].mode]);
+#if PPA_DEBUG > 0
+    len += sprintf(buffer + len, "recon_tmo : %lu\n", ppa_hosts[i].recon_tmo);
+#endif
 
     /* Request for beyond end of buffer */
-    if (offset > len)
+    if (offset > length)
 	return 0;
 
     *start = buffer + offset;
@@ -368,7 +290,8 @@ int ppa_proc_info(char *buffer, char **start, off_t offset,
     if (len > length)
 	len = length;
     return len;
-}				/* end of ppa.c */
+}
+
 static int device_check(int host_no);
 
 #if PPA_DEBUG > 0
@@ -377,7 +300,7 @@ static int device_check(int host_no);
 static inline void ppa_fail_func(int host_no, int error_code)
 #else
 static inline void ppa_fail(int host_no, int error_code)
-  #endif
+#endif
 {
     /* If we fail a device then we trash status / message bytes */
     if (ppa_hosts[host_no].cur_cmd) {
@@ -400,12 +323,11 @@ static unsigned char ppa_wait(int host_no)
     unsigned char r;
 
     k = PPA_SPIN_TMO;
-    do {
-	r = r_str(ppb);
-	k--;
-	udelay(1);
+    /* Wait for bit 6 and 7 - PJC */
+    for (r = r_str (ppb); ((r & 0xc0)!=0xc0) && (k); k--) {
+	    udelay (1);
+	    r = r_str (ppb);
     }
-    while (!(r & 0x80) && (k));
 
     /*
      * return some status information.
@@ -424,8 +346,7 @@ static unsigned char ppa_wait(int host_no)
 }
 
 /*
- * output a string, in whatever mode is available, according to the
- * PPA protocol. 
+ * Clear EPP Timeout Bit 
  */
 static inline void epp_reset(unsigned short ppb)
 {
@@ -436,243 +357,62 @@ static inline void epp_reset(unsigned short ppb)
     w_str(ppb, i & 0xfe);
 }
 
-static inline void ecp_sync(unsigned short ppb)
-{
-    int i;
-
-    if ((r_ecr(ppb) & 0xe0) != 0x80)
-	return;
-
-    for (i = 0; i < 100; i++) {
-	if (r_ecr(ppb) & 0x01)
-	    return;
-	udelay(5);
-    }
-    printk("ppa: ECP sync failed as data still present in FIFO.\n");
-}
-
-/*
- * Here is the asm code for the SPP/PS2 protocols for the i386.
- * This has been optimised for speed on 386/486 machines. There will
- * be very little improvement on the current 586+ machines as it is the
- * IO statements which will limit throughput.
+/* 
+ * Wait for empty ECP fifo (if we are in ECP fifo mode only)
  */
-#ifdef __i386__
-#define BYTE_OUT(reg) \
-	"	movb " #reg ",%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	addl $2,%%edx\n" \
-	"	movb $0x0e,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	movb $0x0c,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	subl $2,%%edx\n"
-
-static inline int ppa_byte_out(unsigned short base, char *buffer, unsigned int len)
+static inline void ecp_sync(unsigned short hostno)
 {
-    /*
-     * %eax scratch
-     * %ebx Data to transfer
-     * %ecx Counter (Don't touch!!)
-     * %edx Port
-     * %esi Source buffer (mem pointer)
-     *
-     * In case you are wondering what the last line of the asm does...
-     * <output allocation> : <input allocation> : <trashed registers>
-     */
-    asm("shr $2,%%ecx\n" \
-	"	jz .no_more_bulk_bo\n" \
-	"	.align 4\n" \
-	".loop_bulk_bo:\n" \
-	"	movl (%%esi),%%ebx\n" \
-	BYTE_OUT(%%bl) \
-	BYTE_OUT(%%bh) \
-	"	rorl $16,%%ebx\n" \
-	BYTE_OUT(%%bl) \
-	BYTE_OUT(%%bh) \
-	"	addl $4,%%esi\n" \
-	"	loop .loop_bulk_bo\n" \
-	"	.align 4\n" \
-	".no_more_bulk_bo:" \
-  : "=S"(buffer): "c"(len), "d"(base), "S"(buffer):"eax", "ebx", "ecx");
+    int i, ppb_hi=ppa_hosts[hostno].dev->port->base_hi;
 
-    asm("andl $3,%%ecx\n" \
-	"	jz .no_more_loose_bo\n" \
-	"	.align 4\n" \
-	".loop_loose_bo:\n" \
-	BYTE_OUT((%%esi)) \
-	"	incl %%esi\n" \
-	"	loop .loop_loose_bo\n" \
-	".no_more_loose_bo:\n" \
-  : /* no output */ : "c"(len), "d"(base), "S"(buffer):"eax", "ebx", "ecx");
-    return 1;			/* All went well - we hope! */
+    if (ppb_hi == 0) return;
+
+    if ((r_ecr(ppb_hi) & 0xe0) == 0x60) { /* mode 011 == ECP fifo mode */
+        for (i = 0; i < 100; i++) {
+            if (r_ecr(ppb_hi) & 0x01)
+                return;
+            udelay(5);
+        }
+        printk("ppa: ECP sync failed as data still present in FIFO.\n");
+    }
 }
 
-#define BYTE_IN(reg) \
-	"	inb (%%dx),%%al\n" \
-	"	movb %%al," #reg "\n" \
-	"	addl $2,%%edx\n" \
-	"	movb $0x27,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	movb $0x25,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	subl $2,%%edx\n"
-
-static inline int ppa_byte_in(unsigned short base, char *buffer, int len)
+static int ppa_byte_out(unsigned short base, const char *buffer, int len)
 {
-    /*
-     * %eax scratch
-     * %ebx Data to transfer
-     * %ecx Counter (Don't touch!!)
-     * %edx Port
-     * %esi Source buffer (mem pointer)
-     *
-     * In case you are wondering what the last line of the asm does...
-     * <output allocation> : <input allocation> : <trashed registers>
-     */
-    asm("shr $2,%%ecx\n" \
-	"	jz .no_more_bulk_bi\n" \
-	"	.align 4\n" \
-	".loop_bulk_bi:\n" \
-	BYTE_IN(%%bl) \
-	BYTE_IN(%%bh) \
-	"	rorl $16,%%ebx\n" \
-	BYTE_IN(%%bl) \
-	BYTE_IN(%%bh) \
-	"	rorl $16,%%ebx\n" \
-	"	movl %%ebx,(%%esi)\n" \
-	"	addl $4,%%esi\n" \
-	"	loop .loop_bulk_bi\n" \
-	"	.align 4\n" \
-	".no_more_bulk_bi:" \
-  : "=S"(buffer): "c"(len), "d"(base), "S"(buffer):"eax", "ebx", "ecx");
-
-    asm("andl $3,%%ecx\n" \
-	"	jz .no_more_loose_bi\n" \
-	"	.align 4\n" \
-	".loop_loose_bi:\n" \
-	BYTE_IN((%%esi)) \
-	"	incl %%esi\n" \
-	"	loop .loop_loose_bi\n" \
-	".no_more_loose_bi:\n" \
-  : /* no output */ : "c"(len), "d"(base), "S"(buffer):"eax", "ebx", "ecx");
-    return 1;			/* All went well - we hope! */
-}
-
-#define NIBBLE_IN(reg) \
-	"	incl %%edx\n" \
-	"	movb $0x04,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	decl %%edx\n" \
-	"	inb (%%dx),%%al\n" \
-	"	andb $0xf0,%%al\n" \
-	"	movb %%al," #reg "\n" \
-	"	incl %%edx\n" \
-	"	movb $0x06,%%al\n" \
-	"	outb %%al,(%%dx)\n" \
-	"	decl %%edx\n" \
-	"	inb (%%dx),%%al\n" \
-	"	shrb $4,%%al\n" \
-	"	orb %%al," #reg "\n"
-
-static inline int ppa_nibble_in(unsigned short str_p, char *buffer, int len)
-{
-    /*
-     * %eax scratch
-     * %ebx Data to transfer
-     * %ecx Counter (Don't touch!!)
-     * %edx Port
-     * %esi Source buffer (mem pointer)
-     *
-     * In case you are wondering what the last line of the asm does...
-     * <output allocation> : <input allocation> : <trashed registers>
-     */
-    asm("shr $2,%%ecx\n" \
-	"	jz .no_more_bulk_ni\n" \
-	"	.align 4\n" \
-	".loop_bulk_ni:\n" \
-	NIBBLE_IN(%%bl) \
-	NIBBLE_IN(%%bh) \
-	"	rorl $16,%%ebx\n" \
-	NIBBLE_IN(%%bl) \
-	NIBBLE_IN(%%bh) \
-	"	rorl $16,%%ebx\n" \
-	"	movl %%ebx,(%%esi)\n" \
-	"	addl $4,%%esi\n" \
-	"	loop .loop_bulk_ni\n" \
-	"	.align 4\n" \
-	".no_more_bulk_ni:" \
-  : "=S"(buffer): "c"(len), "d"(str_p), "S"(buffer):"eax", "ebx", "ecx");
-
-    asm("andl $3,%%ecx\n" \
-	"	jz .no_more_loose_ni\n" \
-	"	.align 4\n" \
-	".loop_loose_ni:\n" \
-	NIBBLE_IN((%%esi)) \
-	"	incl %%esi\n" \
-	"	loop .loop_loose_ni\n" \
-	".no_more_loose_ni:\n" \
-  : /* no output */ : "c"(len), "d"(str_p), "S"(buffer):"eax", "ebx", "ecx");
-    return 1;			/* All went well - we hope! */
-}
-#else				/* Old style C routines */
-
-static inline int ppa_byte_out(unsigned short base, const char *buffer, int len)
-{
-    unsigned short ctr_p = base + 2;
     int i;
 
     for (i = len; i; i--) {
-	outb(*buffer++, base);
-	outb(0xe, ctr_p);
-	outb(0xc, ctr_p);
+	w_dtr(base, *buffer++);
+	w_ctr(base, 0xe);
+	w_ctr(base, 0xc);
     }
     return 1;			/* All went well - we hope! */
 }
 
-static inline int ppa_byte_in(unsigned short base, char *buffer, int len)
+static int ppa_byte_in(unsigned short base, char *buffer, int len)
 {
-    unsigned short ctr_p = base + 2;
     int i;
 
     for (i = len; i; i--) {
-	*buffer++ = inb(base);
-	outb(0x27, ctr_p);
-	outb(0x25, ctr_p);
+	*buffer++ = r_dtr(base);
+	w_ctr(base, 0x27);
+	w_ctr(base, 0x25);
     }
     return 1;			/* All went well - we hope! */
 }
 
-static inline int ppa_nibble_in(unsigned short str_p, char *buffer, int len)
+static int ppa_nibble_in(unsigned short base, char *buffer, int len)
 {
-    unsigned short ctr_p = str_p + 1;
-    unsigned char h, l;
-    int i;
+    for (; len; len--) {
+	unsigned char h;
 
-    for (i = len; i; i--) {
-	outb(0x4, ctr_p);
-	h = inb(str_p);
-	outb(0x6, ctr_p);
-	l = inb(str_p);
-	*buffer++ = (h & 0xf0) | ((l & 0xf0) >> 4);
+	w_ctr(base, 0x4);
+	h = r_str(base) & 0xf0;
+	w_ctr(base, 0x6);
+	*buffer++ = h | ((r_str(base) & 0xf0) >> 4);
     }
     return 1;			/* All went well - we hope! */
-  }
-  #endif
-  
-static inline int ppa_epp_out(unsigned short epp_p, unsigned short str_p, const char *buffer, int len)
-{
-    int i;
-    for (i = len; i; i--) {
-	outb(*buffer++, epp_p);
-#ifdef CONFIG_SCSI_PPA_HAVE_PEDANTIC
-	if (inb(str_p) & 0x01)
-	    return 0;
-  #endif
-    }
-    return 1;
-  }
-  
+}
+
 static int ppa_out(int host_no, char *buffer, int len)
 {
     int r;
@@ -696,18 +436,19 @@ static int ppa_out(int host_no, char *buffer, int len)
     case PPA_EPP_8:
 	epp_reset(ppb);
 	w_ctr(ppb, 0x4);
-#ifdef CONFIG_SCSI_PPA_HAVE_PEDANTIC
-	r = ppa_epp_out(ppb + 4, ppb + 1, buffer, len);
+#ifdef CONFIG_SCSI_IZIP_EPP16
+	if (!(((long) buffer | len) & 0x01))
+	    outsw(ppb + 4, buffer, len >> 1);
 #else
 	if (!(((long) buffer | len) & 0x03))
 	    outsl(ppb + 4, buffer, len >> 2);
+#endif
 	else
 	    outsb(ppb + 4, buffer, len);
 	w_ctr(ppb, 0xc);
 	r = !(r_str(ppb) & 0x01);
-#endif
 	w_ctr(ppb, 0xc);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     default:
@@ -717,19 +458,6 @@ static int ppa_out(int host_no, char *buffer, int len)
     return r;
 }
 
-static inline int ppa_epp_in(int epp_p, int str_p, char *buffer, int len)
-{
-    int i;
-    for (i = len; i; i--) {
-	*buffer++ = inb(epp_p);
-#ifdef CONFIG_SCSI_PPA_HAVE_PEDANTIC
-	if (inb(str_p) & 0x01)
-	    return 0;
-#endif
-    }
-    return 1;
-  }
-  
 static int ppa_in(int host_no, char *buffer, int len)
 {
     int r;
@@ -744,7 +472,7 @@ static int ppa_in(int host_no, char *buffer, int len)
     switch (ppa_hosts[host_no].mode) {
     case PPA_NIBBLE:
 	/* 4 bit input, with a loop */
-	r = ppa_nibble_in(ppb + 1, buffer, len);
+	r = ppa_nibble_in(ppb, buffer, len);
 	w_ctr(ppb, 0xc);
 	break;
 
@@ -761,18 +489,19 @@ static int ppa_in(int host_no, char *buffer, int len)
     case PPA_EPP_8:
 	epp_reset(ppb);
 	w_ctr(ppb, 0x24);
-#ifdef CONFIG_SCSI_PPA_HAVE_PEDANTIC
-	r = ppa_epp_in(ppb + 4, ppb + 1, buffer, len);
-  #else
+#ifdef CONFIG_SCSI_IZIP_EPP16
+	if (!(((long) buffer | len) & 0x01))
+	    insw(ppb + 4, buffer, len >> 1);
+#else
 	if (!(((long) buffer | len) & 0x03))
 	    insl(ppb + 4, buffer, len >> 2);
+#endif
 	else
 	    insb(ppb + 4, buffer, len);
 	w_ctr(ppb, 0x2c);
 	r = !(r_str(ppb) & 0x01);
-#endif
 	w_ctr(ppb, 0x2c);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     default:
@@ -839,6 +568,7 @@ static int ppa_select(int host_no, int target)
     k = PPA_SELECT_TMO;
     do {
 	k--;
+	udelay(1);
     } while ((r_str(ppb) & 0x40) && (k));
     if (!k)
 	return 0;
@@ -852,6 +582,7 @@ static int ppa_select(int host_no, int target)
     k = PPA_SELECT_TMO;
     do {
 	k--;
+	udelay(1);
     }
     while (!(r_str(ppb) & 0x40) && (k));
     if (!k)
@@ -874,6 +605,12 @@ static int ppa_init(int host_no)
     int retv;
     unsigned short ppb = PPA_BASE(host_no);
 
+#if defined(CONFIG_PARPORT) || defined(CONFIG_PARPORT_MODULE)
+    if (ppa_pb_claim(host_no))
+	while (ppa_hosts[host_no].p_busy)
+	    schedule();		/* We can safe schedule here */
+#endif
+
     ppa_disconnect(host_no);
     ppa_connect(host_no, CONNECT_NORMAL);
 
@@ -887,20 +624,16 @@ static int ppa_init(int host_no)
     if ((r_str(ppb) & 0x08) == 0x00)
 	retv--;
 
-    /* This is a SCSI BUS reset signal */
-    if (!retv) {
-	w_dtr(ppb, 0x40);
-	w_ctr(ppb, 0x08);
-	udelay(30);
-	w_ctr(ppb, 0x0c);
-	udelay(1000);		/* Allow devices to settle down */
-    }
+    if (!retv)
+	ppa_reset_pulse(ppb);
+    udelay(1000);		/* Allow devices to settle down */
     ppa_disconnect(host_no);
     udelay(1000);		/* Another delay to allow devices to settle */
 
     if (!retv)
 	retv = device_check(host_no);
 
+    ppa_pb_release(host_no);
     return retv;
 }
 
@@ -956,15 +689,39 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	 * If we have been running for more than a full timer tick
 	 * then take a rest.
 	 */
-	if (jiffies > start_jiffies + 1)
+	if (time_after(jiffies, start_jiffies + 1))
 	    return 0;
 
-	if (((r & 0xc0) != 0xc0) || (cmd->SCp.this_residual <= 0)) {
+	if ((cmd->SCp.this_residual <= 0)) {
 	    ppa_fail(host_no, DID_ERROR);
 	    return -1;		/* ERROR_RETURN */
 	}
-	/* determine if we should use burst I/O */ fast = (bulk && (cmd->SCp.this_residual >= PPA_BURST_SIZE))
-	    ? PPA_BURST_SIZE : 1;
+
+	/* On some hardware we have SCSI disconnected (6th bit low)
+	 * for about 100usecs. It is too expensive to wait a 
+	 * tick on every loop so we busy wait for no more than
+	 * 500usecs to give the drive a chance first. We do not 
+	 * change things for "normal" hardware since generally 
+	 * the 6th bit is always high.
+	 * This makes the CPU load higher on some hardware 
+	 * but otherwise we can not get more then 50K/secs 
+	 * on this problem hardware.
+	 */
+	if ((r & 0xc0) != 0xc0) {
+	   /* Wait for reconnection should be no more than 
+	    * jiffy/2 = 5ms = 5000 loops
+	    */
+	   unsigned long k = ppa_hosts[host_no].recon_tmo; 
+	   for (; k && ((r = (r_str(ppb) & 0xf0)) & 0xc0) != 0xc0; k--)
+	     udelay(1);
+
+	   if(!k) 
+	     return 0;
+	}	   
+
+	/* determine if we should use burst I/O */ 
+	fast = (bulk && (cmd->SCp.this_residual >= PPA_BURST_SIZE)) 
+	     ? PPA_BURST_SIZE : 1;
 
 	if (r == (unsigned char) 0xc0)
 	    status = ppa_out(host_no, cmd->SCp.ptr, fast);
@@ -995,6 +752,39 @@ static int ppa_completion(Scsi_Cmnd * cmd)
     return 1;			/* FINISH_RETURN */
 }
 
+/* deprecated synchronous interface */
+int ppa_command(Scsi_Cmnd * cmd)
+{
+    static int first_pass = 1;
+    int host_no = cmd->host->unique_id;
+
+    if (first_pass) {
+	printk("ppa: using non-queuing interface\n");
+	first_pass = 0;
+    }
+    if (ppa_hosts[host_no].cur_cmd) {
+	printk("PPA: bug in ppa_command\n");
+	return 0;
+    }
+    ppa_hosts[host_no].failed = 0;
+    ppa_hosts[host_no].jstart = jiffies;
+    ppa_hosts[host_no].cur_cmd = cmd;
+    cmd->result = DID_ERROR << 16;	/* default return code */
+    cmd->SCp.phase = 0;
+
+    ppa_pb_claim(host_no);
+
+    while (ppa_engine(&ppa_hosts[host_no], cmd))
+	schedule();
+
+    if (cmd->SCp.phase)		/* Only disconnect if we have connected */
+	ppa_disconnect(cmd->host->unique_id);
+
+    ppa_pb_release(host_no);
+    ppa_hosts[host_no].cur_cmd = 0;
+    return cmd->result;
+}
+
 /*
  * Since the PPA itself doesn't generate interrupts, we use
  * the scheduler's task queue to generate a stream of call-backs and
@@ -1004,6 +794,7 @@ static void ppa_interrupt(void *data)
 {
     ppa_struct *tmp = (ppa_struct *) data;
     Scsi_Cmnd *cmd = tmp->cur_cmd;
+    unsigned long flags;
 
     if (!cmd) {
 	printk("PPA: bug in ppa_interrupt\n");
@@ -1047,13 +838,18 @@ static void ppa_interrupt(void *data)
     default:
 	printk("ppa: bad return code (%02x)\n", (cmd->result >> 16) & 0xff);
     }
-  #endif
-  
+#endif
+
     if (cmd->SCp.phase > 1)
 	ppa_disconnect(cmd->host->unique_id);
+    if (cmd->SCp.phase > 0)
+	ppa_pb_release(cmd->host->unique_id);
 
     tmp->cur_cmd = 0;
+    
+    spin_lock_irqsave(&io_request_lock, flags);
     cmd->scsi_done(cmd);
+    spin_unlock_irqrestore(&io_request_lock, flags);
     return;
 }
 
@@ -1064,7 +860,7 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
     unsigned char l = 0, h = 0;
     int retv;
 
-    /* First check for any errors that may have occurred
+    /* First check for any errors that may of occurred
      * Here we check for internal errors
      */
     if (tmp->failed)
@@ -1095,7 +891,7 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 	    if ((r_str(ppb) & 0x08) == 0x00)
 		retv--;
 
-	    if (retv)
+	    if (retv) {
 		if ((jiffies - tmp->jstart) > (1 * HZ)) {
 		    printk("ppa: Parallel port cable is unplugged!!\n");
 		    ppa_fail(host_no, DID_BUS_BUSY);
@@ -1104,6 +900,7 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 		    ppa_disconnect(host_no);
 		    return 1;	/* Try again in a jiffy */
 		}
+	    }
 	    cmd->SCp.phase++;
 	}
 
@@ -1220,6 +1017,7 @@ int ppa_biosparam(Disk * disk, kdev_t dev, int ip[])
 
 int ppa_abort(Scsi_Cmnd * cmd)
 {
+    int host_no = cmd->host->unique_id;
     /*
      * There is no method for aborting commands since Iomega
      * have tied the SCSI_MESSAGE line high in the interface
@@ -1228,60 +1026,37 @@ int ppa_abort(Scsi_Cmnd * cmd)
     switch (cmd->SCp.phase) {
     case 0:			/* Do not have access to parport */
     case 1:			/* Have not connected to interface */
-	cmd->result = DID_ABORT;
-	cmd->done(cmd);
-	return SCSI_ABORT_SUCCESS;
+	ppa_hosts[host_no].cur_cmd = NULL;	/* Forget the problem */
+	return SUCCESS;
 	break;
     default:			/* SCSI command sent, can not abort */
-	return SCSI_ABORT_BUSY;
+	return FAILED;
 	break;
     }
 }
 
-int ppa_reset(Scsi_Cmnd * cmd, unsigned int x)
+static void ppa_reset_pulse(unsigned int base)
+{
+    w_dtr(base, 0x40);
+    w_ctr(base, 0x8);
+    udelay(30);
+    w_ctr(base, 0xc);
+}
+
+int ppa_reset(Scsi_Cmnd * cmd)
 {
     int host_no = cmd->host->unique_id;
-    int ppb = PPA_BASE(host_no);
 
-    /*
-     * PHASE1:
-     * Bring the interface crashing down on whatever is running
-     * hopefully this will kill the request.
-     * Bring back up the interface, reset the drive (and anything
-     * attached for that manner)
-     */
-    if (cmd)
-	if (cmd->SCp.phase)
-	    ppa_disconnect(cmd->host->unique_id);
+    if (cmd->SCp.phase)
+	ppa_disconnect(host_no);
+    ppa_hosts[host_no].cur_cmd = NULL;	/* Forget the problem */
 
     ppa_connect(host_no, CONNECT_NORMAL);
-    w_dtr(ppb, 0x40);
-    w_ctr(ppb, 0x8);
-    udelay(30);
-    w_ctr(ppb, 0xc);
-    udelay(1000);		/* delay for devices to settle down */
+    ppa_reset_pulse(PPA_BASE(host_no));
+    udelay(1000);		/* device settle delay */
     ppa_disconnect(host_no);
-    udelay(1000);		/* Additional delay to allow devices to settle down */
-
-    /*
-     * PHASE2:
-     * Sanity check for the sake of mid-level driver
-     */
-    if (!cmd) {
-	printk("ppa bus reset called for invalid command.\n");
-	return SCSI_RESET_NOT_RUNNING;
-    }
-    /*
-     * PHASE3:
-     * Flag the current command as having died due to reset
-     */
-    ppa_connect(host_no, CONNECT_NORMAL);
-    ppa_fail(host_no, DID_RESET);
-
-    /* Since the command was already on the timer queue ppa_interrupt
-     * will be called shortly.
-     */
-    return SCSI_RESET_PENDING;
+    udelay(1000);		/* device settle delay */
+    return SUCCESS;
 }
 
 static int device_check(int host_no)
@@ -1346,10 +1121,7 @@ static int device_check(int host_no)
 	if (l != 0xf0) {
 	    ppa_disconnect(host_no);
 	    ppa_connect(host_no, CONNECT_EPP_MAYBE);
-	    w_dtr(ppb, 0x40);
-	    w_ctr(ppb, 0x08);
-	    udelay(30);
-	    w_ctr(ppb, 0x0c);
+	    ppa_reset_pulse(ppb);
 	    udelay(1000);
 	    ppa_disconnect(host_no);
 	    udelay(1000);
@@ -1363,188 +1135,14 @@ static int device_check(int host_no)
 	ppa_disconnect(host_no);
 	printk("ppa: Communication established with ID %i using %s\n", loop,
 	       PPA_MODE_STRING[ppa_hosts[host_no].mode]);
+	ppa_connect(host_no, CONNECT_EPP_MAYBE);
+	ppa_reset_pulse(ppb);
+	udelay(1000);
+	ppa_disconnect(host_no);
+	udelay(1000);
 	return 0;
     }
     printk("ppa: No devices found, aborting driver load.\n");
     return 1;
 }
-
-#define PPA_ID "ppa: "
-
-int port_probe(unsigned short port)
-{
-    int retv = 0;
-    unsigned char a, b, c;
-    unsigned int i, j;
-
-
-    printk(PPA_ID "Probing port %04x\n", port);
-
-/*                 #####  ######  ######
- *                #     # #     # #     #
- *                #       #     # #     #
- *                 #####  ######  ######
- *                      # #       #
- *                #     # #       #
- *                 #####  #       #
- */
-
-    outb(0x0c, port + 0x402);
-    outb(0x0c, port + 0x002);
-    outb(0x55, port);
-    a = inb(port);
-    if (a != 0x55)
-	return retv;
-    printk(PPA_ID "    SPP port present\n");
-
-    retv += PPA_PROBE_SPP;
-
-/*                #######  #####  ######
- *                #       #     # #     #
- *                #       #       #     #
- *                #####   #       ######
- *                #       #       #
- *                #       #     # #
- *                #######  #####  #
- */
-
-    for (i = 1024; i > 0; i--) {	/* clear at most 1k of data from FIFO */
-	a = inb(port + 0x402);
-	if ((a & 0x03) == 0x03)
-	    goto no_ecp;
-	if (a & 0x01)
-	    break;
-	inb(port + 0x400);	/* Remove byte from FIFO */
-    }
-
-    if (i <= 0)
-	goto no_ecp;
-
-    b = a ^ 3;
-    outb(b, port + 0x402);
-    c = inb(port + 0x402);
-
-    if (a == c) {
-	outb(0xc0, port + 0x402);	/* FIFO test */
-	j = 0;
-	while (!(inb(port + 0x402) & 0x01) && (j < 1024)) {
-	    inb(port + 0x400);
-	    j++;
-	}
-	if (j >= 1024)
-	    goto no_ecp;
-	i = 0;
-	j = 0;
-	while (!(inb(port + 0x402) & 0x02) && (j < 1024)) {
-	    outb(0x00, port + 0x400);
-	    i++;
-	    j++;
-	}
-	if (j >= 1024)
-	    goto no_ecp;
-	j = 0;
-	while (!(inb(port + 0x402) & 0x01) && (j < 1024)) {
-	    inb(port + 0x400);
-	    j++;
-	}
-	if (j >= 1024)
-	    goto no_ecp;
-	printk(PPA_ID "    ECP with a %i byte FIFO present\n", i);
-
-	retv += PPA_PROBE_ECR;
-    }
-/*                ######   #####   #####
- *                #     # #     # #     #
- *                #     # #             #
- *                ######   #####   #####
- *                #             # #
- *                #       #     # #
- *                #        #####  #######
- */
-
-  no_ecp:
-    if (retv & PPA_PROBE_ECR)
-	outb(0x20, port + 0x402);
-
-    outb(0x55, port);
-    outb(0x0c, port + 2);
-    a = inb(port);
-    outb(0x55, port);
-    outb(0x2c, port + 2);
-    b = inb(port);
-    if (a != b) {
-	printk(PPA_ID "    PS/2 bidirectional port present\n");
-	retv += PPA_PROBE_PS2;
-    }
-/*                ####### ######  ######
- *                #       #     # #     #
- *                #       #     # #     #
- *                #####   ######  ######
- *                #       #       #
- *                #       #       #
- *                ####### #       #
- */
-
-    if (port & 0x007) {
-	printk(PPA_ID "    EPP not supported at this address\n");
-	return retv;
-    }
-    if (retv & PPA_PROBE_ECR) {
-	for (i = 0x00; i < 0x80; i += 0x20) {
-	    outb(i, port + 0x402);
-
-	    a = inb(port + 1);
-	    outb(a, port + 1);
-	    outb(a & 0xfe, port + 1);
-	    a = inb(port + 1);
-	    if (!(a & 0x01)) {
-		printk(PPA_ID "    Failed Intel bug check. (Phony EPP in ECP)\n");
-		return retv;
-	    }
-	}
-	printk(PPA_ID "    Passed Intel bug check.\n");
-	outb(0x80, port + 0x402);
-    }
-    a = inb(port + 1);
-    outb(a, port + 1);
-    outb(a & 0xfe, port + 1);
-    a = inb(port + 1);
-
-    if (a & 0x01) {
-	outb(0x0c, port + 0x402);
-	outb(0x0c, port + 0x002);
-	return retv;
-    }
-
-    outb(0x04, port + 2);
-    inb(port + 4);
-    a = inb(port + 1);
-    outb(a, port + 1);
-    outb(a & 0xfe, port + 1);
-
-    if (a & 0x01) {
-	printk(PPA_ID "    EPP 1.9 with hardware direction protocol\n");
-	retv += PPA_PROBE_EPP19;
-    } else {
-	/* The EPP timeout bit was not set, this could either be:
-	 * EPP 1.7
-	 * EPP 1.9 with software direction
-	 */
-	outb(0x24, port + 2);
-	inb(port + 4);
-	a = inb(port + 1);
-	outb(a, port + 1);
-	outb(a & 0xfe, port + 1);
-	if (a & 0x01) {
-	    printk(PPA_ID "    EPP 1.9 with software direction protocol\n");
-	    retv += PPA_PROBE_EPP19;
-	} else {
-	    printk(PPA_ID "    EPP 1.7\n");
-	    retv += PPA_PROBE_EPP17;
-	}
-    }
-
-    outb(0x0c, port + 0x402);
-    outb(0x0c, port + 0x002);
-    return retv;
-}
+MODULE_LICENSE("GPL");

@@ -1,4 +1,4 @@
-#! /usr/local/bin/perl
+#!/usr/bin/perl -s
 
 # NCR 53c810 script assembler
 # Sponsored by 
@@ -9,6 +9,10 @@
 #      (Unix and Linux consulting and custom programming)
 #      drew@Colorado.EDU
 #      +1 (303) 786-7975 
+#
+#   Support for 53c710 (via -ncr7x0_family switch) added by Richard
+#   Hirst <richard@sleepie.demon.co.uk> - 15th March 1997
+#   Renamed to -ncr7x0_family to -ncr710, and added -ncr700 - 5th May 2000.
 #
 #   This program is free software; you can redistribute it and/or modify
 #   it under the terms of the GNU General Public License as published by
@@ -74,7 +78,15 @@ $prefix = '';		# define all arrays having this prefix so we
 # 	and = 0x04_00_00_00
 # 	add = 0x06_00_00_00
 
-%operators_810 = (
+if ($ncr700 || $ncr710) {
+  %operators = (
+    '|', 0x02_00_00_00, 'OR', 0x02_00_00_00,
+    '&', 0x04_00_00_00, 'AND', 0x04_00_00_00,
+    '+', 0x06_00_00_00
+  );
+}
+else {
+  %operators = (
     'SHL',  0x01_00_00_00, 
     '|', 0x02_00_00_00, 'OR', 0x02_00_00_00, 
     'XOR', 0x03_00_00_00, 
@@ -83,11 +95,50 @@ $prefix = '';		# define all arrays having this prefix so we
     # Note : low bit of the operator bit should be set for add with 
     # carry.
     '+', 0x06_00_00_00 
-);
-
+  );
+}
 
 # Table of register addresses
-%registers_810 = (
+
+if ($ncr700) {
+  %registers = (
+    'SCNTL0', 0, 'SCNTL1', 1, 'SDID', 2, 'SIEN', 3,
+    'SCID', 4, 'SXFER', 5, 'SODL', 6, 'SOCL', 7,
+    'SFBR', 8, 'SIDL', 9, 'SBDL', 10, 'SBCL', 11,
+    'DSTAT', 12, 'SSTAT0', 13, 'SSTAT1', 14, 'SSTAT2', 15,
+    'CTEST0', 20, 'CTEST1', 21, 'CTEST2', 22, 'CTEST3', 23,
+    'CTEST4', 24, 'CTEST5', 25, 'CTEST6', 26, 'CTEST7', 27,
+    'TEMP0', 28, 'TEMP1', 29, 'TEMP2', 30, 'TEMP3', 31,
+    'DFIFO', 32, 'ISTAT', 33, 'CTEST8', 34,
+    'DBC0', 36, 'DBC1', 37, 'DBC2', 38, 'DCMD', 39,
+    'DNAD0', 40, 'DNAD1', 41, 'DNAD2', 42, 'DNAD3', 43,
+    'DSP0', 44, 'DSP1', 45, 'DSP2', 46, 'DSP3', 47,
+    'DSPS0', 48, 'DSPS1', 49, 'DSPS2', 50, 'DSPS3', 51,
+    'DMODE', 52, 'DIEN', 57, 'DWT', 58, 'DCNTL', 59,
+  );
+}
+elsif ($ncr710) {
+  %registers = (
+    'SCNTL0', 0, 'SCNTL1', 1, 'SDID', 2, 'SIEN', 3,
+    'SCID', 4, 'SXFER', 5, 'SODL', 6, 'SOCL', 7,
+    'SFBR', 8, 'SIDL', 9, 'SBDL', 10, 'SBCL', 11,
+    'DSTAT', 12, 'SSTAT0', 13, 'SSTAT1', 14, 'SSTAT2', 15,
+    'DSA0', 16, 'DSA1', 17, 'DSA2', 18, 'DSA3', 19,
+    'CTEST0', 20, 'CTEST1', 21, 'CTEST2', 22, 'CTEST3', 23,
+    'CTEST4', 24, 'CTEST5', 25, 'CTEST6', 26, 'CTEST7', 27,
+    'TEMP0', 28, 'TEMP1', 29, 'TEMP2', 30, 'TEMP3', 31,
+    'DFIFO', 32, 'ISTAT', 33, 'CTEST8', 34, 'LCRC', 35,
+    'DBC0', 36, 'DBC1', 37, 'DBC2', 38, 'DCMD', 39,
+    'DNAD0', 40, 'DNAD1', 41, 'DNAD2', 42, 'DNAD3', 43,
+    'DSP0', 44, 'DSP1', 45, 'DSP2', 46, 'DSP3', 47,
+    'DSPS0', 48, 'DSPS1', 49, 'DSPS2', 50, 'DSPS3', 51,
+    'SCRATCH0', 52, 'SCRATCH1', 53, 'SCRATCH2', 54, 'SCRATCH3', 55,
+    'DMODE', 56, 'DIEN', 57, 'DWT', 58, 'DCNTL', 59,
+    'ADDER0', 60, 'ADDER1', 61, 'ADDER2', 62, 'ADDER3', 63,
+  );
+}
+else {
+  %registers = (
     'SCNTL0', 0, 'SCNTL1', 1, 'SCNTL2', 2, 'SCNTL3', 3,
     'SCID', 4, 'SXFER', 5, 'SDID', 6, 'GPREG', 7,
     'SFBR', 8, 'SOCL', 9, 'SSID', 10, 'SBCL', 11,
@@ -113,7 +164,8 @@ $prefix = '';		# define all arrays having this prefix so we
     'SODL', 84,
     'SBDL', 88,
     'SCRATCHB0', 92, 'SCRATCHB1', 93, 'SCRATCHB2', 94, 'SCRATCHB3', 95
-);
+  );
+}
 
 # Parsing regular expressions
 $identifier = '[A-Za-z_][A-Za-z_0-9]*';		
@@ -131,17 +183,22 @@ print STDERR "value regex = $value\n" if ($debug);
 
 $phase = join ('|', keys %scsi_phases);
 print STDERR "phase regex = $phase\n" if ($debug);
-$register = join ('|', keys %registers_810);
+$register = join ('|', keys %registers);
 
-# yucky - since %operators_810 includes meta-characters which must
+# yucky - since %operators includes meta-characters which must
 # be escaped, I can't use the join() trick I used for the register
 # regex
 
-$operator = '\||OR|AND|XOR|\&|\+';
+if ($ncr700 || $ncr710) {
+  $operator = '\||OR|AND|\&|\+';
+}
+else {
+  $operator = '\||OR|AND|XOR|\&|\+';
+}
 
 # Global variables
 
-%symbol_values = (%registers_810) ;	# Traditional symbol table
+%symbol_values = (%registers) ;		# Traditional symbol table
 
 %symbol_references = () ;		# Table of symbol references, where
 					# the index is the symbol name, 
@@ -421,6 +478,7 @@ print STDERR "defined external $1 to $external\n" if ($debug_external);
 	if ($1 =~ /^($identifier)\s*$/) {
 	    push (@entry, $1);
 	} else {
+	    die
 "$0 : syntax error in line $lineno : $_
 	expected ENTRY <identifier>
 ";
@@ -428,7 +486,7 @@ print STDERR "defined external $1 to $external\n" if ($debug_external);
 # Process MOVE length, address, WITH|WHEN phase instruction
     } elsif (/^\s*MOVE\s+(.*)/i) {
 	$rest = $1;
-	if ($rest =~ /^FROM\s+($value)\s*,\s*(WITH|WHEN)\s+($phase)\s*$/i) {
+	if (!$ncr700 && ($rest =~ /^FROM\s+($value)\s*,\s*(WITH|WHEN)\s+($phase)\s*$/i)) {
 	    $transfer_addr = $1;
 	    $with_when = $2;
 	    $scsi_phase = $3;
@@ -558,13 +616,13 @@ print STDERR "data8 source\n" if ($debug);
 	    # instruction.
 	    if (($src_reg eq undef) || ($src_reg eq $dst_reg)) {
 		$code[$address] |= 0x38_00_00_00 | 
-		    ($registers_810{$dst_reg} << 16);
+		    ($registers{$dst_reg} << 16);
 	    } elsif ($dst_reg =~ /SFBR/i) {
 		$code[$address] |= 0x30_00_00_00 |
-		    ($registers_810{$src_reg} << 16);
+		    ($registers{$src_reg} << 16);
 	    } elsif ($src_reg =~ /SFBR/i) {
 		$code[$address] |= 0x28_00_00_00 |
-		    ($registers_810{$dst_reg} << 16);
+		    ($registers{$dst_reg} << 16);
 	    } else {
 		die
 "$0 : Illegal combination of registers in line $lineno : $_
@@ -573,10 +631,10 @@ print STDERR "data8 source\n" if ($debug);
 ";
 	    }
 
-	    $code[$address] |= $operators_810{$op};
+	    $code[$address] |= $operators{$op};
 	    
 	    &parse_value ($data8, 0, 1, 1);
-	    $code[$address] |= $operators_810{$op};
+	    $code[$address] |= $operators{$op};
 	    $code[$address + 1] = 0x00_00_00_00;# Reserved
 	    $address += 2;
 	} else {
@@ -856,7 +914,8 @@ foreach $label (@label) {
 open (OUTPUT, ">$output") || die "$0 : can't open $output for writing\n";
 open (OUTPUTU, ">$outputu") || die "$0 : can't open $outputu for writing\n";
 
-print OUTPUT "u32 ".$prefix."SCRIPT[] = {\n";
+print OUTPUT "/* DO NOT EDIT - Generated automatically by ".$0." */\n";
+print OUTPUT "static u32 ".$prefix."SCRIPT[] = {\n";
 $instructions = 0;
 for ($i = 0; $i < $#code; ) {
     if ($list_in_array) {
@@ -895,7 +954,7 @@ foreach $i (@absolute) {
     }
     printf OUTPUTU "#undef A_$i\n";
 
-    printf OUTPUT "u32 A_".$i."_used\[\] = {\n";
+    printf OUTPUT "static u32 A_".$i."_used\[\] __attribute((unused)) = {\n";
 printf STDERR "$i is used $symbol_references{$i}\n" if ($debug);
     foreach $j (split (/\s+/,$symbol_references{$i})) {
 	$j =~ /(ABS|REL),(.*),(.*)/;
@@ -917,15 +976,15 @@ foreach $i (sort @entry) {
 # NCR assembler outputs label patches in the form of indices into 
 # the code.
 #
-printf OUTPUT "u32 ".$prefix."LABELPATCHES[] = {\n";
+printf OUTPUT "static u32 ".$prefix."LABELPATCHES[] __attribute((unused)) = {\n";
 for $patch (sort {$a <=> $b} @label_patches) {
     printf OUTPUT "\t0x%08x,\n", $patch;
 }
 printf OUTPUT "};\n\n";
 
 $num_external_patches = 0;
-printf OUTPUT "struct {\n\tu32\toffset;\n\tvoid\t\t*address;\n".
-    "} ".$prefix."EXTERNAL_PATCHES[] = {\n";
+printf OUTPUT "static struct {\n\tu32\toffset;\n\tvoid\t\t*address;\n".
+    "} ".$prefix."EXTERNAL_PATCHES[] __attribute((unused)) = {\n";
 while ($ident = pop(@external_patches)) {
     $off = pop(@external_patches);
     printf OUTPUT "\t{0x%08x, &%s},\n", $off, $ident;
@@ -933,11 +992,11 @@ while ($ident = pop(@external_patches)) {
 }
 printf OUTPUT "};\n\n";
 
-printf OUTPUT "u32 ".$prefix."INSTRUCTIONS\t= %d;\n", 
+printf OUTPUT "static u32 ".$prefix."INSTRUCTIONS __attribute((unused))\t= %d;\n", 
     $instructions;
-printf OUTPUT "u32 ".$prefix."PATCHES\t= %d;\n", 
+printf OUTPUT "static u32 ".$prefix."PATCHES __attribute((unused))\t= %d;\n", 
     $#label_patches+1;
-printf OUTPUT "u32 ".$prefix."EXTERNAL_PATCHES_LEN\t= %d;\n",
+printf OUTPUT "static u32 ".$prefix."EXTERNAL_PATCHES_LEN __attribute((unused))\t= %d;\n",
     $num_external_patches;
 close OUTPUT;
 close OUTPUTU;

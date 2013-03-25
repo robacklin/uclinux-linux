@@ -1,12 +1,13 @@
 /*
  *  linux/arch/h8300/mm/fault.c
  *
+ *  Copyright (C) 1998  D. Jeff Dionne <jeff@uClinux.org>,
+ *  Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
+ *
  *  Based on:
  *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@ryeham.ee.ryerson.ca>,
- *                      The Silver Hammer Group, Ltd.
- *
  *  linux/arch/m68knommu/mm/fault.c
+ *  linux/arch/m68k/mm/fault.c
  *
  *  Copyright (C) 1995  Hamish Macdonald
  */

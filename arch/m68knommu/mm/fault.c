@@ -1,7 +1,7 @@
 /*
  *  linux/arch/m68knommu/mm/fault.c
  *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@lineo.ca>,
+ *  Copyright (C) 1998  D. Jeff Dionne <jeff@uClinux.org>,
  *  Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
  *
  *  Based on:
@@ -36,9 +36,8 @@ asmlinkage int do_page_fault(struct pt_regs *regs, unsigned long address,
 			      unsigned long error_code)
 {
 #ifdef DEBUG
-	printk ("regs->sr=%#x, regs->pc=%#lx, address=%#lx, %ld, %p\n",
-		regs->sr, regs->pc, address, error_code,
-		tsk->mm->pgd);
+	printk ("regs->sr=%#x, regs->pc=%#lx, address=%#lx, %ld\n",
+		regs->sr, regs->pc, address, error_code);
 #endif
 
 /*

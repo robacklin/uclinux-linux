@@ -6,6 +6,11 @@
 #ifndef _SPARC_SMP_H
 #define _SPARC_SMP_H
 
+#include <linux/config.h>
+#include <linux/threads.h>
+#include <asm/head.h>
+#include <asm/btfixup.h>
+
 #ifndef __ASSEMBLY__
 /* PROM provided per-processor information we need
  * to start them all up.
@@ -15,27 +20,29 @@ struct prom_cpuinfo {
 	int prom_node;
 	int mid;
 };
+extern int linux_num_cpus;	/* number of CPUs probed  */
+
 #endif /* !(__ASSEMBLY__) */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 #ifndef __ASSEMBLY__
 
-extern struct prom_cpuinfo linux_cpus[NCPUS];
+#include <asm/ptrace.h>
+#include <asm/asi.h>
+
+extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 
 /* Per processor Sparc parameters we need. */
 
 struct cpuinfo_sparc {
 	unsigned long udelay_val; /* that's it */
+	unsigned short next;
+	unsigned short mid;
 };
 
 extern struct cpuinfo_sparc cpu_data[NR_CPUS];
-
-typedef volatile unsigned char klock_t;
-extern klock_t kernel_flag;
-
-#define KLOCK_HELD       0xff
-#define KLOCK_CLEAR      0x00
+extern unsigned long cpu_offset[NR_CPUS];
 
 /*
  *	Private routines/data
@@ -44,15 +51,7 @@ extern klock_t kernel_flag;
 extern int smp_found_cpus;
 extern unsigned char boot_cpu_id;
 extern unsigned long cpu_present_map;
-extern volatile unsigned long smp_invalidate_needed[NR_CPUS];
-extern volatile unsigned long kernel_counter;
-extern volatile unsigned char active_kernel_processor;
-extern void smp_message_irq(void);
-extern unsigned long ipi_count;
-extern volatile unsigned long kernel_counter;
-extern volatile unsigned long syscall_count;
-
-extern void print_lock_state(void);
+#define cpu_online_map cpu_present_map
 
 typedef void (*smpfunc_t)(unsigned long, unsigned long, unsigned long,
 		       unsigned long, unsigned long);
@@ -60,34 +59,62 @@ typedef void (*smpfunc_t)(unsigned long, unsigned long, unsigned long,
 /*
  *	General functions that each host system must provide.
  */
+ 
+void sun4m_init_smp(void);
+void sun4d_init_smp(void);
 
-extern void smp_callin(void);
-extern void smp_boot_cpus(void);
-extern void smp_store_cpu_info(int id);
-extern void smp_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
-			   unsigned long arg3, unsigned long arg4, unsigned long arg5);
-extern void smp_capture(void);
-extern void smp_release(void);
+void smp_callin(void);
+void smp_boot_cpus(void);
+void smp_store_cpu_info(int);
 
-extern inline void xc0(smpfunc_t func) { smp_cross_call(func, 0, 0, 0, 0, 0); }
-extern inline void xc1(smpfunc_t func, unsigned long arg1)
+struct seq_file;
+void smp_bogo_info(struct seq_file *);
+void smp_info(struct seq_file *);
+
+BTFIXUPDEF_CALL(void, smp_cross_call, smpfunc_t, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
+BTFIXUPDEF_CALL(void, smp_message_pass, int, int, unsigned long, int)
+BTFIXUPDEF_CALL(int, __smp_processor_id, void)
+BTFIXUPDEF_BLACKBOX(smp_processor_id)
+BTFIXUPDEF_BLACKBOX(load_current)
+
+#define smp_cross_call(func,arg1,arg2,arg3,arg4,arg5) BTFIXUP_CALL(smp_cross_call)(func,arg1,arg2,arg3,arg4,arg5)
+#define smp_message_pass(target,msg,data,wait) BTFIXUP_CALL(smp_message_pass)(target,msg,data,wait)
+
+extern __inline__ void xc0(smpfunc_t func) { smp_cross_call(func, 0, 0, 0, 0, 0); }
+extern __inline__ void xc1(smpfunc_t func, unsigned long arg1)
 { smp_cross_call(func, arg1, 0, 0, 0, 0); }
-extern inline void xc2(smpfunc_t func, unsigned long arg1, unsigned long arg2)
+extern __inline__ void xc2(smpfunc_t func, unsigned long arg1, unsigned long arg2)
 { smp_cross_call(func, arg1, arg2, 0, 0, 0); }
-extern inline void xc3(smpfunc_t func, unsigned long arg1, unsigned long arg2,
-		       unsigned long arg3)
+extern __inline__ void xc3(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+			   unsigned long arg3)
 { smp_cross_call(func, arg1, arg2, arg3, 0, 0); }
-extern inline void xc4(smpfunc_t func, unsigned long arg1, unsigned long arg2,
-		       unsigned long arg3, unsigned long arg4)
+extern __inline__ void xc4(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+			   unsigned long arg3, unsigned long arg4)
 { smp_cross_call(func, arg1, arg2, arg3, arg4, 0); }
-extern inline void xc5(smpfunc_t func, unsigned long arg1, unsigned long arg2,
-		       unsigned long arg3, unsigned long arg4, unsigned long arg5)
+extern __inline__ void xc5(smpfunc_t func, unsigned long arg1, unsigned long arg2,
+			   unsigned long arg3, unsigned long arg4, unsigned long arg5)
 { smp_cross_call(func, arg1, arg2, arg3, arg4, arg5); }
 
-extern volatile int cpu_number_map[NR_CPUS];
-extern volatile int cpu_logical_map[NR_CPUS];
+extern __inline__ int smp_call_function(void (*func)(void *info), void *info, int nonatomic, int wait)
+{
+	xc1((smpfunc_t)func, (unsigned long)info);
+	return 0;
+}
 
-extern __inline int smp_processor_id(void)
+extern __volatile__ int __cpu_number_map[NR_CPUS];
+extern __volatile__ int __cpu_logical_map[NR_CPUS];
+extern unsigned long smp_proc_in_lock[NR_CPUS];
+
+extern __inline__ int cpu_logical_map(int cpu)
+{
+	return __cpu_logical_map[cpu];
+}
+extern __inline__ int cpu_number_map(int cpu)
+{
+	return __cpu_number_map[cpu];
+}
+
+extern __inline__ int hard_smp4m_processor_id(void)
 {
 	int cpuid;
 
@@ -98,49 +125,58 @@ extern __inline int smp_processor_id(void)
 	return cpuid;
 }
 
-
-extern volatile unsigned long smp_proc_in_lock[NR_CPUS]; /* for computing process time */
-extern volatile int smp_process_available;
-
-extern inline int smp_swap(volatile int *addr, int value)
+extern __inline__ int hard_smp4d_processor_id(void)
 {
-	__asm__ __volatile__("swap [%2], %0\n\t" :
-			     "=&r" (value) :
-			     "0" (value), "r" (addr));
-	return value;
+	int cpuid;
+
+	__asm__ __volatile__("lda [%%g0] %1, %0\n\t" :
+			     "=&r" (cpuid) : "i" (ASI_M_VIKING_TMP1));
+	return cpuid;
 }
 
-extern inline volatile void inc_smp_counter(volatile int *ctr)
+#ifndef MODULE
+extern __inline__ int hard_smp_processor_id(void)
 {
-	int tmp;
+	int cpuid;
 
-	while((tmp = smp_swap(ctr, -1)) == -1)
-		;
-	smp_swap(ctr, (tmp + 1));
+	/* Black box - sun4m
+		__asm__ __volatile__("rd %%tbr, %0\n\t"
+				     "srl %0, 12, %0\n\t"
+				     "and %0, 3, %0\n\t" :
+				     "=&r" (cpuid));
+	             - sun4d
+	   	__asm__ __volatile__("lda [%g0] ASI_M_VIKING_TMP1, %0\n\t"
+	   			     "nop; nop" :
+	   			     "=&r" (cpuid));
+	   See btfixup.h and btfixupprep.c to understand how a blackbox works.
+	 */
+	__asm__ __volatile__("sethi %%hi(___b_smp_processor_id), %0\n\t"
+			     "sethi %%hi(boot_cpu_id), %0\n\t"
+			     "ldub [%0 + %%lo(boot_cpu_id)], %0\n\t" :
+			     "=&r" (cpuid));
+	return cpuid;
 }
-
-extern inline volatile void dec_smp_counter(volatile int *ctr)
+#else
+extern __inline__ int hard_smp_processor_id(void)
 {
-	int tmp;
-
-	while((tmp = smp_swap(ctr, -1)) == -1)
-		;
-	smp_swap(ctr, (tmp - 1));
+	int cpuid;
+	
+	__asm__ __volatile__("mov %%o7, %%g1\n\t"
+			     "call ___f___smp_processor_id\n\t"
+			     " nop\n\t"
+			     "mov %%g2, %0\n\t" : "=r"(cpuid) : : "g1", "g2");
+	return cpuid;
 }
+#endif
 
-extern inline volatile int read_smp_counter(volatile int *ctr)
-{
-	int value;
-
-	while((value = *ctr) == -1)
-		;
-	return value;
-}
+#define smp_processor_id() hard_smp_processor_id()
+/* XXX We really need to implement this now.  -DaveM */
+extern __inline__ void smp_send_reschedule(int cpu) { }
+extern __inline__ void smp_send_stop(void) { }
 
 #endif /* !(__ASSEMBLY__) */
 
 /* Sparc specific messages. */
-#define MSG_CAPTURE            0x0004       /* Park a processor. */
 #define MSG_CROSS_CALL         0x0005       /* run func on cpus */
 
 /* Empirical PROM processor mailbox constants.  If the per-cpu mailbox
@@ -154,14 +190,10 @@ extern inline volatile int read_smp_counter(volatile int *ctr)
 #define MBOX_IDLECPU2         0xFD
 #define MBOX_STOPCPU2         0xFE
 
+#define PROC_CHANGE_PENALTY     15
+
+#endif /* !(CONFIG_SMP) */
 
 #define NO_PROC_ID            0xFF
-
-#define PROC_CHANGE_PENALTY     20
-
-#define SMP_FROM_INT		1
-#define SMP_FROM_SYSCALL	2
-
-#endif /* !(__SMP__) */
 
 #endif /* !(_SPARC_SMP_H) */

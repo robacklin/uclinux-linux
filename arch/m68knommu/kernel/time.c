@@ -1,21 +1,16 @@
 /*
- *  linux/arch/m68knommu/kernel/time.c
- *
- *  Copyright (C) 1998  D. Jeff Dionne <jeff@lineo.ca>,
- *                      Kenneth Albanowski <kjahds@kjahds.com>,
- *  Copyright (C) 2000  Lineo, Inc.  (www.lineo.com) 
- *
- *  Copied/hacked from:
- *
  *  linux/arch/m68k/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  *
  * This file contains the m68k-specific time handling details.
  * Most of the stuff is located in the machine specific files.
+ *
+ * 1997-09-10	Updated NTP code according to technical memorandum Jan '96
+ *		"A Kernel Model for Precision Timekeeping" by Dave Mills
  */
 
-#include <linux/config.h>
+#include <linux/config.h> /* CONFIG_HEARTBEAT */
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -24,7 +19,6 @@
 #include <linux/mm.h>
 
 #include <asm/machdep.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 
 #include <linux/timex.h>
@@ -37,66 +31,79 @@ static inline int set_rtc_mmss(unsigned long nowtime)
   return -1;
 }
 
+static inline void do_profile (unsigned long pc)
+{
+	if (prof_buffer && current->pid) {
+		extern int _stext;
+		pc -= (unsigned long) &_stext;
+		pc >>= prof_shift;
+		if (pc < prof_len)
+			++prof_buffer[pc];
+		else
+		/*
+		 * Don't ignore out-of-bounds PC values silently,
+		 * put them into the last histogram slot, so if
+		 * present, they will show up as a sharp peak.
+		 */
+			++prof_buffer[prof_len-1];
+	}
+}
+
 /*
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
+static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
 	static long last_rtc_update=0;
-	
+
 	/* may need to kick the hardware timer */
 	if (mach_tick)
 	  mach_tick();
 
 	do_timer(regs);
 
+	if (!user_mode(regs))
+		do_profile(regs->pc);
+
 	/*
 	 * If we have an externally synchronized Linux clock, then update
 	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
 	 * called as close as possible to 500 ms before the new second starts.
 	 */
-	if (time_state != TIME_BAD && xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec > 500000 - (tick >> 1) &&
-	    xtime.tv_usec < 500000 + (tick >> 1)) {
+	if ((time_status & STA_UNSYNC) == 0 &&
+	    xtime.tv_sec > last_rtc_update + 660 &&
+	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
+	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
 	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
+#ifdef CONFIG_HEARTBEAT
+	/* use power LED as a heartbeat instead -- much more useful
+	   for debugging -- based on the version for PReP by Cort */
+	/* acts like an actual heart beat -- ie thump-thump-pause... */
+	if (mach_heartbeat) {
+	    static unsigned cnt = 0, period = 0, dist = 0;
 
-}
+	    if (cnt == 0 || cnt == dist)
+		mach_heartbeat( 1 );
+	    else if (cnt == 7 || cnt == dist+7)
+		mach_heartbeat( 0 );
 
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
+	    if (++cnt > period) {
+		cnt = 0;
+		/* The hyperbolic function below modifies the heartbeat period
+		 * length in dependency of the current (5min) load. It goes
+		 * through the points f(0)=126, f(1)=86, f(5)=51,
+		 * f(inf)->30. */
+		period = ((672<<FSHIFT)/(5*avenrun[0]+(7<<FSHIFT))) + 30;
+		dist = period / 4;
+	    }
 	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
+#endif /* CONFIG_HEARTBEAT */
 }
 
 void time_init(void)
@@ -111,7 +118,7 @@ void time_init(void)
 	/* very stange errors */
 	year = 1980;
 	mon = day = 1;
-	hour = min = sec = 0;  
+	hour = min = sec = 0;
 	arch_gettod (&year, &mon, &day, &hour, &min, &sec);
 
 	if ((year += 1900) < 1970)
@@ -119,33 +126,41 @@ void time_init(void)
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
 	xtime.tv_usec = 0;
 
-	if (mach_sched_init)
-		mach_sched_init(timer_interrupt);
+	mach_sched_init(timer_interrupt);
 }
+
+extern rwlock_t xtime_lock;
 
 /*
  * This version of gettimeofday has near microsecond resolution.
  */
 void do_gettimeofday(struct timeval *tv)
 {
+	extern volatile unsigned long wall_jiffies;
 	unsigned long flags;
-	
-	save_flags(flags);
-	cli();
-	*tv = xtime;
-	if (mach_gettimeoffset) {
-	  tv->tv_usec += mach_gettimeoffset();
-	  if (tv->tv_usec >= 1000000) {
-	    tv->tv_usec -= 1000000;
-	    tv->tv_sec++;
-	  }
+	unsigned long usec, sec, lost;
+
+	read_lock_irqsave(&xtime_lock, flags);
+	usec = mach_gettimeoffset ? mach_gettimeoffset() : 0;
+	lost = jiffies - wall_jiffies;
+	if (lost)
+		usec += lost * (1000000/HZ);
+	sec = xtime.tv_sec;
+	usec += xtime.tv_usec;
+	read_unlock_irqrestore(&xtime_lock, flags);
+
+	while (usec >= 1000000) {
+		usec -= 1000000;
+		sec++;
 	}
-	restore_flags(flags);
+
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
 }
 
 void do_settimeofday(struct timeval *tv)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 	/* This is revolting. We need to set the xtime.tv_usec
 	 * correctly. However, the value in this location is
 	 * is value at the last tick.
@@ -153,17 +168,17 @@ void do_settimeofday(struct timeval *tv)
 	 * would have done, and then undo it!
 	 */
 	if (mach_gettimeoffset)
-	  tv->tv_usec -= mach_gettimeoffset();
+		tv->tv_usec -= mach_gettimeoffset();
 
-	if (tv->tv_usec < 0) {
+	while (tv->tv_usec < 0) {
 		tv->tv_usec += 1000000;
 		tv->tv_sec--;
 	}
 
 	xtime = *tv;
-	time_state = TIME_BAD;
-	time_maxerror = MAXPHASE;
-	time_esterror = MAXPHASE;
-	sti();
+	time_adjust = 0;		/* stop active adjtime() */
+	time_status |= STA_UNSYNC;
+	time_maxerror = NTP_PHASE_LIMIT;
+	time_esterror = NTP_PHASE_LIMIT;
+	write_unlock_irq(&xtime_lock);
 }
-

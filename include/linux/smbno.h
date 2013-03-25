@@ -2,12 +2,12 @@
 #define _SMBNO_H_
 
 /* these define the attribute byte as seen by DOS */
-#define aRONLY (1L<<0)
-#define aHIDDEN (1L<<1)
-#define aSYSTEM (1L<<2)
-#define aVOLID (1L<<3)
-#define aDIR (1L<<4)
-#define aARCH (1L<<5)
+#define aRONLY	(1L<<0)
+#define aHIDDEN	(1L<<1)
+#define aSYSTEM	(1L<<2)
+#define aVOLID	(1L<<3)
+#define aDIR	(1L<<4)
+#define aARCH	(1L<<5)
 
 /* error classes */
 #define SUCCESS 0  /* The request was successful. */
@@ -44,8 +44,15 @@
 #define ERRpipeclosing 232      /* named pipe close in progress */
 #define ERRnotconnected 233     /* No process on other end of named pipe */
 #define ERRmoredata 234         /* More data to be returned */
-#define ERROR_EAS_DIDNT_FIT 275 /* Extended attributes didn't fit */
-#define ERROR_EAS_NOT_SUPPORTED 282 /* Extended attributes not supported */
+
+#define ERROR_INVALID_PARAMETER	 87
+#define ERROR_DISK_FULL		112
+#define ERROR_INVALID_NAME	123
+#define ERROR_DIR_NOT_EMPTY	145
+#define ERROR_NOT_LOCKED	158
+#define ERROR_ALREADY_EXISTS	183  /* see also 80 ? */
+#define ERROR_EAS_DIDNT_FIT	275 /* Extended attributes didn't fit */
+#define ERROR_EAS_NOT_SUPPORTED	282 /* Extended attributes not supported */
 
 /* Error codes for the ERRSRV class */
 
@@ -99,6 +106,14 @@
 #define ERRFCBunavail 35
 #define ERRsharebufexc 36       /* share buffer exceeded */
 #define ERRdiskfull 39
+
+/*
+ * Access modes when opening a file
+ */
+#define SMB_ACCMASK	0x0003
+#define SMB_O_RDONLY	0x0000
+#define SMB_O_WRONLY	0x0001
+#define SMB_O_RDWR	0x0002
 
 /* offsets into message for common items */
 #define smb_com 8
@@ -266,19 +281,64 @@
 #define TRANSACT2_FINDNOTIFYNEXT  12
 #define TRANSACT2_MKDIR           13
 
+/* Information Levels -  Shared? */
+#define SMB_INFO_STANDARD		1
+#define SMB_INFO_QUERY_EA_SIZE		2
+#define SMB_INFO_QUERY_EAS_FROM_LIST	3
+#define SMB_INFO_QUERY_ALL_EAS		4
+#define SMB_INFO_IS_NAME_VALID		6
 
-/* Capabilities.  See ftp://ftp.microsoft.com/developr/drg/cifs/cifs6.txt */
-#define CAP_RAW_MODE         0x0001
-#define CAP_MPX_MODE         0x0002
-#define CAP_UNICODE          0x0004
-#define CAP_LARGE_FILES      0x0008
-#define CAP_NT_SMBS          0x0010
-#define CAP_RPC_REMOTE_APIS  0x0020
-#define CAP_STATUS32         0x0040
-#define CAP_LEVEL_II_OPLOCKS 0x0080
-#define CAP_LOCK_AND_READ    0x0100
-#define CAP_NT_FIND          0x0200
-#define CAP_DFS              0x1000
-#define CAP_LARGE_READX      0x4000
+/* Information Levels -  TRANSACT2_FINDFIRST */
+#define SMB_FIND_FILE_DIRECTORY_INFO		0x101
+#define SMB_FIND_FILE_FULL_DIRECTORY_INFO	0x102
+#define SMB_FIND_FILE_NAMES_INFO		0x103
+#define SMB_FIND_FILE_BOTH_DIRECTORY_INFO	0x104
+
+/* Information Levels -  TRANSACT2_QPATHINFO */
+#define SMB_QUERY_FILE_BASIC_INFO	0x101
+#define SMB_QUERY_FILE_STANDARD_INFO	0x102
+#define SMB_QUERY_FILE_EA_INFO		0x103
+#define SMB_QUERY_FILE_NAME_INFO	0x104
+#define SMB_QUERY_FILE_ALL_INFO		0x107
+#define SMB_QUERY_FILE_ALT_NAME_INFO	0x108
+#define SMB_QUERY_FILE_STREAM_INFO	0x109
+#define SMB_QUERY_FILE_COMPRESSION_INFO	0x10b
+
+/* Information Levels - TRANSACT2_SETFILEINFO */
+#define SMB_SET_FILE_BASIC_INFO		0x101
+#define SMB_SET_FILE_DISPOSITION_INFO	0x102
+#define SMB_SET_FILE_ALLOCATION_INFO	0x103
+#define SMB_SET_FILE_END_OF_FILE_INFO	0x104
+
+/*
+ * UNIX stuff  (from samba trans2.h)
+ */
+#define MIN_UNIX_INFO_LEVEL		0x200
+#define MAX_UNIX_INFO_LEVEL		0x2FF
+#define SMB_FIND_FILE_UNIX		0x202
+#define SMB_QUERY_FILE_UNIX_BASIC	0x200
+#define SMB_QUERY_FILE_UNIX_LINK	0x201
+#define SMB_QUERY_FILE_UNIX_HLINK	0x202
+#define SMB_SET_FILE_UNIX_BASIC		0x200
+#define SMB_SET_FILE_UNIX_LINK		0x201
+#define SMB_SET_FILE_UNIX_HLINK		0x203
+#define SMB_QUERY_CIFS_UNIX_INFO	0x200
+
+/* values which means "don't change it" */
+#define SMB_MODE_NO_CHANGE		0xFFFFFFFF
+#define SMB_UID_NO_CHANGE		0xFFFFFFFF
+#define SMB_GID_NO_CHANGE		0xFFFFFFFF
+#define SMB_TIME_NO_CHANGE		0xFFFFFFFFFFFFFFFFULL
+#define SMB_SIZE_NO_CHANGE		0xFFFFFFFFFFFFFFFFULL
+
+/* UNIX filetype mappings. */
+#define UNIX_TYPE_FILE		0
+#define UNIX_TYPE_DIR		1
+#define UNIX_TYPE_SYMLINK	2
+#define UNIX_TYPE_CHARDEV	3
+#define UNIX_TYPE_BLKDEV	4
+#define UNIX_TYPE_FIFO		5
+#define UNIX_TYPE_SOCKET	6
+#define UNIX_TYPE_UNKNOWN	0xFFFFFFFF
 
 #endif /* _SMBNO_H_ */

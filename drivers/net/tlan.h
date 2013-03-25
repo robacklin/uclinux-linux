@@ -8,11 +8,16 @@
  *  by James Banks
  *
  *  (C) 1997-1998 Caldera, Inc.
- *
+ *  (C) 1999-2001 Torben Mathiasen
+ * 
  *  This software may be used and distributed according to the terms
- *  of the GNU Public License, incorporated herein by reference.
+ *  of the GNU General Public License, incorporated herein by reference.
  *
  ** This file is best viewed/edited with tabstop=4, colums>=132
+ *
+ *  
+ *  Dec 10, 1999	Torben Mathiasen <torben.mathiasen@compaq.com>
+ *			New Maintainer
  *
  ********************************************************************/
 
@@ -20,11 +25,6 @@
 #include <asm/io.h>
 #include <asm/types.h>
 #include <linux/netdevice.h>
-
-#if LINUX_VERSION_CODE <= 0x20100
-#define net_device_stats	enet_statistics
-#endif
-
 
 
 
@@ -39,19 +39,21 @@
 #define TLAN_MIN_FRAME_SIZE	64
 #define TLAN_MAX_FRAME_SIZE	1600
 
-#define TLAN_NUM_RX_LISTS	4
-#define TLAN_NUM_TX_LISTS	8
+#define TLAN_NUM_RX_LISTS	32
+#define TLAN_NUM_TX_LISTS	64
 
 #define TLAN_IGNORE		0
 #define TLAN_RECORD		1
 
-#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk( format, ##args );
+#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk(KERN_DEBUG "TLAN: " format, ##args );
 #define TLAN_DEBUG_GNRL		0x0001
 #define TLAN_DEBUG_TX		0x0002
 #define TLAN_DEBUG_RX		0x0004 
 #define TLAN_DEBUG_LIST		0x0008
+#define TLAN_DEBUG_PROBE	0x0010
 
-
+#define TX_TIMEOUT		(10*HZ)	 /* We need time for auto-neg */
+#define MAX_TLAN_BOARDS		8	 /* Max number of boards installed at a time */
 
 
 	/*****************************************************************
@@ -59,14 +61,6 @@
 	 *
 	 ****************************************************************/
 		
-#define PCI_DEVICE_ID_NETELLIGENT_10			0xAE34
-#define PCI_DEVICE_ID_NETELLIGENT_10_100		0xAE32
-#define PCI_DEVICE_ID_NETFLEX_3P_INTEGRATED		0xAE35
-#define PCI_DEVICE_ID_NETFLEX_3P			0xF130
-#define PCI_DEVICE_ID_NETFLEX_3P_BNC			0xF150
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_PROLIANT	0xAE43
-#define PCI_DEVICE_ID_NETELLIGENT_10_100_DUAL		0xAE40
-#define PCI_DEVICE_ID_DESKPRO_4000_5233MMX		0xB011
 #define PCI_DEVICE_ID_NETELLIGENT_10_T2			0xB012
 #define PCI_DEVICE_ID_NETELLIGENT_10_100_WS_5100	0xB030
 #ifndef PCI_DEVICE_ID_OLICOM_OC2183
@@ -101,6 +95,24 @@ typedef struct tlan_adapter_entry {
 #define TLAN_DUPLEX_HALF	1
 #define TLAN_DUPLEX_FULL	2
 
+
+
+	/*****************************************************************
+	 * EISA Definitions
+	 *
+	 ****************************************************************/
+
+#define EISA_ID      0xc80   /* EISA ID Registers */ 
+#define EISA_ID0     0xc80   /* EISA ID Register 0 */ 
+#define EISA_ID1     0xc81   /* EISA ID Register 1 */ 
+#define EISA_ID2     0xc82   /* EISA ID Register 2 */ 
+#define EISA_ID3     0xc83   /* EISA ID Register 3 */ 
+#define EISA_CR      0xc84   /* EISA Control Register */
+#define EISA_REG0    0xc88   /* EISA Configuration Register 0 */
+#define EISA_REG1    0xc89   /* EISA Configuration Register 1 */
+#define EISA_REG2    0xc8a   /* EISA Configuration Register 2 */
+#define EISA_REG3    0xc8f   /* EISA Configuration Register 3 */
+#define EISA_APROM   0xc90   /* Ethernet Address PROM */
 
 
 
@@ -156,16 +168,23 @@ typedef u8 TLanBuffer[TLAN_MAX_FRAME_SIZE];
 	 ****************************************************************/
 
 typedef struct tlan_private_tag {
-	struct device           *nextDevice;
+	struct net_device       *nextDevice;
+	struct pci_dev		*pciDev;
 	void			*dmaStorage;
+	dma_addr_t		dmaStorageDMA;
+	unsigned int		dmaSize;
 	u8			*padBuffer;
 	TLanList                *rxList;
+	dma_addr_t		rxListDMA;
 	u8			*rxBuffer;
+	dma_addr_t		rxBufferDMA;
 	u32                     rxHead;
 	u32                     rxTail;
 	u32			rxEocCount;
 	TLanList                *txList;
+	dma_addr_t		txListDMA;
 	u8			*txBuffer;
+	dma_addr_t		txBufferDMA;
 	u32                     txHead;
 	u32                     txInProgress;
 	u32                     txTail;
@@ -175,18 +194,22 @@ typedef struct tlan_private_tag {
 	u32			timerType;
 	struct timer_list	timer;
 	struct net_device_stats	stats;
-	TLanAdapterEntry	*adapter;
+	struct board		*adapter;
 	u32			adapterRev;
 	u32			aui;
 	u32			debug;
 	u32			duplex;
 	u32			phy[2];
 	u32			phyNum;
-	u32			sa_int;
 	u32			speed;
 	u8			tlanRev;
 	u8			tlanFullDuplex;
 	char                    devName[8];
+	spinlock_t		lock;
+	u8			link;
+	u8			is_eisa;
+	struct tq_struct	tlan_tqueue;
+	u8			neg_be_verbose;
 } TLanPrivateInfo;
 
 
@@ -197,7 +220,7 @@ typedef struct tlan_private_tag {
 	 *
 	 ****************************************************************/
 
-#define TLAN_TIMER_LINK			1
+#define TLAN_TIMER_LINK_BEAT		1
 #define TLAN_TIMER_ACTIVITY		2
 #define TLAN_TIMER_PHY_PDOWN		3
 #define TLAN_TIMER_PHY_PUP		4
@@ -206,7 +229,7 @@ typedef struct tlan_private_tag {
 #define TLAN_TIMER_PHY_FINISH_AN	7
 #define TLAN_TIMER_FINISH_RESET		8
 
-#define TLAN_TIMER_ACT_DELAY		10
+#define TLAN_TIMER_ACT_DELAY		(HZ/10)
 
 
 
@@ -404,7 +427,17 @@ typedef struct tlan_private_tag {
 #define		TLAN_TS_POLOK		0x2000
 #define		TLAN_TS_TPENERGY	0x1000
 #define		TLAN_TS_RESERVED	0x0FFF
+#define TLAN_TLPHY_PAR			0x19
+#define		TLAN_PHY_CIM_STAT	0x0020
+#define		TLAN_PHY_SPEED_100	0x0040
+#define		TLAN_PHY_DUPLEX_FULL	0x0080
+#define		TLAN_PHY_AN_EN_STAT     0x0400
 
+/* National Sem. & Level1 PHY id's */
+#define NAT_SEM_ID1			0x2000
+#define NAT_SEM_ID2			0x5C01
+#define LEVEL1_ID1			0x7810
+#define LEVEL1_ID2			0x0000
 
 #define CIRC_INC( a, b ) if ( ++a >= b ) a = 0
 
@@ -496,6 +529,24 @@ inline void TLan_SetBit(u8 bit, u16 port)
 #define TLan_GetBit( bit, port )	((int) (inb_p(port) & bit))
 #define TLan_SetBit( bit, port )	outb_p(inb_p(port) | bit, port)
 
+#ifdef I_LIKE_A_FAST_HASH_FUNCTION
+/* given 6 bytes, view them as 8 6-bit numbers and return the XOR of those */
+/* the code below is about seven times as fast as the original code */
+inline u32 TLan_HashFunc( u8 *a )
+{
+        u8     hash;
+
+        hash = (a[0]^a[3]);             /* & 077 */
+        hash ^= ((a[0]^a[3])>>6);       /* & 003 */
+        hash ^= ((a[1]^a[4])<<2);       /* & 074 */
+        hash ^= ((a[1]^a[4])>>4);       /* & 017 */
+        hash ^= ((a[2]^a[5])<<4);       /* & 060 */
+        hash ^= ((a[2]^a[5])>>2);       /* & 077 */
+
+        return (hash & 077);
+}
+
+#else /* original code */
 
 inline	u32	xor( u32 a, u32 b )
 {
@@ -519,7 +570,5 @@ inline u32 TLan_HashFunc( u8 *a )
 
 } 
 
-
-
-
+#endif /* I_LIKE_A_FAST_HASH_FUNCTION */
 #endif

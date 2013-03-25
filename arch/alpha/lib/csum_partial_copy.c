@@ -2,13 +2,20 @@
  * csum_partial_copy - do IP checksumming and copy
  *
  * (C) Copyright 1996 Linus Torvalds
+ * accellerated versions (and 21264 assembly versions ) contributed by
+ *	Rick Gorton	<rick.gorton@alpha-processor.com>
  *
  * Don't look at this too closely - you'll go mad. The things
  * we do for performance..
  */
 
+#include <linux/types.h>
+#include <linux/string.h>
+#include <asm/uaccess.h>
+
+
 #define ldq_u(x,y) \
-__asm__ __volatile__("ldq_u %0,%1":"=r" (x):"m" (*(unsigned long *)(y)))
+__asm__ __volatile__("ldq_u %0,%1":"=r" (x):"m" (*(const unsigned long *)(y)))
 
 #define stq_u(x,y) \
 __asm__ __volatile__("stq_u %1,%0":"=m" (*(unsigned long *)(y)):"r" (x))
@@ -31,17 +38,77 @@ __asm__ __volatile__("insql %1,%2,%0":"=r" (z):"r" (x),"r" (y))
 #define insqh(x,y,z) \
 __asm__ __volatile__("insqh %1,%2,%0":"=r" (z):"r" (x),"r" (y))
 
+
+#define __get_user_u(x,ptr)				\
+({							\
+	long __guu_err;					\
+	__asm__ __volatile__(				\
+	"1:	ldq_u %0,%2\n"				\
+	"2:\n"						\
+	".section __ex_table,\"a\"\n"			\
+	"	.gprel32 1b\n"				\
+	"	lda %0,2b-1b(%1)\n"			\
+	".previous"					\
+		: "=r"(x), "=r"(__guu_err)		\
+		: "m"(__m(ptr)), "1"(0));		\
+	__guu_err;					\
+})
+
+#define __put_user_u(x,ptr)				\
+({							\
+	long __puu_err;					\
+	__asm__ __volatile__(				\
+	"1:	stq_u %2,%1\n"				\
+	"2:\n"						\
+	".section __ex_table,\"a\"\n"			\
+	"	.gprel32 1b"				\
+	"	lda $31,2b-1b(%0)\n"			\
+	".previous"					\
+		: "=r"(__puu_err)			\
+		: "m"(__m(addr)), "rJ"(x), "0"(0));	\
+	__puu_err;					\
+})
+
+
+static inline unsigned short from64to16(unsigned long x)
+{
+	/* Using extract instructions is a bit more efficient
+	   than the original shift/bitmask version.  */
+
+	union {
+		unsigned long	ul;
+		unsigned int	ui[2];
+		unsigned short	us[4];
+	} in_v, tmp_v, out_v;
+
+	in_v.ul = x;
+	tmp_v.ul = (unsigned long) in_v.ui[0] + (unsigned long) in_v.ui[1];
+
+	/* Since the bits of tmp_v.sh[3] are going to always be zero,
+	   we don't have to bother to add that in.  */
+	out_v.ul = (unsigned long) tmp_v.us[0] + (unsigned long) tmp_v.us[1]
+			+ (unsigned long) tmp_v.us[2];
+
+	/* Similarly, out_v.us[2] is always zero for the final add.  */
+	return out_v.us[0] + out_v.us[1];
+}
+
+
+
 /*
  * Ok. This isn't fun, but this is the EASY case.
  */
-static inline unsigned long csum_partial_copy_aligned(
-	unsigned long *src, unsigned long *dst,
-	long len, unsigned long checksum)
+static inline unsigned long
+csum_partial_cfu_aligned(const unsigned long *src, unsigned long *dst,
+			 long len, unsigned long checksum,
+			 int *errp)
 {
 	unsigned long carry = 0;
+	int err = 0;
 
 	while (len >= 0) {
-		unsigned long word = *src;
+		unsigned long word;
+		err |= __get_user(word, src);
 		checksum += carry;
 		src++;
 		checksum += word;
@@ -54,7 +121,7 @@ static inline unsigned long csum_partial_copy_aligned(
 	checksum += carry;
 	if (len) {
 		unsigned long word, tmp;
-		word = *src;
+		err |= __get_user(word, src);
 		tmp = *dst;
 		mskql(word, len, word);
 		checksum += word;
@@ -63,28 +130,31 @@ static inline unsigned long csum_partial_copy_aligned(
 		*dst = word | tmp;
 		checksum += carry;
 	}
-	return checksum;	
+	if (err) *errp = err;
+	return checksum;
 }
 
 /*
  * This is even less fun, but this is still reasonably
  * easy.
  */
-static inline unsigned long csum_partial_copy_dest_aligned(
-	unsigned long *src, unsigned long *dst,
-	unsigned long soff,
-	long len, unsigned long checksum)
+static inline unsigned long
+csum_partial_cfu_dest_aligned(const unsigned long *src, unsigned long *dst,
+			      unsigned long soff,
+			      long len, unsigned long checksum,
+			      int *errp)
 {
 	unsigned long first;
 	unsigned long word, carry;
 	unsigned long lastsrc = 7+len+(unsigned long)src;
+	int err = 0;
 
-	ldq_u(first,src);
+	err |= __get_user_u(first,src);
 	carry = 0;
 	while (len >= 0) {
 		unsigned long second;
 
-		ldq_u(second, src+1);
+		err |= __get_user_u(second, src+1);
 		extql(first, soff, word);
 		len -= 8;
 		src++;
@@ -102,7 +172,7 @@ static inline unsigned long csum_partial_copy_dest_aligned(
 	if (len) {
 		unsigned long tmp;
 		unsigned long second;
-		ldq_u(second, lastsrc);
+		err |= __get_user_u(second, lastsrc);
 		tmp = *dst;
 		extql(first, soff, word);
 		extqh(second, soff, first);
@@ -114,25 +184,28 @@ static inline unsigned long csum_partial_copy_dest_aligned(
 		*dst = word | tmp;
 		checksum += carry;
 	}
+	if (err) *errp = err;
 	return checksum;
 }
 
 /*
  * This is slightly less fun than the above..
  */
-static inline unsigned long csum_partial_copy_src_aligned(
-	unsigned long *src, unsigned long *dst,
-	unsigned long doff,
-	long len, unsigned long checksum,
-	unsigned long partial_dest)
+static inline unsigned long
+csum_partial_cfu_src_aligned(const unsigned long *src, unsigned long *dst,
+			     unsigned long doff,
+			     long len, unsigned long checksum,
+			     unsigned long partial_dest,
+			     int *errp)
 {
 	unsigned long carry = 0;
 	unsigned long word;
+	unsigned long second_dest;
+	int err = 0;
 
 	mskql(partial_dest, doff, partial_dest);
 	while (len >= 0) {
-		unsigned long second_dest;
-		word = *src;
+		err |= __get_user(word, src);
 		len -= 8;
 		insql(word, doff, second_dest);
 		checksum += carry;
@@ -143,35 +216,31 @@ static inline unsigned long csum_partial_copy_src_aligned(
 		carry = checksum < word;
 		dst++;
 	}
-	len += doff;
-	checksum += carry;
-	if (len >= 0) {
-		unsigned long second_dest;
-		word = *src;
-		mskql(word, len-doff, word);
+	len += 8;
+	if (len) {
+		checksum += carry;
+		err |= __get_user(word, src);
+		mskql(word, len, word);
+		len -= 8;
 		checksum += word;
 		insql(word, doff, second_dest);
-		stq_u(partial_dest | second_dest, dst);
+		len += doff;
 		carry = checksum < word;
-		if (len) {
-			ldq_u(second_dest, dst+1);
+		partial_dest |= second_dest;
+		if (len >= 0) {
+			stq_u(partial_dest, dst);
+			if (!len) goto out;
+			dst++;
 			insqh(word, doff, partial_dest);
-			mskqh(second_dest, len, second_dest);
-			stq_u(partial_dest | second_dest, dst+1);
 		}
-		checksum += carry;
-	} else if (len & 7) {
-		unsigned long second_dest;
-		word = *src;
-		ldq_u(second_dest, dst);
-		mskql(word, len-doff, word);
-		checksum += word;
-		mskqh(second_dest, len, second_dest);
-		carry = checksum < word;
-		insql(word, doff, word);
-		stq_u(partial_dest | word | second_dest, dst);
-		checksum += carry;
+		doff = len;
 	}
+	ldq_u(second_dest, dst);
+	mskqh(second_dest, doff, second_dest);
+	stq_u(partial_dest | second_dest, dst);
+out:
+	checksum += carry;
+	if (err) *errp = err;
 	return checksum;
 }
 
@@ -179,24 +248,26 @@ static inline unsigned long csum_partial_copy_src_aligned(
  * This is so totally un-fun that it's frightening. Don't
  * look at this too closely, you'll go blind.
  */
-static inline unsigned long csum_partial_copy_unaligned(
-	unsigned long * src, unsigned long * dst,
-	unsigned long soff, unsigned long doff,
-	long len, unsigned long checksum,
-	unsigned long partial_dest)
+static inline unsigned long
+csum_partial_cfu_unaligned(const unsigned long * src, unsigned long * dst,
+			   unsigned long soff, unsigned long doff,
+			   long len, unsigned long checksum,
+			   unsigned long partial_dest,
+			   int *errp)
 {
 	unsigned long carry = 0;
 	unsigned long first;
 	unsigned long lastsrc;
+	int err = 0;
 
-	ldq_u(first, src);
+	err |= __get_user_u(first, src);
 	lastsrc = 7+len+(unsigned long)src;
 	mskql(partial_dest, doff, partial_dest);
 	while (len >= 0) {
 		unsigned long second, word;
 		unsigned long second_dest;
 
-		ldq_u(second, src+1);
+		err |= __get_user_u(second, src+1);
 		extql(first, soff, word);
 		checksum += carry;
 		len -= 8;
@@ -216,8 +287,8 @@ static inline unsigned long csum_partial_copy_unaligned(
 	if (len >= 0) {
 		unsigned long second, word;
 		unsigned long second_dest;
-		
-		ldq_u(second, lastsrc);
+
+		err |= __get_user_u(second, lastsrc);
 		extql(first, soff, word);
 		extqh(second, soff, first);
 		word |= first;
@@ -233,12 +304,12 @@ static inline unsigned long csum_partial_copy_unaligned(
 			mskqh(second_dest, len, second_dest);
 			stq_u(partial_dest | second_dest, dst+1);
 		}
-		checksum += carry;			
-	} else if (len & 7) {
+		checksum += carry;
+	} else {
 		unsigned long second, word;
 		unsigned long second_dest;
 
-		ldq_u(second, lastsrc);
+		err |= __get_user_u(second, lastsrc);
 		extql(first, soff, word);
 		extqh(second, soff, first);
 		word |= first;
@@ -251,10 +322,13 @@ static inline unsigned long csum_partial_copy_unaligned(
 		stq_u(partial_dest | word | second_dest, dst);
 		checksum += carry;
 	}
+	if (err) *errp = err;
 	return checksum;
 }
 
-unsigned int csum_partial_copy(char *src, char *dst, int len, int sum)
+static unsigned int
+do_csum_partial_copy_from_user(const char *src, char *dst, int len,
+			       unsigned int sum, int *errp)
 {
 	unsigned long checksum = (unsigned) sum;
 	unsigned long soff = 7 & (unsigned long) src;
@@ -263,38 +337,64 @@ unsigned int csum_partial_copy(char *src, char *dst, int len, int sum)
 	if (len) {
 		if (!doff) {
 			if (!soff)
-				checksum = csum_partial_copy_aligned(
-					(unsigned long *) src,
+				checksum = csum_partial_cfu_aligned(
+					(const unsigned long *) src,
 					(unsigned long *) dst,
-					len-8, checksum);
+					len-8, checksum, errp);
 			else
-				checksum = csum_partial_copy_dest_aligned(
-					(unsigned long *) src,
+				checksum = csum_partial_cfu_dest_aligned(
+					(const unsigned long *) src,
 					(unsigned long *) dst,
-					soff, len-8, checksum);
+					soff, len-8, checksum, errp);
 		} else {
 			unsigned long partial_dest;
 			ldq_u(partial_dest, dst);
 			if (!soff)
-				checksum = csum_partial_copy_src_aligned(
-					(unsigned long *) src,
+				checksum = csum_partial_cfu_src_aligned(
+					(const unsigned long *) src,
 					(unsigned long *) dst,
 					doff, len-8, checksum,
-					partial_dest);
+					partial_dest, errp);
 			else
-				checksum = csum_partial_copy_unaligned(
-					(unsigned long *) src,
+				checksum = csum_partial_cfu_unaligned(
+					(const unsigned long *) src,
 					(unsigned long *) dst,
 					soff, doff, len-8, checksum,
-					partial_dest);
+					partial_dest, errp);
 		}
-		/* 64 -> 33 bits */
-		checksum = (checksum & 0xffffffff) + (checksum >> 32);
-		/* 33 -> < 32 bits */
-		checksum = (checksum & 0xffff) + (checksum >> 16);
-		/* 32 -> 16 bits */
-		checksum = (checksum & 0xffff) + (checksum >> 16);
-		checksum = (checksum & 0xffff) + (checksum >> 16);
+		checksum = from64to16 (checksum);
 	}
 	return checksum;
+}
+
+unsigned int
+csum_partial_copy_from_user(const char *src, char *dst, int len,
+			    unsigned int sum, int *errp)
+{
+	if (!access_ok(src, len, VERIFY_READ)) {
+		*errp = -EFAULT;
+		memset(dst, 0, len);
+		return sum;
+	}
+
+	return do_csum_partial_copy_from_user(src, dst, len, sum, errp);
+}
+
+unsigned int
+csum_partial_copy_nocheck(const char *src, char *dst, int len, unsigned int sum)
+{
+	return do_csum_partial_copy_from_user(src, dst, len, sum, NULL);
+}
+
+unsigned int
+csum_partial_copy (const char *src, char *dst, int len, unsigned int sum)
+{
+	unsigned int ret;
+	int error = 0;
+
+	ret = do_csum_partial_copy_from_user(src, dst, len, sum, &error);
+	if (error)
+		printk("csum_partial_copy_old(): tell mingo to convert me!\n");
+
+	return ret;
 }

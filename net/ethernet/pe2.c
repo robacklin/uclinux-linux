@@ -8,10 +8,11 @@ static void
 pEII_datalink_header(struct datalink_proto *dl, 
 		struct sk_buff *skb, unsigned char *dest_node)
 {
-	struct device	*dev = skb->dev;
+	struct net_device	*dev = skb->dev;
 
 	skb->protocol = htons (ETH_P_IPX);
-	dev->hard_header(skb, dev, ETH_P_IPX, dest_node, NULL, skb->len);
+	if(dev->hard_header)
+		dev->hard_header(skb, dev, ETH_P_IPX, dest_node, NULL, skb->len);
 }
 
 struct datalink_proto *
@@ -33,5 +34,5 @@ make_EII_client(void)
 void destroy_EII_client(struct datalink_proto *dl)
 {
 	if (dl)
-		kfree_s(dl, sizeof(struct datalink_proto));
+		kfree(dl);
 }

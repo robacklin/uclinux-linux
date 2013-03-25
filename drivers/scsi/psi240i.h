@@ -211,6 +211,8 @@ typedef	struct _READ_CAPACITY_DATA
 	}	READ_CAPACITY_DATA, *PREAD_CAPACITY_DATA;
 
 // SCSI inquiry data
+#ifndef HOSTS_C
+
 typedef struct _INQUIRYDATA
 	{
 	UCHAR DeviceType			:5;
@@ -235,6 +237,7 @@ typedef struct _INQUIRYDATA
     UCHAR VendorSpecific[20];
     UCHAR Reserved3[40];
 	}	INQUIRYDATA, *PINQUIRYDATA;
+#endif
 
 // IDE IDENTIFY data
 typedef struct _IDENTIFY_DATA
@@ -318,27 +321,18 @@ int Psi240i_BiosParam		(Disk *disk, kdev_t dev, int geom[]);
 	#define NULL 0
 #endif
 
-extern struct proc_dir_entry Proc_Scsi_Psi240i;
-
-#define PSI240I { NULL, NULL,						\
-			&Proc_Scsi_Psi240i,/* proc_dir_entry */	\
-			NULL,		                			\
-			"PSI-240I EIDE Disk Controller",		\
-			Psi240i_Detect,							\
-			NULL,									\
-			NULL,	 								\
-			Psi240i_Command,						\
-			Psi240i_QueueCommand,					\
-			Psi240i_Abort,							\
-			Psi240i_Reset,							\
-			NULL,									\
-			Psi240i_BiosParam,                 		\
-			1, 										\
-			-1, 									\
-			SG_NONE,		 						\
-			1, 										\
-			0, 										\
-			0, 										\
-			DISABLE_CLUSTERING }
+#define PSI240I { proc_name:      "psi240i", \
+		  name:           "PSI-240I EIDE Disk Controller",\
+		  detect:         Psi240i_Detect,			\
+		  command:	  Psi240i_Command,			\
+		  queuecommand:	  Psi240i_QueueCommand,		\
+		  abort:	  Psi240i_Abort,			\
+		  reset:	  Psi240i_Reset,			\
+		  bios_param:	  Psi240i_BiosParam,                 	\
+		  can_queue:	  1, 					\
+		  this_id:	  -1, 					\
+		  sg_tablesize:	  SG_NONE,		 		\
+		  cmd_per_lun:	  1, 					\
+		  use_clustering: DISABLE_CLUSTERING }
 
 #endif

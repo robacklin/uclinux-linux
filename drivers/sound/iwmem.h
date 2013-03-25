@@ -1,20 +1,23 @@
 /*
- * sound/iwmem.c
+ * sound/iwmem.h
  *
  * DRAM size encoding table for AMD Interwave chip.
  */
 /*
- * Copyright (C) by Hannu Savolainen 1993-1996
+ * Copyright (C) by Hannu Savolainen 1993-1997
  *
- * USS/Lite for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
+ * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
+ *
+ * Changes:
+ * Bartlomiej Zolnierkiewicz	: added __initdata to mem_decode
  */
 
 
 #define K 1024
 #define M (1024*K)
-static int mem_decode[][4] =
+static int mem_decode[][4] __initdata =
 {
 /*	Bank0	Bank1	Bank2	Bank3	Encoding bits	*/
 	{256*K,	0,	0,	0},		/*  0 */

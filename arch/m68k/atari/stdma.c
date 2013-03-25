@@ -1,6 +1,5 @@
-
 /*
- *  linux/atari/stmda.c
+ *  linux/arch/m68k/atari/stmda.c
  *
  *  Copyright (C) 1994 Roman Hodek
  *
@@ -30,27 +29,29 @@
 
 
 #include <linux/types.h>
+#include <linux/kdev_t.h>
 #include <linux/genhd.h>
 #include <linux/sched.h>
-#include <asm/bootinfo.h>
+#include <linux/init.h>
+
 #include <asm/atari_stdma.h>
 #include <asm/atariints.h>
 #include <asm/atarihw.h>
-#include <asm/atarihdreg.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
 static int stdma_locked = 0;			/* the semaphore */
-static isrfunc	stdma_isr = NULL;		/* int func to be called */
+						/* int func to be called */
+static void (*stdma_isr)(int, void *, struct pt_regs *) = NULL;
 static void	*stdma_isr_data = NULL;		/* data passed to isr */
-static struct wait_queue *stdma_wait = NULL;	/* wait queue for ST-DMA */
+static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
 
 
 
 /***************************** Prototypes *****************************/
 
-static void stdma_int (int irq, struct pt_regs *fp, void *dummy);
+static void stdma_int (int irq, void *dummy, struct pt_regs *fp);
 
 /************************* End of Prototypes **************************/
 
@@ -72,7 +73,7 @@ static void stdma_int (int irq, struct pt_regs *fp, void *dummy);
  *
  */
 
-void stdma_lock(isrfunc isr, void *data)
+void stdma_lock(void (*handler)(int, void *, struct pt_regs *), void *data)
 {
 	unsigned long	oldflags;
 
@@ -86,7 +87,7 @@ void stdma_lock(isrfunc isr, void *data)
 		sleep_on(&stdma_wait);
 
 	stdma_locked   = 1;
-	stdma_isr      = isr;
+	stdma_isr      = handler;
 	stdma_isr_data = data;
 	restore_flags(oldflags);
 }
@@ -171,11 +172,11 @@ int stdma_islocked(void)
  *
  */
 
-void stdma_init(void)
+void __init stdma_init(void)
 {
 	stdma_isr = NULL;
-	add_isr(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW, NULL,
-		"ST-DMA: floppy/ACSI/IDE/Falcon-SCSI");
+	request_irq(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW,
+	            "ST-DMA: floppy/ACSI/IDE/Falcon-SCSI", stdma_int);
 }
 
 
@@ -187,8 +188,8 @@ void stdma_init(void)
  *
  */
 
-static void stdma_int(int irq, struct pt_regs *fp, void *dummy)
+static void stdma_int(int irq, void *dummy, struct pt_regs *fp)
 {
   if (stdma_isr)
-      (*stdma_isr)(irq, fp, stdma_isr_data);
+      (*stdma_isr)(irq, stdma_isr_data, fp);
 }

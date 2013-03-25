@@ -1,7 +1,16 @@
 #ifndef _H8300_IO_H
 #define _H8300_IO_H
 
+#ifdef __KERNEL__
+
+#include <linux/config.h>
+#include <asm/virtconvert.h>
+
 /*
+ * These are for ISA/PCI shared memory _only_ and should never be used
+ * on any other type of memory, including Zorro memory. They are meant to
+ * access the bus in the bus byte order which is little-endian!.
+ *
  * readX/writeX() are used to access memory mapped devices. On some
  * architectures the memory mapped IO stuff needs to be accessed
  * differently. On the m68k architecture, we just read/write the
@@ -10,6 +19,44 @@
 /* ++roman: The assignments to temp. vars avoid that gcc sometimes generates
  * two accesses to memory, which may be undesireable for some devices.
  */
+
+/*
+ * swap functions are sometimes needed to interface little-endian hardware
+ */
+
+/*
+ * CHANGES
+ * 
+ * 020325   Added some #define's for the COBRA5272 board
+ *          (hede)
+ */
+static inline unsigned short _swapw(volatile unsigned short v)
+{
+	unsigned short r;
+	__asm__("mov.b %w1,r1h\n\t"
+		"mov.b %x1,r1l\n\t"
+		"mov.w r1,%0"
+		:"=r"(r)
+		:"r"(v)
+		:"er1");
+	return r;
+}
+
+static inline unsigned int _swapl(volatile unsigned long v)
+{
+	unsigned int r;
+	__asm__("mov.b %w1,r1h\n\t"
+		"mov.b %x1,r1l\n\t"
+		"mov.w r1,%e0\n\t"
+		"mov.w %e1,r1\n\t"
+		"mov.b r1l,%x0\n\t"
+		"mov.b r1h,%w0"
+		:"=r"(r)
+		:"r"(v)
+		:"er1");
+	return r;
+}
+
 #define readb(addr) \
     ({ unsigned char __v = (*(volatile unsigned char *) (addr)); __v; })
 #define readw(addr) \
@@ -17,47 +64,11 @@
 #define readl(addr) \
     ({ unsigned int __v = (*(volatile unsigned int *) (addr)); __v; })
 
-#define writeb(b,addr) ((*(volatile unsigned char *) (addr)) = (b))
-#define writew(b,addr) ((*(volatile unsigned short *) (addr)) = (b))
-#define writel(b,addr) ((*(volatile unsigned int *) (addr)) = (b))
+#define writeb(b,addr) (void)((*(volatile unsigned char *) (addr)) = (b))
+#define writew(b,addr) (void)((*(volatile unsigned short *) (addr)) = (b))
+#define writel(b,addr) (void)((*(volatile unsigned int *) (addr)) = (b))
 
-#if 0
-
-/* There is no difference between I/O and memory on 68k, these are the same */
-#define inb(addr) \
-    ({ unsigned char __v = (*(volatile unsigned char *) (addr)); printk("inb(%x)=%02x\n", (addr), __v); __v; })
-#define inw(addr) \
-    ({ unsigned short __v = (*(volatile unsigned short *) (addr)); printk("inw(%x)=%04x\n", (addr), __v); __v; })
-#define inl(addr) \
-    ({ unsigned int __v = (*(volatile unsigned int *) (addr)); printk("inl(%x)=%08x\n", (addr), __v); __v; })
-
-#define outb(b,addr) { ((*(volatile unsigned char *) (addr)) = (b)) ; printk("outb(%x)=%02x\n", (addr), (b)); }
-#define outw(b,addr) { ((*(volatile unsigned short *) (addr)) = (b)) ; printk("outw(%x)=%04x\n", (addr), (b)); }
-#define outl(b,addr) { ((*(volatile unsigned int *) (addr)) = (b)) ; printk("outl(%x)=%08x\n", (addr), (b)); }
-
-#else
-
-/* There is no difference between I/O and memory on 68k, these are the same */
-#define inb(addr) \
-    ({ unsigned char __v = (*(volatile unsigned char *) (addr)); __v; })
-#define inw(addr) \
-    ({ unsigned short __v = (*(volatile unsigned short *) (addr)); __v; })
-#define inl(addr) \
-    ({ unsigned int __v = (*(volatile unsigned int *) (addr)); __v; })
-
-#define outb(b,addr) ((*(volatile unsigned char *) (addr)) = (b))
-#define outw(b,addr) ((*(volatile unsigned short *) (addr)) = (b))
-#define outl(b,addr) ((*(volatile unsigned int *) (addr)) = (b))
-
-#endif
-
-#define	inb_p	inb
-#define	inw_p	inw
-#define	outb_p	outb
-#define	outw_p	outw
-
-
-static inline void outsb(void *addr, void *buf, int len)
+static inline void io_outsb(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned char *ap = (volatile unsigned char *) addr;
 	unsigned char *bp = (unsigned char *) buf;
@@ -65,23 +76,23 @@ static inline void outsb(void *addr, void *buf, int len)
 		*ap = *bp++;
 }
 
-static inline void outsw(void *addr, void *buf, int len)
+static inline void io_outsw(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned short *ap = (volatile unsigned short *) addr;
 	unsigned short *bp = (unsigned short *) buf;
 	while (len--)
-		*ap = *bp++;
+		*ap = _swapw(*bp++);
 }
 
-static inline void outsl(void *addr, void *buf, int len)
+static inline void io_outsl(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned int *ap = (volatile unsigned int *) addr;
 	unsigned int *bp = (unsigned int *) buf;
 	while (len--)
-		*ap = *bp++;
+		*ap = _swapl(*bp++);
 }
 
-static inline void insb(void *addr, void *buf, int len)
+static inline void io_insb(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned char *ap = (volatile unsigned char *) addr;
 	unsigned char *bp = (unsigned char *) buf;
@@ -89,63 +100,121 @@ static inline void insb(void *addr, void *buf, int len)
 		*bp++ = *ap;
 }
 
-static inline void insw(void *addr, void *buf, int len)
+static inline void io_insw(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned short *ap = (volatile unsigned short *) addr;
 	unsigned short *bp = (unsigned short *) buf;
 	while (len--)
-		*bp++ = *ap;
+		*bp++ = _swapw(*ap);
 }
 
-static inline void insl(void *addr, void *buf, int len)
+static inline void io_insl(unsigned int addr, void *buf, int len)
 {
 	volatile unsigned int *ap = (volatile unsigned int *) addr;
 	unsigned int *bp = (unsigned int *) buf;
 	while (len--)
-		*bp++ = *ap;
-}
-
-
-static inline unsigned char get_user_byte_io(const char * addr)
-{
-	register unsigned char _v;
-
-	__asm__ __volatile__ ("moveb %1,%0":"=dm" (_v):"m" (*addr));
-	return _v;
-}
-
-static inline void put_user_byte_io(char val,char *addr)
-{
-	__asm__ __volatile__ ("moveb %0,%1"
-			      : /* no outputs */
-			      :"idm" (val),"m" (*addr)
-			      : "memory");
+		*bp++ = _swapl(*ap);
 }
 
 /*
- * Change virtual addresses to physical addresses and vv.
- * These are trivial on the 1:1 Linux/i386 mapping (but if we ever
- * make the kernel segment mapped at 0, we need to do translation
- * on the i386 as well)
+ *	make the short names macros so specific devices
+ *	can override them as required
  */
-extern unsigned long mm_vtop(unsigned long addr);
-extern unsigned long mm_ptov(unsigned long addr);
 
-extern inline unsigned long virt_to_phys(volatile void * address)
+#define memset_io(a,b,c)	memset((void *)(a),(b),(c))
+#define memcpy_fromio(a,b,c)	memcpy((a),(void *)(b),(c))
+#define memcpy_toio(a,b,c)	memcpy((void *)(a),(b),(c))
+
+#define inb(addr)      readb(addr)
+#define inw(addr)    readw(addr)
+#define inl(addr)    readl(addr)
+#define outb(x,addr) ((void) writeb(x,addr))
+#define outw(x,addr) ((void) writew(x,addr))
+#define outl(x,addr) ((void) writel(x,addr))
+
+#define inb_p(addr)    inb(addr)
+#define inw_p(addr)    inw(addr)
+#define inl_p(addr)    inl(addr)
+#define outb_p(x,addr) outb(x,addr)
+#define outw_p(x,addr) outw(x,addr)
+#define outl_p(x,addr) outl(x,addr)
+
+#define outsb(a,b,l) io_outsb(a,b,l)
+#define outsw(a,b,l) io_outsw(a,b,l)
+#define outsl(a,b,l) io_outsl(a,b,l)
+
+#define insb(a,b,l) io_insb(a,b,l)
+#define insw(a,b,l) io_insw(a,b,l)
+#define insl(a,b,l) io_insl(a,b,l)
+
+#define IO_SPACE_LIMIT 0xffffff
+
+
+/* Values for nocacheflag and cmode */
+#define IOMAP_FULL_CACHING		0
+#define IOMAP_NOCACHE_SER		1
+#define IOMAP_NOCACHE_NONSER		2
+#define IOMAP_WRITETHROUGH		3
+
+extern void *__ioremap(unsigned long physaddr, unsigned long size, int cacheflag);
+extern void __iounmap(void *addr, unsigned long size);
+
+extern inline void *ioremap(unsigned long physaddr, unsigned long size)
 {
-	return (unsigned long) mm_vtop((unsigned long)address);
+	return __ioremap(physaddr, size, IOMAP_NOCACHE_SER);
+}
+extern inline void *ioremap_nocache(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_NOCACHE_SER);
+}
+extern inline void *ioremap_writethrough(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_WRITETHROUGH);
+}
+extern inline void *ioremap_fullcache(unsigned long physaddr, unsigned long size)
+{
+	return __ioremap(physaddr, size, IOMAP_FULL_CACHING);
 }
 
-extern inline void * phys_to_virt(unsigned long address)
+extern void iounmap(void *addr);
+
+/* Nothing to do */
+
+#define dma_cache_inv(_start,_size)		do { } while (0)
+#define dma_cache_wback(_start,_size)		do { } while (0)
+#define dma_cache_wback_inv(_start,_size)	do { } while (0)
+
+/* H8/300 internal I/O functions */
+static __inline__ unsigned char ctrl_inb(unsigned long addr)
 {
-	return (void *) mm_ptov(address);
+	return *(volatile unsigned char*)addr;
 }
 
-/*
- * IO bus memory addresses are also 1:1 with the physical address
- */
-#define virt_to_bus virt_to_phys
-#define bus_to_virt phys_to_virt
+static __inline__ unsigned short ctrl_inw(unsigned long addr)
+{
+	return *(volatile unsigned short*)addr;
+}
 
+static __inline__ unsigned int ctrl_inl(unsigned long addr)
+{
+	return *(volatile unsigned long*)addr;
+}
+
+static __inline__ void ctrl_outb(unsigned char b, unsigned long addr)
+{
+	*(volatile unsigned char*)addr = b;
+}
+
+static __inline__ void ctrl_outw(unsigned short b, unsigned long addr)
+{
+	*(volatile unsigned short*)addr = b;
+}
+
+static __inline__ void ctrl_outl(unsigned int b, unsigned long addr)
+{
+        *(volatile unsigned long*)addr = b;
+}
+
+#endif /* __KERNEL__ */
 
 #endif /* _H8300_IO_H */

@@ -1,5 +1,5 @@
-static const char *version =
-	"de600.c: $Revision: 1.1.1.1 $,  Bjorn Ekwall (bj0rn@blox.se)\n";
+static const char version[] =
+	"de600.c: $Revision: 1.40 $,  Bjorn Ekwall (bj0rn@blox.se)\n";
 /*
  *	de600.c
  *
@@ -16,7 +16,7 @@ static const char *version =
  *
  *	Adapted to the sample network driver core for linux,
  *	written by: Donald Becker <becker@super.org>
- *	C/O Supercomputing Research Ctr., 17100 Science Dr., Bowie MD 20715
+ *		(Now at <becker@scyld.com>)
  *
  *	compile-command:
  *	"gcc -D__KERNEL__  -Wall -Wstrict-prototypes -O6 -fomit-frame-pointer \
@@ -36,11 +36,11 @@ static const char *version =
  *
  *	You should have received a copy of the GNU General Public License
  *	along with this program; if not, write to the Free Software
- *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
+ *	Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
  *
  **************************************************************/
-/* Add another "; SLOW_DOWN_IO" here if your adapter won't work OK: */
-#define DE600_SLOW_DOWN SLOW_DOWN_IO; SLOW_DOWN_IO; SLOW_DOWN_IO
+/* Add more time here if your adapter won't work OK: */
+#define DE600_SLOW_DOWN udelay(delay_time)
 
  /*
  * If you still have trouble reading/writing to the adapter,
@@ -88,7 +88,6 @@ static const char *version =
 #define DE600_DEBUG 0
 #define PRINTK(x) /**/
 #endif
-unsigned int de600_debug = DE600_DEBUG;
 
 #include <linux/module.h>
 
@@ -104,18 +103,27 @@ unsigned int de600_debug = DE600_DEBUG;
 #include <linux/ptrace.h>
 #include <asm/system.h>
 #include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/delay.h>
 
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+static unsigned int de600_debug = DE600_DEBUG;
+MODULE_PARM(de600_debug, "i");
+MODULE_PARM_DESC(de600_debug, "DE-600 debug level (0-2)");
+
+static unsigned int delay_time = 10;
+MODULE_PARM(delay_time, "i");
+MODULE_PARM_DESC(delay_time, "DE-600 deley on I/O in microseconds");
+
 #ifdef FAKE_SMALL_MAX
 static unsigned long de600_rspace(struct sock *sk);
 #include <net/sock.h>
 #endif
 
-#define netstats enet_statistics
 typedef unsigned char byte;
 
 /**************************************************
@@ -237,36 +245,36 @@ typedef unsigned char byte;
  * Index to functions, as function prototypes.
  */
 /* Routines used internally. (See "convenience macros") */
-static byte	de600_read_status(struct device *dev);
-static byte	de600_read_byte(unsigned char type, struct device *dev);
+static byte	de600_read_status(struct net_device *dev);
+static byte	de600_read_byte(unsigned char type, struct net_device *dev);
 
 /* Put in the device structure. */
-static int	de600_open(struct device *dev);
-static int	de600_close(struct device *dev);
-static struct netstats *get_stats(struct device *dev);
-static int	de600_start_xmit(struct sk_buff *skb, struct device *dev);
+static int	de600_open(struct net_device *dev);
+static int	de600_close(struct net_device *dev);
+static struct net_device_stats *get_stats(struct net_device *dev);
+static int	de600_start_xmit(struct sk_buff *skb, struct net_device *dev);
 
 /* Dispatch from interrupts. */
 static void	de600_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static int	de600_tx_intr(struct device *dev, int irq_status);
-static void	de600_rx_intr(struct device *dev);
+static int	de600_tx_intr(struct net_device *dev, int irq_status);
+static void	de600_rx_intr(struct net_device *dev);
 
 /* Initialization */
-static void	trigger_interrupt(struct device *dev);
-int		de600_probe(struct device *dev);
-static int	adapter_init(struct device *dev);
+static void	trigger_interrupt(struct net_device *dev);
+int		de600_probe(struct net_device *dev);
+static int	adapter_init(struct net_device *dev);
 
 /*
  * D-Link driver variables:
  */
-static volatile int		rx_page		= 0;
+static volatile int		rx_page;
 
 #define TX_PAGES 2
 static volatile int		tx_fifo[TX_PAGES];
-static volatile int		tx_fifo_in = 0;
-static volatile int		tx_fifo_out = 0;
+static volatile int		tx_fifo_in;
+static volatile int		tx_fifo_out;
 static volatile int		free_tx_pages = TX_PAGES;
-static int			was_down = 0;
+static int			was_down;
 
 /*
  * Convenience macros/functions for D-Link adapter
@@ -304,7 +312,7 @@ static int			was_down = 0;
 #define tx_page_adr(a) (((a) + 1) * MEM_2K)
 
 static inline byte
-de600_read_status(struct device *dev)
+de600_read_status(struct net_device *dev)
 {
 	byte status;
 
@@ -316,7 +324,7 @@ de600_read_status(struct device *dev)
 }
 
 static inline byte
-de600_read_byte(unsigned char type, struct device *dev) { /* dev used by macros */
+de600_read_byte(unsigned char type, struct net_device *dev) { /* dev used by macros */
 	byte lo;
 
 	(void)outb_p((type), DATA_PORT);
@@ -334,19 +342,16 @@ de600_read_byte(unsigned char type, struct device *dev) { /* dev used by macros 
  * there is a non-reboot way to recover if something goes wrong.
  */
 static int
-de600_open(struct device *dev)
+de600_open(struct net_device *dev)
 {
-	if (request_irq(DE600_IRQ, de600_interrupt, 0, "de600", NULL)) {
+	int ret = request_irq(DE600_IRQ, de600_interrupt, 0, dev->name, dev);
+	if (ret) {
 		printk ("%s: unable to get IRQ %d\n", dev->name, DE600_IRQ);
-		return 1;
+		return ret;
 	}
-	irq2dev_map[DE600_IRQ] = dev;
 
-	MOD_INC_USE_COUNT;
-	dev->start = 1;
-	if (adapter_init(dev)) {
-		return 1;
-	}
+	if (adapter_init(dev))
+		return -EIO;
 
 	return 0;
 }
@@ -355,7 +360,7 @@ de600_open(struct device *dev)
  * The inverse routine to de600_open().
  */
 static int
-de600_close(struct device *dev)
+de600_close(struct net_device *dev)
 {
 	select_nic();
 	rx_page = 0;
@@ -364,23 +369,20 @@ de600_close(struct device *dev)
 	de600_put_command(0);
 	select_prn();
 
-	if (dev->start) {
-		free_irq(DE600_IRQ, NULL);
-		irq2dev_map[DE600_IRQ] = NULL;
-		dev->start = 0;
-		MOD_DEC_USE_COUNT;
+	if (netif_running(dev)) { /* perhaps not needed? */
+		free_irq(DE600_IRQ, dev);
 	}
 	return 0;
 }
 
-static struct netstats *
-get_stats(struct device *dev)
+static struct net_device_stats *
+get_stats(struct net_device *dev)
 {
-    return (struct netstats *)(dev->priv);
+    return (struct net_device_stats *)(dev->priv);
 }
 
 static inline void
-trigger_interrupt(struct device *dev)
+trigger_interrupt(struct net_device *dev)
 {
 	de600_put_command(FLIP_IRQ);
 	select_prn();
@@ -394,23 +396,14 @@ trigger_interrupt(struct device *dev)
  * Start sending.
  */
 static int
-de600_start_xmit(struct sk_buff *skb, struct device *dev)
+de600_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
+	unsigned long flags;
 	int	transmit_from;
 	int	len;
 	int	tickssofar;
 	byte	*buffer = skb->data;
-
-	/*
-	 * If some higher layer thinks we've missed a
-	 * tx-done interrupt we are passed NULL.
-	 * Caution: dev_tint() handles the cli()/sti() itself.
-	 */
-
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
+	int	i;
 
 	if (free_tx_pages <= 0) {	/* Do timeouts, to avoid hangs. */
 		tickssofar = jiffies - dev->trans_start;
@@ -436,6 +429,7 @@ de600_start_xmit(struct sk_buff *skb, struct device *dev)
 	if ((len = skb->len) < RUNT)
 		len = RUNT;
 
+	save_flags(flags);
 	cli();
 	select_nic();
 	tx_fifo[tx_fifo_in] = transmit_from = tx_page_adr(tx_fifo_in) - len;
@@ -447,30 +441,35 @@ de600_start_xmit(struct sk_buff *skb, struct device *dev)
 	de600_read_byte(READ_DATA, dev);
 	if (was_down || (de600_read_byte(READ_DATA, dev) != 0xde)) {
 		if (adapter_init(dev)) {
-			sti();
+			restore_flags(flags);
 			return 1;
 		}
 	}
 #endif
 
 	de600_setup_address(transmit_from, RW_ADDR);
-	for ( ; len > 0; --len, ++buffer)
+	for (i = 0;  i < skb->len ; ++i, ++buffer)
 		de600_put_byte(*buffer);
+	for (; i < len; ++i)
+		de600_put_byte(0);
 
 	if (free_tx_pages-- == TX_PAGES) { /* No transmission going on */
 		dev->trans_start = jiffies;
-		dev->tbusy = 0;	/* allow more packets into adapter */
+		netif_start_queue(dev); /* allow more packets into adapter */
 		/* Send page and generate a faked interrupt */
 		de600_setup_address(transmit_from, TX_ADDR);
 		de600_put_command(TX_ENABLE);
 	}
 	else {
-		dev->tbusy = !free_tx_pages;
+		if (free_tx_pages)
+			netif_start_queue(dev);
+		else
+			netif_stop_queue(dev);
 		select_prn();
 	}
-	
-	sti(); /* interrupts back on */
-	
+
+	restore_flags(flags);
+
 #ifdef FAKE_SMALL_MAX
 	/* This will "patch" the socket TCP proto at an early moment */
 	if (skb->sk && (skb->sk->protocol == IPPROTO_TCP) &&
@@ -478,7 +477,7 @@ de600_start_xmit(struct sk_buff *skb, struct device *dev)
 		skb->sk->prot->rspace = de600_rspace; /* Ugh! */
 #endif
 
-	dev_kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb);
 
 	return 0;
 }
@@ -490,18 +489,17 @@ de600_start_xmit(struct sk_buff *skb, struct device *dev)
 static void
 de600_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device	*dev = irq2dev_map[irq];
+	struct net_device	*dev = dev_id;
 	byte		irq_status;
 	int		retrig = 0;
 	int		boguscount = 0;
 
 	/* This might just as well be deleted now, no crummy drivers present :-) */
-	if ((dev == NULL) || (dev->start == 0) || (DE600_IRQ != irq)) {
+	if ((dev == NULL) || (DE600_IRQ != irq)) {
 		printk("%s: bogus interrupt %d\n", dev?dev->name:"DE-600", irq);
 		return;
 	}
 
-	dev->interrupt = 1;
 	select_nic();
 	irq_status = de600_read_status(dev);
 
@@ -528,24 +526,21 @@ de600_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	 */
 
 	/* Enable adapter interrupts */
-	dev->interrupt = 0;
 	select_prn();
 
 	if (retrig)
 		trigger_interrupt(dev);
 
-	sti();
 	return;
 }
 
 static int
-de600_tx_intr(struct device *dev, int irq_status)
+de600_tx_intr(struct net_device *dev, int irq_status)
 {
 	/*
 	 * Returns 1 if tx still not done
 	 */
 
-	mark_bh(NET_BH);
 	/* Check if current transmission is done yet */
 	if (irq_status & TX_BUSY)
 		return 1; /* tx not done, try again */
@@ -555,8 +550,8 @@ de600_tx_intr(struct device *dev, int irq_status)
 	if (!(irq_status & TX_FAILED16)) {
 		tx_fifo_out = (tx_fifo_out + 1) % TX_PAGES;
 		++free_tx_pages;
-		((struct netstats *)(dev->priv))->tx_packets++;
-		dev->tbusy = 0;
+		((struct net_device_stats *)(dev->priv))->tx_packets++;
+		netif_wake_queue(dev);
 	}
 
 	/* More to send, or resend last packet? */
@@ -575,15 +570,18 @@ de600_tx_intr(struct device *dev, int irq_status)
  * We have a good packet, get it out of the adapter.
  */
 static void
-de600_rx_intr(struct device *dev)
+de600_rx_intr(struct net_device *dev)
 {
 	struct sk_buff	*skb;
+	unsigned long flags;
 	int		i;
 	int		read_from;
 	int		size;
 	register unsigned char	*buffer;
 
+	save_flags(flags);
 	cli();
+
 	/* Get size of received packet */
 	size = de600_read_byte(RX_LEN, dev);	/* low byte */
 	size += (de600_read_byte(RX_LEN, dev) << 8);	/* high byte */
@@ -593,7 +591,8 @@ de600_rx_intr(struct device *dev)
 	read_from = rx_page_adr();
 	next_rx_page();
 	de600_put_command(RX_ENABLE);
-	sti();
+
+	restore_flags(flags);
 
 	if ((size < 32)  ||  (size > 1535)) {
 		printk("%s: Bogus packet size %d.\n", dev->name, size);
@@ -603,7 +602,6 @@ de600_rx_intr(struct device *dev)
 	}
 
 	skb = dev_alloc_skb(size+2);
-	sti();
 	if (skb == NULL) {
 		printk("%s: Couldn't allocate a sk_buff of size %d.\n",
 			dev->name, size);
@@ -613,7 +611,7 @@ de600_rx_intr(struct device *dev)
 
 	skb->dev = dev;
 	skb_reserve(skb,2);	/* Align */
-	
+
 	/* 'skb->data' points to the start of sk_buff data area. */
 	buffer = skb_put(skb,size);
 
@@ -621,12 +619,16 @@ de600_rx_intr(struct device *dev)
 	de600_setup_address(read_from, RW_ADDR);
 	for (i = size; i > 0; --i, ++buffer)
 		*buffer = de600_read_byte(READ_DATA, dev);
-	
-	((struct netstats *)(dev->priv))->rx_packets++; /* count all receives */
 
 	skb->protocol=eth_type_trans(skb,dev);
-	
+
 	netif_rx(skb);
+
+	/* update stats */
+	dev->last_rx = jiffies;
+	((struct net_device_stats *)(dev->priv))->rx_packets++; /* count all receives */
+	((struct net_device_stats *)(dev->priv))->rx_bytes += size; /* count all received bytes */
+
 	/*
 	 * If any worth-while packets have been received, netif_rx()
 	 * has done a mark_bh(INET_BH) for us and will work on them
@@ -634,12 +636,14 @@ de600_rx_intr(struct device *dev)
 	 */
 }
 
-int
-de600_probe(struct device *dev)
+int __init 
+de600_probe(struct net_device *dev)
 {
 	int	i;
-	static struct netstats de600_netstats;
-	/*dev->priv = kmalloc(sizeof(struct netstats), GFP_KERNEL);*/
+	static struct net_device_stats de600_netstats;
+	/*dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL);*/
+
+	SET_MODULE_OWNER(dev);
 
 	printk("%s: D-Link DE-600 pocket adapter", dev->name);
 	/* Alpha testers must have the version number to report bugs. */
@@ -654,7 +658,7 @@ de600_probe(struct device *dev)
 	de600_put_command(STOP_RESET);
 	if (de600_read_status(dev) & 0xf0) {
 		printk(": not at I/O %#3x.\n", DATA_PORT);
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/*
@@ -679,13 +683,13 @@ de600_probe(struct device *dev)
 		dev->dev_addr[3] |= 0x70;
 	} else {
 		printk(" not identified in the printer port\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 #if 0 /* Not yet */
 	if (check_region(DE600_IO, 3)) {
 		printk(", port 0x%x busy\n", DE600_IO);
-		return EBUSY;
+		return -EBUSY;
 	}
 #endif
 	request_region(DE600_IO, 3, "de600");
@@ -696,10 +700,9 @@ de600_probe(struct device *dev)
 	printk("\n");
 
 	/* Initialize the device structure. */
-	/*dev->priv = kmalloc(sizeof(struct netstats), GFP_KERNEL);*/
 	dev->priv = &de600_netstats;
 
-	memset(dev->priv, 0, sizeof(struct netstats));
+	memset(dev->priv, 0, sizeof(struct net_device_stats));
 	dev->get_stats = get_stats;
 
 	dev->open = de600_open;
@@ -707,18 +710,18 @@ de600_probe(struct device *dev)
 	dev->hard_start_xmit = &de600_start_xmit;
 
 	ether_setup(dev);
-	
+
 	dev->flags&=~IFF_MULTICAST;
-	
+
 	select_prn();
 	return 0;
 }
 
 static int
-adapter_init(struct device *dev)
+adapter_init(struct net_device *dev)
 {
 	int	i;
-	long flags;
+	unsigned long flags;
 
 	save_flags(flags);
 	cli();
@@ -746,7 +749,7 @@ adapter_init(struct device *dev)
 		de600_close(dev);
 #endif /* SHUTDOWN_WHEN_LOST */
 		was_down = 1;
-		dev->tbusy = 1;		/* Transmit busy...  */
+		netif_stop_queue(dev); /* Transmit busy...  */
 		restore_flags(flags);
 		return 1; /* failed */
 	}
@@ -756,8 +759,7 @@ adapter_init(struct device *dev)
 		was_down = 0;
 	}
 
-	dev->tbusy = 0;		/* Transmit busy...  */
-	dev->interrupt = 0;
+	netif_start_queue(dev);
 	tx_fifo_in = 0;
 	tx_fifo_out = 0;
 	free_tx_pages = TX_PAGES;
@@ -802,7 +804,6 @@ adapter_init(struct device *dev)
  * This differs from the standard function, that can return an
  * arbitrarily small window!
  */
-#define min(a,b)	((a)<(b)?(a):(b))
 static unsigned long
 de600_rspace(struct sock *sk)
 {
@@ -815,8 +816,8 @@ de600_rspace(struct sock *sk)
   	sk->max_unacked = DE600_MAX_WINDOW - DE600_TCP_WINDOW_DIFF;
  */
 
-	if (sk->rmem_alloc >= sk->rcvbuf-2*DE600_MIN_WINDOW) return(0);
-	amt = min((sk->rcvbuf-sk->rmem_alloc)/2/*-DE600_MIN_WINDOW*/, DE600_MAX_WINDOW);
+	if (atomic_read(&sk->rmem_alloc) >= sk->rcvbuf-2*DE600_MIN_WINDOW) return(0);
+	amt = min_t(int, (sk->rcvbuf-atomic_read(&sk->rmem_alloc))/2/*-DE600_MIN_WINDOW*/, DE600_MAX_WINDOW);
 	if (amt < 0) return(0);
 	return(amt);
   }
@@ -825,13 +826,12 @@ de600_rspace(struct sock *sk)
 #endif
 
 #ifdef MODULE
-static char nullname[8];
-static struct device de600_dev = {
-	nullname, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, de600_probe };
+static struct net_device de600_dev;
 
 int
 init_module(void)
 {
+	de600_dev.init = de600_probe;
 	if (register_netdev(&de600_dev) != 0)
 		return -EIO;
 	return 0;
@@ -844,6 +844,9 @@ cleanup_module(void)
 	release_region(DE600_IO, 3);
 }
 #endif /* MODULE */
+
+MODULE_LICENSE("GPL");
+
 /*
  * Local variables:
  *  kernel-compile-command: "gcc -D__KERNEL__ -Ilinux/include -I../../net/inet -Wall -Wstrict-prototypes -O2 -m486 -c de600.c"

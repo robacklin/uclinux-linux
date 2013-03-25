@@ -1,8 +1,6 @@
 /* 
         pt.c    (c) 1998  Grant R. Guenther <grant@torque.net>
-                          Under the terms of the GNU public license.
-
-	Special 2.0.35 version
+                          Under the terms of the GNU General Public License.
 
         This is the high-level driver for parallel port ATAPI tape
         drives based on chips supported by the paride module.
@@ -106,7 +104,7 @@
 	
 */
 
-#define PT_VERSION      "1.04s"
+#define PT_VERSION      "1.04"
 #define PT_MAJOR	96
 #define PT_NAME		"pt"
 #define PT_UNITS	4
@@ -145,12 +143,15 @@ static int pt_drive_count;
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/mtio.h>
+#include <linux/wait.h>
+#include <linux/smp_lock.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #ifndef MODULE
 
@@ -168,6 +169,14 @@ void pt_setup( char *str, int *ints)
 }
 
 #endif
+
+MODULE_PARM(verbose,"i");
+MODULE_PARM(major,"i");
+MODULE_PARM(name,"s");
+MODULE_PARM(drive0,"1-6i");
+MODULE_PARM(drive1,"1-6i");
+MODULE_PARM(drive2,"1-6i");
+MODULE_PARM(drive3,"1-6i");
 
 #include "paride.h"
 
@@ -208,10 +217,11 @@ void cleanup_module( void );
 static int pt_open(struct inode *inode, struct file *file);
 static int pt_ioctl(struct inode *inode,struct file *file,
                     unsigned int cmd, unsigned long arg);
-static void pt_release (struct inode *inode, struct file *file);
-static int pt_read(struct inode *inode, struct file *filp, char *buf, int count);
-static int pt_write(struct inode *inode, struct file *filp, 
-		const char *buf, int count);
+static int pt_release (struct inode *inode, struct file *file);
+static ssize_t pt_read(struct file * filp, char * buf, 
+                       size_t count, loff_t *ppos);
+static ssize_t pt_write(struct file * filp, const char * buf, 
+                        size_t count, loff_t *ppos);
 static int pt_detect(void);
 
 static int pt_identify (int unit);
@@ -254,19 +264,12 @@ static char pt_scratch[512];            /* scratch block buffer */
 /* kernel glue structures */
 
 static struct file_operations pt_fops = {
-        NULL,                   /* lseek - default */
-        pt_read,                /* read */
-        pt_write,               /* write */
-        NULL,                   /* readdir - bad */
-        NULL,                   /* select */
-        pt_ioctl,               /* ioctl */
-        NULL,                   /* mmap */
-        pt_open,                /* open */
-        pt_release,             /* release */
-        NULL,                   /* fsync */
-        NULL,                   /* fasync */
-        NULL,                   /* media change ? */
-        NULL                    /* revalidate new media */
+	owner:		THIS_MODULE,
+	read:		pt_read,
+	write:		pt_write,
+	ioctl:		pt_ioctl,
+	open:		pt_open,
+	release:	pt_release,
 };
 
 void pt_init_units( void )
@@ -290,6 +293,8 @@ void pt_init_units( void )
         }
 } 
 
+static devfs_handle_t devfs_handle;
+
 int pt_init (void)      /* preliminary initialisation */
 
 {       int unit;
@@ -300,7 +305,7 @@ int pt_init (void)      /* preliminary initialisation */
 
 	if (pt_detect()) return -1;
 
-        if (register_chrdev(major,name,&pt_fops)) {
+	if (devfs_register_chrdev(major,name,&pt_fops)) {
                 printk("pt_init: unable to get major number %d\n",
                         major);
 	        for (unit=0;unit<PT_UNITS;unit++)
@@ -308,6 +313,13 @@ int pt_init (void)      /* preliminary initialisation */
                 return -1;
         }
 
+	devfs_handle = devfs_mk_dir (NULL, "pt", NULL);
+	devfs_register_series (devfs_handle, "%u", 4, DEVFS_FL_DEFAULT,
+			       major, 0, S_IFCHR | S_IRUSR | S_IWUSR,
+			       &pt_fops, NULL);
+	devfs_register_series (devfs_handle, "%un", 4, DEVFS_FL_DEFAULT,
+			       major, 128, S_IFCHR | S_IRUSR | S_IWUSR,
+			       &pt_fops, NULL);
         return 0;
 }
 
@@ -334,9 +346,10 @@ int     init_module(void)
 
 void    cleanup_module(void)
 
-{       int unit;
+{	int unit;
 
-        unregister_chrdev(major,name);
+	devfs_unregister (devfs_handle);
+	devfs_unregister_chrdev(major,name);
 
 	for (unit=0;unit<PT_UNITS;unit++)
 	  if (PT.present) pi_release(PI);
@@ -429,7 +442,7 @@ static void pt_req_sense( int unit, int quiet )
         int     r;
 
         r = pt_command(unit,rs_cmd,16,"Request sense");
-        udelay(1000);
+        mdelay(1);
         if (!r) pt_completion(unit,buf,"Request sense");
 
 	PT.last_sense = -1;
@@ -446,7 +459,7 @@ static int pt_atapi( int unit, char * cmd, int dlen, char * buf, char * fun )
 {       int r;
 
         r = pt_command(unit,cmd,dlen,fun);
-        udelay(1000);
+        mdelay(1);
         if (!r) r = pt_completion(unit,buf,fun);
         if (r) pt_req_sense(unit,!fun);
         
@@ -456,8 +469,7 @@ static int pt_atapi( int unit, char * cmd, int dlen, char * buf, char * fun )
 static void pt_sleep( int cs )
 
 {       current->state = TASK_INTERRUPTIBLE;
-        current->timeout = jiffies + cs;
-        schedule();
+        schedule_timeout(cs);
 }
 
 static int pt_poll_dsc( int unit, int pause, int tmo, char *msg )
@@ -491,7 +503,7 @@ static void pt_media_access_cmd( int unit, int tmo, char *cmd, char *fun)
 		return;
 	}
 	pi_disconnect(PI);
-	pt_poll_dsc(unit,100,tmo,fun);
+	pt_poll_dsc(unit,HZ,tmo,fun);
 }
 
 static void pt_rewind( int unit )
@@ -519,11 +531,11 @@ static int pt_reset( int unit )
 	WR(0,6,DRIVE);
 	WR(0,7,8);
 
-	pt_sleep(2);
+	pt_sleep(20*HZ/1000);
 
         k = 0;
         while ((k++ < PT_RESET_TMO) && (RR(1,6)&STAT_BUSY))
-                pt_sleep(10);
+                pt_sleep(HZ/10);
 
 	flg = 1;
 	for(i=0;i<5;i++) flg &= (RR(0,i+1) == expect[i]);
@@ -552,7 +564,7 @@ static int pt_ready_wait( int unit, int tmo )
 	  if (!p) return 0;
 	  if (!(((p & 0xffff) == 0x0402)||((p & 0xff) == 6))) return p;
 	  k++;
-          pt_sleep(100);
+          pt_sleep(HZ);
 	}
 	return 0x000020;	/* timeout */
 }
@@ -565,7 +577,8 @@ static void xs( char *buf, char *targ, int offs, int len )
 	for (k=0;k<len;k++) 
 	   if((buf[k+offs]!=0x20)||(buf[k+offs]!=l))
 		l=targ[j++]=buf[k+offs];
-	if (l==0x20) j--; targ[j]=0;
+	if (l==0x20) j--;
+	targ[j]=0;
 }
 
 static int xn( char *buf, int offs, int size )
@@ -691,19 +704,15 @@ static int pt_open (struct inode *inode, struct file *file)
 		return -EBUSY;
 	}
 
-        MOD_INC_USE_COUNT;
-
 	pt_identify(unit);
 
 	if (!PT.flags & PT_MEDIA) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		return -ENODEV;
 		}
 
 	if ((!PT.flags & PT_WRITE_OK) && (file ->f_mode & 2)) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		return -EROFS;
 		}
 
@@ -713,7 +722,6 @@ static int pt_open (struct inode *inode, struct file *file)
 	PT.bufptr = kmalloc(PT_BUFSIZE,GFP_KERNEL);
 	if (PT.bufptr == NULL) {
 		PT.access--;
-		MOD_DEC_USE_COUNT;
 		printk("%s: buffer allocation failed\n",PT.name);
 		return -ENOMEM;
 	}
@@ -737,13 +745,17 @@ static int pt_ioctl(struct inode *inode,struct file *file,
 
         switch (cmd) {
 	    case MTIOCTOP:	
-		memcpy_fromfs((char *)&mtop, (char *)arg, 
-			           sizeof(struct mtop));
+		if (copy_from_user((char *)&mtop, (char *)arg, 
+			           sizeof(struct mtop))) return -EFAULT;
 
 		switch (mtop.mt_op) {
 
 		    case MTREW: 
 			pt_rewind(unit);
+			return 0;
+
+		    case MTWEOF:
+			pt_write_fm(unit);
 			return 0;
 
 		    default:	
@@ -760,13 +772,14 @@ static int pt_ioctl(struct inode *inode,struct file *file,
 }
 
 
-static void pt_release (struct inode *inode, struct file *file)
+static int pt_release (struct inode *inode, struct file *file)
 {
         int	unit = DEVICE_NR(inode->i_rdev);
 
         if ((unit >= PT_UNITS) || (PT.access <= 0)) 
-                return;
+                return -EINVAL;
 
+	lock_kernel();
 	if (PT.flags & PT_WRITING) pt_write_fm(unit);
 
 	if (PT.flags & PT_REWIND) pt_rewind(unit);	
@@ -775,14 +788,17 @@ static void pt_release (struct inode *inode, struct file *file)
 
 	kfree(PT.bufptr);
 	PT.bufptr = NULL;
+	unlock_kernel();
 
-        MOD_DEC_USE_COUNT;
+	return 0;
 
 }
 
-static int pt_read(struct inode *inode, struct file *filp, char *buf, int count)
-
-{	int	unit = DEVICE_NR(inode->i_rdev);
+static ssize_t pt_read(struct file * filp, char * buf, 
+                       size_t count, loff_t *ppos)
+{
+  	struct 	inode *ino = filp->f_dentry->d_inode;
+	int	unit = DEVICE_NR(ino->i_rdev);
 	char	rd_cmd[12] = {ATAPI_READ_6,1,0,0,0,0,0,0,0,0,0,0};
 	int	k, n, r, p, s, t, b;
 
@@ -798,7 +814,7 @@ static int pt_read(struct inode *inode, struct file *filp, char *buf, int count)
 
 	while (count > 0) {
 
-	    if (!pt_poll_dsc(unit,1,PT_TMO,"read")) return -EIO;
+	    if (!pt_poll_dsc(unit,HZ/100,PT_TMO,"read")) return -EIO;
 
 	    n = count;
 	    if (n > 32768) n = 32768;   /* max per command */
@@ -809,7 +825,7 @@ static int pt_read(struct inode *inode, struct file *filp, char *buf, int count)
 
 	    r = pt_command(unit,rd_cmd,n,"read");
 
-	    udelay(1000);
+	    mdelay(1);
 
 	    if (r) {
 	        pt_req_sense(unit,0);
@@ -848,7 +864,10 @@ static int pt_read(struct inode *inode, struct file *filp, char *buf, int count)
 		    n -= k;
 		    b = k;
 		    if (b > count) b = count;
-		    memcpy_tofs(buf+t,PT.bufptr,b);
+		    if (copy_to_user(buf + t, PT.bufptr, b)) {
+	    		pi_disconnect(PI);
+			return -EFAULT;
+		    }
 		    t += b;
 		    count -= b;
 	        }
@@ -862,10 +881,11 @@ static int pt_read(struct inode *inode, struct file *filp, char *buf, int count)
 
 }
 
-static int pt_write(struct inode *inode, struct file *filp, 
-			const char *buf, int count)
-
-{	int unit = DEVICE_NR(inode->i_rdev);
+static ssize_t pt_write(struct file * filp, const char * buf, 
+                        size_t count, loff_t *ppos)
+{
+        struct inode *ino = filp->f_dentry->d_inode;
+        int unit = DEVICE_NR(ino->i_rdev);
         char    wr_cmd[12] = {ATAPI_WRITE_6,1,0,0,0,0,0,0,0,0,0,0};
         int     k, n, r, p, s, t, b;
 
@@ -883,7 +903,7 @@ static int pt_write(struct inode *inode, struct file *filp,
 
 	while (count > 0) {
 
-	    if (!pt_poll_dsc(unit,1,PT_TMO,"write")) return -EIO;
+	    if (!pt_poll_dsc(unit,HZ/100,PT_TMO,"write")) return -EIO;
 
             n = count;
             if (n > 32768) n = 32768;	/* max per command */
@@ -894,7 +914,7 @@ static int pt_write(struct inode *inode, struct file *filp,
 
             r = pt_command(unit,wr_cmd,n,"write");
 
-            udelay(1000);
+            mdelay(1);
 
             if (r) {			/* error delivering command only */
                 pt_req_sense(unit,0);
@@ -931,7 +951,10 @@ static int pt_write(struct inode *inode, struct file *filp,
 		    if (k > PT_BUFSIZE) k = PT_BUFSIZE;
 		    b = k;
 		    if (b > count) b = count;
-		    memcpy_fromfs(PT.bufptr,buf+t,b);
+		    if (copy_from_user(PT.bufptr, buf + t, b)) {
+			pi_disconnect(PI);
+			return -EFAULT;
+		    }
                     pi_write_block(PI,PT.bufptr,k);
 		    t += b;
 		    count -= b;
@@ -948,3 +971,4 @@ static int pt_write(struct inode *inode, struct file *filp,
 
 /* end of pt.c */
 
+MODULE_LICENSE("GPL");

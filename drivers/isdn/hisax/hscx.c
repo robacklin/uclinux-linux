@@ -1,71 +1,29 @@
-/* $Id: hscx.c,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- * hscx.c   HSCX specific routines
+/* $Id: hscx.c,v 1.1.4.1 2001/11/20 14:19:36 kai Exp $
  *
- * Author       Karsten Keil (keil@isdn4linux.de)
+ * HSCX specific routines
  *
- *
- * $Log: hscx.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.3.2.11  1998/11/05 21:14:01  keil
- * minor fixes
- *
- * Revision 1.3.2.10  1998/11/03 00:06:37  keil
- * certification related changes
- * fixed logging for smaller stack use
- *
- * Revision 1.3.2.9  1998/09/27 13:06:14  keil
- * Apply most changes from 2.1.X (HiSax 3.1)
- *
- * Revision 1.3.2.8  1998/09/15 15:25:04  keil
- * Repair HSCX init
- *
- * Revision 1.3.2.7  1998/06/26 22:02:55  keil
- * send flags between hdlc frames
- *
- * Revision 1.3.2.6  1998/06/09 18:26:32  keil
- * PH_DEACTIVATE B-channel every time signaled to higher layer
- *
- * Revision 1.3.2.5  1998/05/27 18:05:34  keil
- * HiSax 3.0
- *
- * Revision 1.3.2.4  1998/04/08 21:57:04  keil
- * Fix "lltrans ..." message
- * New init code to fix problems during init if S0 is allready activ
- *
- * Revision 1.3.2.3  1997/11/27 12:30:55  keil
- * cosmetic changes
- *
- * Revision 1.3.2.2  1997/11/15 18:54:25  keil
- * cosmetics
- *
- * Revision 1.3.2.1  1997/10/17 22:10:44  keil
- * new files on 2.0
- *
- * Revision 1.3  1997/07/27 21:38:34  keil
- * new B-channel interface
- *
- * Revision 1.2  1997/06/26 11:16:17  keil
- * first version
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "hscx.h"
 #include "isac.h"
 #include "isdnl1.h"
 #include <linux/interrupt.h>
 
-static char *HSCXVer[] HISAX_INITDATA =
+static char *HSCXVer[] __initdata =
 {"A1", "?1", "A2", "?3", "A3", "V2.1", "?6", "?7",
  "?8", "?9", "?10", "?11", "?12", "?13", "?14", "???"};
 
-HISAX_INITFUNC(int
-HscxVersion(struct IsdnCardState *cs, char *s))
+int __init
+HscxVersion(struct IsdnCardState *cs, char *s)
 {
 	int verA, verB;
 
@@ -107,12 +65,12 @@ modehscx(struct BCState *bcs, int mode, int bc)
 
 	if (bc == 0) {
 		cs->BC_Write_Reg(cs, hscx, HSCX_TSAX,
-			      test_bit(HW_IOM1, &cs->HW_Flags) ? 0x7 : 0x2f);
+			      test_bit(HW_IOM1, &cs->HW_Flags) ? 0x7 : bcs->hw.hscx.tsaxr0);
 		cs->BC_Write_Reg(cs, hscx, HSCX_TSAR,
-			      test_bit(HW_IOM1, &cs->HW_Flags) ? 0x7 : 0x2f);
+			      test_bit(HW_IOM1, &cs->HW_Flags) ? 0x7 : bcs->hw.hscx.tsaxr0);
 	} else {
-		cs->BC_Write_Reg(cs, hscx, HSCX_TSAX, 0x3);
-		cs->BC_Write_Reg(cs, hscx, HSCX_TSAR, 0x3);
+		cs->BC_Write_Reg(cs, hscx, HSCX_TSAX, bcs->hw.hscx.tsaxr1);
+		cs->BC_Write_Reg(cs, hscx, HSCX_TSAR, bcs->hw.hscx.tsaxr1);
 	}
 	switch (mode) {
 		case (L1_MODE_NULL):
@@ -210,10 +168,10 @@ close_hscxstate(struct BCState *bcs)
 			kfree(bcs->blog);
 			bcs->blog = NULL;
 		}
-		discard_queue(&bcs->rqueue);
-		discard_queue(&bcs->squeue);
+		skb_queue_purge(&bcs->rqueue);
+		skb_queue_purge(&bcs->squeue);
 		if (bcs->tx_skb) {
-			dev_kfree_skb(bcs->tx_skb, FREE_WRITE);
+			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
 			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
 		}
@@ -263,8 +221,8 @@ setstack_hscx(struct PStack *st, struct BCState *bcs)
 	return (0);
 }
 
-HISAX_INITFUNC(void
-clear_pending_hscx_ints(struct IsdnCardState *cs))
+void __init
+clear_pending_hscx_ints(struct IsdnCardState *cs)
 {
 	int val, eval;
 
@@ -289,8 +247,8 @@ clear_pending_hscx_ints(struct IsdnCardState *cs))
 	cs->BC_Write_Reg(cs, 1, HSCX_MASK, 0xFF);
 }
 
-HISAX_INITFUNC(void
-inithscx(struct IsdnCardState *cs))
+void __init
+inithscx(struct IsdnCardState *cs)
 {
 	cs->bcs[0].BC_SetStack = setstack_hscx;
 	cs->bcs[1].BC_SetStack = setstack_hscx;
@@ -298,12 +256,16 @@ inithscx(struct IsdnCardState *cs))
 	cs->bcs[1].BC_Close = close_hscxstate;
 	cs->bcs[0].hw.hscx.hscx = 0;
 	cs->bcs[1].hw.hscx.hscx = 1;
+	cs->bcs[0].hw.hscx.tsaxr0 = 0x2f;
+	cs->bcs[0].hw.hscx.tsaxr1 = 3;
+	cs->bcs[1].hw.hscx.tsaxr0 = 0x2f;
+	cs->bcs[1].hw.hscx.tsaxr1 = 3;
 	modehscx(cs->bcs, 0, 0);
 	modehscx(cs->bcs + 1, 0, 0);
 }
 
-HISAX_INITFUNC(void
-inithscxisac(struct IsdnCardState *cs, int part))
+void __init
+inithscxisac(struct IsdnCardState *cs, int part)
 {
 	if (part & 1) {
 		clear_pending_isac_ints(cs);

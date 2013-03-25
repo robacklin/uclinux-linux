@@ -4,10 +4,9 @@
  *	crt0_ram.S -- startup code for MCF5307C3 MOTOROLA ColdFire board.
  *
  *	(C) Copyright 1999-2002, Greg Ungerer (gerg@snapgear.com).
+ * 	Copyright (C) 2000  Lineo Inc. (www.lineo.com) 
  *
  * 	1999/02/24 Modified for the 5307 processor David W. Miller
- *	2000/01/05 Taken from the 5307/ARNEWSH file and mangled by Steve
- *                 McAndrewSmith
  */
 
 /*****************************************************************************/
@@ -15,13 +14,13 @@
 #include "linux/autoconf.h"
 #include "asm/coldfire.h"
 #include "asm/mcfsim.h"
+#include "asm/nettel.h"
 
 /*****************************************************************************/
 
 /*
- *	M5307C3 ColdFire eval board, chip select and memory setup.
+ *	Generic board memory setup.
  */
-
 #define	MEM_BASE	0x00000000	/* Memory base at address 0 */
 #define	MEM_SIZE	0x00800000	/* Memory size 8Mb */
 #define	VBR_BASE	MEM_BASE	/* Vector address */
@@ -72,7 +71,6 @@ _start:
 	nop					/* Filler */
 	move.w	#0x2700, %sr			/* No interrupts */
 
-
 	/*
 	 * Setup VBR here, otherwise buserror remap will not work.
 	 * if dBug was active before (on my SBC with dBug 1.1 of Dec 16 1996)
@@ -89,7 +87,7 @@ _start:
 
 
 	/*
-	 *	Set size of RAM, then set up initial stack.
+	 *	Determine size of RAM, then set up initial stack.
 	 */
 	move.l	#MEM_SIZE, %a0
 
@@ -97,48 +95,37 @@ _start:
 	move.l	%d0, %sp			/* Set up initial stack ptr */
 	move.l	%d0, _ramend			/* Set end ram addr */
 
-
-	/* now fire off the cache, remember to invalidate it first */
-	move.l	#0, %d0
-	movec	%d0, %CACR
-	nop
-	movec	%d0, %CACR			/* Cache is off */
-
-	move.l	#CACR_CINVA, %d0		/* Invalidate whole cache */
-	movec	%d0, %CACR
-	nop
-	movec	%d0, %CACR
-	nop                                    
-
 	/*
 	 *	Make region ROM cachable (turn off for flash programming?)
 	 */
 	/* 0xff000000 - 0xffffffff */
 #ifdef DEBUGGER_COMPATIBLE_CACHE
-	move.l #(0xff<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WTHRU+ACR_WPROTECT, %d0
+	move.l	#(0xff<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WTHRU+ACR_WPROTECT, %d0
 #else
-	move.l #(0xff<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WBACK+ACR_WPROTECT, %d0
+	move.l	#(0xff<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WBACK+ACR_WPROTECT, %d0
 #endif
 	movec  %d0, %ACR0
 
 	/*
 	 *	Make region RAM cachable.
-	 */
+	 *
 	/* 0x00000000 - 0x00ffffffff */
 #ifdef DEBUGGER_COMPATIBLE_CACHE
-	move.l #(0x00<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WTHRU, %d0
+	move.l	#(0x00<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WTHRU,%d0
 #else
-	move.l #(0x00<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WBACK, %d0
+	move.l	#(0x00<<ACR_BASE_POS)+(0<<ACR_MASK_POS)+ACR_ENABLE+ACR_ANY+ACR_CM_WBACK,%d0
 #endif
 	movec  %d0, %ACR1
 
 	/*
 	 *	Make the default cache mode precise.
 	 */
-	move.l  #CACR_EC+CACR_ESB+CACR_DCM_OFF_PRE, %d0 /* Enable cache */
-	movec  %d0, %CACR
+	move.l	#CACR_EC+CACR_ESB+CACR_DCM_OFF_PRE, %d0 /* enable cache */
+	movec	%d0, %CACR
+	nop
 
 
+#ifdef CONFIG_ROMFS_FS
 	/*
 	 *	Move ROM filesystem above bss :-)
 	 */
@@ -167,6 +154,13 @@ _copy_romfs:
 	cmp.l	%a0, %a2			/* Check if at end */
 	bne	_copy_romfs
 
+#else /* !CONFIG_ROMFS_FS */
+
+	lea.l	_ebss, %a1			/* Get end of bss segment */
+	move.l	%a1, _ramstart			/* Set start of ram */
+
+#endif /* !CONFIG_ROMFS_FS */
+
 	/*
 	 *	Zero out the bss region.
 	 */
@@ -179,6 +173,7 @@ _clear_bss:
 	bne	_clear_bss
 
 #if CONFIG_BLK_DEV_INITRD
+# if CONFIG_ROMFS_FS
 	/*
 	 *	Setup up RAMdisk info if using it.
 	 *	(Must do this after clearing the bss :-)
@@ -186,7 +181,27 @@ _clear_bss:
 	move.l	%d2, initrd_start		/* Set up start of initrd */
 	add.l	%d1, %d2			/* Calculate end of initrd */
 	move.l	%d2, initrd_end
-#endif
+
+# else /* !CONFIG_ROMFS_FS */
+
+	/*
+	 * initrd support for Coldfire currently requires romfs.
+	 * Generic initrd support requires a bootloader protocol to 
+	 * tell the kernel where the image is located.
+	 */
+	moveq.l	#0, %d2
+	move.l	%d2, initrd_start
+	move.l	%d2, initrd_end
+
+# endif /* !CONFIG_ROMFS_FS */
+#endif /* CONFIG_BLK_DEV_INITRD */
+
+	/*
+	 *	Load the current task pointer and stack.
+	 */
+	lea	init_task_union ,%a0
+	movel	%a0, _current_task
+	lea	0x2000(%a0), %sp
 
 	/*
 	 *	Assember start up done, start code proper.

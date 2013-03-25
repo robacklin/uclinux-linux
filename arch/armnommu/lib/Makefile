@@ -1,65 +1,49 @@
 #
 # linux/arch/arm/lib/Makefile
 #
-# Copyright (C) 1995, 1996 Russell King
+# Copyright (C) 1995-2000 Russell King
 #
 
-L_TARGET := lib.a
-L_OBJS   := backtrace.o bitops.o checksum.o delay.o fp_support.o \
-	    loaders.o memfastset.o segment.o system.o string.o \
-            longjmp.o
+USE_STANDARD_AS_RULE := true
 
-ifdef CONFIG_ARCH_ACORN
-  L_OBJS += ll_char_wr.o io-acorn.o irqs-acorn.o
-  ifdef CONFIG_ARCH_A5K
-    L_OBJS += floppydma.o
-  endif
-  ifdef CONFIG_ARCH_RPC
-    L_OBJS += floppydma.o
-  endif
+L_TARGET	:= lib.a
+
+obj-y		:= backtrace.o changebit.o csumipv6.o csumpartial.o   \
+		   csumpartialcopy.o csumpartialcopyuser.o clearbit.o \
+		   copy_page.o delay.o findbit.o memchr.o memcpy.o    \
+		   memset.o memzero.o setbit.o strncpy_from_user.o    \
+		   strnlen_user.o strchr.o strrchr.o testchangebit.o  \
+		   testclearbit.o testsetbit.o uaccess.o
+obj-m		:=
+obj-n		:=
+
+obj-arc		:= ecard.o io-acorn.o floppydma.o
+obj-rpc		:= ecard.o io-acorn.o floppydma.o
+obj-clps7500	:= io-acorn.o
+obj-l7200     	:= io-acorn.o
+obj-shark	:= io-shark.o
+
+obj-y		+= $(obj-$(MACHINE))
+
+ifeq ($(CONFIG_CPU_32v4),y)
+  v3		:= n
+  v4		:= y
+else
+  v3		:= y
+  v4		:= n
 endif
 
-ifeq ($(MACHINE),ebsa110)
-L_OBJS	 += io-ebsa.o irqs-ebsa.o
-endif
+obj-y		+= io-readsb.o io-writesb.o
+obj-$(v3)	+= io-readsw-armv3.o io-writesw-armv3.o io-readsl-armv3.o
+obj-$(v4)	+= io-readsw-armv4.o io-writesw-armv4.o io-readsl-armv4.o
+obj-y		+= io-writesl.o
 
-ifeq ($(MACHINE),trio)
-L_OBJS	 += irqs-trio.o io-trio.o
-endif
-
-ifeq ($(MACHINE),atmel)
-L_OBJS	 += irqs-atmel.o io-atmel.o
-endif
-
-ifeq ($(MACHINE),netarm)
-L_OBJS	 += irqs-netarm.o io-netarm.o
-endif
-
-ifeq ($(MACHINE),gba)
-L_OBJS	 += irqs-gba.o io-gba.o
+ifeq ($(PROCESSOR),armo)
+  obj-y		+= uaccess-armo.o
 endif
 
 include $(TOPDIR)/Rules.make
 
-constants.h: getconstants
-	./getconstants > constants.h
+csumpartialcopy.o: csumpartialcopygeneric.S
+csumpartialcopyuser.o: csumpartialcopygeneric.S
 
-getconstants: getconstants.c getconstants.h
-	$(HOSTCC) -D__KERNEL__ -o getconstants getconstants.c
-
-getconstants.h: getconsdata.c
-	$(CC) $(CFLAGS) -c getconsdata.c
-	$(PERL) extractinfo.perl $(OBJDUMP) > $@
-
-ifneq ($(CONFIG_BINUTILS_NEW),y)
-%.o: %.S
-	$(CC) $(CFLAGS) -D__ASSEMBLY__ -E $< | tr ';$$' '\n#' > ..tmp.$<.s
-	$(CC) $(CFLAGS:-pipe=) -c -o $@ ..tmp.$<.s
-	$(RM) ..tmp.$<.s
-else
-%.o: %.S
-	$(CC) $(CFLAGS) -D__ASSEMBLY__ -c -o $@ $<
-endif
-
-clean:
-	$(RM) getconstants constants.h getconstants.h

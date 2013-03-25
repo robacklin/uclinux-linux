@@ -62,6 +62,14 @@ static inline int smc_inw(unsigned int addr)
 	return(((w << 8) | (w >> 8)) & 0xffff);
 }
 
+static inline int smc_inl(unsigned int addr)
+{
+	register unsigned long	v;
+	v = *((volatile unsigned long *) addr);
+	return((v << 24) | ((v & 0xff00) << 8) | ((v & 0xff0000) >> 8) |
+			(v >> 24));
+}
+
 static inline void smc_outl(unsigned long val, unsigned int addr)
 {
 	*((volatile unsigned long *) addr) = 

@@ -3,6 +3,8 @@
  *
  * definitions for expansion cards
  *
+ * This is a new system as from Linux 1.2.3
+ *
  * Changelog:
  *  11-12-1996	RMK	Further minor improvements
  *  12-09-1997	RMK	Added interrupt enable/disable for card level
@@ -39,8 +41,8 @@
 #define PROD_MORLEY_SCSI_UNCACHED	0x0067
 
 #define MANU_CUMANA		0x003a
-#define PROD_CUMANA_SCSI_1		0x00a0
 #define PROD_CUMANA_SCSI_2		0x003a
+#define PROD_CUMANA_SCSI_1		0x00a0
 
 #define MANU_ICS		0x003c
 #define PROD_ICS_IDE			0x00ae
@@ -57,6 +59,7 @@
 #define PROD_I3_ETHERLAN600A		0x011e
 
 #define MANU_ANT		0x0053
+#define PROD_ANT_ETHERM			0x00d8
 #define PROD_ANT_ETHERB			0x00e4
 
 #define MANU_ALSYSTEMS		0x005b
@@ -77,7 +80,7 @@
 #define CONST const
 #endif
 
-#define MAX_ECARDS	8
+#define MAX_ECARDS	9
 
 typedef enum {				/* Cards address space		*/
 	ECARD_IOC,
@@ -127,7 +130,7 @@ typedef struct {			/* Card handler routines	*/
  * This contains all the info needed on an expansion card
  */
 struct expansion_card {
-	struct expansion_card	*next;
+	struct expansion_card  *next;
 
 	/* Public data */
 	volatile unsigned char *irqaddr;	/* address of IRQ register	*/
@@ -140,17 +143,17 @@ struct expansion_card {
 	void			*fiq_data;	/* Data for use for FIQ by card	*/
 	expansioncard_ops_t	*ops;		/* Enable/Disable Ops for card	*/
 
-	CONST unsigned char	slot_no;	/* Slot number			*/
-	CONST unsigned char	dma;		/* DMA number (for request_dma)	*/
-	CONST unsigned char	irq;		/* IRQ number (for request_irq)	*/
-	CONST unsigned char	fiq;		/* FIQ number (for request_irq)	*/
+	CONST unsigned int	slot_no;	/* Slot number			*/
+	CONST unsigned int	dma;		/* DMA number (for request_dma)	*/
+	CONST unsigned int	irq;		/* IRQ number (for request_irq)	*/
+	CONST unsigned int	fiq;		/* FIQ number (for request_irq)	*/
 	CONST card_type_t	type;		/* Type of card			*/
 	CONST struct in_ecid	cid;		/* Card Identification		*/
 
 	/* Private internal data */
-	const char		*card_desc;	/* description of card		*/
+	const char		*card_desc;	/* Card description		*/
 	CONST unsigned int	podaddr;	/* Base Linux address for card	*/
-	CONST loader_t		loader;		/* loader program		*/
+	CONST loader_t		loader;		/* loader program */
 };
 
 struct in_chunk_dir {

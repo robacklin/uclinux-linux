@@ -33,7 +33,7 @@
  *    derived from this software without specific prior written permission.
  *
  * Where this Software is combined with software released under the terms of 
- * the GNU Public License ("GPL") and the terms of the GPL would require the 
+ * the GNU General Public License ("GPL") and the terms of the GPL would require the 
  * combined work to also be released under the terms of the GPL, the terms
  * and conditions of this License will apply in addition to those of the
  * GPL with the exception of any terms or conditions of this License that
@@ -74,81 +74,28 @@
 #ifndef	LINUX_VERSION_CODE
 #include <linux/version.h>
 #endif
+#include <linux/types.h>
 
 #include "sd.h"
 
 extern int i91u_detect(Scsi_Host_Template *);
+extern int i91u_release(struct Scsi_Host *);
 extern int i91u_command(Scsi_Cmnd *);
 extern int i91u_queue(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 extern int i91u_abort(Scsi_Cmnd *);
 extern int i91u_reset(Scsi_Cmnd *, unsigned int);
-
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(1, 3, 0)
 extern int i91u_biosparam(Scsi_Disk *, kdev_t, int *);	/*for linux v2.0 */
-extern struct proc_dir_entry proc_scsi_ini9100u;
-#else
-extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
-#endif
 
-#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03f"
+#define i91u_REVID "Initio INI-9X00U/UW SCSI device driver; Revision: 1.03g"
 
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(1, 3, 0)
-#define INI9100U	{ \
-		NULL, \
-		NULL, \
-		i91u_REVID, \
-		i91u_detect, \
-		NULL, \
-		NULL, \
-		i91u_command, \
-		i91u_queue, \
-		i91u_abort, \
-		i91u_reset, \
-		NULL, \
-		i91u_biosparam, \
-		1, \
-		7, \
-		SG_ALL, \
-		1, \
-		0, \
-		0, \
-		ENABLE_CLUSTERING \
-}
-#else
-
-#if LINUX_VERSION_CODE < CVT_LINUX_VERSION(2, 1, 75)
-#define INI9100U	{ \
-		NULL, \
-		NULL, \
-		&proc_scsi_ini9100u, \
-		NULL, \
-		i91u_REVID, \
-		i91u_detect, \
-		NULL, \
-		NULL, \
-		i91u_command, \
-		i91u_queue, \
-		i91u_abort, \
-		i91u_reset, \
-		NULL, \
-		i91u_biosparam, \
-		1, \
-		7, \
-		SG_ALL, \
-		1, \
-		0, \
-		0, \
-		ENABLE_CLUSTERING \
-}
-#else				/* Version >= 2.1.75 */
 #define INI9100U	{ \
 	next:		NULL,						\
 	module:		NULL,						\
-	proc_dir:	&proc_scsi_ini9100u, \
+	proc_name:	"INI9100U", \
 	proc_info:	NULL,				\
 	name:		i91u_REVID, \
 	detect:		i91u_detect, \
-	release:	NULL, \
+	release:	i91u_release, \
 	info:		NULL,					\
 	command:	i91u_command, \
 	queuecommand:	i91u_queue, \
@@ -170,25 +117,18 @@ extern int i91u_biosparam(Disk *, int, int *);	/*for linux v1.13 */
 	use_clustering:	ENABLE_CLUSTERING, \
  use_new_eh_code: 0 \
 }
-#endif
-#endif
-
 
 #define VIRT_TO_BUS(i)  (unsigned int) virt_to_bus((void *)(i))
 #define ULONG   unsigned long
 #define USHORT  unsigned short
 #define UCHAR   unsigned char
-#define BYTE    unsigned char
+#define BYTE    u8
 #define WORD    unsigned short
 #define DWORD   unsigned long
-#define UBYTE   unsigned char
+#define UBYTE   u8
 #define UWORD   unsigned short
 #define UDWORD  unsigned long
-#ifdef ALPHA
-#define U32   unsigned int
-#else
-#define U32   unsigned long
-#endif
+#define U32   u32
 
 #ifndef NULL
 #define NULL     0		/* zero          */
@@ -330,11 +270,10 @@ typedef struct Ha_Ctrl_Struc {
 	TCS HCS_Tcs[16];	/* 78 -> 16 Targets */
 	Scsi_Cmnd *pSRB_head;	/* SRB save queue header     */
 	Scsi_Cmnd *pSRB_tail;	/* SRB save queue tail       */
-#if LINUX_VERSION_CODE >= CVT_LINUX_VERSION(2,1,95)
 	spinlock_t HCS_AvailLock;
 	spinlock_t HCS_SemaphLock;
 	spinlock_t pSRB_lock;
-#endif
+	struct pci_dev *pci_dev;
 } HCS;
 
 /* Bit Definition for HCB_Flags */

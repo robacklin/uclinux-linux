@@ -3,8 +3,9 @@
 /*
  *	mcfne.h -- NE2000 in ColdFire eval boards.
  *
- *	(C) Copyright 1999-2001, Greg Ungerer (gerg@snapgear.com)
- *	(C) Copyright 2000-2001, Lineo (www.lineo.com)
+ *	(C) Copyright 1999-2000, Greg Ungerer (gerg@snapgear.com)
+ *	(C) Copyright 2000,      Lineo (www.lineo.com)
+ *	(C) Copyright 2001,      SnapGear (www.snapgear.com)
  *
  *      19990409 David W. Miller  Converted from m5206ne.h for 5307 eval board
  *
@@ -71,6 +72,13 @@
 #define	NE2000_BYTE		volatile unsigned char
 #endif
 
+#if defined(CONFIG_M5307) && defined(CONFIG_MOTOROLA)
+#define NE2000_ADDR		0x40000300
+#define NE2000_ODDOFFSET	0x00010000
+#define NE2000_IRQ_VECTOR	0x1b
+#define	NE2000_BYTE		volatile unsigned short
+#endif
+
 #if defined(CONFIG_M5272) && defined(CONFIG_NETtel)
 #define NE2000_ADDR		0x30600300
 #define NE2000_ODDOFFSET	0x00008000
@@ -80,13 +88,6 @@
 #define	NE2000_BYTE		volatile unsigned short
 #undef	RSWAP
 #define	RSWAP(w)		(((w) << 8) | ((w) >> 8))
-#endif
-
-#if defined(CONFIG_M5307) && defined(CONFIG_MOTOROLA)
-#define NE2000_ADDR		0x40000300
-#define NE2000_ODDOFFSET	0x00010000
-#define NE2000_IRQ_VECTOR	0x1b
-#define	NE2000_BYTE		volatile unsigned short
 #endif
 
 #if defined(CONFIG_M5307) && defined(CONFIG_NETtel)
@@ -141,6 +142,10 @@
 #undef outb_p
 #undef inb
 #undef inb_p
+#undef outsb
+#undef outsw
+#undef insb
+#undef insw
 
 #define	outb	ne2000_outb
 #define	inb	ne2000_inb
@@ -192,7 +197,7 @@ int ne2000_inb(unsigned int addr)
 
 	rp = (NE2000_BYTE *) NE2000_PTR(addr);
 	val = *rp;
-	return(RSWAP(val));
+	return((int) ((NE2000_BYTE) RSWAP(val)));
 }
 
 void ne2000_insb(unsigned int addr, void *vbuf, int unsigned long len)
@@ -312,6 +317,7 @@ void ne2000_irqsetup(int irq)
 	pitr = (volatile unsigned long *) (MCF_MBAR + MCFSIM_PITR);
 	*pitr = *pitr | 0x20000000;
 }
+
 void ne2000_irqack(int irq)
 {
 	volatile unsigned long	*icrp;
@@ -324,18 +330,23 @@ void ne2000_irqack(int irq)
 
 #if defined(CONFIG_M5307) || defined(CONFIG_M5407)
 #if defined(CONFIG_NETtel) || defined(CONFIG_SECUREEDGEMP3)
+
 void ne2000_irqsetup(int irq)
 {
 	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_EINT3);
 	mcf_autovector(irq);
 }
+
 #else
+
 void ne2000_irqsetup(int irq)
 {
 	mcf_setimr(mcf_getimr() & ~MCFSIM_IMR_EINT3);
 }
+
 #endif /* ! CONFIG_NETtel || CONFIG_SECUREEDGEMP3 */
 #endif /* CONFIG_M5307 || CONFIG_M5407 */
+
 #endif /* COLDFIRE_NE2000_FUNCS */
 
 /****************************************************************************/

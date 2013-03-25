@@ -31,9 +31,7 @@
 
 #ifndef __ASM_ARCH_NETARM_HARDWARE_H
 #define __ASM_ARCH_NETARM_HARDWARE_H
-
-#define KERNEL_TIMER	2
-
+#include <asm/arch/netarm_registers.h> 
 /*
  * What hardware must be present
  */
@@ -50,9 +48,26 @@ typedef unsigned long u_32;
 #define PARAMS_BASE			0x1000
 /*#define KERNEL_BASE		(PAGE_OFFSET + 0x80000)*/
 
-#define HARD_RESET_NOW()  { arch_hard_reset(); }
+#endif
+
+/*
+ * HARD_RESET_NOW -- used in blkmem.c. Should call arch_hard_reset(), but I 
+ * don't appear to have one ;).
+ * --gmcnutt
+ */
+#if !defined(CONFIG_NETARM_NS7520) 
+#define HARD_RESET_NOW()
+#else  /* This might actually work for other platforms */
+#define HARD_RESET_NOW() {		\
+    cli();				\
+    *(get_gen_reg_addr( NETARM_GEN_PLL_CONTROL )) &= 0x0000ffff; \
+    mdelay( 100 );  \
+    *(get_gen_reg_addr( NETARM_GEN_SYSTEM_CONTROL )) |= \
+            (NETARM_GEN_SYS_CFG_WDOG_EN|NETARM_GEN_SYS_CFG_WDOG_RST| \
+             NETARM_GEN_SYS_CFG_WDOG_24); \
+}
 
 #endif
 
-
 #endif
+

@@ -1,13 +1,10 @@
 #ifndef _AHA1542_H
 
-/* $Id: aha1542.h,v 1.1.1.1 1999-11-22 03:47:21 christ Exp $
+/* $Id: aha1542.h,v 1.1 1992/07/24 06:27:38 root Exp root $
  *
  * Header file for the adaptec 1542 driver for Linux
  *
  * $Log: aha1542.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:21  christ
- * Importing new-wave v1.0.4
- *
  * Revision 1.1  1992/07/24  06:27:38  root
  * Initial revision
  *
@@ -133,12 +130,16 @@ struct ccb {			/* Command Control Block 5.3 */
 				/* REQUEST SENSE */
 };
 
-int aha1542_detect(Scsi_Host_Template *);
-int aha1542_command(Scsi_Cmnd *);
-int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int aha1542_abort(Scsi_Cmnd *);
-int aha1542_reset(Scsi_Cmnd *, unsigned int);
-int aha1542_biosparam(Disk *, kdev_t, int*);
+static int aha1542_detect(Scsi_Host_Template *);
+static int aha1542_command(Scsi_Cmnd *);
+static int aha1542_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+static int aha1542_abort(Scsi_Cmnd * SCpnt);
+static int aha1542_bus_reset(Scsi_Cmnd * SCpnt);
+static int aha1542_dev_reset(Scsi_Cmnd * SCpnt);
+static int aha1542_host_reset(Scsi_Cmnd * SCpnt);
+static int aha1542_old_abort(Scsi_Cmnd * SCpnt);
+static int aha1542_old_reset(Scsi_Cmnd *, unsigned int);
+static int aha1542_biosparam(Disk *, kdev_t, int*);
 
 #define AHA1542_MAILBOXES 8
 #define AHA1542_SCATTER 16
@@ -148,27 +149,24 @@ int aha1542_biosparam(Disk *, kdev_t, int*);
 	#define NULL 0
 #endif
 
-extern struct proc_dir_entry proc_scsi_aha1542;
-
-#define AHA1542 {  NULL, NULL,				\
-                     &proc_scsi_aha1542,/* proc_dir_entry */ \
-		     NULL,		                \
-		     "Adaptec 1542", 			\
-		     aha1542_detect,			\
-		     NULL,				\
-		     NULL,	 			\
-		     aha1542_command,			\
-		     aha1542_queuecommand,		\
-		     aha1542_abort,			\
-		     aha1542_reset,			\
-		     NULL,				\
-		     aha1542_biosparam,                 \
-		     AHA1542_MAILBOXES, 		\
-		     7, 				\
-		     AHA1542_SCATTER, 			\
-		     AHA1542_CMDLUN, 			\
-		     0, 				\
-		     1, 				\
-		     ENABLE_CLUSTERING}
+#define AHA1542 {    proc_name:			"aha1542",		\
+		     name:			"Adaptec 1542", 	\
+		     detect:			aha1542_detect,		\
+		     command:			aha1542_command,	\
+		     queuecommand:		aha1542_queuecommand,	\
+                     abort:		        aha1542_old_abort,	\
+                     reset:			aha1542_old_reset,	\
+		     eh_abort_handler:		aha1542_abort,		\
+		     eh_device_reset_handler:	aha1542_dev_reset,	\
+		     eh_bus_reset_handler:	aha1542_bus_reset,	\
+		     eh_host_reset_handler:	aha1542_host_reset,	\
+		     bios_param:		aha1542_biosparam,      \
+		     can_queue:			AHA1542_MAILBOXES, 	\
+		     this_id:			7, 			\
+		     sg_tablesize:		AHA1542_SCATTER, 	\
+		     cmd_per_lun:		AHA1542_CMDLUN, 	\
+		     unchecked_isa_dma:		1, 			\
+		     use_clustering:		ENABLE_CLUSTERING,	\
+		     use_new_eh_code:		1}
 
 #endif

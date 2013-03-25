@@ -2,21 +2,24 @@
 
        Thomas M. Sailer, HB9JNX/AE4WA, <sailer@ife.ee.ethz.ch>
 
-This driver allows either SoundBlaster (sbc) or WindowsSoundSystem (wss)
+This driver allows either SoundBlaster (sbc) or Windows Sound System (wss)
 compatible soundcards to be used as either 1200 baud AFSK or 9600 baud FSK
-AX.25 packet radio modems. Only half duplex operation is supported by
-the SoundBlaster driver. Fullduplex is supported for WSS chipsets capable
-of addressing two DMA channels. The driver needs some processing power!
-A 486DX/2 66MHz is a minimum requirement, otherwise interactive performance
-of the computer may become sluggish.
+AX.25 packet radio modems. Only half duplex operation is supported; an
+attempt to include full duplex support failed because the hardware did
+not support it (it appeared that the card only provides one DMA channel,
+although the codec chip would support two channels). The driver needs
+some processing power! A 66 MHz 486 DX2 is a minimum requirement.  Otherwise
+interactive performance of the computer may become sluggish. This driver
+does *not* support telephone modem standards, it is intended for radio
+use only.
 
 
 The Interface of the driver
 
-The driver provides a kernel network drivers named sm[0-3]. sethdlc 
+The driver provides kernel network drivers named sm[0-3]. sethdlc 
 from the ax25 utilities may be used to set driver states etc. Users
 of userland AX.25 stacks may use the net2kiss utility (also available
-in the ax25 utilities package) to converts packets of a network interface
+in the ax25 utilities package) to convert packets of a network interface
 to a KISS stream on a pseudo tty. There's also a patch available from
 me for WAMPES which allows attaching a kernel network interface directly.
 
@@ -29,20 +32,18 @@ you may use the standard linux sound driver to initialize the soundcard;
 compile it as a module, and do
   insmod sound
   rmmod sound
-The soundcard should then be initialized correctly. isapnptools is another
-package that can configure PnP soundcards. If your soundcard contains
-a Crystal CS423x chip, you may also try the setcrystal utility in the
-ax25-utilities package.
+The soundcard should then be initialized correctly. If this does not help,
+you'll have to write your own initialization utility.
 
 Every time the driver is inserted into the kernel, it has to know which
-modems it should access at which ports. This can be done with the sethdlc
+modems it should access at which ports. This can be done with the setbaycom
 utility. If you are only using one modem, you can also configure the
 driver from the insmod command line (or by means of an option line in
-/etc/conf.modules).
+/etc/modules.conf).
 
-Examples: (use either method, not both)
+Examples:
   insmod soundmodem mode="sbc:afsk1200" iobase=0x220 irq=5 dma=1
-  sethdlc -i sm0 -p hw sbc type afsk1200 io 0x220 irq 5 dma 1
+  sethdlc -i sm0 -p mode "sbc:afsk1200" io 0x220 irq 5 dma 1
 
 Both lines configure the first port to drive a soundblaster card
 in 1200 baud AFSK mode.
@@ -58,9 +59,7 @@ There are two utilities, available in the ax25 utilities distribution,
 to facilitate this: smmixer and smdiag. smdiag allows you to display
 the input signal in an oscilloscope like display or an eye diagram.
 smmixer allows you to adjust input/output levels. See the respective
-man pages. These two utilities have two counterparts: xfsmmixer and
-xfsmdiag. They both require the FORMS to compile, and provide a nicer
-user interface. Functionality is the same, though.
+man pages.
 
 
 Transmitter keying
@@ -85,12 +84,7 @@ be able to access the soundcard. You might therefore find it necessary to
 unload the sound driver before using the soundcard modem driver.
 
 
-Further reading
-
-Please take a look at http://www.ife.ee.ethz.ch/~sailer/ham/linux/hdlc.html
-for further informations on the driver.
-
 
 vy 73s de
 Tom Sailer, sailer@ife.ee.ethz.ch
-Packet Radio: hb9jnx@hb9w.che.eu
+hb9jnx @ hb9w.ampr.org

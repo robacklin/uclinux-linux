@@ -2,10 +2,10 @@
  *
  * Copyright (C) 1995       David S. Miller    <davem@caip.rutgers.edu>
  * Copyright (C) 1998       Kenneth Albanowski <kjahds@kjahds.com>
- * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@lineo.ca>
+ * Copyright (C) 1998, 1999 D. Jeff Dionne     <jeff@uclinux.org>
  * Copyright (C) 1999       Vladimir Gurevich  <vgurevic@cisco.com>
- * Copyright (C) 2000       Lineo, Inc.        (www.lineo.com) 
  *
+ * VZ Support/Fixes             Evan Stawnyczy <e@lineo.ca>
  */
 
 #ifndef _MC683XX_SERIAL_H
@@ -104,13 +104,15 @@ struct serial_struct {
  *                                  -- Vladimir Gurevich
  */
 
-#if defined(CONFIG_M68EZ328)
+/* (es) */
+#if defined(CONFIG_M68EZ328) || defined(CONFIG_M68VZ328)
 #define USTCNT_RX_INTR_MASK (USTCNT_RXHE | USTCNT_ODEN)
 #elif defined(CONFIG_M68328)
 #define USTCNT_RX_INTR_MASK (USTCNT_RXRE)
 #else
 #error Please, define the Rx interrupt events for your CPU
 #endif
+/* (/es) */
 
 /*
  * This is our internal structure for each serial port's state.
@@ -163,8 +165,8 @@ struct m68k_serial {
 	struct tq_struct	tqueue_hangup;
 	struct termios		normal_termios;
 	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
+	wait_queue_head_t	open_wait;
+	wait_queue_head_t	close_wait;
 };
 
 
@@ -180,6 +182,17 @@ struct m68k_serial {
  * time, instead of at rs interrupt time.
  */
 #define RS_EVENT_WRITE_WAKEUP	0
+
+/* 
+ * Define the number of ports supported and their irqs.
+ */
+#ifndef CONFIG_68328_SERIAL_UART2
+#define NR_PORTS 1
+#define UART_IRQ_DEFNS {UART_IRQ_NUM}
+#else
+#define NR_PORTS 2
+#define UART_IRQ_DEFNS {UART1_IRQ_NUM, UART2_IRQ_NUM}
+#endif
 
 #endif /* __KERNEL__ */
 #endif /* !(_MC683XX_SERIAL_H) */

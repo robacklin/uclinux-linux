@@ -2,51 +2,55 @@
  *  linux/mm/vmalloc.c
  *
  *  Copyright (C) 1993  Linus Torvalds
+ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
+ *  SMP-safe vmalloc/vfree/ioremap, Tigran Aivazian <tigran@veritas.com>, May 2000
+ *  Copyright (c) 2001 Lineo Inc., David McCullough <davidm@lineo.com>
+ *  Copyright (c) 2000-2001 D Jeff Dionne <jeff@uClinux.org>
  */
 
-/*
- * uClinux revisions for NO_MM
- * Copyright (C) 1998  Kenneth Albanowski <kjahds@kjahds.com>,
- * Copyright (C) 1999, 2000   D. Jeff Dionne <jeff@uclinux.org>,
- *                            Rt-Control, Inc. / Lineo Inc.
- */  
+#include <linux/config.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+#include <linux/spinlock.h>
 
-#include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 
-#include <linux/signal.h>
-#include <linux/sched.h>
-#include <linux/head.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/types.h>
-#include <linux/malloc.h>
-#include <linux/mm.h>
+rwlock_t vmlist_lock = RW_LOCK_UNLOCKED;
+struct vm_struct * vmlist;
 
-/*
- * These routines just punt in a flat address space
- */
-
-void vfree(void * addr)
+void __vfree(void * addr, int free_area_pages)
 {
 	kfree(addr);
 }
 
-void * vmalloc(unsigned long size)
+void vfree(void * addr)
 {
-	return kmalloc(size, GFP_KERNEL);
+	__vfree(addr,1);
 }
 
-/*
- * In a flat address space, there is no translation needed
- */
-void * vremap(unsigned long offset, unsigned long size)
+void * __vmalloc (unsigned long size, int gfp_mask, pgprot_t prot)
 {
-	return (void*)offset;
+	/*
+	 * kmalloc doesn't like __GFP_HIGHMEM for some reason
+	 * I doubt we need it - DAVIDM
+	 */
+	return kmalloc(size, gfp_mask & ~__GFP_HIGHMEM);
 }
 
-int vread(char *buf, char *addr, int count)
+long vread(char *buf, char *addr, unsigned long count)
 {
-	memcpy_tofs(buf, addr, count);
+	memcpy(buf, addr, count);
 	return count;
 }
+
+long vwrite(char *buf, char *addr, unsigned long count)
+{
+	/* Don't allow overflow */
+	if ((unsigned long) addr + count < count)
+		count = -(unsigned long) addr;
+	
+	memcpy(addr, buf, count);
+	return(count);
+}
+

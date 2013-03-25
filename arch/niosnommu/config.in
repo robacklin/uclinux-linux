@@ -5,7 +5,10 @@
 mainmenu_name 'uClinux/Nios (w/o MMU) Kernel Configuration'
 
 define_bool CONFIG_UCLINUX y
-
+define_bool CONFIG_UID16 y
+define_bool CONFIG_RWSEM_GENERIC_SPINLOCK y
+define_bool CONFIG_RWSEM_XCHGADD_ALGORITHM n
+define_bool CONFIG_RAMKERNEL y
 
 mainmenu_option next_comment
 comment 'Code maturity level options'
@@ -54,119 +57,122 @@ comment 'General setup'
 
 bool 'Networking support' CONFIG_NET
 bool 'System V IPC' CONFIG_SYSVIPC
-bool 'Reduced memory footprint' CONFIG_REDUCED_MEMORY
+# bool 'Reduced memory footprint' CONFIG_REDUCED_MEMORY
+bool 'BSD Process Accounting' CONFIG_BSD_PROCESS_ACCT
+bool 'Sysctl support' CONFIG_SYSCTL
+if [ "$CONFIG_PROC_FS" = "y" ]; then
+   choice 'Kernel core (/proc/kcore) format' \
+	"ELF		CONFIG_KCORE_ELF	\
+	 A.OUT		CONFIG_KCORE_AOUT" ELF
+fi
 tristate 'Kernel support for flat binaries' CONFIG_BINFMT_FLAT
 # tristate 'Kernel support for a.out binaries' CONFIG_BINFMT_AOUT
 # tristate 'Kernel support for ELF binaries' CONFIG_BINFMT_ELF
-# bool 'Compile kernel as ELF - if your GCC is ELF-GCC' CONFIG_KERNEL_ELF
-bool 'Frame buffer support' CONFIG_FRAMEBUFFER
-if [ "$CONFIG_FRAMEBUFFER" = "y" ]; then
-	bool ' epson S1D13505 frame buffer' CONFIG_E1355FB
-	if [ "$CONFIG_E1355FB" = "y" ]; then	
-		bool ' Virtual console support' CONFIG_CONSOLE
-		if [ "$CONFIG_CONSOLE" = "y" ]; then
-			define_bool CONFIG_FBCON_FONTS y
-		#	comment ' Select compiled-in fonts(at least one)' 
-			if [ "$CONFIG_FBCON_FONTS" = "y" ]; then
-		 		bool '   VGA 8x8 font' CONFIG_FONT_8x8
-		 		bool '   VGA 8x16 font' CONFIG_FONT_8x16
-		 		bool '   Pearl 8x8 font' CONFIG_FONT_PEARL8x8
-		 		if [ "$CONFIG_FONT_8x16" = "n" -a "$CONFIG_FONT_PEARL8x8" = "n" ]; then
-	 				define_bool CONFIG_FONT_8x8 	y
-		 		fi
-		 	fi
-		fi
-		if [ "$CONFIG_CONSOLE" = "y" ]; then
-			bool '   Booting from frame buffer based console' CONFIG_BOOT_FBCONSOLE
-		fi
-	fi	
-fi
+bool 'Compile kernel as ELF - if your GCC is ELF-GCC' CONFIG_KERNEL_ELF
 bool 'Kernel support for remote GDB client' CONFIG_KGDB
 if [ "$CONFIG_KGDB" = "y" ]; then
   bool '  Include breakpoint trap on kernel startup' CONFIG_BREAK_ON_START
 fi
 endmenu
 
-string 'Initial kernel command string' CONFIG_CMDLINE "CONSOLE=/dev/ttyS0 root=/dev/rom0 ro"
+define_string CONFIG_CMDLINE "CONSOLE=/dev/ttyS0 root=/dev/rom0 ro"
 
-#
-# Block device driver configuration
-#
-define_bool CONFIG_PCI n
+# source drivers/mtd/Config.in
+# source drivers/pnp/Config.in
+
 source drivers/block/Config.in
-
-tristate 'FLASH device support' CONFIG_DEV_FLASH
-if [ "$CONFIG_DEV_FLASH" = "y" ]; then
-  bool '   FLASH Block device' CONFIG_BLK_DEV_FLASH
-  bool '   FLASH Character device' CONFIG_CHR_DEV_FLASH
-fi
 
 if [ "$CONFIG_NET" = "y" ]; then
   source net/Config.in
 fi
 
-if [ "$CONFIG_NET" = "y" ]; then
-
 mainmenu_option next_comment
-comment 'Network device support'
+comment 'ATA/IDE/MFM/RLL support'
 
-bool 'Network device support' CONFIG_NETDEVICES
-if [ "$CONFIG_NETDEVICES" = "y" ]; then
-#
-# Network device configuration
-#
-tristate 'Dummy net driver support' CONFIG_DUMMY
-tristate 'SLIP (serial line) support' CONFIG_SLIP
-if [ "$CONFIG_SLIP" != "n" ]; then
-  bool ' CSLIP compressed headers' CONFIG_SLIP_COMPRESSED
-  bool ' Keepalive and linefill' CONFIG_SLIP_SMART
-  bool ' Six bit SLIP encapsulation' CONFIG_SLIP_MODE_SLIP6
-fi
-tristate 'PPP (point-to-point) support' CONFIG_PPP
-if [ ! "$CONFIG_PPP" = "n" ]; then
-  comment 'CCP compressors for PPP are only built as modules.'
-fi
-tristate 'EQL (serial line load balancing) support' CONFIG_EQUALIZER
-bool 'Cirrus Logic cs8900 ethernet' CONFIG_UCCS8900
+tristate 'ATA/IDE/MFM/RLL support' CONFIG_IDE
 
+if [ "$CONFIG_IDE" != "n" ]; then
+  source drivers/ide/Config.in
+else
+  define_bool CONFIG_BLK_DEV_HD n
 fi
 endmenu
+
+# mainmenu_option next_comment
+# comment 'SCSI support'
+# tristate 'SCSI support' CONFIG_SCSI
+# if [ "$CONFIG_SCSI" != "n" ]; then
+#   source drivers/scsi/Config.in
+# fi
+# endmenu
+
+source drivers/ieee1394/Config.in
+
+# source drivers/i2o/Config.in
+
+if [ "$CONFIG_NET" = "y" ]; then
+   mainmenu_option next_comment
+   comment 'Network device support'
+
+   bool 'Network device support' CONFIG_NETDEVICES
+   if [ "$CONFIG_NETDEVICES" = "y" ]; then
+      source drivers/net/Config.in
+      if [ "$CONFIG_ATM" = "y" ]; then
+         source drivers/atm/Config.in
+      fi
+   fi
+   endmenu
 fi
+
+# source net/ax25/Config.in
+
+# source net/irda/Config.in
+
+# mainmenu_option next_comment
+# comment 'ISDN subsystem'
+# if [ "$CONFIG_NET" != "n" ]; then
+#   tristate 'ISDN support' CONFIG_ISDN
+#   if [ "$CONFIG_ISDN" != "n" ]; then
+#      source drivers/isdn/Config.in
+#   fi
+# fi
+# endmenu
+
+# mainmenu_option next_comment
+# comment 'Old CD-ROM drivers (not SCSI, not IDE)'
+
+# bool 'Support non-SCSI/IDE/ATAPI CDROM drives' CONFIG_CD_NO_IDESCSI
+# if [ "$CONFIG_CD_NO_IDESCSI" != "n" ]; then
+#    source drivers/cdrom/Config.in
+# fi
+# endmenu
+
+source drivers/char/Config.in
 
 source fs/Config.in
 
-mainmenu_option next_comment
-comment 'Character devices'
-
-# tristate 'Parallel printer support' CONFIG_PRINTER
-# bool 'Support for user misc device modules' CONFIG_UMISC
-if [ "$CONFIG_EXCALIBUR" = "y" ]; then
-	bool 'NIOS serial support' CONFIG_NIOS_SERIAL
-	bool 'SPI device support. (H/W MUST be built into core)' CONFIG_NIOS_SPI
+if [ "$CONFIG_VT" = "y" ]; then
+  source drivers/video/Config.in
 fi
 
-# bool 'Support for user serial device modules' CONFIG_USERIAL
-# bool 'Watchdog Timer Support'	CONFIG_WATCHDOG
-# if [ "$CONFIG_WATCHDOG" != "n" ]; then
-#   bool '   Disable watchdog shutdown on close' CONFIG_WATCHDOG_NOWAYOUT
-#   bool '   Software Watchdog' CONFIG_SOFT_WATCHDOG
-# fi
-endmenu
-
-
-
-# mainmenu_option next_comment
-# comment 'Sound support'
-#
-# tristate 'Sound support' CONFIG_SOUND
-# endmenu
+source drivers/usb/Config.in
 
 mainmenu_option next_comment
 comment 'Kernel hacking'
 
-# bool 'Debug kmalloc/kfree' CONFIG_DEBUG_MALLOC
+bool 'Full Symbolic/Source Debugging support' CONFIG_FULLDEBUG
+#bool 'Debug kmalloc/kfree' CONFIG_DEBUG_MALLOC
+bool 'Magic SysRq key' CONFIG_MAGIC_SYSRQ
+
 bool 'Kernel profiling support' CONFIG_PROFILE
 if [ "$CONFIG_PROFILE" = "y" ]; then
   int ' Profile shift count' CONFIG_PROFILE_SHIFT 2
+  bool 'Use fast second timer for profiling' CONFIG_HIGHPROFILE
 fi
+
+bool 'Suppress Kernel BUG Messages' CONFIG_NO_KERNEL_MSG
+
 endmenu
+
+source crypto/Config.in
+source lib/Config.in

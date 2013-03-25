@@ -140,17 +140,19 @@ int pas16_proc_info (char *buffer ,char **start, off_t offset,
  * macros when this is being used solely for the host stub.
  */
 
-#if defined(HOSTS_C) || defined(MODULE)
+#define MV_PAS16 {					\
+	name:           "Pro Audio Spectrum-16 SCSI", 	\
+	detect:         pas16_detect, 			\
+	queuecommand:   pas16_queue_command,		\
+	abort:          pas16_abort,			\
+	reset:          pas16_reset,			\
+	bios_param:     pas16_biosparam, 		\
+	can_queue:      CAN_QUEUE,			\
+	this_id:        7,				\
+	sg_tablesize:   SG_ALL,				\
+	cmd_per_lun:    CMD_PER_LUN ,			\
+	use_clustering: DISABLE_CLUSTERING}
 
-#define MV_PAS16 {NULL, NULL, NULL, NULL, \
-	"Pro Audio Spectrum-16 SCSI", 		\
-	pas16_detect, NULL, NULL,					\
-	NULL, pas16_queue_command, pas16_abort, pas16_reset, NULL, 	\
-	pas16_biosparam, 						\
-	/* can queue */ CAN_QUEUE, /* id */ 7, SG_ALL,			\
-	/* cmd per lun */ CMD_PER_LUN , 0, 0, DISABLE_CLUSTERING}
-
-#endif
 #ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
@@ -181,6 +183,7 @@ int pas16_proc_info (char *buffer ,char **start, off_t offset,
 
 
 #define NCR5380_intr pas16_intr
+#define do_NCR5380_intr do_pas16_intr
 #define NCR5380_queue_command pas16_queue_command
 #define NCR5380_abort pas16_abort
 #define NCR5380_reset pas16_reset

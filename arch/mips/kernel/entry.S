@@ -1,279 +1,243 @@
 /*
- * Low level exception handling
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995 by Ralf Baechle
+ * Copyright (C) 1994 - 2000, 2001 by Ralf Baechle
+ * Copyright (C) 1999, 2000 Silicon Graphics, Inc.
+ * Copyright (C) 2001 MIPS Technologies, Inc.
  */
-
-/*
- * entry.S contains the system-call and fault low-level handling routines.
- * This also contains the timer-interrupt handler, as well as all interrupts
- * and faults that can result in a task-switch. The ISA dependent TLB
- * code is in arch/mips/kernel/<cputype>.S
- */
+#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/sys.h>
 
+#include <asm/addrspace.h>
 #include <asm/asm.h>
+#include <asm/cacheops.h>
+#include <asm/current.h>
 #include <asm/errno.h>
-#include <asm/segment.h>
 #include <asm/mipsregs.h>
-#include <asm/mipsconfig.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
+#include <asm/pgtable-bits.h>
 #include <asm/stackframe.h>
 #include <asm/processor.h>
+#include <asm/regdef.h>
+#include <asm/fpregdef.h>
 #include <asm/unistd.h>
+#include <asm/isadep.h>
 
-/*
- * These are offsets into the task-struct.
- */
-state		=  0
-counter		=  4
-priority	=  8
-signal		= 12
-blocked		= 16
-flags		= 20
-errno		= 24
-exec_domain	= 60
 
-#ifdef __SMP__
-#error "Fix this for SMP"
-#else
-#define current current_set
-#endif
-
-/*
- * Heia ...  The %lo, %hi and %HI stuff is too strong for the ELF assembler
- * and the ABI to cope with ...
- */
 		.text
-		.set	noreorder
-		.align 4
-handle_bottom_half:
-		lui	s0,%hi(intr_count)
-		lw	s1,%lo(intr_count)(s0)
-		mfc0	s3,CP0_STATUS		# Enable IRQs
-		addiu	s2,s1,1
-		sw	s2,%lo(intr_count)(s0)
-		ori	t0,s3,0x1f
-		xori	t0,0x1e
-		jal	do_bottom_half
-		mtc0	t0,CP0_STATUS		# delay slot
-		mtc0	s3,CP0_STATUS		# Restore old IRQ state
-		b	9f
-		sw	s1,%lo(intr_count)(s0)	# delay slot
-
-reschedule:	jal	schedule 
-		nop				# delay slot
-EXPORT(ret_from_sys_call)
-		lw	t0,intr_count		# bottom half
-		bnez	t0,return
-
-9:		lw	t0,bh_mask		# delay slot
-		lw	t1,bh_active		# unused delay slot
-		and	t0,t1
-		bnez	t0,handle_bottom_half
-
-		lw	t0,FR_STATUS(sp)	# returning to kernel mode?
-		andi	t1,t0,0x10
-		beqz	t1,return		# -> yes
-
-		mfc0	t0,CP0_STATUS		# delay slot
-		lw	t1,need_resched
-		ori	t0,0x1f			# enable irqs
-		xori	t0,0x1e
-		bnez	t1,reschedule
-		mtc0	t0,CP0_STATUS		# delay slot
-
-		lw	s0,current
-		lw	t0,task
-		lw	a0,blocked(s0)
-		beq	s0,t0,return		# task[0] cannot have signals
-						# save blocked in a0 for
-						# signal handling
-		lw	t0,signal(s0)
-		nor	t1,zero,a0
-		and	t1,t0,t1
-		beqz	t1,return
-		nop
-
-		jal	do_signal
-		move	a1,sp			# delay slot
-		
-		.set	noat
-EXPORT(return)	RESTORE_ALL
-		ERET
-		.set	at
-
-/*
- * Beware: interrupt, fast_interrupt and bad_interrupt have unusual
- * calling conventions to speedup the mess.
- *
- * t1 - interrupt number
- * s2 - destroyed
- * return values:
- * v0 - return routine
- */
-		.text
-		.set	at
 		.align	5
-NESTED(interrupt, FR_SIZE, sp)
-		move	s2,ra
-		mfc0	t0,CP0_STATUS			# enable IRQs
-		ori	t0,0x1f
-		xori	t0,0x1e
-		mtc0	t0,CP0_STATUS
-		move	a0,t1
-		jal	do_IRQ
-		move	a1,sp				# delay slot
-		mfc0	t0,CP0_STATUS			# disable IRQs
-		ori	t0,1
-		xori	t0,1
-		la	v0,ret_from_sys_call
-		jr	s2
-		mtc0	t0,CP0_STATUS			# delay slot
-		END(interrupt)
-
-		.align	5
-NESTED(fast_interrupt, FR_SIZE, sp)
-		move	s2,ra
-		move	a0,t1
-		jal	do_fast_IRQ
-		move	a1,sp				# delay slot
-		lui	v0,%hi(return)
-		jr	s2
-		addiu	v0,%lo(return)			# delay slot
-		END(fast_interrupt)
-
-LEAF(bad_interrupt)
-		/*
-		 * Don't return & unblock the pic
-		 */
-		j	return
-		nop
-		END(bad_interrupt)
-
-/*
- * do_syscall calls the function in a1 with upto 7 arguments.  If over
- * four arguments are being requested, the additional arguments will
- * be copied from the user stack pointed to by a0->reg29.
- * Note that this routine relies on the GNU assemblers weak instruction
- * scheduling abilities to generate the best possible code for all MIPS CPUs.
- *
- * a0 (struct pt_regs *)  pointer to user registers
- * a1 (syscall_t)         pointer to syscall to do
- * a2 (int)               number of arguments to syscall
- */
-		.set	noreorder
-		.text
-NESTED(do_syscalls, 32, sp)
-		subu	sp,32
-		sw	ra,28(sp)
-		sll	a2,a2,PTRLOG
-		lw	t0,dst(a2)
-		move	t2,a1
-		jalr	t0
-		lw	t0,FR_REG29(a0)		# get old user stack pointer
-
-		.set	reorder			# for sake of R3000
-7:		lw	t1,24(t0)		# parameter #7 from usp
-		sw	t1,24(t0)
-6:		lw	t1,20(t0)		# parameter #6 from usp
-		sw	t1,20(t0)
-5:		lw	t1,16(t0)		# parameter #5 from usp
-		sw	t1,16(t0)
-		.set	noreorder
-4:		lw	a3,FR_REG7(a0)		# 4 args
-3:		lw	a2,FR_REG6(a0)		# 3 args
-2:		lw	a1,FR_REG5(a0)		# 2 args
-1:		jalr	t2			# 1 args
-		lw	a0,FR_REG4(a0)		# delay slot
+		.set	push
 		.set	reorder
-		lw	ra,28(sp)
-		addiu	sp,32
-		jr	ra
-0:		jalr	t2			# 0 args, just pass a0
-		lw	ra,28(sp)
-		addiu	sp,32
-		jr	ra
-		END(do_syscalls)
-		.set	noreorder
+FEXPORT(ret_from_irq)
+FEXPORT(ret_from_exception)
+		lw	t0, PT_STATUS(sp)	# returning to kernel mode?
+		andi	t0, t0, KU_USER
+		beqz	t0, restore_all
 
-		.rdata
-		.align	PTRLOG
-dst:		PTR	0b, 1b, 2b, 3b, 4b, 5b, 6b, 7b
+FEXPORT(ret_from_sys_call)		# here to prevent code duplication
+ret_from_schedule:
+		mfc0	t0, CP0_STATUS	# need_resched and signals atomic test
+		ori	t0, t0, 1
+		xori	t0, t0, 1
+		mtc0	t0, CP0_STATUS
+		SSNOP; SSNOP; SSNOP
+
+		lw	v0, TASK_NEED_RESCHED($28)
+		lw	v1, TASK_SIGPENDING($28)
+		bnez	v0, reschedule
+		bnez	v1, signal_return
+restore_all:	.set	noat
+		RESTORE_ALL_AND_RET
+		.set	at
+
+/* Put this behind restore_all for the sake of the branch prediction.  */
+signal_return:
+		.type	signal_return, @function
+
+		mfc0	t0, CP0_STATUS
+		ori	t0, t0, 1
+		mtc0	t0, CP0_STATUS
+
+		move	a0, zero
+		move	a1, sp
+		jal	do_signal
+		b	restore_all
+
+reschedule:
+		jal	schedule
+		b	ret_from_schedule
+
+/*
+ * Common spurious interrupt handler.
+ */
+		.text
+		.align  5
+LEAF(spurious_interrupt)
+		/*
+		 * Someone tried to fool us by sending an interrupt but we
+		 * couldn't find a cause for it.
+		 */
+		lui     t1,%hi(irq_err_count)
+		lw      t0,%lo(irq_err_count)(t1)
+		addiu   t0,1
+		sw      t0,%lo(irq_err_count)(t1)
+		j	ret_from_irq
+END(spurious_interrupt)
+
+		__INIT
+
+		.set	reorder
+
+NESTED(except_vec1_generic, 0, sp)
+		PANIC("Exception vector 1 called")
+END(except_vec1_generic)
+
+		/*
+		 * General exception vector.  Used for all CPUs except R4000
+		 * and R4400 SC and MC versions.
+		 */
+NESTED(except_vec3_generic, 0, sp)
+#if R5432_CP0_INTERRUPT_WAR
+		mfc0	k0, CP0_INDEX
+#endif
+		mfc0	k1, CP0_CAUSE
+		la	k0, exception_handlers
+		andi	k1, k1, 0x7c
+		addu	k0, k0, k1
+		lw	k0, (k0)
+		jr	k0
+END(except_vec3_generic)
+		.set	at
+
+		/* General exception vector R4000 version. */
+NESTED(except_vec3_r4000, 0, sp)
+		.set	push
+		.set    mips3
+		.set	noat
+		mfc0	k1, CP0_CAUSE
+		li	k0, 31<<2
+		andi	k1, k1, 0x7c
+		.set	noreorder
+		beq	k1, k0, handle_vced
+		 li	k0, 14<<2
+		beq	k1, k0, handle_vcei
+		 la	k0, exception_handlers
+		.set	reorder
+		addu	k0, k0, k1
+		lw	k0, (k0)
+		jr	k0
+
+		/*
+		 * Big shit, we now may have two dirty primary cache lines for
+		 * the same physical address.  We can savely invalidate the
+		 * line pointed to by c0_badvaddr because after return from
+		 * this exception handler the load / store will be re-executed.
+		 */
+handle_vced:
+		mfc0	k0, CP0_BADVADDR
+		li	k1, -4
+		and	k0, k1
+		mtc0	zero, CP0_TAGLO
+		cache	Index_Store_Tag_D,(k0)
+		cache	Hit_Writeback_Inv_SD,(k0)
+#ifdef CONFIG_PROC_FS
+		lui	k0, %hi(vced_count)
+		lw	k1, %lo(vced_count)(k0)
+		addiu	k1, 1
+		sw	k1, %lo(vced_count)(k0)
+#endif
+		eret
+
+handle_vcei:
+		mfc0	k0, CP0_BADVADDR
+		cache	Hit_Writeback_Inv_SD, (k0)	# also cleans pi
+#ifdef CONFIG_PROC_FS
+		lui	k0, %hi(vcei_count)
+		lw	k1, %lo(vcei_count)(k0)
+		addiu	k1, 1
+		sw	k1, %lo(vcei_count)(k0)
+#endif
+		eret
+		.set    pop
+END(except_vec3_r4000)
+
+		__FINIT
 
 /*
  * Build a default exception handler for the exceptions that don't need
  * special handlers.  If you didn't know yet - I *like* playing games with
  * the C preprocessor ...
  */
+#define __BUILD_clear_none(exception)
+#define __BUILD_clear_sti(exception)                                    \
+		STI
+#define __BUILD_clear_cli(exception)                                    \
+		CLI
+#define __BUILD_clear_fpe(exception)                                    \
+		cfc1	a1,fcr31;                                       \
+		li	a2,~(0x3f<<12);                                 \
+		and	a2,a1;                                          \
+		ctc1	a2,fcr31;                                       \
+		STI
+#define __BUILD_clear_ade(exception)                                    \
+		.set	reorder;					\
+		MFC0	t0,CP0_BADVADDR;                                \
+		.set	noreorder;					\
+		REG_S	t0,PT_BVADDR(sp);                               \
+		KMODE
 #define __BUILD_silent(exception)
+
+#define fmt "Got %s at %08lx.\n"
+
 #define __BUILD_verbose(exception)                                      \
 		la	a1,8f;                                          \
 		TEXT	(#exception);                                   \
-		lw	a2,FR_EPC(sp);                                  \
-		PRINT("Got %s at %08x.\n")
+		REG_L	a2,PT_EPC(sp);                                  \
+		PRINT(fmt)
 #define __BUILD_count(exception)                                        \
 		.set	reorder;                                        \
 		lw	t0,exception_count_##exception;                 \
-		addiu	t0,1;                                           \
-		sw	t0,exception_count_##exception;                 \
 		.set	noreorder;                                      \
+		addiu	t0, 1;                                          \
+		sw	t0,exception_count_##exception;                 \
 		.data;                                                  \
 EXPORT(exception_count_##exception);                                    \
 		.word	0;                                              \
-		.text;
-#define BUILD_HANDLER(exception,verbose)                                \
-		.text;                                                  \
+		.previous;
+#define BUILD_HANDLER(exception,handler,clear,verbose)                  \
 		.align	5;                                              \
-		NESTED(handle_##exception, FR_SIZE, sp);                \
+NESTED(handle_##exception, PT_SIZE, sp);		                \
 		.set	noat;                                           \
 		SAVE_ALL;                                               \
-		STI;                                                    \
+FEXPORT(handle_##exception##_int);					\
+		__BUILD_clear_##clear(exception);                       \
 		.set	at;                                             \
 		__BUILD_##verbose(exception);                           \
-		li	t0,-1;                   /* not a sys call */   \
-		sw	t0,FR_ORIG_REG2(sp);                            \
-		jal	do_##exception;                                 \
-		move	a0,sp;                   /* delay slot */       \
-		j	ret_from_sys_call;                              \
-		nop;                             /* delay slot */       \
-		END(handle_##exception)
+		jal	do_##handler;                                   \
+		 move	a0, sp;                                         \
+		j	ret_from_exception;                             \
+		 nop;                                                   \
+END(handle_##exception)
 
-		BUILD_HANDLER(adel,verbose)		/* #4  */
-		BUILD_HANDLER(ades,verbose)		/* #5  */
-		BUILD_HANDLER(ibe,verbose)		/* #6  */
-		BUILD_HANDLER(dbe,verbose)		/* #7  */
-		BUILD_HANDLER(sys,silent)		/* #8  */
-		BUILD_HANDLER(bp,verbose)		/* #9  */
-		BUILD_HANDLER(ri,verbose)		/* #10 */
-		BUILD_HANDLER(cpu,silent)		/* #11 */
-		BUILD_HANDLER(ov,verbose)		/* #12 */
-		BUILD_HANDLER(tr,verbose)		/* #13 */
-		BUILD_HANDLER(vcei,verbose)		/* #14 */
-		BUILD_HANDLER(fpe,verbose)		/* #15 */
-		BUILD_HANDLER(watch,verbose)		/* #23 */
-		BUILD_HANDLER(vced,verbose)		/* #31 */
-		BUILD_HANDLER(reserved,verbose)		/* others */
+		BUILD_HANDLER(adel,ade,ade,silent)		/* #4  */
+		BUILD_HANDLER(ades,ade,ade,silent)		/* #5  */
+		BUILD_HANDLER(ibe,be,cli,silent)		/* #6  */
+		BUILD_HANDLER(dbe,be,cli,silent)		/* #7  */
+		BUILD_HANDLER(bp,bp,sti,silent)			/* #9  */
+		BUILD_HANDLER(ri,ri,sti,silent)			/* #10 */
+		BUILD_HANDLER(cpu,cpu,sti,silent)		/* #11 */
+		BUILD_HANDLER(ov,ov,sti,silent)			/* #12 */
+		BUILD_HANDLER(tr,tr,sti,silent)			/* #13 */
+		BUILD_HANDLER(fpe,fpe,fpe,silent)		/* #15 */
+		BUILD_HANDLER(mdmx,mdmx,sti,silent)		/* #22 */
+		BUILD_HANDLER(watch,watch,sti,silent)		/* #23 */
+		BUILD_HANDLER(mcheck,mcheck,cli,silent)		/* #24 */
+		BUILD_HANDLER(reserved,reserved,sti,silent)	/* others */
 
-/*
- * Exception handler table with 32 entries.
- * This might be extended to handle software exceptions
- */
-		.bss
-		.align	PTRLOG
-EXPORT(exception_handlers)
-		.fill	32,PTRSIZE,0
-
-/*
- * Interrupt handler table with 16 entries.
- */
-EXPORT(IRQ_vectors)
-		.fill	16,PTRSIZE,0
+		.set	pop
 
 /*
  * Table of syscalls
@@ -281,31 +245,43 @@ EXPORT(IRQ_vectors)
 		.data
 		.align	PTRLOG
 EXPORT(sys_call_table)
-		/*
-		 * Reserved space for all the SVR4, SVR, BSD43 and POSIX
-		 * flavoured syscalls.
-		 */
-		.space	(__NR_Linux)*PTRSIZE
-
-		/*
-		 * Linux flavoured syscalls.
-		 */
 #define SYS(call, narg) PTR call
+
+		/* Reserved space for all SVR4 syscalls. */
+		.space	(1000)*PTRSIZE
+
+#ifdef CONFIG_BINFMT_IRIX
+		/* 32bit IRIX5 system calls. */
+#include "irix5sys.h"
+#else
+		.space	(1000)*PTRSIZE		/* No IRIX syscalls */
+#endif
+
+		/* Reserved space for all the BSD43 and POSIX syscalls. */
+		.space	(2000)*PTRSIZE
+
+		/* Linux flavoured syscalls. */
 #include "syscalls.h"
 
 /*
  * Number of arguments of each syscall
  */
 EXPORT(sys_narg_table)
-		/*
-		 * Reserved space for all the SVR4, SVR, BSD43 and POSIX
-		 * flavoured syscalls.
-		 */
-		.space	(__NR_Linux)
-
-		/*
-		 * Linux flavoured syscalls.
-		 */
 #undef SYS
 #define SYS(call, narg) .byte narg
+
+		/* Reserved space for all SVR4 flavoured syscalls. */
+		.space	(1000)
+
+#ifdef CONFIG_BINFMT_IRIX
+		/* 32bit IRIX5 system calls. */
+#include "irix5sys.h"
+#else
+		.space	(1000)			/* No IRIX syscalls */
+#endif
+
+		/* Reserved space for all the BSD43 and POSIX syscalls. */
+		.space	(2000)
+
+		/* Linux flavoured syscalls. */
 #include "syscalls.h"

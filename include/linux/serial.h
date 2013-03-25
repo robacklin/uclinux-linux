@@ -10,21 +10,45 @@
 #ifndef _LINUX_SERIAL_H
 #define _LINUX_SERIAL_H
 
+#ifdef __KERNEL__
+#include <asm/page.h>
+
+/*
+ * Counters of the input lines (CTS, DSR, RI, CD) interrupts
+ */
+
+struct async_icount {
+	__u32	cts, dsr, rng, dcd, tx, rx;
+	__u32	frame, parity, overrun, brk;
+	__u32	buf_overrun;
+};
+
+/*
+ * The size of the serial xmit buffer is 1 page, or 4096 bytes
+ */
+#define SERIAL_XMIT_SIZE PAGE_SIZE
+
+#endif
+
 struct serial_struct {
 	int	type;
 	int	line;
-	int	port;
+	unsigned int	port;
 	int	irq;
 	int	flags;
 	int	xmit_fifo_size;
 	int	custom_divisor;
 	int	baud_base;
 	unsigned short	close_delay;
-	char	reserved_char[2];
+	char	io_type;
+	char	reserved_char[1];
 	int	hub6;
 	unsigned short	closing_wait; /* time to wait before closing */
 	unsigned short	closing_wait2; /* no longer used... */
-	int	reserved[4];
+	unsigned char	*iomem_base;
+	unsigned short	iomem_reg_shift;
+	unsigned int	port_high;
+	int	reserved[1];
 };
 
 /*
@@ -42,10 +66,35 @@ struct serial_struct {
 #define PORT_16450	2
 #define PORT_16550	3
 #define PORT_16550A	4
-#define PORT_CIRRUS     5
+#define PORT_CIRRUS     5	/* usurped by cyclades.c */
 #define PORT_16650	6
-#define PORT_STARTECH	7
-#define PORT_MAX	7
+#define PORT_16650V2	7
+#define PORT_16750	8
+#define PORT_STARTECH	9	/* usurped by cyclades.c */
+#define PORT_16C950	10	/* Oxford Semiconductor */
+#define PORT_16654	11
+#define PORT_16850	12
+#define PORT_RSA	13	/* RSA-DV II/S card */
+#define PORT_XSCALE	14
+#define PORT_DSC21	15
+#define PORT_C5471	16
+#define PORT_DM270	17
+#define PORT_MAX	17
+
+#define SERIAL_IO_PORT	0
+#define SERIAL_IO_HUB6	1
+#define SERIAL_IO_MEM	2
+#define SERIAL_IO_MEMHI	3
+
+struct serial_uart_config {
+	char	*name;
+	int	dfl_xmit_fifo_size;
+	int	flags;
+};
+
+#define UART_CLEAR_FIFO		0x01
+#define UART_USE_FIFO		0x02
+#define UART_STARTECH		0x04
 
 /*
  * Definitions for async_struct (and serial_struct) flags field
@@ -56,7 +105,7 @@ struct serial_struct {
 #define ASYNC_SAK	0x0004	/* Secure Attention Key (Orange book) */
 #define ASYNC_SPLIT_TERMIOS 0x0008 /* Separate termios for dialin/callout */
 
-#define ASYNC_SPD_MASK	0x0030
+#define ASYNC_SPD_MASK	0x1030
 #define ASYNC_SPD_HI	0x0010	/* Use 56000 instead of 38400 bps */
 
 #define ASYNC_SPD_VHI	0x0020  /* Use 115200 instead of 38400 bps */
@@ -68,8 +117,20 @@ struct serial_struct {
 #define ASYNC_PGRP_LOCKOUT    0x0200 /* Lock out cua opens based on pgrp */
 #define ASYNC_CALLOUT_NOHUP   0x0400 /* Don't do hangups for cua device */
 
-#define ASYNC_FLAGS	0x0FFF	/* Possible legal async flags */
-#define ASYNC_USR_MASK 0x0430	/* Legal flags that non-privileged
+#define ASYNC_HARDPPS_CD	0x0800	/* Call hardpps when CD goes high  */
+
+#define ASYNC_SPD_SHI	0x1000	/* Use 230400 instead of 38400 bps */
+#define ASYNC_SPD_WARP	0x1010	/* Use 460800 instead of 38400 bps */
+
+#define ASYNC_LOW_LATENCY 0x2000 /* Request low latency behaviour */
+
+#define ASYNC_BUGGY_UART  0x4000 /* This is a buggy UART, skip some safety
+				  * checks.  Note: can be dangerous! */
+
+#define ASYNC_AUTOPROBE	 0x8000 /* Port was autoprobed by PCI or PNP code */
+
+#define ASYNC_FLAGS	0x7FFF	/* Possible legal async flags */
+#define ASYNC_USR_MASK	0x3430	/* Legal flags that non-privileged
 				 * users can set or reset */
 
 /* Internal flags used only by kernel/chr_drv/serial.c */
@@ -80,8 +141,12 @@ struct serial_struct {
 #define ASYNC_CLOSING		0x08000000 /* Serial port is closing */
 #define ASYNC_CTS_FLOW		0x04000000 /* Do CTS flow control */
 #define ASYNC_CHECK_CD		0x02000000 /* i.e., CLOCAL */
-#define ASYNC_SHARE_IRQ		0x01000000 /* for multifunction cards */
-#define ASYNC_PCI           0x00800000 /* this port is on a PCI board */
+#define ASYNC_SHARE_IRQ		0x01000000 /* for multifunction cards
+					     --- no longer used */
+#define ASYNC_CONS_FLOW		0x00800000 /* flow control for console  */
+
+#define ASYNC_BOOT_ONLYMCA	0x00400000 /* Probe only if MCA bus */
+#define ASYNC_INTERNAL_FLAGS	0xFFC00000 /* Internal flags */
 
 /*
  * Multiport serial configuration structure --- external structure
@@ -106,140 +171,23 @@ struct serial_multiport_struct {
  */
 struct serial_icounter_struct {
 	int cts, dsr, rng, dcd;
-	int reserved[16];
+	int rx, tx;
+	int frame, overrun, parity, brk;
+	int buf_overrun;
+	int reserved[9];
 };
 
 
 #ifdef __KERNEL__
-/*
- * This is our internal structure for each serial port's state.
- * 
- * Many fields are paralleled by the structure used by the serial_struct
- * structure.
- *
- * For definitions of the flags field, see tty.h
- */
-
-#include <linux/termios.h>
-#include <linux/tqueue.h>
-
-/*
- * Counters of the input lines (CTS, DSR, RI, CD) interrupts
- */
-struct async_icount {
-	__u32	cts, dsr, rng, dcd;	
-};
-
-struct async_struct {
-	int			magic;
-	int			baud_base;
-	int			port;
-	int			irq;
-	int			flags; 		/* defined in tty.h */
-	int			hub6;		/* HUB6 plus one */
-	int			type; 		/* UART type */
-	struct tty_struct 	*tty;
-	int			read_status_mask;
-	int			ignore_status_mask;
-	int			timeout;
-	int			xmit_fifo_size;
-	int			custom_divisor;
-	int			x_char;	/* xon/xoff character */
-	int			close_delay;
-	unsigned short		closing_wait;
-	unsigned short		closing_wait2;
-	int			IER; 	/* Interrupt Enable Register */
-	int			MCR; 	/* Modem control register */
-	int			MCR_noint; /* MCR with interrupts off */
-	unsigned long		event;
-	unsigned long		last_active;
-	int			line;
-	int			count;	    /* # of fd on device */
-	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
-	unsigned char 		*xmit_buf;
-	int			xmit_head;
-	int			xmit_tail;
-	int			xmit_cnt;
-	struct tq_struct	tqueue;
-	struct tq_struct	tqueue_hangup;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
-	struct wait_queue	*open_wait;
-	struct wait_queue	*close_wait;
-	struct wait_queue	*delta_msr_wait;
-	struct async_icount	icount;	/* kernel counters for the 4 input interrupts */
-	struct async_struct	*next_port; /* For the linked list */
-	struct async_struct	*prev_port;
-};
-
-#define SERIAL_MAGIC 0x5301
-
-/*
- * The size of the serial xmit buffer is 1 page, or 4096 bytes
- */
-#define SERIAL_XMIT_SIZE 4096
-
-/*
- * Events are used to schedule things to happen at timer-interrupt
- * time, instead of at rs interrupt time.
- */
-#define RS_EVENT_WRITE_WAKEUP	0
-
-/*
- * Multiport serial configuration structure --- internal structure
- */
-struct rs_multiport_struct {
-	int		port1;
-	unsigned char	mask1, match1;
-	int		port2;
-	unsigned char	mask2, match2;
-	int		port3;
-	unsigned char	mask3, match3;
-	int		port4;
-	unsigned char	mask4, match4;
-	int		port_monitor;
-};
-
-/*
- * PCI board base -- internal structure 
- */
-
-/*
- * There are four config spaces on a PCI board. Which ones house the
- * serial chips?
- */
-
-enum pci_spc {
-  pci_space_0 = 1,  
-  pci_space_1 = 2,
-  pci_space_2 = 4,  
-  pci_space_3 = 8
-};
-
-struct pci_struct {
-  int start;                        /* IO Base for this chip */
-  struct pci_serial_boards *type;   /* Pointer to the board type */
-};
-
-struct pci_serial_boards {
-  int vendor_id;          /* Vendor of the Board */
-  int device_id;          /* Device ID */
-  char *board_name;       /* Name of the Board */
-  int board_type;         /* Which chip is on the board */
-  enum pci_spc pci_space; /* How many PCI spaces should be mapped in? */
-  int dev_per_space;      /* How many chips are in every PCI space */
-  int dev_spacing;        /* What spacing are they located? */ 
-  int io_size;            /* Size of the Register IO Space */
-  int baud_base;          /* What crystal is on the board */
-};
-
-
-
-
 /* Export to allow PCMCIA to use this - Dave Hinds */
 extern int register_serial(struct serial_struct *req);
 extern void unregister_serial(int line);
+
+/* Allow complicated architectures to specify rs_table[] at run time */
+extern int early_serial_setup(struct serial_struct *req);
+
+/* tty port reserved for the HCDP serial console port */
+#define HCDP_SERIAL_CONSOLE_PORT	4
+
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

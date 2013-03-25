@@ -1,36 +1,46 @@
 /*
- * uclinux/include/asm-armnommu/arch-atmel/a.out.h
+ * linux/include/asm-armnommu/arch-atmel/io.h
  *
+ * Copyright (C) 1997-1999 Russell King
+ *
+ * Modifications:
+ *  06-12-1997	RMK	Created.
+ *  07-04-1999	RMK	Major cleanup
+ *  02-19-2001  gjm     Leveraged for armnommu/dsc21
  */
 #ifndef __ASM_ARM_ARCH_IO_H
 #define __ASM_ARM_ARCH_IO_H
 
-#undef ARCH_IO_DELAY
+/*
+ * kernel/resource.c uses this to initialize the global ioport_resource struct
+ * which is used in all calls to request_resource(), allocate_resource(), etc.
+ * --gmcnutt
+ */
+#define IO_SPACE_LIMIT 0xffffffff
 
-#define outb_t(v,p) (*(volatile unsigned char *)(p) = (v))
-#define outl_t(v,p) (*(volatile unsigned long *)(p) = (v))
-#define inb_t(p)    (*(volatile unsigned char *)(p))
-#define inl_t(p)    (*(volatile unsigned long *)(p))
+/*
+ * If we define __io then asm/io.h will take care of most of the inb & friends
+ * macros. It still leaves us some 16bit macros to deal with ourselves, though.
+ * We don't have PCI or ISA on the dsc21 so I dropped __mem_pci & __mem_isa.
+ * --gmcnutt
+ */
+#define __io(a) (CONFIG_IO16_BASE + (a))
+#define __iob(a) (CONFIG_IO8_BASE + (a))	// byte io address
+#define __mem_pci(a)	((unsigned long)(a))	 
 
-#define outw_t(v,p) (*(volatile unsigned short *)(p) = (v))
-#define inw_t(p)    (*(volatile unsigned short *)(p))
+#define __arch_getw(a) (*(volatile unsigned short *)(a))
+#define __arch_putw(v,a) (*(volatile unsigned short *)(a) = (v))
 
-extern __inline__ void __outb (unsigned int value, unsigned int port) { outb_t(value,port); }
-extern __inline__ void __outw (unsigned int value, unsigned int port) { outw_t(value,port); }
-extern __inline__ void __outl (unsigned int value, unsigned int port) { outl_t(value,port); }
+/*
+ * Defining these two gives us ioremap for free. See asm/io.h.
+ * --gmcnutt
+ */
+#define iomem_valid_addr(iomem,sz) (1)
+#define iomem_to_phys(iomem) (iomem)
 
-#define DECLARE_DYN_IN(sz,fnsuffix,instr)     \
-extern __inline__ unsigned sz __in##fnsuffix (unsigned int port) { return in##fnsuffix##_t(port); }
-
-DECLARE_DYN_IN(char,b,"b")
-DECLARE_DYN_IN(short,w,"")
-DECLARE_DYN_IN(long,l,"")
-
-#undef DECLARE_DYN_IN
-
-#define __outbc(value,port) outb_t(value,port)
-
-#define __outwc(value,port) outw_t(value,port)
-#define __outlc(value,port) outl_t(value,port)
+#ifdef CONFIG_CPU_BIG_ENDIAN
+#define __io_noswap 1
+#endif
 
 #endif
+

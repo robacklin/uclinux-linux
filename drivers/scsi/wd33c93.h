@@ -2,7 +2,7 @@
  *    wd33c93.h -  Linux device driver definitions for the
  *                 Commodore Amiga A2091/590 SCSI controller card
  *
- *    IMPORTANT: This file is for version 1.21 - 20/Mar/1996
+ *    IMPORTANT: This file is for version 1.25 - 09/Jul/1997
  *
  * Copyright (c) 1996 John Shifflett, GeoLog Consulting
  *    john@geolog.com
@@ -19,10 +19,24 @@
  * GNU General Public License for more details.
  *
  */
-
 #ifndef WD33C93_H
 #define WD33C93_H
 
+#define PROC_INTERFACE     /* add code for /proc/scsi/wd33c93/xxx interface */
+#ifdef  PROC_INTERFACE
+#define PROC_STATISTICS    /* add code for keeping various real time stats */
+#endif
+
+#define SYNC_DEBUG         /* extra info on sync negotiation printed */
+#define DEBUGGING_ON       /* enable command-line debugging bitmask */
+#define DEBUG_DEFAULTS 0   /* default debugging bitmask */
+
+
+#ifdef DEBUGGING_ON
+#define DB(f,a) if (hostdata->args & (f)) a;
+#else
+#define DB(f,a)
+#endif
 
 #define uchar unsigned char
 
@@ -172,9 +186,8 @@
 
    /* This is what the 3393 chip looks like to us */
 typedef struct {
-   volatile unsigned char   SASR;
-   char                     pad;
-   volatile unsigned char   SCMD;
+   volatile unsigned char  *SASR;
+   volatile unsigned char  *SCMD;
 } wd33c93_regs;
 
 
@@ -183,7 +196,9 @@ typedef void (*dma_stop_t) (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
              int status);
 
 
-#define DEFAULT_SX_PER   500     /* (ns) fairly safe */
+#define ILLEGAL_STATUS_BYTE   0xff
+
+#define DEFAULT_SX_PER   376     /* (ns) fairly safe */
 #define DEFAULT_SX_OFF   0       /* aka async */
 
 #define OPTIMUM_SX_PER   252     /* (ns) best we can do (mult-of-4) */
@@ -201,16 +216,17 @@ struct sx_period {
 
 struct WD33C93_hostdata {
     struct Scsi_Host *next;
-    wd33c93_regs     *regp;
+    wd33c93_regs     regs;
     uchar            clock_freq;
     uchar            chip;             /* what kind of wd33c93? */
     uchar            microcode;        /* microcode rev */
+    uchar            dma_buffer_pool;  /* FEF: buffer from chip_ram? */
     int              dma_dir;          /* data transfer dir. */
     dma_setup_t      dma_setup;
     dma_stop_t       dma_stop;
+    unsigned int     dma_xfer_mask;
     uchar            *dma_bounce_buffer;
     unsigned int     dma_bounce_len;
-    uchar            dma_buffer_pool;  /* FEF: buffer from chip_ram? */
     volatile uchar   busy[8];          /* index = target, bit = lun */
     volatile Scsi_Cmnd *input_Q;       /* commands waiting to be started */
     volatile Scsi_Cmnd *selecting;     /* trying to select this command */
@@ -229,8 +245,17 @@ struct WD33C93_hostdata {
     uchar            sync_xfer[8];     /* sync_xfer reg settings per target */
     uchar            sync_stat[8];     /* status of sync negotiation per target */
     uchar            no_sync;          /* bitmask: don't do sync on these targets */
-#if 0
+    uchar            no_dma;           /* set this flag to disable DMA */
+#ifdef PROC_INTERFACE
     uchar            proc;             /* bitmask: what's in proc output */
+#ifdef PROC_STATISTICS
+    unsigned long    cmd_cnt[8];       /* # of commands issued per target */
+    unsigned long    int_cnt;          /* # of interrupts serviced */
+    unsigned long    pio_cnt;          /* # of pio data transfers */
+    unsigned long    dma_cnt;          /* # of DMA data transfers */
+    unsigned long    disc_allowed_cnt[8]; /* # of disconnects allowed per target */
+    unsigned long    disc_done_cnt[8]; /* # of disconnects done per target*/
+#endif
 #endif
     };
 
@@ -294,7 +319,7 @@ struct WD33C93_hostdata {
 
 #define PR_VERSION   1<<0
 #define PR_INFO      1<<1
-#define PR_TOTALS    1<<2
+#define PR_STATISTICS 1<<2
 #define PR_CONNECTED 1<<3
 #define PR_INPUTQ    1<<4
 #define PR_DISCQ     1<<5
@@ -302,21 +327,13 @@ struct WD33C93_hostdata {
 #define PR_STOP      1<<7
 
 
-void wd33c93_init (struct Scsi_Host *instance, wd33c93_regs *regs,
+void wd33c93_init (struct Scsi_Host *instance, const wd33c93_regs regs,
          dma_setup_t setup, dma_stop_t stop, int clock_freq);
 int wd33c93_abort (Scsi_Cmnd *cmd);
 int wd33c93_queuecommand (Scsi_Cmnd *cmd, void (*done)(Scsi_Cmnd *));
 void wd33c93_intr (struct Scsi_Host *instance);
 int wd33c93_proc_info(char *, char **, off_t, int, int, int);
-
-#if LINUX_VERSION_CODE >= 0x010300
 int wd33c93_reset (Scsi_Cmnd *, unsigned int);
-#else
-int wd33c93_reset (Scsi_Cmnd *);
-#endif
-
-#if 0
-struct proc_dir_entry proc_scsi_wd33c93;
-#endif
+void wd33c93_release(void);
 
 #endif /* WD33C93_H */

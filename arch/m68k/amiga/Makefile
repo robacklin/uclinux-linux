@@ -8,12 +8,11 @@
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
 O_TARGET := amiga.o
-O_OBJS	 := config.o amikeyb.o amiints.o \
-	   chipram.o amisound.o amifb.o zorro.o
-OX_OBJS = ksyms.o
 
-ifdef CONFIG_FB_CYBER
-O_OBJS := $(O_OBJS) cyberfb.o
-endif
+export-objs	:= amiga_ksyms.o
+
+obj-y		:= config.o amiints.o cia.o chipram.o amisound.o amiga_ksyms.o
+
+obj-$(CONFIG_AMIGA_PCMCIA)	+= pcmcia.o
 
 include $(TOPDIR)/Rules.make

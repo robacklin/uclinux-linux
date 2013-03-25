@@ -1,4 +1,4 @@
-/* $Id: wof.S,v 1.1.1.1 1999-11-22 03:47:41 christ Exp $
+/* $Id: wof.S,v 1.40 2000/01/08 16:38:18 anton Exp $
  * wof.S: Sparc window overflow handler.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -62,7 +62,7 @@ spnwin_patch3_7win:	and	%twin_tmp, 0x7f, %twin_tmp
 	 * andcc %l0, PSR_PS, %g0
 	 */
 
-	/* Datum current->tss.uwinmask contains at all times a bitmask
+	/* Datum current->thread.uwinmask contains at all times a bitmask
 	 * where if any user windows are active, at least one bit will
 	 * be set in to mask.  If no user windows are active, the bitmask
 	 * will be all zeroes.
@@ -92,14 +92,14 @@ spnwin_patch2:	and	%glob_tmp, 0xff, %glob_tmp
 	LOAD_CURRENT(curptr, twin_tmp)
 
 	andcc	%t_psr, PSR_PS, %g0
-	be	spwin_fromuser				! all user wins, branch
-	 nop
+	be,a	spwin_fromuser				! all user wins, branch
+	 save	%g0, %g0, %g0				! Go where saving will occur
 	
 	/* See if any user windows are active in the set. */
-	ld	[%curptr + THREAD_UMASK], %twin_tmp	! grab win mask
+	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %twin_tmp	! grab win mask
 	orcc	%g0, %twin_tmp, %g0			! check for set bits
 	bne	spwin_exist_uwins			! yep, there are some
-	 nop
+	 andn	%twin_tmp, %glob_tmp, %twin_tmp		! compute new umask
 
 	/* Save into the window which must be saved and do it.
 	 * Basically if we are here, this means that we trapped
@@ -108,7 +108,6 @@ spnwin_patch2:	and	%glob_tmp, 0xff, %glob_tmp
 	 */
 	save	%g0, %g0, %g0		! save into the window to stash away
 	wr	%glob_tmp, 0x0, %wim	! set new %wim, this is safe now
-	WRITE_PAUSE			! burn cpu cycles due to bad engineering
 
 spwin_no_userwins_from_kernel:
 	/* LOCATION: Window to be saved */
@@ -140,16 +139,12 @@ spwin_exist_uwins:
 	 * But first, store the new user window mask calculated
 	 * above.
 	 */
-	andn	%twin_tmp, %glob_tmp, %twin_tmp		! compute new umask
-	st	%twin_tmp, [%curptr + THREAD_UMASK]
-
-spwin_fromuser:
-	/* LOCATION: Trap window */
+	st	%twin_tmp, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
 	save	%g0, %g0, %g0		! Go to where the saving will occur
 
+spwin_fromuser:
 	/* LOCATION: Window to be saved */
 	wr	%glob_tmp, 0x0, %wim	! Now it is safe to set new %wim
-	WRITE_PAUSE			! burn baby burn
 
 	/* LOCATION: Window to be saved */
 
@@ -192,6 +187,7 @@ spwin_finish_up:
 	/* Restore saved globals */
 	mov	%saved_g5, %g5
 	mov	%saved_g6, %g6
+
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 	jmp	%t_pc
@@ -216,15 +212,15 @@ spwin_user_stack_is_bolixed:
 	/* Oh well, throw this one window into the per-task window
 	 * buffer, the first one.
 	 */
-	st	%sp, [%curptr + THREAD_STACK_PTRS]
-	STORE_WINDOW(curptr + THREAD_REG_WINDOW)
+	st	%sp, [%curptr + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
+	STORE_WINDOW(curptr + AOFF_task_thread + AOFF_thread_reg_window)
 	restore	%g0, %g0, %g0
 
 	/* LOCATION: Trap Window */
 
 	/* Back in the trap window, update winbuffer save count. */
 	mov	1, %glob_tmp
-	st	%glob_tmp, [%curptr + THREAD_W_SAVED]
+	st	%glob_tmp, [%curptr + AOFF_task_thread + AOFF_thread_w_saved]
 
 		/* Compute new user window mask.  What we are basically
 		 * doing is taking two windows, the invalid one at trap
@@ -236,22 +232,26 @@ spwin_user_stack_is_bolixed:
 		or	%twin_tmp, %t_wim, %twin_tmp
 		not	%twin_tmp
 spnwin_patch3:	and	%twin_tmp, 0xff, %twin_tmp	! patched on 7win Sparcs
-		st	%twin_tmp, [%curptr + THREAD_UMASK]
+		st	%twin_tmp, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
 
-	/* Jump onto kernel stack for this process... */
-	ld	[%curptr + TASK_SAVED_KSTACK], %sp
+#define STACK_OFFSET (TASK_UNION_SIZE - TRACEREG_SZ - STACKFRAME_SZ)
+
+	sethi	%hi(STACK_OFFSET), %sp
+	or	%sp, %lo(STACK_OFFSET), %sp
+	add	%curptr, %sp, %sp
 
 	/* Restore the saved globals and build a pt_regs frame. */
 	mov	%saved_g5, %g5
 	mov	%saved_g6, %g6
 	STORE_PT_ALL(sp, t_psr, t_pc, t_npc, g1)
 
-	ENTER_SYSCALL
+	sethi	%hi(STACK_OFFSET), %g6
+	or	%g6, %lo(STACK_OFFSET), %g6
+	sub	%sp, %g6, %g6
 
 	/* Turn on traps and call c-code to deal with it. */
 	wr	%t_psr, PSR_ET, %psr
-	WRITE_PAUSE
-
+	nop
 	call	C_LABEL(window_overflow_fault)
 	 nop
 
@@ -260,7 +260,7 @@ spnwin_patch3:	and	%twin_tmp, 0xff, %twin_tmp	! patched on 7win Sparcs
 	 * be given the look of death from Commander Peanut.
 	 */
 	b	ret_trap_entry
-	 nop
+	 clr	%l6
 
 spwin_bad_ustack_from_kernel:
 	/* LOCATION: Window to be saved */
@@ -277,7 +277,8 @@ spwin_bad_ustack_from_kernel:
 	/* LOCATION: Trap window */
 
 	/* Restore globals, condition codes in the %psr and
-	 * return from trap.
+	 * return from trap.  Note, restoring %g6 when returning
+	 * to kernel mode is not necessarily these days. ;-)
 	 */
 	mov	%saved_g5, %g5
 	mov	%saved_g6, %g6
@@ -315,7 +316,8 @@ C_LABEL(spwin_sun4c_stackchk):
 	be	1f
 	 sra	%sp, 29, %glob_tmp
 
-	b	spwin_user_stack_is_bolixed
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4
 	 nop
 
 1:
@@ -324,7 +326,8 @@ C_LABEL(spwin_sun4c_stackchk):
 	be	1f
 	 and	%sp, 0xfff, %glob_tmp		! delay slot
 
-	b	spwin_user_stack_is_bolixed
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4
 	 nop
 
 	/* See if our dump area will be on more than one
@@ -343,7 +346,8 @@ spwin_sun4c_twopages:
 	be	1f
 	 add	%sp, 0x38, %glob_tmp	/* Is second page in vma hole? */
 
-	b	spwin_user_stack_is_bolixed
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4
 	 nop
 
 1:
@@ -353,7 +357,8 @@ spwin_sun4c_twopages:
 	be	1f
 	 add	%sp, 0x38, %glob_tmp
 
-	b	spwin_user_stack_is_bolixed
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4
 	 nop
 
 1:
@@ -365,7 +370,8 @@ spwin_sun4c_onepage:
 	be	spwin_good_ustack			! success
 	 nop
 
-	b	spwin_user_stack_is_bolixed
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4
 	 nop
 
 	/* This is a generic SRMMU routine.  As far as I know this
@@ -389,7 +395,7 @@ C_LABEL(spwin_srmmu_stackchk):
 	 */
 	/* Check results of callers andcc %sp, 0x7, %g0 */
 	bne	spwin_user_stack_is_bolixed
-	 sethi	%hi(KERNBASE), %glob_tmp
+	 sethi   %hi(PAGE_OFFSET), %glob_tmp
 	cmp	%glob_tmp, %sp
 	bleu	spwin_user_stack_is_bolixed
 	 mov	AC_M_SFSR, %glob_tmp
@@ -414,8 +420,9 @@ C_LABEL(spwin_srmmu_stackchk):
 	mov	AC_M_SFSR, %glob_tmp
 	lda	[%glob_tmp] ASI_M_MMUREGS, %glob_tmp
 	andcc	%glob_tmp, 0x2, %g0			! did we fault?
-	be	spwin_finish_up				! cool beans, success
-	 nop
+	be,a	spwin_finish_up + 0x4			! cool beans, success
+	 restore %g0, %g0, %g0
 
-	b	spwin_user_stack_is_bolixed		! we faulted, ugh
+	rd	%psr, %glob_tmp
+	b	spwin_user_stack_is_bolixed + 0x4	! we faulted, ugh
 	 nop

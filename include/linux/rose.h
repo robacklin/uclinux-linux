@@ -24,7 +24,7 @@
 #define	SIOCRSL2CALL		(SIOCPROTOPRIVATE+2)
 #define	SIOCRSSL2CALL		(SIOCPROTOPRIVATE+2)
 #define	SIOCRSACCEPT		(SIOCPROTOPRIVATE+3)
-#define	SIOCRSCLRRT			(SIOCPROTOPRIVATE+4)
+#define	SIOCRSCLRRT		(SIOCPROTOPRIVATE+4)
 #define	SIOCRSGL2CALL		(SIOCPROTOPRIVATE+5)
 #define	SIOCRSGFACILITIES	(SIOCPROTOPRIVATE+6)
 
@@ -40,19 +40,19 @@
 #define	ROSE_SHIP_ABSENT	0x39
 
 typedef struct {
-	char			rose_addr[5];
+	char		rose_addr[5];
 } rose_address;
 
 struct sockaddr_rose {
-	unsigned short	srose_family;
+	sa_family_t	srose_family;
 	rose_address	srose_addr;
 	ax25_address	srose_call;
-	unsigned int	srose_ndigis;
+	int		srose_ndigis;
 	ax25_address	srose_digi;
 };
 
 struct full_sockaddr_rose {
-	unsigned short	srose_family;
+	sa_family_t	srose_family;
 	rose_address	srose_addr;
 	ax25_address	srose_call;
 	unsigned int	srose_ndigis;
@@ -63,7 +63,7 @@ struct rose_route_struct {
 	rose_address	address;
 	unsigned short	mask;
 	ax25_address	neighbour;
-	char			device[16];
+	char		device[16];
 	unsigned char	ndigis;
 	ax25_address	digipeaters[AX25_MAX_DIGIS];
 };
@@ -83,6 +83,5 @@ struct rose_facilities_struct {
 	rose_address	fail_addr;
 	ax25_address	fail_call;
 };
-
 
 #endif

@@ -17,11 +17,13 @@
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/page.h>
 #include <asm/nios.h>
+#include <asm/hardirq.h>
 
 /* assembler routines */
 asmlinkage void system_call(void);
@@ -46,6 +48,11 @@ volatile unsigned int num_spurious;
 #define NUM_IRQ_NODES 16
 static irq_node_t nodes[NUM_IRQ_NODES];
 
+void __init init_irq_proc(void)
+{
+	/* Insert /proc/irq driver here */
+}
+
 /*
  * void init_IRQ(void)
  *
@@ -57,7 +64,7 @@ static irq_node_t nodes[NUM_IRQ_NODES];
  * the IRQ handling routines.
  */
 
-void init_IRQ(void)
+void __init init_IRQ(void)
 {
 	int i;
 	unsigned int *vectorTable;
@@ -72,7 +79,7 @@ void init_IRQ(void)
 //	_ramvec[3] = 0;					/* breakpoint  */
 //	_ramvec[4] = 0;					/* single step */
 //	_ramvec[5] = 0;					/* GDB start   */
-//	_ramvec[6] = 0;					/* binfmt_flat_debug_flag */
+//      _ramvec[6] = 0;                                 /* binfmt_flat_debug_flag */
 	vectorTable[7] = bad_trap_handler;
 //	_ramvec[8] = 0;					/* debug/trace */
 
@@ -184,8 +191,8 @@ void disable_irq(unsigned int irq)
 asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 {
 	/* give the machine specific code a crack at it first */
-
-	kstat.interrupts[vec]++;
+	irq_enter(0, irq);
+	kstat.irqs[0][vec]++;
 	if (irq_list[vec].handler) {
 		irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
 	} else
@@ -201,6 +208,11 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 		panic("No interrupt handler for level %ld\n", vec);
   #endif
 #endif
+
+	irq_exit(0, irq);
+	if (softirq_pending(0))
+		do_softirq();
+
 }
 
 int get_irq_list(char *buf)
@@ -211,7 +223,7 @@ int get_irq_list(char *buf)
 	for (i = 0; i < SYS_IRQS; i++) {
 		if (irq_list[i].handler) {
 			len += sprintf(buf+len, "auto %2d: %10u ", i,
-			               i ? kstat.interrupts[i] : num_spurious);
+			               i ? kstat.irqs[0][i] : num_spurious);
 			if (irq_list[i].flags & IRQ_FLG_LOCK)
 				len += sprintf(buf+len, "L ");
 			else

@@ -1,64 +1,36 @@
-/* $Id: fsm.c,v 1.1.1.1 1999-11-22 03:47:19 christ Exp $
-
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
- *              based on the teles driver from Jan den Ouden
+/* $Id: fsm.c,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
+ *
+ * Finite state machine
+ *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ *              by Kai Germaschewski <kai.germaschewski@gmx.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
- * $Log: fsm.c,v $
- * Revision 1.1.1.1  1999-11-22 03:47:19  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.4.2.5  1998/11/03 00:06:23  keil
- * certification related changes
- * fixed logging for smaller stack use
- *
- * Revision 1.4.2.4  1998/05/27 18:05:21  keil
- * HiSax 3.0
- *
- * Revision 1.4.2.3  1998/03/07 23:15:20  tsbogend
- * made HiSax working on Linux/Alpha
- *
- * Revision 1.4.2.2  1997/11/15 18:54:29  keil
- * cosmetics
- *
- * Revision 1.4.2.1  1997/10/17 22:13:49  keil
- * update to last hisax version
- *
- * Revision 1.6  1997/07/27 21:42:25  keil
- * proof Fsm routines
- *
- * Revision 1.5  1997/06/26 11:10:05  keil
- * Restart timer function added
- *
- * Revision 1.4  1997/04/06 22:56:42  keil
- * Some cosmetic changes
- *
- * Revision 1.3  1997/02/16 01:04:08  fritz
- * Bugfix: Changed timer handling caused hang with 2.1.X
- *
- * Revision 1.2  1997/01/09 20:57:27  keil
- * cleanup & FSM_TIMER_DEBUG
- *
- * Revision 1.1  1996/10/13 20:04:52  keil
- * Initial revision
- *
- *
  */
+
 #define __NO_VERSION__
+#include <linux/module.h>
+#include <linux/init.h>
 #include "hisax.h"
 
 #define FSM_TIMER_DEBUG 0
 
-HISAX_INITFUNC(void
-FsmNew(struct Fsm *fsm,
-       struct FsmNode *fnlist, int fncount))
+int __init
+FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount)
 {
 	int i;
 
 	fsm->jumpmatrix = (FSMFNPTR *)
 		kmalloc(sizeof (FSMFNPTR) * fsm->state_count * fsm->event_count, GFP_KERNEL);
+	if (!fsm->jumpmatrix)
+		return -ENOMEM;
+
 	memset(fsm->jumpmatrix, 0, sizeof (FSMFNPTR) * fsm->state_count * fsm->event_count);
 
 	for (i = 0; i < fncount; i++) 
@@ -69,6 +41,7 @@ FsmNew(struct Fsm *fsm,
 		} else		
 			fsm->jumpmatrix[fsm->state_count * fnlist[i].event +
 				fnlist[i].state] = (FSMFNPTR) fnlist[i].routine;
+	return 0;
 }
 
 void
@@ -157,7 +130,7 @@ FsmAddTimer(struct FsmTimer *ft,
 			(long) ft, millisec, where);
 #endif
 
-	if (ft->tl.next || ft->tl.prev) {
+	if (timer_pending(&ft->tl)) {
 		printk(KERN_WARNING "FsmAddTimer: timer already active!\n");
 		ft->fi->printdebug(ft->fi, "FsmAddTimer already active!");
 		return -1;
@@ -181,7 +154,7 @@ FsmRestartTimer(struct FsmTimer *ft,
 			(long) ft, millisec, where);
 #endif
 
-	if (ft->tl.next || ft->tl.prev)
+	if (timer_pending(&ft->tl))
 		del_timer(&ft->tl);
 	init_timer(&ft->tl);
 	ft->event = event;

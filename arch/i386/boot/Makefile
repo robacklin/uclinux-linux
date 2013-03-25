@@ -8,39 +8,17 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-ifdef CONFIG_KERNEL_ELF
-HOSTCFLAGS := $(HOSTCFLAGS) -D__BFD__
-endif
-
-ifdef SMP
-HOSTCFLAGS := $(HOSTCFLAGS) -D__SMP__
-endif
+BOOT_INCL =	$(TOPDIR)/include/linux/config.h \
+		$(TOPDIR)/include/linux/autoconf.h \
+		$(TOPDIR)/include/asm/boot.h
 
 zImage: $(CONFIGURE) bootsect setup compressed/vmlinux tools/build
-ifdef CONFIG_KERNEL_ELF
-	if hash $(ENCAPS) 2> /dev/null; then \
-	  $(OBJDUMP) $(OBJDUMP_FLAGS) -o $(ZIMAGE_OFFSET) compressed/vmlinux > compressed/vmlinux.out; \
-	else \
-	  $(OBJCOPY) compressed/vmlinux compressed/vmlinux.out; \
-	fi
+	$(OBJCOPY) compressed/vmlinux compressed/vmlinux.out
 	tools/build bootsect setup compressed/vmlinux.out $(ROOT_DEV) > zImage
-else
-	tools/build bootsect setup compressed/vmlinux $(ROOT_DEV) > zImage
-endif
-	sync
 
-bzImage: $(CONFIGURE) bbootsect setup compressed/bvmlinux tools/bbuild
-ifdef CONFIG_KERNEL_ELF
-	if hash $(ENCAPS) 2> /dev/null; then \
-	  $(OBJDUMP) $(OBJDUMP_FLAGS) -o $(IMAGE_OFFSET) compressed/bvmlinux > compressed/bvmlinux.out; \
-	else \
-	  $(OBJCOPY) compressed/bvmlinux compressed/bvmlinux.out; \
-	fi
-	tools/bbuild bbootsect setup compressed/bvmlinux.out $(ROOT_DEV) > bzImage
-else
-	tools/bbuild bbootsect setup compressed/bvmlinux $(ROOT_DEV) > bzImage
-endif
-	sync
+bzImage: $(CONFIGURE) bbootsect bsetup compressed/bvmlinux tools/build
+	$(OBJCOPY) compressed/bvmlinux compressed/bvmlinux.out
+	tools/build -b bbootsect bsetup compressed/bvmlinux.out $(ROOT_DEV) > bzImage
 
 compressed/vmlinux: $(TOPDIR)/vmlinux
 	@$(MAKE) -C compressed vmlinux
@@ -58,47 +36,52 @@ zlilo: $(CONFIGURE) $(BOOTIMAGE)
 	cp $(TOPDIR)/System.map $(INSTALL_PATH)/
 	if [ -x /sbin/lilo ]; then /sbin/lilo; else /etc/lilo/install; fi
 
-install: $(CONFIGURE) zImage
-	sh ./install.sh $(VERSION).$(PATCHLEVEL).$(SUBLEVEL) zImage $(TOPDIR)/System.map "$(INSTALL_PATH)"
+install: $(CONFIGURE) $(BOOTIMAGE)
+	sh -x ./install.sh $(KERNELRELEASE) $(BOOTIMAGE) $(TOPDIR)/System.map "$(INSTALL_PATH)"
 
 tools/build: tools/build.c
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $< -I$(TOPDIR)/include
 
-tools/bbuild: tools/build.c
-	$(HOSTCC) $(HOSTCFLAGS) -D__BIG_KERNEL__ -o $@ $< -I$(TOPDIR)/include
-
-setup: setup.o
-	$(LD86) -s -o $@ $<
-
-setup.o: setup.s
-	$(AS86) -o $@ $<
-
-setup.s: setup.S video.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Makefile
-	$(CPP) -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
-
 bootsect: bootsect.o
-	$(LD86) -s -o $@ $<
+	$(LD) -Ttext 0x0 -s --oformat binary -o $@ $<
 
 bootsect.o: bootsect.s
-	$(AS86) -o $@ $<
+	$(AS) -o $@ $<
 
-bootsect.s: bootsect.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Makefile
-	$(CPP) -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
+bootsect.s: bootsect.S Makefile $(BOOT_INCL)
+	$(CPP) $(CPPFLAGS) -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
 
 bbootsect: bbootsect.o
-	$(LD86) -s -o $@ $<
+	$(LD) -Ttext 0x0 -s --oformat binary $< -o $@
 
 bbootsect.o: bbootsect.s
-	$(AS86) -o $@ $<
+	$(AS) -o $@ $<
 
-bbootsect.s: bootsect.S $(CONFIGURE) $(TOPDIR)/include/linux/config.h Makefile
-	$(CPP) -D__BIG_KERNEL__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
+bbootsect.s: bootsect.S Makefile $(BOOT_INCL)
+	$(CPP) $(CPPFLAGS) -D__BIG_KERNEL__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
+
+setup: setup.o
+	$(LD) -Ttext 0x0 -s --oformat binary -e begtext -o $@ $<
+
+setup.o: setup.s
+	$(AS) -o $@ $<
+
+setup.s: setup.S video.S Makefile $(BOOT_INCL) $(TOPDIR)/include/linux/version.h $(TOPDIR)/include/linux/compile.h
+	$(CPP) $(CPPFLAGS) -D__ASSEMBLY__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
+
+bsetup: bsetup.o
+	$(LD) -Ttext 0x0 -s --oformat binary -e begtext -o $@ $<
+
+bsetup.o: bsetup.s
+	$(AS) -o $@ $<
+
+bsetup.s: setup.S video.S Makefile $(BOOT_INCL) $(TOPDIR)/include/linux/version.h $(TOPDIR)/include/linux/compile.h
+	$(CPP) $(CPPFLAGS) -D__BIG_KERNEL__ -D__ASSEMBLY__ -traditional $(SVGA_MODE) $(RAMDISK) $< -o $@
 
 dep:
 
 clean:
-	rm -f bootsect setup
-	rm -f bbootsect
-	rm -f zImage tools/build compressed/vmlinux.out
-	rm -f bzImage tools/bbuild compressed/bvmlinux.out
+	rm -f tools/build
+	rm -f setup bootsect zImage compressed/vmlinux.out
+	rm -f bsetup bbootsect bzImage compressed/bvmlinux.out
 	@$(MAKE) -C compressed clean

@@ -19,11 +19,11 @@
 
 #include <linux/signal.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
+#include "fpu_emu.h"
 #include "fpu_system.h"
 #include "exception.h"
-#include "fpu_emu.h"
 #include "status_w.h"
 #include "control_w.h"
 #include "reg_constant.h"
@@ -36,23 +36,23 @@
 
 void Un_impl(void)
 {
-  unsigned char byte1, FPU_modrm;
+  u_char byte1, FPU_modrm;
   unsigned long address = FPU_ORIG_EIP;
 
   RE_ENTRANT_CHECK_OFF;
   /* No need to verify_area(), we have previously fetched these bytes. */
   printk("Unimplemented FPU Opcode at eip=%p : ", (void *) address);
-  if ( FPU_CS == USER_CS )
+  if ( FPU_CS == __USER_CS )
     {
       while ( 1 )
 	{
-	  byte1 = get_fs_byte((unsigned char *) address);
+	  FPU_get_user(byte1, (u_char *) address);
 	  if ( (byte1 & 0xf8) == 0xd8 ) break;
 	  printk("[%02x]", byte1);
 	  address++;
 	}
       printk("%02x ", byte1);
-      FPU_modrm = get_fs_byte(1 + (unsigned char *) address);
+      FPU_get_user(FPU_modrm, 1 + (u_char *) address);
       
       if (FPU_modrm >= 0300)
 	printk("%02x (%02x+%d)\n", FPU_modrm, FPU_modrm & 0xf8, FPU_modrm & 7);
@@ -82,23 +82,23 @@ void FPU_illegal(void)
 
 
 
-void emu_printall(void)
+void FPU_printall(void)
 {
   int i;
-  static const char *tag_desc[] = { "Valid", "Zero", "ERROR", "ERROR",
-                              "DeNorm", "Inf", "NaN", "Empty" };
-  unsigned char byte1, FPU_modrm;
+  static const char *tag_desc[] = { "Valid", "Zero", "ERROR", "Empty",
+                              "DeNorm", "Inf", "NaN" };
+  u_char byte1, FPU_modrm;
   unsigned long address = FPU_ORIG_EIP;
 
   RE_ENTRANT_CHECK_OFF;
   /* No need to verify_area(), we have previously fetched these bytes. */
   printk("At %p:", (void *) address);
-  if ( FPU_CS == USER_CS )
+  if ( FPU_CS == __USER_CS )
     {
 #define MAX_PRINTED_BYTES 20
       for ( i = 0; i < MAX_PRINTED_BYTES; i++ )
 	{
-	  byte1 = get_fs_byte((unsigned char *) address);
+	  FPU_get_user(byte1, (u_char *) address);
 	  if ( (byte1 & 0xf8) == 0xd8 )
 	    {
 	      printk(" %02x", byte1);
@@ -111,7 +111,7 @@ void emu_printall(void)
 	printk(" [more..]\n");
       else
 	{
-	  FPU_modrm = get_fs_byte(1 + (unsigned char *) address);
+	  FPU_get_user(FPU_modrm, 1 + (u_char *) address);
 	  
 	  if (FPU_modrm >= 0300)
 	    printk(" %02x (%02x+%d)\n", FPU_modrm, FPU_modrm & 0xf8, FPU_modrm & 7);
@@ -141,7 +141,7 @@ if ( partial_status & SW_Overflow )    printk("SW: overflow\n");
 if ( partial_status & SW_Zero_Div )    printk("SW: divide by zero\n");
 if ( partial_status & SW_Denorm_Op )   printk("SW: denormalized operand\n");
 if ( partial_status & SW_Invalid )     printk("SW: invalid operation\n");
-#endif DEBUGGING
+#endif /* DEBUGGING */
 
   printk(" SW: b=%d st=%ld es=%d sf=%d cc=%d%d%d%d ef=%d%d%d%d%d%d\n",
 	 partial_status & 0x8000 ? 1 : 0,   /* busy */
@@ -166,29 +166,23 @@ printk(" CW: ic=%d rc=%ld%ld pc=%ld%ld iem=%d     ef=%d%d%d%d%d%d\n",
   for ( i = 0; i < 8; i++ )
     {
       FPU_REG *r = &st(i);
-      char tagi = r->tag;
+      u_char tagi = FPU_gettagi(i);
       switch (tagi)
 	{
-	case TW_Empty:
+	case TAG_Empty:
 	  continue;
 	  break;
-	case TW_Zero:
-#if 0
-	  printk("st(%d)  %c .0000 0000 0000 0000         ",
-		 i, r->sign ? '-' : '+');
-	  break;
-#endif
-	case TW_Valid:
-	case TW_NaN:
-/*	case TW_Denormal: */
-	case TW_Infinity:
-	  printk("st(%d)  %c .%04lx %04lx %04lx %04lx e%+-6ld ", i,
-		 r->sign ? '-' : '+',
+	case TAG_Zero:
+	case TAG_Special:
+	  tagi = FPU_Special(r);
+	case TAG_Valid:
+	  printk("st(%d)  %c .%04lx %04lx %04lx %04lx e%+-6d ", i,
+		 getsign(r) ? '-' : '+',
 		 (long)(r->sigh >> 16),
 		 (long)(r->sigh & 0xFFFF),
 		 (long)(r->sigl >> 16),
 		 (long)(r->sigl & 0xFFFF),
-		 r->exp - EXP_BIAS + 1);
+		 exponent(r) - EXP_BIAS + 1);
 	  break;
 	default:
 	  printk("Whoops! Error in errors.c: tag%d is %d ", i, tagi);
@@ -262,6 +256,11 @@ static struct {
 	      0x161  in reg_ld_str.c
 	      0x162  in reg_ld_str.c
 	      0x163  in reg_ld_str.c
+	      0x164  in reg_ld_str.c
+	      0x170  in fpu_tags.c
+	      0x171  in fpu_tags.c
+	      0x172  in fpu_tags.c
+	      0x180  in reg_convert.c
        0x2nn  in an *.S file:
               0x201  in reg_u_add.S
               0x202  in reg_u_div.S
@@ -292,7 +291,7 @@ static struct {
 	      0x242  in div_Xsig.S
  */
 
-void exception(int n)
+void FPU_exception(int n)
 {
   int i, int_type;
 
@@ -328,7 +327,7 @@ void exception(int n)
 #ifdef PRINT_MESSAGES
       /* My message from the sponsor */
       printk(FPU_VERSION" "__DATE__" (C) W. Metzenthen.\n");
-#endif PRINT_MESSAGES
+#endif /* PRINT_MESSAGES */
       
       /* Get a name string for error reporting */
       for (i=0; exception_names[i].type; i++)
@@ -339,7 +338,7 @@ void exception(int n)
 	{
 #ifdef PRINT_MESSAGES
 	  printk("FP Exception: %s!\n", exception_names[i].name);
-#endif PRINT_MESSAGES
+#endif /* PRINT_MESSAGES */
 	}
       else
 	printk("FPU emulator: Unknown Exception: 0x%04x!\n", n);
@@ -347,12 +346,12 @@ void exception(int n)
       if ( n == EX_INTERNAL )
 	{
 	  printk("FPU emulator: Internal error type 0x%04x\n", int_type);
-	  emu_printall();
+	  FPU_printall();
 	}
 #ifdef PRINT_MESSAGES
       else
-	emu_printall();
-#endif PRINT_MESSAGES
+	FPU_printall();
+#endif /* PRINT_MESSAGES */
 
       /*
        * The 80486 generates an interrupt on the next non-control FPU
@@ -364,29 +363,102 @@ void exception(int n)
 
 #ifdef __DEBUG__
   math_abort(FPU_info,SIGFPE);
-#endif __DEBUG__
+#endif /* __DEBUG__ */
 
 }
 
 
-/* Real operation attempted on two operands, one a NaN. */
-/* Returns nz if the exception is unmasked */
-asmlinkage int real_2op_NaN(FPU_REG const *a, FPU_REG const *b, FPU_REG *dest)
+/* Real operation attempted on a NaN. */
+/* Returns < 0 if the exception is unmasked */
+int real_1op_NaN(FPU_REG *a)
 {
-  FPU_REG const *x;
-  int signalling;
+  int signalling, isNaN;
+
+  isNaN = (exponent(a) == EXP_OVER) && (a->sigh & 0x80000000);
 
   /* The default result for the case of two "equal" NaNs (signs may
      differ) is chosen to reproduce 80486 behaviour */
-  x = a;
-  if (a->tag == TW_NaN)
+  signalling = isNaN && !(a->sigh & 0x40000000);
+
+  if ( !signalling )
     {
-      if (b->tag == TW_NaN)
+      if ( !isNaN )  /* pseudo-NaN, or other unsupported? */
+	{
+	  if ( control_word & CW_Invalid )
+	    {
+	      /* Masked response */
+	      reg_copy(&CONST_QNaN, a);
+	    }
+	  EXCEPTION(EX_Invalid);
+	  return (!(control_word & CW_Invalid) ? FPU_Exception : 0) | TAG_Special;
+	}
+      return TAG_Special;
+    }
+
+  if ( control_word & CW_Invalid )
+    {
+      /* The masked response */
+      if ( !(a->sigh & 0x80000000) )  /* pseudo-NaN ? */
+	{
+	  reg_copy(&CONST_QNaN, a);
+	}
+      /* ensure a Quiet NaN */
+      a->sigh |= 0x40000000;
+    }
+
+  EXCEPTION(EX_Invalid);
+
+  return (!(control_word & CW_Invalid) ? FPU_Exception : 0) | TAG_Special;
+}
+
+
+/* Real operation attempted on two operands, one a NaN. */
+/* Returns < 0 if the exception is unmasked */
+int real_2op_NaN(FPU_REG const *b, u_char tagb,
+		 int deststnr,
+		 FPU_REG const *defaultNaN)
+{
+  FPU_REG *dest = &st(deststnr);
+  FPU_REG const *a = dest;
+  u_char taga = FPU_gettagi(deststnr);
+  FPU_REG const *x;
+  int signalling, unsupported;
+
+  if ( taga == TAG_Special )
+    taga = FPU_Special(a);
+  if ( tagb == TAG_Special )
+    tagb = FPU_Special(b);
+
+  /* TW_NaN is also used for unsupported data types. */
+  unsupported = ((taga == TW_NaN)
+		 && !((exponent(a) == EXP_OVER) && (a->sigh & 0x80000000)))
+    || ((tagb == TW_NaN)
+	&& !((exponent(b) == EXP_OVER) && (b->sigh & 0x80000000)));
+  if ( unsupported )
+    {
+      if ( control_word & CW_Invalid )
+	{
+	  /* Masked response */
+	  FPU_copy_to_regi(&CONST_QNaN, TAG_Special, deststnr);
+	}
+      EXCEPTION(EX_Invalid);
+      return (!(control_word & CW_Invalid) ? FPU_Exception : 0) | TAG_Special;
+    }
+
+  if (taga == TW_NaN)
+    {
+      x = a;
+      if (tagb == TW_NaN)
 	{
 	  signalling = !(a->sigh & b->sigh & 0x40000000);
-	  /* find the "larger" */
-	  if ( significand(a) < significand(b) )
+	  if ( significand(b) > significand(a) )
 	    x = b;
+	  else if ( significand(b) == significand(a) )
+	    {
+	      /* The default result for the case of two "equal" NaNs (signs may
+		 differ) is chosen to reproduce 80486 behaviour */
+	      x = defaultNaN;
+	    }
 	}
       else
 	{
@@ -396,8 +468,8 @@ asmlinkage int real_2op_NaN(FPU_REG const *a, FPU_REG const *b, FPU_REG *dest)
     }
   else
 #ifdef PARANOID
-    if (b->tag == TW_NaN)
-#endif PARANOID
+    if (tagb == TW_NaN)
+#endif /* PARANOID */
     {
       signalling = !(b->sigh & 0x40000000);
       x = b;
@@ -409,35 +481,34 @@ asmlinkage int real_2op_NaN(FPU_REG const *a, FPU_REG const *b, FPU_REG *dest)
       EXCEPTION(EX_INTERNAL|0x113);
       x = &CONST_QNaN;
     }
-#endif PARANOID
+#endif /* PARANOID */
 
-  if ( !signalling )
+  if ( (!signalling) || (control_word & CW_Invalid) )
     {
+      if ( ! x )
+	x = b;
+
       if ( !(x->sigh & 0x80000000) )  /* pseudo-NaN ? */
 	x = &CONST_QNaN;
-      reg_move(x, dest);
-      return 0;
-    }
 
-  if ( control_word & CW_Invalid )
-    {
-      /* The masked response */
-      if ( !(x->sigh & 0x80000000) )  /* pseudo-NaN ? */
-	x = &CONST_QNaN;
-      reg_move(x, dest);
+      FPU_copy_to_regi(x, TAG_Special, deststnr);
+
+      if ( !signalling )
+	return TAG_Special;
+
       /* ensure a Quiet NaN */
       dest->sigh |= 0x40000000;
     }
 
   EXCEPTION(EX_Invalid);
-  
-  return !(control_word & CW_Invalid);
+
+  return (!(control_word & CW_Invalid) ? FPU_Exception : 0) | TAG_Special;
 }
 
 
 /* Invalid arith operation on Valid registers */
-/* Returns nz if the exception is unmasked */
-asmlinkage int arith_invalid(FPU_REG *dest)
+/* Returns < 0 if the exception is unmasked */
+asmlinkage int arith_invalid(int deststnr)
 {
 
   EXCEPTION(EX_Invalid);
@@ -445,28 +516,31 @@ asmlinkage int arith_invalid(FPU_REG *dest)
   if ( control_word & CW_Invalid )
     {
       /* The masked response */
-      reg_move(&CONST_QNaN, dest);
+      FPU_copy_to_regi(&CONST_QNaN, TAG_Special, deststnr);
     }
   
-  return !(control_word & CW_Invalid);
+  return (!(control_word & CW_Invalid) ? FPU_Exception : 0) | TAG_Valid;
 
 }
 
 
 /* Divide a finite number by zero */
-asmlinkage int divide_by_zero(int sign, FPU_REG *dest)
+asmlinkage int FPU_divide_by_zero(int deststnr, u_char sign)
 {
+  FPU_REG *dest = &st(deststnr);
+  int tag = TAG_Valid;
 
   if ( control_word & CW_ZeroDiv )
     {
       /* The masked response */
-      reg_move(&CONST_INF, dest);
-      dest->sign = (unsigned char)sign;
+      FPU_copy_to_regi(&CONST_INF, TAG_Special, deststnr);
+      setsign(dest, sign);
+      tag = TAG_Special;
     }
  
   EXCEPTION(EX_ZeroDiv);
 
-  return !(control_word & CW_ZeroDiv);
+  return (!(control_word & CW_ZeroDiv) ? FPU_Exception : 0) | tag;
 
 }
 
@@ -482,7 +556,7 @@ int set_precision_flag(int flags)
     }
   else
     {
-      exception(flags);
+      EXCEPTION(flags);
       return 1;
     }
 }
@@ -494,8 +568,7 @@ asmlinkage void set_precision_flag_up(void)
   if ( control_word & CW_Precision )
     partial_status |= (SW_Precision | SW_C1);   /* The masked response */
   else
-    exception(EX_Precision | SW_C1);
-
+    EXCEPTION(EX_Precision | SW_C1);
 }
 
 
@@ -508,7 +581,7 @@ asmlinkage void set_precision_flag_down(void)
       partial_status |= SW_Precision;
     }
   else
-    exception(EX_Precision);
+    EXCEPTION(EX_Precision);
 }
 
 
@@ -517,32 +590,31 @@ asmlinkage int denormal_operand(void)
   if ( control_word & CW_Denormal )
     {   /* The masked response */
       partial_status |= SW_Denorm_Op;
-      return 0;
+      return TAG_Special;
     }
   else
     {
-      exception(EX_Denormal);
-      return 1;
+      EXCEPTION(EX_Denormal);
+      return TAG_Special | FPU_Exception;
     }
 }
 
 
 asmlinkage int arith_overflow(FPU_REG *dest)
 {
+  int tag = TAG_Valid;
 
   if ( control_word & CW_Overflow )
     {
-      char sign;
       /* The masked response */
 /* ###### The response here depends upon the rounding mode */
-      sign = dest->sign;
-      reg_move(&CONST_INF, dest);
-      dest->sign = sign;
+      reg_copy(&CONST_INF, dest);
+      tag = TAG_Special;
     }
   else
     {
       /* Subtract the magic number from the exponent */
-      dest->exp -= (3 * (1 << 13));
+      addexponent(dest, (-3 * (1 << 13)));
     }
 
   EXCEPTION(EX_Overflow);
@@ -553,30 +625,36 @@ asmlinkage int arith_overflow(FPU_REG *dest)
 	 The roundup bit (C1) is also set because we have
 	 "rounded" upwards to Infinity. */
       EXCEPTION(EX_Precision | SW_C1);
-      return !(control_word & CW_Precision);
+      return tag;
     }
 
-  return 0;
+  return tag;
 
 }
 
 
 asmlinkage int arith_underflow(FPU_REG *dest)
 {
+  int tag = TAG_Valid;
 
   if ( control_word & CW_Underflow )
     {
       /* The masked response */
-      if ( dest->exp <= EXP_UNDER - 63 )
+      if ( exponent16(dest) <= EXP_UNDER - 63 )
 	{
-	  reg_move(&CONST_Z, dest);
+	  reg_copy(&CONST_Z, dest);
 	  partial_status &= ~SW_C1;       /* Round down. */
+	  tag = TAG_Zero;
+	}
+      else
+	{
+	  stdexp(dest);
 	}
     }
   else
     {
       /* Add the magic number to the exponent. */
-      dest->exp += (3 * (1 << 13));
+      addexponent(dest, (3 * (1 << 13)) + EXTENDED_Ebias);
     }
 
   EXCEPTION(EX_Underflow);
@@ -584,22 +662,22 @@ asmlinkage int arith_underflow(FPU_REG *dest)
     {
       /* The underflow exception is masked. */
       EXCEPTION(EX_Precision);
-      return !(control_word & CW_Precision);
+      return tag;
     }
 
-  return 0;
+  return tag;
 
 }
 
 
-void stack_overflow(void)
+void FPU_stack_overflow(void)
 {
 
  if ( control_word & CW_Invalid )
     {
       /* The masked response */
       top--;
-      reg_move(&CONST_QNaN, &st(0));
+      FPU_copy_to_reg0(&CONST_QNaN, TAG_Special);
     }
 
   EXCEPTION(EX_StackOver);
@@ -609,13 +687,13 @@ void stack_overflow(void)
 }
 
 
-void stack_underflow(void)
+void FPU_stack_underflow(void)
 {
 
  if ( control_word & CW_Invalid )
     {
       /* The masked response */
-      reg_move(&CONST_QNaN, &st(0));
+      FPU_copy_to_reg0(&CONST_QNaN, TAG_Special);
     }
 
   EXCEPTION(EX_StackUnder);
@@ -625,13 +703,13 @@ void stack_underflow(void)
 }
 
 
-void stack_underflow_i(int i)
+void FPU_stack_underflow_i(int i)
 {
 
  if ( control_word & CW_Invalid )
     {
       /* The masked response */
-      reg_move(&CONST_QNaN, &(st(i)));
+      FPU_copy_to_regi(&CONST_QNaN, TAG_Special, i);
     }
 
   EXCEPTION(EX_StackUnder);
@@ -641,14 +719,14 @@ void stack_underflow_i(int i)
 }
 
 
-void stack_underflow_pop(int i)
+void FPU_stack_underflow_pop(int i)
 {
 
  if ( control_word & CW_Invalid )
     {
       /* The masked response */
-      reg_move(&CONST_QNaN, &(st(i)));
-      pop();
+      FPU_copy_to_regi(&CONST_QNaN, TAG_Special, i);
+      FPU_pop();
     }
 
   EXCEPTION(EX_StackUnder);

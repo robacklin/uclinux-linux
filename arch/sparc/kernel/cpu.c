@@ -5,7 +5,9 @@
  */
 
 #include <linux/kernel.h>
-
+#include <linux/init.h>
+#include <linux/smp.h>
+#include <linux/threads.h>
 #include <asm/oplib.h>
 #include <asm/page.h>
 #include <asm/head.h>
@@ -66,6 +68,7 @@ struct cpu_fp_info linux_sparc_fpu[] = {
   { 5, 5, "reserved"},
   { 5, 6, "reserved"},
   { 5, 7, "No FPU"},
+  { 9, 3, "Fujitsu or Weitek on-chip FPU"},
 };
 
 #define NSPARCFPU  (sizeof(linux_sparc_fpu)/sizeof(struct cpu_fp_info))
@@ -75,6 +78,7 @@ struct cpu_iu_info linux_sparc_chips[] = {
   { 0, 0, "Fujitsu  MB86900/1A or LSI L64831 SparcKIT-40"},
   /* borned STP1012PGA */
   { 0, 4, "Fujitsu  MB86904"},
+  { 0, 5, "Fujitsu TurboSparc MB86907"},
   /* SparcStation2, SparcServer 490 & 690 */
   { 1, 0, "LSI Logic Corporation - L64811"},
   /* SparcStation2 */
@@ -83,12 +87,12 @@ struct cpu_iu_info linux_sparc_chips[] = {
   { 1, 3, "Cypress/ROSS CY7C611"},
   /* Ross Technologies HyperSparc */
   { 1, 0xf, "ROSS HyperSparc RT620"},
-  { 1, 0xe, "ROSS HyperSparc RT625"},
+  { 1, 0xe, "ROSS HyperSparc RT625 or RT626"},
   /* ECL Implementation, CRAY S-MP Supercomputer... AIEEE! */
   /* Someone please write the code to support this beast! ;) */
   { 2, 0, "Bipolar Integrated Technology - B5010"},
   { 3, 0, "LSI Logic Corporation - unknown-type"},
-  { 4, 0, "Texas Instruments, Inc. - SuperSparc 50"},
+  { 4, 0, "Texas Instruments, Inc. - SuperSparc-(II)"},
   /* SparcClassic  --  borned STP1010TAB-50*/
   { 4, 1, "Texas Instruments, Inc. - MicroSparc"},
   { 4, 2, "Texas Instruments, Inc. - MicroSparc II"},
@@ -100,7 +104,10 @@ struct cpu_iu_info linux_sparc_chips[] = {
   { 7, 0, "Harvest VLSI Design Center, Inc. - unknown"},
   /* Gallium arsenide 200MHz, BOOOOGOOOOMIPS!!! */
   { 8, 0, "Systems and Processes Engineering Corporation (SPEC)"},
-  { 9, 0, "Fujitsu #3"},
+  { 9, 0, "Fujitsu or Weitek Power-UP"},
+  { 9, 1, "Fujitsu or Weitek Power-UP"},
+  { 9, 2, "Fujitsu or Weitek Power-UP"},
+  { 9, 3, "Fujitsu or Weitek Power-UP"},
   { 0xa, 0, "UNKNOWN CPU-VENDOR/TYPE"},
   { 0xb, 0, "UNKNOWN CPU-VENDOR/TYPE"},
   { 0xc, 0, "UNKNOWN CPU-VENDOR/TYPE"},
@@ -111,23 +118,25 @@ struct cpu_iu_info linux_sparc_chips[] = {
 
 #define NSPARCCHIPS  (sizeof(linux_sparc_chips)/sizeof(struct cpu_iu_info))
 
-char *sparc_cpu_type[NCPUS] = { "cpu-oops", "cpu-oops1", "cpu-oops2", "cpu-oops3" };
-char *sparc_fpu_type[NCPUS] = { "fpu-oops", "fpu-oops1", "fpu-oops2", "fpu-oops3" };
+char *sparc_cpu_type[NR_CPUS] = { 0 };
+char *sparc_fpu_type[NR_CPUS] = { 0 };
 
 unsigned int fsr_storage;
 
-void
-cpu_probe(void)
+void __init cpu_probe(void)
 {
 	int psr_impl, psr_vers, fpu_vers;
-	int i, cpuid;
+	int i, cpuid, psr;
 
-	cpuid = get_cpuid();
+	cpuid = hard_smp_processor_id();
 
 	psr_impl = ((get_psr()>>28)&0xf);
 	psr_vers = ((get_psr()>>24)&0xf);
 
+	psr = get_psr();
+	put_psr(psr | PSR_EF);
 	fpu_vers = ((get_fsr()>>17)&0x7);
+	put_psr(psr);
 
 	for(i = 0; i<NSPARCCHIPS; i++) {
 		if(linux_sparc_chips[i].psr_impl == psr_impl)

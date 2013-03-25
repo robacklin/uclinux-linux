@@ -1,5 +1,5 @@
-#ifndef _H8300H_TYPES_H
-#define _H8300H_TYPES_H
+#ifndef _H8300_TYPES_H
+#define _H8300_TYPES_H
 
 /*
  * This file is never included by application software unless
@@ -47,6 +47,12 @@ typedef unsigned int u32;
 typedef signed long long s64;
 typedef unsigned long long u64;
 
+#define BITS_PER_LONG 32
+
+/* Dma addresses are 32-bits wide.  */
+
+typedef u32 dma_addr_t;
+
 #endif /* __KERNEL__ */
 
-#endif /* _H8300H_TYPES_H */
+#endif /* _H8300_TYPES_H */

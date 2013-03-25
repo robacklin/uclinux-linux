@@ -1,57 +1,57 @@
 #ifndef _PPC_PTRACE_H
 #define _PPC_PTRACE_H
 
-
 /*
  * This struct defines the way the registers are stored on the
  * kernel stack during a system call or other kernel entry.
- * Note: the "_overhead" and "_underhead" spaces are stack locations
- * used by called routines.  Because of the way the PowerPC ABI
- * specifies the function prologue/epilogue, registers can be
- * saved in stack locations which are below the current stack
- * pointer (_underhead).  If an interrupt occurs during this
- * [albeit] small time interval, registers which were saved on
- * the stack could be trashed by the interrupt save code.  The
- * "_underhead" leaves a hole just in case this happens.  It also
- * wastes 80 bytes of stack if it doesn't!  Similarly, the called
- * routine stores some information "above" the stack pointer before
- * if gets adjusted.  This is covered by the "_overhead" field
- * and [thankfully] is not totally wasted.
  *
+ * this should only contain volatile regs
+ * since we can keep non-volatile in the thread_struct
+ * should set this up when only volatiles are saved
+ * by intr code.
+ *
+ * Since this is going on the stack, *CARE MUST BE TAKEN* to insure
+ * that the overall structure is a multiple of 16 bytes in length.
+ *
+ * Note that the offsets of the fields in this struct correspond with
+ * the PT_* values below.  This simplifies arch/ppc/kernel/ptrace.c.
  */
 
+#ifndef __ASSEMBLY__
 struct pt_regs {
-	unsigned long _overhead[14]; /* Callee's SP,LR,params */
 	unsigned long gpr[32];
 	unsigned long nip;
 	unsigned long msr;
+	unsigned long orig_gpr3;	/* Used for restarting system calls */
 	unsigned long ctr;
 	unsigned long link;
-	unsigned long ccr;
 	unsigned long xer;
-	unsigned long dar;	/* Fault registers */
-	unsigned long dsisr;
-	unsigned long hash1, hash2;
-	unsigned long imiss, dmiss;
-	unsigned long icmp, dcmp;
-	unsigned long orig_gpr3; /* Used for restarting system calls */
-	unsigned long result;    /* Result of a system call */
-	double        fpr[4];    /* Caution! Only FP0-FP3 save on interrupts */
-	double        fpcsr;
-	unsigned long trap;	/* Reason for being here */
-	unsigned long marker;	/* Should have DEADDEAD */
-	unsigned long _underhead[20]; /* Callee's register save area */
-	unsigned long edx;	/* for binfmt_elf.c which wants edx */
+	unsigned long ccr;
+	unsigned long mq;		/* 601 only (not used at present) */
+					/* Used on APUS to hold IPL value. */
+	unsigned long trap;		/* Reason for being here */
+	unsigned long dar;		/* Fault registers */
+	unsigned long dsisr;		/* used for ESR on 4xx/Book-E */
+	unsigned long result; 		/* Result of a system call */
 };
-
-#define instruction_pointer(regs) ((regs)->nip)
-#define user_mode(regs) ((regs)->msr & 0x4000)
-#ifdef KERNEL
-extern void show_regs(struct pt_regs *);
 #endif
 
-/* Offsets used by 'ptrace' system call interface */
-/* Note: these should correspond to gpr[x]        */
+#ifdef __KERNEL__
+#define STACK_FRAME_OVERHEAD	16	/* size of minimum stack frame */
+
+/* Size of stack frame allocated when calling signal handler. */
+#define __SIGNAL_FRAMESIZE	64
+
+#define instruction_pointer(regs) ((regs)->nip)
+#define user_mode(regs) (((regs)->msr & MSR_PR) != 0)
+
+#endif /* __KERNEL__ */
+
+/*
+ * Offsets used by 'ptrace' system call interface.
+ * These can't be changed without breaking binary compatibility
+ * with MkLinux, etc.
+ */
 #define PT_R0	0
 #define PT_R1	1
 #define PT_R2	2
@@ -87,13 +87,21 @@ extern void show_regs(struct pt_regs *);
 
 #define PT_NIP	32
 #define PT_MSR	33
+#ifdef __KERNEL__
 #define PT_ORIG_R3 34
+#endif
 #define PT_CTR	35
 #define PT_LNK	36
 #define PT_XER	37
 #define PT_CCR	38
+#define PT_MQ	39
 
-#define PT_FPR0	48
+#define PT_FPR0	48	/* each FP reg occupies 2 slots in this space */
+#define PT_FPR31 (PT_FPR0 + 2*31)
+#define PT_FPSCR (PT_FPR0 + 2*32 + 1)
+
+/* Get/set all the altivec registers vr0..vr31, vscr, vrsave, in one go */
+#define PTRACE_GETVRREGS	18
+#define PTRACE_SETVRREGS	19
 
 #endif
-

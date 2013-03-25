@@ -3,7 +3,7 @@
 	Written 1995/96 by Roman Hodek (Roman.Hodek@informatik.uni-erlangen.de)
 
 	This software may be used and distributed according to the terms
-	of the GNU Public License, incorporated herein by reference.
+	of the GNU General Public License, incorporated herein by reference.
 
 	This drivers was written with the following sources of reference:
 	 - The driver for the Riebl Lance card by the TU Vienna.
@@ -42,7 +42,7 @@
 
 */
 
-static char *version = "atarilance.c: v1.3 04/04/96 "
+static char version[] = "atarilance.c: v1.3 04/04/96 "
 					   "Roman.Hodek@informatik.uni-erlangen.de\n";
 
 #include <linux/module.h>
@@ -53,15 +53,16 @@ static char *version = "atarilance.c: v1.3 04/04/96 "
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
-#include <linux/malloc.h>
+#include <linux/slab.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 
+#include <asm/setup.h>
 #include <asm/irq.h>
 #include <asm/atarihw.h>
 #include <asm/atariints.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
-#include <asm/bootinfo.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -81,6 +82,9 @@ static int lance_debug = LANCE_DEBUG;
 #else
 static int lance_debug = 1;
 #endif
+MODULE_PARM(lance_debug, "i");
+MODULE_PARM_DESC(lance_debug, "atarilance debug level (0-3)");
+MODULE_LICENSE("GPL");
 
 /* Print debug messages on probing? */
 #undef LANCE_DEBUG_PROBE
@@ -94,7 +98,7 @@ static int lance_debug = 1;
 #ifdef LANCE_DEBUG_PROBE
 # define PROBE_PRINT(a)	printk a
 #else
-# define PROBE_PRINT(a)	
+# define PROBE_PRINT(a)
 #endif
 
 /* These define the number of Rx and Tx buffers as log2. (Only powers
@@ -116,6 +120,8 @@ static int lance_debug = 1;
 #define RX_RING_SIZE			(1 << RX_LOG_RING_SIZE)
 #define RX_RING_LEN_BITS		(RX_LOG_RING_SIZE << 5)
 #define	RX_RING_MOD_MASK		(RX_RING_SIZE - 1)
+
+#define TX_TIMEOUT	20
 
 /* The LANCE Rx and Tx ring descriptors. */
 struct lance_rx_head {
@@ -218,14 +224,14 @@ struct lance_private {
 	enum lance_type		cardtype;
 	struct lance_ioreg	*iobase;
 	struct lance_memory	*mem;
-	int					cur_rx, cur_tx;	/* The next free ring entry */
-	int					dirty_tx;		/* Ring entries to be freed. */
-						/* copy function */
-	void				*(*memcpy_f)( void *, const void *, size_t );
-	struct enet_statistics stats;
-/* These two must be ints for set_bit() */
-	int					tx_full;
-	int					lock;
+	int		 	cur_rx, cur_tx;	/* The next free ring entry */
+	int			dirty_tx;		/* Ring entries to be freed. */
+				/* copy function */
+	void			*(*memcpy_f)( void *, const void *, size_t );
+	struct net_device_stats stats;
+/* This must be long for set_bit() */
+	long			tx_full;
+	spinlock_t		devlock;
 };
 
 /* I/O register access macros */
@@ -256,6 +262,8 @@ struct lance_addr {
 									   avoid conflict with ROM
 									   (highest byte stripped) */
 	{ 0xffcf0000, 0xffcffff0, 0 },	/* PAMCard VME in TT and MSTE
+									   (highest byte stripped) */
+	{ 0xfecf0000, 0xfecffff0, 0 },	/* Rhotron's PAMCard VME in TT and MSTE
 									   (highest byte stripped) */
 };
 
@@ -335,18 +343,18 @@ struct lance_addr {
 
 static int addr_accessible( volatile void *regp, int wordflag, int
                             writeflag );
-static unsigned long lance_probe1( struct device *dev, struct lance_addr
+static unsigned long lance_probe1( struct net_device *dev, struct lance_addr
                                    *init_rec );
-static int lance_open( struct device *dev );
-static void lance_init_ring( struct device *dev );
-static int lance_start_xmit( struct sk_buff *skb, struct device *dev );
-static void lance_interrupt( int irq, struct pt_regs *fp, struct device
-                             *dev );
-static int lance_rx( struct device *dev );
-static int lance_close( struct device *dev );
-static struct enet_statistics *lance_get_stats( struct device *dev );
-static void set_multicast_list( struct device *dev );
-static int lance_set_mac_address( struct device *dev, void *addr );
+static int lance_open( struct net_device *dev );
+static void lance_init_ring( struct net_device *dev );
+static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev );
+static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp );
+static int lance_rx( struct net_device *dev );
+static int lance_close( struct net_device *dev );
+static struct net_device_stats *lance_get_stats( struct net_device *dev );
+static void set_multicast_list( struct net_device *dev );
+static int lance_set_mac_address( struct net_device *dev, void *addr );
+static void lance_tx_timeout (struct net_device *dev);
 
 /************************* End of Prototypes **************************/
 
@@ -354,7 +362,7 @@ static int lance_set_mac_address( struct device *dev, void *addr );
 
 
 
-void *slow_memcpy( void *dst, const void *src, size_t len )
+static void *slow_memcpy( void *dst, const void *src, size_t len )
 
 {	char *cto = dst;
 	const char *cfrom = src;
@@ -367,16 +375,18 @@ void *slow_memcpy( void *dst, const void *src, size_t len )
 }
 
 
-int atarilance_probe( struct device *dev )
+int __init atarilance_probe( struct net_device *dev )
+{	
+	int i;
+	static int found;
 
-{	int i;
-	static int found = 0;
-	
+	SET_MODULE_OWNER(dev);
+
 	if (!MACH_IS_ATARI || found)
 		/* Assume there's only one board possible... That seems true, since
 		 * the Riebl/PAM board's address cannot be changed. */
 		return( ENODEV );
-	
+
 	for( i = 0; i < N_LANCE_ADDR; ++i ) {
 		if (lance_probe1( dev, &lance_addr_list[i] )) {
 			found = 1;
@@ -390,9 +400,9 @@ int atarilance_probe( struct device *dev )
 
 /* Derived from hwreg_present() in atari/config.c: */
 
-static int addr_accessible( volatile void *regp, int wordflag, int writeflag )
-
-{	int		ret;
+static int __init addr_accessible( volatile void *regp, int wordflag, int writeflag )
+{
+	int		ret;
 	long	flags;
 	long	*vbr, save_berr;
 
@@ -401,7 +411,7 @@ static int addr_accessible( volatile void *regp, int wordflag, int writeflag )
 
 	__asm__ __volatile__ ( "movec	%/vbr,%0" : "=r" (vbr) : );
 	save_berr = vbr[2];
-	
+
 	__asm__ __volatile__
 	(	"movel	%/sp,%/d1\n\t"
 		"movel	#Lberr,%2@\n\t"
@@ -435,24 +445,24 @@ static int addr_accessible( volatile void *regp, int wordflag, int writeflag )
 
 	vbr[2] = save_berr;
 	restore_flags(flags);
-	
+
 	return( ret );
 }
 
 
-static unsigned long lance_probe1( struct device *dev,
-								   struct lance_addr *init_rec )
-
-{	volatile unsigned short *memaddr =
+static unsigned long __init lance_probe1( struct net_device *dev,
+					   struct lance_addr *init_rec )
+{
+	volatile unsigned short *memaddr =
 		(volatile unsigned short *)init_rec->memaddr;
 	volatile unsigned short *ioaddr =
 		(volatile unsigned short *)init_rec->ioaddr;
 	struct lance_private	*lp;
 	struct lance_ioreg		*IO;
 	int 					i;
-	static int 				did_version = 0;
+	static int 				did_version;
 	unsigned short			save1, save2;
-	
+
 	PROBE_PRINT(( "Probing for Lance card at mem %#lx io %#lx\n",
 				  (long)memaddr, (long)ioaddr ));
 
@@ -469,7 +479,7 @@ static unsigned long lance_probe1( struct device *dev,
 	*memaddr = 0x0000;
 	if (*memaddr != 0x0000) goto probe_fail;
 	*memaddr = save1;
-	
+
 	/* First port should be readable and writable */
 	PROBE_PRINT(( "lance_probe1: testing ioport to be accessible\n" ));
 	if (!addr_accessible( ioaddr, 1, 1 )) goto probe_fail;
@@ -504,17 +514,20 @@ static unsigned long lance_probe1( struct device *dev,
 
   probe_fail:
 	return( 0 );
-	
+
   probe_ok:
 	init_etherdev( dev, sizeof(struct lance_private) );
-	if (!dev->priv)
+	if (!dev->priv) {
 		dev->priv = kmalloc( sizeof(struct lance_private), GFP_KERNEL );
+		if (!dev->priv)
+			return 0;
+	}
 	lp = (struct lance_private *)dev->priv;
 	MEM = (struct lance_memory *)memaddr;
 	IO = lp->iobase = (struct lance_ioreg *)ioaddr;
 	dev->base_addr = (unsigned long)ioaddr; /* informational only */
 	lp->memcpy_f = init_rec->slow_flag ? slow_memcpy : memcpy;
-	
+
 	REGA( CSR0 ) = CSR0_STOP;
 
 	/* Now test for type: If the eeprom I/O port is readable, it is a
@@ -529,12 +542,12 @@ static unsigned long lance_probe1( struct device *dev,
 	}
 	else
 		lp->cardtype = OLD_RIEBL;
-		
+
 	if (lp->cardtype == PAM_CARD ||
 		memaddr == (unsigned short *)0xffe00000) {
 		/* PAMs card and Riebl on ST use level 5 autovector */
-		add_isr( IRQ_AUTO_5, (isrfunc)lance_interrupt, IRQ_TYPE_PRIO, dev,
-				 "PAM/Riebl-ST Ethernet" );
+		request_irq(IRQ_AUTO_5, lance_interrupt, IRQ_TYPE_PRIO,
+		            "PAM/Riebl-ST Ethernet", dev);
 		dev->irq = (unsigned short)IRQ_AUTO_5;
 	}
 	else {
@@ -547,8 +560,8 @@ static unsigned long lance_probe1( struct device *dev,
 			printk( "Lance: request for VME interrupt failed\n" );
 			return( 0 );
 		}
-		add_isr( irq, (isrfunc)lance_interrupt, IRQ_TYPE_PRIO, dev,
-				 "Riebl-VME Ethernet" );
+		request_irq(irq, lance_interrupt, IRQ_TYPE_PRIO,
+		            "Riebl-VME Ethernet", dev);
 		dev->irq = irq;
 	}
 
@@ -571,7 +584,7 @@ static unsigned long lance_probe1( struct device *dev,
 	  case PAM_CARD:
 		i = IO->eeprom;
 		for( i = 0; i < 6; ++i )
-			dev->dev_addr[i] = 
+			dev->dev_addr[i] =
 				((((unsigned short *)MEM)[i*2] & 0x0f) << 4) |
 				((((unsigned short *)MEM)[i*2+1] & 0x0f));
 		i = IO->mem;
@@ -584,7 +597,9 @@ static unsigned long lance_probe1( struct device *dev,
 				dev->name );
 		printk( "      Use \"ifconfig hw ether ...\" to set the address.\n" );
 	}
-	
+
+	lp->devlock = SPIN_LOCK_UNLOCKED;
+
 	MEM->init.mode = 0x0000;		/* Disable Rx and Tx. */
 	for( i = 0; i < 6; i++ )
 		MEM->init.hwaddr[i] = dev->dev_addr[i^1]; /* <- 16 bit swap! */
@@ -601,7 +616,7 @@ static unsigned long lance_probe1( struct device *dev,
 		IO->ivec = IRQ_SOURCE_TO_VECTOR(dev->irq);
 	else
 		*RIEBL_IVEC_ADDR = IRQ_SOURCE_TO_VECTOR(dev->irq);
-	
+
 	if (did_version++ == 0)
 		DPRINTK( 1, ( version ));
 
@@ -612,15 +627,23 @@ static unsigned long lance_probe1( struct device *dev,
 	dev->get_stats = &lance_get_stats;
 	dev->set_multicast_list = &set_multicast_list;
 	dev->set_mac_address = &lance_set_mac_address;
+
+	/* XXX MSch */
+	dev->tx_timeout = lance_tx_timeout;
+	dev->watchdog_timeo = TX_TIMEOUT;
+			
+
+#if 0
 	dev->start = 0;
+#endif
 
 	memset( &lp->stats, 0, sizeof(lp->stats) );
-	
+
 	return( 1 );
 }
 
 
-static int lance_open( struct device *dev )
+static int lance_open( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	struct lance_ioreg	 *IO = lp->iobase;
@@ -631,12 +654,12 @@ static int lance_open( struct device *dev )
 	lance_init_ring(dev);
 	/* Re-initialize the LANCE, and start it when done. */
 
-	REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0); 
+	REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0);
 	REGA( CSR2 ) = 0;
 	REGA( CSR1 ) = 0;
 	REGA( CSR0 ) = CSR0_INIT;
 	/* From now on, AREG is kept to point to CSR0 */
-	
+
 	i = 1000000;
 	while (--i > 0)
 		if (DREG & CSR0_IDON)
@@ -651,12 +674,9 @@ static int lance_open( struct device *dev )
 	DREG = CSR0_STRT;
 	DREG = CSR0_INEA;
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	netif_start_queue (dev);
 
 	DPRINTK( 2, ( "%s: LANCE is open, csr0 %04x\n", dev->name, DREG ));
-	MOD_INC_USE_COUNT;
 
 	return( 0 );
 }
@@ -664,13 +684,12 @@ static int lance_open( struct device *dev )
 
 /* Initialize the LANCE Rx and Tx rings. */
 
-static void lance_init_ring( struct device *dev )
+static void lance_init_ring( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	int i;
 	unsigned offset;
-	
-	lp->lock = 0;
+
 	lp->tx_full = 0;
 	lp->cur_rx = lp->cur_tx = 0;
 	lp->dirty_tx = 0;
@@ -710,29 +729,24 @@ static void lance_init_ring( struct device *dev )
 }
 
 
-static int lance_start_xmit( struct sk_buff *skb, struct device *dev )
+/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
 
-{	struct lance_private *lp = (struct lance_private *)dev->priv;
+
+static void lance_tx_timeout (struct net_device *dev)
+{
+	struct lance_private *lp = (struct lance_private *) dev->priv;
 	struct lance_ioreg	 *IO = lp->iobase;
-	int entry, len;
-	struct lance_tx_head *head;
-	unsigned long flags;
 	
-	/* Transmitter timeout, serious problems. */
-	if (dev->tbusy) {
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 20)
-			return( 1 );
-		AREG = CSR0;
-		DPRINTK( 1, ( "%s: transmit timed out, status %04x, resetting.\n",
-					  dev->name, DREG ));
-		DREG = CSR0_STOP;
-		/*
-		 * Always set BSWP after a STOP as STOP puts it back into
-		 * little endian mode.
-		 */
-		REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0); 
-		lp->stats.tx_errors++;
+	AREG = CSR0;
+	DPRINTK( 1, ( "%s: transmit timed out, status %04x, resetting.\n",
+			  dev->name, DREG ));
+	DREG = CSR0_STOP;
+	/*
+	 * Always set BSWP after a STOP as STOP puts it back into
+	 * little endian mode.
+	 */
+	REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0);
+	lp->stats.tx_errors++;
 #ifndef final_version
 		{	int i;
 			DPRINTK( 2, ( "Ring data: dirty_tx %d cur_tx %d%s cur_rx %d\n",
@@ -750,39 +764,45 @@ static int lance_start_xmit( struct sk_buff *skb, struct device *dev )
 							  -MEM->tx_head[i].length,
 							  MEM->tx_head[i].misc ));
 		}
-#endif
-		lance_init_ring(dev);
-		REGA( CSR0 ) = CSR0_INEA | CSR0_INIT | CSR0_STRT;
+#endif 	 
+	/* XXX MSch: maybe purge/reinit ring here */
+	/* lance_restart, essentially */
+	lance_init_ring(dev);
+	REGA( CSR0 ) = CSR0_INEA | CSR0_INIT | CSR0_STRT;
+	dev->trans_start = jiffies;
+	netif_wake_queue (dev);
+}
 
-		dev->tbusy = 0;
-		dev->trans_start = jiffies;
-		dev_kfree_skb(skb, FREE_WRITE);
-		return( 0 );
-	}
+/* XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX */
 
-	if (skb == NULL) {
-		dev_tint( dev );
-		return( 0 );
-	}
+static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 
-	if (skb->len <= 0)
-		return( 0 );
+{	struct lance_private *lp = (struct lance_private *)dev->priv;
+	struct lance_ioreg	 *IO = lp->iobase;
+	int entry, len;
+	struct lance_tx_head *head;
+	unsigned long flags;
 
 	DPRINTK( 2, ( "%s: lance_start_xmit() called, csr0 %4.4x.\n",
 				  dev->name, DREG ));
 
-	/* Block a timer-based transmit from overlapping.  This could better be
-	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (set_bit( 0, (void*)&dev->tbusy ) != 0) {
-		DPRINTK( 0, ( "%s: Transmitter access conflict.\n", dev->name ));
-		return 1;
-	}
 
-	if (set_bit( 0, (void*)&lp->lock ) != 0) {
-		DPRINTK( 0, ( "%s: tx queue lock!.\n", dev->name ));
-		/* don't clear dev->tbusy flag. */
-		return 1;
+	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
+	len = skb->len;
+	if(len < ETH_ZLEN)
+		len = ETH_ZLEN;
+	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
+	else if (lp->cardtype == PAM_CARD && (len & 1))
+		++len;
+		
+	if(len > skb->len)
+	{
+		skb = skb_padto(skb, len);
+		if(skb == NULL)
+			return 0;
 	}
+		
+	netif_stop_queue (dev);
 
 	/* Fill in a Tx ring entry */
 	if (lance_debug >= 3) {
@@ -801,28 +821,23 @@ static int lance_start_xmit( struct sk_buff *skb, struct device *dev )
 
 	/* We're not prepared for the int until the last flags are set/reset. And
 	 * the int may happen already after setting the OWN_CHIP... */
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&lp->devlock, flags);
 
 	/* Mask to ring buffer boundary. */
 	entry = lp->cur_tx & TX_RING_MOD_MASK;
 	head  = &(MEM->tx_head[entry]);
-	
+
 	/* Caution: the write order is important here, set the "ownership" bits
 	 * last.
 	 */
 
-	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
-	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
-	if (lp->cardtype == PAM_CARD && (len & 1))
-		++len;
 
 	head->length = -len;
 	head->misc = 0;
 	lp->memcpy_f( PKTBUF_ADDR(head), (void *)skb->data, skb->len );
 	head->flag = TMD1_OWN_CHIP | TMD1_ENP | TMD1_STP;
-	dev_kfree_skb( skb, FREE_WRITE );
+	lp->stats.tx_bytes += skb->len;
+	dev_kfree_skb( skb );
 	lp->cur_tx++;
 	while( lp->cur_tx >= TX_RING_SIZE && lp->dirty_tx >= TX_RING_SIZE ) {
 		lp->cur_tx -= TX_RING_SIZE;
@@ -833,22 +848,22 @@ static int lance_start_xmit( struct sk_buff *skb, struct device *dev )
 	DREG = CSR0_INEA | CSR0_TDMD;
 	dev->trans_start = jiffies;
 
-	lp->lock = 0;
 	if ((MEM->tx_head[(entry+1) & TX_RING_MOD_MASK].flag & TMD1_OWN) ==
 		TMD1_OWN_HOST)
-		dev->tbusy = 0;
+		netif_start_queue (dev);
 	else
 		lp->tx_full = 1;
-	restore_flags(flags);
+	spin_unlock_irqrestore (&lp->devlock, flags);
 
 	return 0;
 }
 
 /* The LANCE interrupt handler. */
 
-static void lance_interrupt( int irq, struct pt_regs *fp, struct device *dev )
-
-{	struct lance_private *lp;
+static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
+{
+	struct net_device *dev = dev_id;
+	struct lance_private *lp;
 	struct lance_ioreg	 *IO;
 	int csr0, boguscnt = 10;
 
@@ -859,11 +874,9 @@ static void lance_interrupt( int irq, struct pt_regs *fp, struct device *dev )
 
 	lp = (struct lance_private *)dev->priv;
 	IO = lp->iobase;
-	AREG = CSR0;
+	spin_lock (&lp->devlock);
 
-	if (dev->interrupt)
-		DPRINTK( 2, ( "%s: Re-entering the interrupt handler.\n", dev->name ));
-	dev->interrupt = 1;
+	AREG = CSR0;
 
 	while( ((csr0 = DREG) & (CSR0_ERR | CSR0_TINT | CSR0_RINT)) &&
 		   --boguscnt >= 0) {
@@ -883,7 +896,7 @@ static void lance_interrupt( int irq, struct pt_regs *fp, struct device *dev )
 			while( dirty_tx < lp->cur_tx) {
 				int entry = dirty_tx & TX_RING_MOD_MASK;
 				int status = MEM->tx_head[entry].flag;
-			
+
 				if (status & TMD1_OWN_CHIP)
 					break;			/* It still hasn't been Txed */
 
@@ -910,24 +923,25 @@ static void lance_interrupt( int irq, struct pt_regs *fp, struct device *dev )
 						lp->stats.collisions++;
 					lp->stats.tx_packets++;
 				}
+
+				/* XXX MSch: free skb?? */
 				dirty_tx++;
 			}
 
 #ifndef final_version
 			if (lp->cur_tx - dirty_tx >= TX_RING_SIZE) {
 				DPRINTK( 0, ( "out-of-sync dirty pointer,"
-							  " %d vs. %d, full=%d.\n",
+							  " %d vs. %d, full=%ld.\n",
 							  dirty_tx, lp->cur_tx, lp->tx_full ));
 				dirty_tx += TX_RING_SIZE;
 			}
 #endif
 
-			if (lp->tx_full && dev->tbusy
+			if (lp->tx_full && (netif_queue_stopped(dev))
 				&& dirty_tx > lp->cur_tx - TX_RING_SIZE + 2) {
 				/* The ring is no longer full, clear tbusy. */
 				lp->tx_full = 0;
-				dev->tbusy = 0;
-				mark_bh( NET_BH );
+				netif_wake_queue (dev);
 			}
 
 			lp->dirty_tx = dirty_tx;
@@ -950,12 +964,12 @@ static void lance_interrupt( int irq, struct pt_regs *fp, struct device *dev )
 
 	DPRINTK( 2, ( "%s: exiting interrupt, csr0=%#04x.\n",
 				  dev->name, DREG ));
-	dev->interrupt = 0;
-	return;
+
+	spin_unlock (&lp->devlock);
 }
 
 
-static int lance_rx( struct device *dev )
+static int lance_rx( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	int entry = lp->cur_rx & RX_RING_MOD_MASK;
@@ -963,12 +977,12 @@ static int lance_rx( struct device *dev )
 
 	DPRINTK( 2, ( "%s: rx int, flag=%04x\n", dev->name,
 				  MEM->rx_head[entry].flag ));
-	
+
 	/* If we own the next entry, it's a new packet. Send it up. */
 	while( (MEM->rx_head[entry].flag & RMD1_OWN) == RMD1_OWN_HOST ) {
 		struct lance_rx_head *head = &(MEM->rx_head[entry]);
 		int status = head->flag;
-		
+
 		if (status != (RMD1_ENP|RMD1_STP)) {		/* There was an error. */
 			/* There is a tricky error noted by John Murphy,
 			   <murf@perftech.com> to Russ Nelson: Even with full-sized
@@ -999,7 +1013,7 @@ static int lance_rx( struct device *dev )
 						if (MEM->rx_head[(entry+i) & RX_RING_MOD_MASK].flag &
 							RMD1_OWN_CHIP)
 							break;
-					
+
 					if (i > RX_RING_SIZE - 2) {
 						lp->stats.rx_dropped++;
 						head->flag |= RMD1_OWN_CHIP;
@@ -1023,14 +1037,16 @@ static int lance_rx( struct device *dev )
 						   data[19], data[20], data[21], data[22],
 						   pkt_len );
 				}
-				
+
 				skb->dev = dev;
 				skb_reserve( skb, 2 );	/* 16 byte align */
 				skb_put( skb, pkt_len );	/* Make room */
 				lp->memcpy_f( skb->data, PKTBUF_ADDR(head), pkt_len );
 				skb->protocol = eth_type_trans( skb, dev );
 				netif_rx( skb );
+				dev->last_rx = jiffies;
 				lp->stats.rx_packets++;
+				lp->stats.rx_bytes += pkt_len;
 			}
 		}
 
@@ -1047,13 +1063,12 @@ static int lance_rx( struct device *dev )
 }
 
 
-static int lance_close( struct device *dev )
+static int lance_close( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	struct lance_ioreg	 *IO = lp->iobase;
 
-	dev->start = 0;
-	dev->tbusy = 1;
+	netif_stop_queue (dev);
 
 	AREG = CSR0;
 
@@ -1064,12 +1079,11 @@ static int lance_close( struct device *dev )
 	   memory if we don't. */
 	DREG = CSR0_STOP;
 
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 
-static struct enet_statistics *lance_get_stats( struct device *dev )
+static struct net_device_stats *lance_get_stats( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 
@@ -1084,15 +1098,15 @@ static struct enet_statistics *lance_get_stats( struct device *dev )
 						best-effort filtering.
  */
 
-static void set_multicast_list( struct device *dev )
+static void set_multicast_list( struct net_device *dev )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	struct lance_ioreg	 *IO = lp->iobase;
 
-	if (!dev->start)
+	if (netif_running(dev))
 		/* Only possible if board is already started */
 		return;
-	
+
 	/* We take the simple way out and always enable promiscuous mode. */
 	DREG = CSR0_STOP; /* Temporarily stop the lance. */
 
@@ -1117,7 +1131,7 @@ static void set_multicast_list( struct device *dev )
 	 * Always set BSWP after a STOP as STOP puts it back into
 	 * little endian mode.
 	 */
-	REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0); 
+	REGA( CSR3 ) = CSR3_BSWP | (lp->cardtype == PAM_CARD ? CSR3_ACON : 0);
 
 	/* Resume normal operation and reset AREG to CSR0 */
 	REGA( CSR0 ) = CSR0_IDON | CSR0_INEA | CSR0_STRT;
@@ -1126,16 +1140,16 @@ static void set_multicast_list( struct device *dev )
 
 /* This is needed for old RieblCards and possible for new RieblCards */
 
-static int lance_set_mac_address( struct device *dev, void *addr )
+static int lance_set_mac_address( struct net_device *dev, void *addr )
 
 {	struct lance_private *lp = (struct lance_private *)dev->priv;
 	struct sockaddr *saddr = addr;
 	int i;
-	
+
 	if (lp->cardtype != OLD_RIEBL && lp->cardtype != NEW_RIEBL)
 		return( -EOPNOTSUPP );
 
-	if (dev->start) {
+	if (netif_running(dev)) {
 		/* Only possible while card isn't started */
 		DPRINTK( 1, ( "%s: hwaddr can be set only while card isn't open.\n",
 					  dev->name ));
@@ -1148,26 +1162,19 @@ static int lance_set_mac_address( struct device *dev, void *addr )
 	lp->memcpy_f( RIEBL_HWADDR_ADDR, dev->dev_addr, 6 );
 	/* set also the magic for future sessions */
 	*RIEBL_MAGIC_ADDR = RIEBL_MAGIC;
-	
+
 	return( 0 );
 }
 
 
 #ifdef MODULE
-static char devicename[9] = { 0, };
-
-static struct device atarilance_dev =  
-{
-	devicename,	/* filled in by register_netdev() */
-	0, 0, 0, 0,	/* memory */
-	0, 0,		/* base, irq */
-	0, 0, 0, NULL, atarilance_probe,
-};
+static struct net_device atarilance_dev;
 
 int init_module(void)
 
 {	int err;
-	
+
+	atarilance_dev.init = atarilance_probe;
 	if ((err = register_netdev( &atarilance_dev ))) {
 		if (err == -EIO)  {
 			printk( "No Atari Lance board found. Module not loaded.\n");
@@ -1175,14 +1182,14 @@ int init_module(void)
 		return( err );
 	}
 	return( 0 );
-}  
+}
 
 void cleanup_module(void)
 
 {
 	unregister_netdev( &atarilance_dev );
 }
-                      
+
 #endif /* MODULE */
 
 

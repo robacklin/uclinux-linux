@@ -60,12 +60,9 @@
 #define VM86_GET_AND_RESET_IRQ	6
 
 /*
- * This is the stack-layout when we have done a "SAVE_ALL" from vm86
- * mode - the main change is that the old segment descriptors aren't
- * useful any more and are forced to be zero by the kernel (and the
- * hardware when a trap occurs), and the real segment descriptors are
- * at the end of the structure. Look at ptrace.h to see the "normal"
- * setup.
+ * This is the stack-layout seen by the user space program when we have
+ * done a translation of "SAVE_ALL" from vm86 mode. The real kernel layout
+ * is 'kernel_vm86_regs' (see below).
  */
 
 struct vm86_regs {
@@ -136,9 +133,45 @@ struct vm86plus_struct {
 };
 
 #ifdef __KERNEL__
+/*
+ * This is the (kernel) stack-layout when we have done a "SAVE_ALL" from vm86
+ * mode - the main change is that the old segment descriptors aren't
+ * useful any more and are forced to be zero by the kernel (and the
+ * hardware when a trap occurs), and the real segment descriptors are
+ * at the end of the structure. Look at ptrace.h to see the "normal"
+ * setup. For user space layout see 'struct vm86_regs' above.
+ */
+
+struct kernel_vm86_regs {
+/*
+ * normal regs, with special meaning for the segment descriptors..
+ */
+	long ebx;
+	long ecx;
+	long edx;
+	long esi;
+	long edi;
+	long ebp;
+	long eax;
+	long __null_ds;
+	long __null_es;
+	long orig_eax;
+	long eip;
+	unsigned short cs, __csh;
+	long eflags;
+	long esp;
+	unsigned short ss, __ssh;
+/*
+ * these are specific to v86 mode:
+ */
+	unsigned short es, __esh;
+	unsigned short ds, __dsh;
+	unsigned short fs, __fsh;
+	unsigned short gs, __gsh;
+};
 
 struct kernel_vm86_struct {
-	struct vm86_regs regs;
+	struct kernel_vm86_regs regs;
 /*
  * the below part remains on the kernel stack while we are in VM86 mode.
  * 'tss.esp0' then contains the address of VM86_TSS_ESP0 below, and when we
@@ -167,8 +200,8 @@ struct kernel_vm86_struct {
  */
 };
 
-void handle_vm86_fault(struct vm86_regs *, long);
-int handle_vm86_trap(struct vm86_regs *, long, int);
+void handle_vm86_fault(struct kernel_vm86_regs *, long);
+int handle_vm86_trap(struct kernel_vm86_regs *, long, int);
 
 #endif /* __KERNEL__ */
 

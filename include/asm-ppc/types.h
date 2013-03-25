@@ -1,12 +1,7 @@
 #ifndef _PPC_TYPES_H
 #define _PPC_TYPES_H
 
-typedef unsigned short umode_t;
-
-/*
- * __xx is ok: it doesn't pollute the POSIX namespace. Use these in the
- * header files exported to user space
- */
+#ifndef __ASSEMBLY__
 
 typedef __signed__ char __s8;
 typedef unsigned char __u8;
@@ -22,11 +17,14 @@ typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
 
+typedef struct {
+	__u32 u[4];
+} __attribute((aligned(16))) __vector128;
+
+#ifdef __KERNEL__
 /*
  * These aren't exported outside the kernel to avoid name space clashes
  */
-#ifdef __KERNEL__
-
 typedef signed char s8;
 typedef unsigned char u8;
 
@@ -39,6 +37,22 @@ typedef unsigned int u32;
 typedef signed long long s64;
 typedef unsigned long long u64;
 
+typedef __vector128 vector128;
+
+#define BITS_PER_LONG 32
+
+/* DMA addresses are 32-bits wide */
+typedef u32 dma_addr_t;
+typedef u64 dma64_addr_t;
+
 #endif /* __KERNEL__ */
+
+/*
+ * XXX allowed outside of __KERNEL__ for now, until glibc gets
+ * a proper set of asm headers of its own.  -- paulus
+ */
+typedef unsigned short umode_t;
+
+#endif /* __ASSEMBLY__ */
 
 #endif

@@ -1,3 +1,11 @@
+/*
+ *  linux/fs/hpfs/hpfs.h
+ *
+ *  HPFS structures by Chris Smith, 1993
+ *
+ *  a little bit modified by Mikulas Patocka, 1998-1999
+ */
+
 /* The paper
 
      Duncan, Roy
@@ -19,10 +27,14 @@ typedef secno dnode_secno;		/* sector number of a dnode */
 typedef secno fnode_secno;		/* sector number of an fnode */
 typedef secno anode_secno;		/* sector number of an anode */
 
+typedef unsigned time32_t;		/* 32-bit time_t type */
+
 /* sector 0 */
 
 /* The boot block is very like a FAT boot block, except that the
    29h signature byte is 28h instead, and the ID string is "HPFS". */
+
+#define BB_MAGIC 0xaa55
 
 struct hpfs_boot_block
 {
@@ -61,7 +73,12 @@ struct hpfs_super_block
 {
   unsigned magic;			/* f995 e849 */
   unsigned magic1;			/* fa53 e9c5, more magic? */
-  unsigned huh202;			/* ?? 202 = N. of B. in 1.00390625 S.*/
+  /*unsigned huh202;*/			/* ?? 202 = N. of B. in 1.00390625 S.*/
+  char version;				/* version of a filesystem  usually 2 */
+  char funcversion;			/* functional version - oldest version
+  					   of filesystem that can understand
+					   this disk */
+  unsigned short int zero;		/* 0 */
   fnode_secno root;			/* fnode of root directory */
   secno n_sectors;			/* size of filesystem */
   unsigned n_badblocks;			/* number of bad blocks */
@@ -69,15 +86,15 @@ struct hpfs_super_block
   unsigned zero1;			/* 0 */
   secno badblocks;			/* bad block list */
   unsigned zero3;			/* 0 */
-  time_t last_chkdsk;			/* date last checked, 0 if never */
-  unsigned zero4;			/* 0 */
+  time32_t last_chkdsk;			/* date last checked, 0 if never */
+  /*unsigned zero4;*/			/* 0 */
+  time32_t last_optimize;			/* date last optimized, 0 if never */
   secno n_dir_band;			/* number of sectors in dir band */
   secno dir_band_start;			/* first sector in dir band */
   secno dir_band_end;			/* last sector in dir band */
   secno dir_band_bitmap;		/* free space map, 1 dnode per bit */
-  unsigned zero5[8];			/* 0 */
-  secno scratch_dnodes;			/* ?? 8 preallocated sectors near dir
-					   band, 4-aligned. */
+  char volume_name[32];			/* not used */
+  secno user_id_table;			/* 8 preallocated sectors - user id */
   unsigned zero6[103];			/* 0 */
 };
 
@@ -94,9 +111,23 @@ struct hpfs_spare_block
   unsigned magic1;			/* fa52 29c5, more magic? */
 
   unsigned dirty: 1;			/* 0 clean, 1 "improperly stopped" */
-  unsigned flag1234: 4;			/* unknown flags */
+  /*unsigned flag1234: 4;*/		/* unknown flags */
+  unsigned sparedir_used: 1;		/* spare dirblks used */
+  unsigned hotfixes_used: 1;		/* hotfixes used */
+  unsigned bad_sector: 1;		/* bad sector, corrupted disk (???) */
+  unsigned bad_bitmap: 1;		/* bad bitmap */
   unsigned fast: 1;			/* partition was fast formatted */
-  unsigned flag6to31: 26;		/* unknown flags */
+  unsigned old_wrote: 1;		/* old version wrote to partion */
+  unsigned old_wrote_1: 1;		/* old version wrote to partion (?) */
+  unsigned install_dasd_limits: 1;	/* HPFS386 flags */
+  unsigned resynch_dasd_limits: 1;
+  unsigned dasd_limits_operational: 1;
+  unsigned multimedia_active: 1;
+  unsigned dce_acls_active: 1;
+  unsigned dasd_limits_dirty: 1;
+  unsigned flag67: 2;
+  unsigned char mm_contlgulty;
+  unsigned char unused;
 
   secno hotfix_map;			/* info about remapped bad sectors */
   unsigned n_spares_used;		/* number of hotfixes */
@@ -106,10 +137,14 @@ struct hpfs_spare_block
 					   follows in this block*/
   secno code_page_dir;			/* code page directory block */
   unsigned n_code_pages;		/* number of code pages */
-  unsigned large_numbers[2];		/* ?? */
-  unsigned zero1[15];
-  dnode_secno spare_dnodes[20];		/* emergency free dnode list */
-  unsigned zero2[81];			/* room for more? */
+  /*unsigned large_numbers[2];*/	/* ?? */
+  unsigned super_crc;			/* on HPFS386 and LAN Server this is
+  					   checksum of superblock, on normal
+					   OS/2 unused */
+  unsigned spare_crc;			/* on HPFS386 checksum of spareblock */
+  unsigned zero1[15];			/* unused */
+  dnode_secno spare_dnodes[100];	/* emergency free dnode list */
+  unsigned zero2[1];			/* room for more? */
 };
 
 /* The bad block list is 4 sectors long.  The first word must be zero,
@@ -154,7 +189,9 @@ struct code_page_directory
 					   in data block */
     secno code_page_data;		/* sector number of a code_page_data
 					   containing c.p. array */
-    unsigned index;			/* index in c.p. array in that sector*/
+    unsigned short index;		/* index in c.p. array in that sector*/
+    unsigned short unknown;		/* some unknown value; usually 0;
+    					   2 in Japanese version */
   } array[31];				/* unknown length */
 };
 
@@ -174,7 +211,7 @@ struct code_page_data
   struct {
     unsigned short ix;			/* index */
     unsigned short code_page_number;	/* code page number */
-    unsigned short zero1;
+    unsigned short unknown;		/* the same as in cp directory */
     unsigned char map[128];		/* upcase table for chars 80..ff */
     unsigned short zero2;
   } code_page[3];
@@ -221,7 +258,8 @@ struct dnode {
   unsigned magic;			/* 77e4 0aae */
   unsigned first_free;			/* offset from start of dnode to
 					   first free dir entry */
-  unsigned increment_me;		/* some kind of activity counter?
+  unsigned root_dnode:1;		/* Is it root dnode? */
+  unsigned increment_me:31;		/* some kind of activity counter?
 					   Neither HPFS.IFS nor CHKDSK cares
 					   if you change this word */
   secno up;				/* (root dnode) directory's fnode
@@ -233,12 +271,12 @@ struct dnode {
 struct hpfs_dirent {
   unsigned short length;		/* offset to next dirent */
   unsigned first: 1;			/* set on phony ^A^A (".") entry */
-  unsigned flag1: 1;
+  unsigned has_acl: 1;
   unsigned down: 1;			/* down pointer present (after name) */
   unsigned last: 1;			/* set on phony \377 entry */
-  unsigned flag4: 1;
-  unsigned flag5: 1;
-  unsigned flag6: 1;
+  unsigned has_ea: 1;			/* entry has EA */
+  unsigned has_xtd_perm: 1;		/* has extended perm list (???) */
+  unsigned has_explicit_acl: 1;
   unsigned has_needea: 1;		/* ?? some EA has NEEDEA set
 					   I have no idea why this is
 					   interesting in a dir entry */
@@ -251,12 +289,13 @@ struct hpfs_dirent {
   unsigned not_8x3: 1;			/* name is not 8.3 */
   unsigned flag15: 1;
   fnode_secno fnode;			/* fnode giving allocation info */
-  time_t write_date;			/* mtime */
+  time32_t write_date;			/* mtime */
   unsigned file_size;			/* file length, bytes */
-  time_t read_date;			/* atime */
-  time_t creation_date;			/* ctime */
+  time32_t read_date;			/* atime */
+  time32_t creation_date;			/* ctime */
   unsigned ea_size;			/* total EA length, bytes */
-  unsigned char zero1;
+  unsigned char no_of_acls : 3;		/* number of ACL's */
+  unsigned char reserver : 5;
   unsigned char ix;			/* code page index (of filename), see
 					   struct code_page_data */
   unsigned char namelen, name[1];	/* file name */
@@ -264,34 +303,6 @@ struct hpfs_dirent {
      			  follows name on next word boundary, or maybe it
 			  precedes next dirent, which is on a word boundary. */
 };
-
-/* The b-tree down pointer from a dir entry */
-
-static inline dnode_secno de_down_pointer (struct hpfs_dirent *de)
-{
-  return *(dnode_secno *) ((void *) de + de->length - 4);
-}
-
-/* The first dir entry in a dnode */
-
-static inline struct hpfs_dirent *dnode_first_de (struct dnode *dnode)
-{
-  return (void *) dnode->dirent;
-}
-
-/* The end+1 of the dir entries */
-
-static inline struct hpfs_dirent *dnode_end_de (struct dnode *dnode)
-{
-  return (void *) dnode + dnode->first_free;
-}
-
-/* The dir entry after dir entry de */
-
-static inline struct hpfs_dirent *de_next_de (struct hpfs_dirent *de)
-{
-  return (void *) de + de->length;
-}
 
 
 /* B+ tree: allocation info in fnodes and anodes */
@@ -320,7 +331,7 @@ struct bplus_internal_node
 
 struct bplus_header
 {
-  unsigned flag0: 1;
+  unsigned hbff: 1;	/* high bit of first free entry offset */
   unsigned flag1: 1;
   unsigned flag2: 1;
   unsigned flag3: 1;
@@ -332,7 +343,7 @@ struct bplus_header
 					   may be a chkdsk glitch or may mean
 					   this bit is irrelevant in fnodes,
 					   or this interpretation is all wet */
-  unsigned flag6: 1;
+  unsigned binary_search: 1;		/* suggest binary search (unused) */
   unsigned internal: 1;			/* 1 -> (internal) tree of anodes
 					   0 -> (leaf) list of extents */
   unsigned char fill[3];
@@ -359,10 +370,15 @@ struct bplus_header
 struct fnode
 {
   unsigned magic;			/* f7e4 0aae */
-  unsigned zero1[2];
+  unsigned zero1[2];			/* read history */
   unsigned char len, name[15];		/* true length, truncated name */
   fnode_secno up;			/* pointer to file's directory fnode */
-  unsigned zero2[3];
+  /*unsigned zero2[3];*/
+  secno acl_size_l;
+  secno acl_secno;
+  unsigned short acl_size_s;
+  char acl_anode;
+  char zero2;				/* history bit count */
   unsigned ea_size_l;			/* length of disk-resident ea's */
   secno ea_secno;			/* first sector of disk-resident ea's*/
   unsigned short ea_size_s;		/* length of fnode-resident ea's */
@@ -393,10 +409,14 @@ struct fnode
 
   unsigned file_size;			/* file length, bytes */
   unsigned n_needea;			/* number of EA's with NEEDEA set */
-  unsigned zero4[4];
-  unsigned ea_offs;			/* offset from start of fnode
+  char user_id[16];			/* unused */
+  unsigned short ea_offs;		/* offset from start of fnode
 					   to first fnode-resident ea */
-  unsigned zero5[2];
+  char dasd_limit_treshhold;
+  char dasd_limit_delta;
+  unsigned dasd_limit;
+  unsigned dasd_usage;
+  /*unsigned zero5[2];*/
   unsigned char ea[316];		/* zero or more EA's, packed together
 					   with no alignment padding.
 					   (Do not use this name, get here
@@ -453,6 +473,7 @@ struct extended_attribute
   unsigned needea: 1;			/* required ea */
   unsigned char namelen;		/* length of name, bytes */
   unsigned short valuelen;		/* length of value, bytes */
+  unsigned char name[0];
   /*
     unsigned char name[namelen];	ascii attrib name
     unsigned char nul;			terminating '\0', not counted
@@ -464,34 +485,6 @@ struct extended_attribute
         which points to the value.
   */
 };
-
-static inline unsigned char *ea_name (struct extended_attribute *ea)
-{
-  return (void *) ea + sizeof *ea;
-}
-
-static inline unsigned char *ea_value (struct extended_attribute *ea)
-{
-  return (void *) ea + sizeof *ea + ea->namelen + 1;
-}
-
-static inline struct extended_attribute *
-    ea_next_ea (struct extended_attribute *ea)
-{
-  return (void *) ea + sizeof *ea + ea->namelen + 1 + ea->valuelen;
-}
-
-static inline unsigned ea_indirect_length (struct extended_attribute *ea)
-{
-  unsigned *v = (void *) ea_value (ea);
-  return v[0];
-}
-
-static inline secno ea_indirect_secno (struct extended_attribute *ea)
-{
-  unsigned *v = (void *) ea_value (ea);
-  return v[1];
-}
 
 /*
    Local Variables:

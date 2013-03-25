@@ -42,7 +42,7 @@
  */
 
 /*
- *  ==FILEVERSION 990325==
+ *  ==FILEVERSION 990806==
  *
  *  NOTE TO MAINTAINERS:
  *   If you modify this file at all, please set the above date.
@@ -109,7 +109,7 @@ struct ppp {
 	__u16		rfcs;		/* FCS so far of rpkt		*/
 
 	/* Queues for select() functionality */
-	struct wait_queue *read_wait;	/* queue for reading processes	*/
+	wait_queue_head_t read_wait;	/* queue for reading processes	*/
 
 	/* info for detecting idle channels */
 	unsigned long	last_xmit;	/* time of last transmission	*/
@@ -126,10 +126,13 @@ struct ppp {
 
 	enum	NPmode sc_npmode[NUM_NP]; /* what to do with each NP */
 	int	 sc_xfer;		/* PID of reserved PPP table */
-	char	name[8];		/* space for unit name */
-	struct device	dev;		/* net device structure */
-	struct enet_statistics estats;	/* more detailed stats */
+	char	name[16];		/* space for unit name */
+	struct net_device	dev;		/* net device structure */
+	struct net_device_stats estats;	/* more detailed stats */
 
 	/* tty output buffer */
 	unsigned char	obuf[OBUFSIZE];	/* buffer for characters to send */
 };
+
+#define PPP_MAGIC	0x5002
+#define PPP_VERSION	"2.3.7"

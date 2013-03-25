@@ -1,20 +1,12 @@
-/* $Id: hfc_2bds0.h,v 1.1.1.1 1999-11-22 03:47:20 christ Exp $
-
- *  specific defines for CCD's HFC 2BDS0
+/* $Id: hfc_2bds0.h,v 1.1.4.1 2001/11/20 14:19:35 kai Exp $
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * specific defines for CCD's HFC 2BDS0
  *
- *
- * $Log: hfc_2bds0.h,v $
- * Revision 1.1.1.1  1999-11-22 03:47:20  christ
- * Importing new-wave v1.0.4
- *
- * Revision 1.1.2.2  1998/01/27 22:41:36  keil
- * add set_cs_func()
- *
- * Revision 1.1.2.1  1998/01/11 22:54:02  keil
- * Teles 16.3c (HFC 2BDS0) first version
- *
+ * Author       Karsten Keil
+ * Copyright    by Karsten Keil      <keil@isdn4linux.de>
+ * 
+ * This software may be used and distributed according to the terms
+ * of the GNU General Public License, incorporated herein by reference.
  *
  */
 

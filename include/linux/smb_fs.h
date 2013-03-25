@@ -2,6 +2,7 @@
  *  smb_fs.h
  *
  *  Copyright (C) 1995 by Paal-Kr. Engstad and Volker Lendecke
+ *  Copyright (C) 1997 by Volker Lendecke
  *
  */
 
@@ -9,69 +10,49 @@
 #define _LINUX_SMB_FS_H
 
 #include <linux/smb.h>
-#include <linux/fs.h>
-#include <linux/in.h>
-#include <linux/types.h>
-
-#include <linux/smb_mount.h>
-#include <linux/smb_fs_sb.h>
-#include <linux/smb_fs_i.h>
 
 /*
  * ioctl commands
  */
-#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, uid_t)
+#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_old_uid_t)
+#define SMB_IOC_NEWCONN                 _IOW('u', 2, struct smb_conn_opt)
+
+/* __kernel_uid_t can never change, so we have to use __kernel_uid32_t */
+#define	SMB_IOC_GETMOUNTUID32		_IOR('u', 3, __kernel_uid32_t)
+
 
 #ifdef __KERNEL__
 
-/*
- * The readdir cache size controls how many directory entries are cached.
- */
-#define SMB_READDIR_CACHE_SIZE        64
-
-/*
- * This defines the number of filenames cached in memory to avoid 
- * constructing filenames from \
- */
-#define SMB_CACHE_TABLE_SIZE          64
-
-#define SMB_SUPER_MAGIC               0x517B
+#include <linux/pagemap.h>
+#include <linux/vmalloc.h>
+#include <linux/smb_mount.h>
+#include <asm/unaligned.h>
 
 
+/* macro names are short for word, double-word, long value (?) */
+#define WVAL(buf,pos) \
+	(le16_to_cpu(get_unaligned((u16 *)((u8 *)(buf) + (pos)))))
+#define DVAL(buf,pos) \
+	(le32_to_cpu(get_unaligned((u32 *)((u8 *)(buf) + (pos)))))
+#define LVAL(buf,pos) \
+	(le64_to_cpu(get_unaligned((u64 *)((u8 *)(buf) + (pos)))))
+#define WSET(buf,pos,val) \
+	put_unaligned(cpu_to_le16((u16)(val)), (u16 *)((u8 *)(buf) + (pos)))
+#define DSET(buf,pos,val) \
+	put_unaligned(cpu_to_le32((u32)(val)), (u32 *)((u8 *)(buf) + (pos)))
+#define LSET(buf,pos,val) \
+	put_unaligned(cpu_to_le64((u64)(val)), (u64 *)((u8 *)(buf) + (pos)))
 
-#define SMB_SBP(sb)          ((struct smb_sb_info *)(sb->u.generic_sbp))
-#define SMB_INOP(inode)      ((struct smb_inode_info *)(inode->u.generic_ip))
-
-#define SMB_SERVER(inode)    (&(SMB_SBP(inode->i_sb)->s_server))
-#define SMB_SERVATTR(inode)  (&(SMB_SBP(inode->i_sb)->s_attr))
-
-#define SMB_FINFO(inode)     (&(SMB_INOP(inode)->finfo))
-
-#define SMB_HEADER_LEN   37     /* includes everything up to, but not
-                                 * including smb_bcc */
+/* where to find the base of the SMB packet proper */
+#define smb_base(buf) ((u8 *)(((u8 *)(buf))+4))
 
 #ifdef DEBUG_SMB_MALLOC
 
-#include <linux/malloc.h>
+#include <linux/slab.h>
 
 extern int smb_malloced;
-extern int smb_current_kmalloced;
 extern int smb_current_vmalloced;
-
-static inline void *
-smb_kmalloc(unsigned int size, int priority)
-{
-        smb_malloced += 1;
-        smb_current_kmalloced += 1;
-        return kmalloc(size, priority);
-}
-
-static inline void
-smb_kfree_s(void *obj, int size)
-{
-        smb_current_kmalloced -= 1;
-        kfree_s(obj, size);
-}
+extern int smb_current_kmalloced;
 
 static inline void *
 smb_vmalloc(unsigned int size)
@@ -88,130 +69,122 @@ smb_vfree(void *obj)
         vfree(obj);
 }
 
+static inline void *
+smb_kmalloc(size_t size, int flags)
+{
+	smb_malloced += 1;
+	smb_current_kmalloced += 1;
+	return kmalloc(size, flags);
+}
+
+static inline void
+smb_kfree(void *obj)
+{
+	smb_current_kmalloced -= 1;
+	kfree(obj);
+}
+
 #else /* DEBUG_SMB_MALLOC */
 
-#define smb_kmalloc(s,p) kmalloc(s,p)
-#define smb_kfree_s(o,s) kfree_s(o,s)
-#define smb_vmalloc(s)   vmalloc(s)
-#define smb_vfree(o)     vfree(o)
+#define smb_kmalloc(s,p)	kmalloc(s,p)
+#define smb_kfree(o)		kfree(o)
+#define smb_vmalloc(s)		vmalloc(s)
+#define smb_vfree(o)		vfree(o)
 
 #endif /* DEBUG_SMB_MALLOC */
 
-#if DEBUG_SMB > 0
-#define DPRINTK(format, args...) printk(format , ## args)
-#else
-#define DPRINTK(format, args...)
-#endif
-
-#if DEBUG_SMB > 1
-#define DDPRINTK(format, args...) printk(format , ## args)
-#else
-#define DDPRINTK(format, args...)
-#endif
+/*
+ * Flags for the in-memory inode
+ */
+#define SMB_F_LOCALWRITE	0x02	/* file modified locally */
 
 
-static inline ino_t
-smb_info_ino(struct smb_inode_info *info)
+/* NT1 protocol capability bits */
+#define SMB_CAP_RAW_MODE         0x00000001
+#define SMB_CAP_MPX_MODE         0x00000002
+#define SMB_CAP_UNICODE          0x00000004
+#define SMB_CAP_LARGE_FILES      0x00000008
+#define SMB_CAP_NT_SMBS          0x00000010
+#define SMB_CAP_RPC_REMOTE_APIS  0x00000020
+#define SMB_CAP_STATUS32         0x00000040
+#define SMB_CAP_LEVEL_II_OPLOCKS 0x00000080
+#define SMB_CAP_LOCK_AND_READ    0x00000100
+#define SMB_CAP_NT_FIND          0x00000200
+#define SMB_CAP_DFS              0x00001000
+#define SMB_CAP_LARGE_READX      0x00004000
+#define SMB_CAP_LARGE_WRITEX     0x00008000
+#define SMB_CAP_UNIX             0x00800000     /* unofficial ... */
+
+
+/*
+ * This is the time we allow an inode, dentry or dir cache to live. It is bad
+ * for performance to have shorter ttl on an inode than on the cache. It can
+ * cause refresh on each inode for a dir listing ... one-by-one
+ */
+#define SMB_MAX_AGE(server) (((server)->mnt->ttl * HZ) / 1000)
+
+static inline void
+smb_age_dentry(struct smb_sb_info *server, struct dentry *dentry)
 {
-#if 0
-	return (ino_t) info;
-#else
-	if (info != NULL)
-	{
-		return info->finfo.f_ino;
-	}
-	return 1;
-#endif
+	dentry->d_time = jiffies - SMB_MAX_AGE(server);
 }
 
-/* linux/fs/smbfs/file.c */
-extern struct inode_operations smb_file_inode_operations;
-int smb_make_open(struct inode *i, int right);
+struct smb_cache_head {
+	time_t		mtime;	/* unused */
+	unsigned long	time;	/* cache age */
+	unsigned long	end;	/* last valid fpos in cache */
+	int		eof;
+};
 
-/* linux/fs/smbfs/dir.c */
-extern struct inode_operations smb_dir_inode_operations;
-struct smb_inode_info *smb_find_inode(struct smb_server *server, ino_t ino);
-void smb_free_inode_info(struct smb_inode_info *i);
-void smb_free_all_inodes(struct smb_server *server);
-void smb_init_root(struct smb_server *server);
-int  smb_stat_root(struct smb_server *server);
-void smb_init_dir_cache(void);
-void smb_invalid_dir_cache(unsigned long ino);
-void smb_invalidate_all_inodes(struct smb_server *server);
-void smb_free_dir_cache(void);
+#define SMB_DIRCACHE_SIZE	((int)(PAGE_CACHE_SIZE/sizeof(struct dentry *)))
+union smb_dir_cache {
+	struct smb_cache_head   head;
+	struct dentry           *dentry[SMB_DIRCACHE_SIZE];
+};
 
-/* linux/fs/smbfs/ioctl.c */
-int smb_ioctl (struct inode * inode, struct file * filp,
-               unsigned int cmd, unsigned long arg);
+#define SMB_FIRSTCACHE_SIZE	((int)((SMB_DIRCACHE_SIZE * \
+	sizeof(struct dentry *) - sizeof(struct smb_cache_head)) / \
+	sizeof(struct dentry *)))
 
-/* linux/fs/smbfs/inode.c */
-struct super_block *smb_read_super(struct super_block *sb,
-                                   void *raw_data, int silent);
-extern int init_smb_fs(void);
-int smb_notify_change(struct inode *inode, struct iattr *attr);
-void smb_invalidate_connection(struct smb_server *server);
-int smb_conn_is_valid(struct smb_server *server);
+#define SMB_DIRCACHE_START      (SMB_DIRCACHE_SIZE - SMB_FIRSTCACHE_SIZE)
 
-/* linux/fs/smbfs/proc.c */
-dword smb_len(unsigned char *packet);
-byte *smb_encode_smb_length(byte *p, dword len);
-__u8 *smb_setup_header(struct smb_server *server, byte command,
-		       word wct, word bcc);
-void smb_init_root_dirent(struct smb_server *server, struct smb_dirent *entry);
-int smb_proc_open(struct smb_server *server,
-		  struct smb_inode_info *dir, const char *name, int len,
-		  struct smb_dirent *entry);
-int smb_proc_close(struct smb_server *server, 
-		   __u16 fileid, __u32 mtime);
-int smb_proc_read(struct smb_server *server, struct smb_dirent *finfo, 
-		  off_t offset, long count, char *data, int fs);
-int smb_proc_read_raw(struct smb_server *server, struct smb_dirent *finfo, 
-                      off_t offset, long count, char *data);
-int smb_proc_write(struct smb_server *server, struct smb_dirent *finfo,
-		   off_t offset, int count, const char *data);
-int smb_proc_write_raw(struct smb_server *server, struct smb_dirent *finfo, 
-                       off_t offset, long count, const char *data);
-int smb_proc_create(struct inode *dir, const char *name, int len,
-		    word attr, time_t ctime);
-int smb_proc_mv(struct inode *odir, const char *oname, const int olen,
-		struct inode *ndir, const char *nname, const int nlen);
-int smb_proc_mkdir(struct inode *dir, const char *name, const int len);
-int smb_proc_rmdir(struct inode *dir, const char *name, const int len);
-int smb_proc_unlink(struct inode *dir, const char *name, const int len);
-int smb_proc_readdir(struct smb_server *server, struct inode *dir,
-                     int fpos, int cache_size, 
-		     struct smb_dirent *entry);
-int smb_proc_getattr(struct inode *dir, const char *name, int len,
-		     struct smb_dirent *entry);
-int smb_proc_setattr(struct smb_server *server,
-                     struct inode *ino,
-                     struct smb_dirent *new_finfo);
-int smb_proc_chkpath(struct smb_server *server, char *path, int len,
-                     int *result);
-int smb_proc_dskattr(struct super_block *super, struct smb_dskattr *attr);
-int smb_proc_reconnect(struct smb_server *server);
-int smb_proc_connect(struct smb_server *server);
-int smb_proc_disconnect(struct smb_server *server);
-int smb_proc_trunc(struct smb_server *server, word fid, dword length);
+struct smb_cache_control {
+	struct  smb_cache_head		head;
+	struct  page			*page;
+	union   smb_dir_cache		*cache;
+	unsigned long			fpos, ofs;
+	int				filled, valid, idx;
+};
 
-/* linux/fs/smbfs/sock.c */
-int smb_release(struct smb_server *server);
-int smb_connect(struct smb_server *server);
-int smb_request(struct smb_server *server);
-int smb_request_read_raw(struct smb_server *server,
-                         unsigned char *target, int max_len);
-int smb_request_write_raw(struct smb_server *server,
-                          unsigned const char *source, int length);
-int smb_catch_keepalive(struct smb_server *server);
-int smb_dont_catch_keepalive(struct smb_server *server);
-int smb_trans2_request(struct smb_server *server, __u16 trans2_command,
-		       int ldata, unsigned char *data,
-		       int lparam, unsigned char *param,
-		       int *lrdata, unsigned char **rdata,
-		       int *lrparam, unsigned char **rparam);
+static inline int
+smb_is_open(struct inode *i)
+{
+	return (i->u.smbfs_i.open == server_from_inode(i)->generation);
+}
 
-/* linux/fs/smbfs/mmap.c */
-int smb_mmap(struct inode * inode, struct file * file, struct vm_area_struct * vma);
+#define SMB_OPS_NUM_STATIC      5
+struct smb_ops {
+	int (*read)(struct inode *inode, loff_t offset, int count,
+		    char *data);
+	int (*write)(struct inode *inode, loff_t offset, int count, const
+		     char *data);
+	int (*readdir)(struct file *filp, void *dirent, filldir_t filldir,
+		       struct smb_cache_control *ctl);
+
+	int (*getattr)(struct smb_sb_info *server, struct dentry *dir,
+		       struct smb_fattr *fattr);
+	/* int (*setattr)(...); */      /* setattr is really icky! */
+
+	int (*truncate)(struct inode *inode, loff_t length);
+
+
+	/* --- --- --- end of "static" entries --- --- --- */
+
+	int (*convert)(unsigned char *output, int olen,
+		       const unsigned char *input, int ilen,
+		       struct nls_table *nls_from,
+		       struct nls_table *nls_to);
+};
 
 #endif /* __KERNEL__ */
 

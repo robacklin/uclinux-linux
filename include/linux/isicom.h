@@ -52,6 +52,13 @@ typedef	struct	{
 #define		ISICOM_NAME	"ISICom"
 
 /*
+ *      PCI definitions
+ */
+
+ #define        DEVID_COUNT     9
+ #define        VENDOR_ID       0x10b5
+
+/*
  *	These are now officially allocated numbers
  */
 
@@ -129,6 +136,7 @@ struct	isi_board {
 	unsigned short		shift_count;
 	struct isi_port		* ports;
 	signed char		count;
+	unsigned char		isa;
 };
 
 struct	isi_port {
@@ -144,8 +152,8 @@ struct	isi_port {
 	long			pgrp;
 	struct isi_board	* card;
 	struct tty_struct 	* tty;
-	struct wait_queue	* close_wait;
-	struct wait_queue	* open_wait;
+	wait_queue_head_t	close_wait;
+	wait_queue_head_t	open_wait;
 	struct tq_struct	hangup_tq;
 	struct tq_struct	bh_tqueue;
 	unsigned char		* xmit_buf;
@@ -161,12 +169,12 @@ struct	isi_port {
  *  ISI Card specific ops ...
  */
  
-extern inline void raise_dtr(struct isi_port * port)
+static inline void raise_dtr(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in raise_dtr.\n");
@@ -180,12 +188,13 @@ extern inline void raise_dtr(struct isi_port * port)
 	InterruptTheCard(base);
 	port->status |= ISI_DTR;
 }
-extern inline void drop_dtr(struct isi_port * port)
+
+static inline void drop_dtr(struct isi_port * port)
 {	
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in drop_dtr.\n");
@@ -199,12 +208,12 @@ extern inline void drop_dtr(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status &= ~ISI_DTR;
 }
-extern inline void raise_rts(struct isi_port * port)
+static inline void raise_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in raise_rts.\n");
@@ -218,12 +227,12 @@ extern inline void raise_rts(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status |= ISI_RTS;
 }
-extern inline void drop_rts(struct isi_port * port)
+static inline void drop_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in drop_rts.\n");
@@ -237,12 +246,12 @@ extern inline void drop_rts(struct isi_port * port)
 	InterruptTheCard(base);	
 	port->status &= ~ISI_RTS;
 }
-extern inline void raise_dtr_rts(struct isi_port * port)
+static inline void raise_dtr_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in raise_dtr_rts.\n");
@@ -256,12 +265,12 @@ extern inline void raise_dtr_rts(struct isi_port * port)
 	InterruptTheCard(base);
 	port->status |= (ISI_DTR | ISI_RTS);
 }
-extern inline void drop_dtr_rts(struct isi_port * port)
+static inline void drop_dtr_rts(struct isi_port * port)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in drop_dtr_rts.\n");
@@ -276,12 +285,12 @@ extern inline void drop_dtr_rts(struct isi_port * port)
 	port->status &= ~(ISI_RTS | ISI_DTR);
 }
 
-extern inline void kill_queue(struct isi_port * port, short queue)
+static inline void kill_queue(struct isi_port * port, short queue)
 {
 	struct isi_board * card = port->card;
 	unsigned short base = card->base;
 	unsigned char channel = port->channel;
-	short wait=300;
+	short wait=400;
 	while(((inw(base+0x0e) & 0x01) == 0) && (wait-- > 0));
 	if (wait <= 0) {
 		printk(KERN_WARNING "ISICOM: Card found busy in kill_queue.\n");
@@ -298,3 +307,4 @@ extern inline void kill_queue(struct isi_port * port, short queue)
 #endif	/*	__KERNEL__	*/
 
 #endif	/*	ISICOM_H	*/
+
